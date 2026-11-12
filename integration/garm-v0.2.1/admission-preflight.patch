@@ -24,10 +24,10 @@ index ca98bdf..938440c 100644
  			return fmt.Errorf("path to config file must be an absolute path")
 diff --git a/runner/common/admission.go b/runner/common/admission.go
 new file mode 100644
-index 0000000..74f707d
+index 0000000..624593c
 --- /dev/null
 +++ b/runner/common/admission.go
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,210 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +package common
@@ -188,6 +188,8 @@ index 0000000..74f707d
 +// Child stdout/stderr are never interpolated into errors or logs. Output is
 +// bounded while still drained so an oversized response cannot allocate freely.
 +func RunAdmissionProvider(ctx context.Context, binary string, environ []string, request AdmissionRequest) error {
++ ctx,cancel:=context.WithTimeout(ctx,10*time.Second)
++ defer cancel()
 + if request.validate()!=nil { return errAdmissionProtocol }
 + input,err := json.Marshal(struct {
 +  Protocol string `json:"protocol"`
@@ -420,10 +422,10 @@ index 9f5fc19..499ea27 100644
  	jitConfig := make(map[string]string)
 diff --git a/runner/providers/v0.1.1/admission_test.go b/runner/providers/v0.1.1/admission_test.go
 new file mode 100644
-index 0000000..eaafdb2
+index 0000000..a4b408f
 --- /dev/null
 +++ b/runner/providers/v0.1.1/admission_test.go
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,67 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package v011
 +
@@ -445,6 +447,14 @@ index 0000000..eaafdb2
 + if mode:=os.Getenv("GCC_EXTERNAL_ADMISSION_STUB");mode!="" {
 +  input,_:=io.ReadAll(os.Stdin)
 +  if mode=="echo-failure" { fmt.Printf("%s",input);fmt.Fprintf(os.Stderr,"%s",input);os.Exit(1) }
++  if mode=="invalid-status" || mode=="provider-fault" {
++   var bootstrap commonParams.BootstrapInstance
++   _=json.Unmarshal(input,&bootstrap)
++   result:=commonParams.ProviderInstance{Name:bootstrap.Name,ProviderID:"test-instance",Status:commonParams.InstanceStatus("secret-must-not-echo")}
++   if mode=="provider-fault" { result.Status=commonParams.InstanceError;result.ProviderFault=[]byte("secret-must-not-echo") }
++   _=json.NewEncoder(os.Stdout).Encode(result)
++   os.Exit(0)
++  }
 +  var fields map[string]any
 +  _=json.Unmarshal(input,&fields)
 +  if len(fields)!=3 || fields["protocol"]!=common.AdmissionProtocolVersion || os.Getenv("GARM_COMMAND")!="AdmitInstance" || os.Getenv("GARM_CONTROLLER_ID")!="test-controller" { os.Exit(9) }
@@ -472,8 +482,19 @@ index 0000000..eaafdb2
 + _,err:=provider.CreateInstance(context.Background(),commonParams.BootstrapInstance{Name:"runner",PoolID:"pool",InstanceToken:secret},common.CreateInstanceParams{})
 + if err==nil || common.IsAdmissionDeferred(err) || strings.Contains(err.Error(),secret) { t.Fatalf("unsafe create result: %v",err) }
 +}
++
++func TestOptInCreateValidationAndFaultsAreRedacted(t *testing.T) {
++ for _,mode:=range []string{"invalid-status","provider-fault"} {
++  cfg:=&config.Provider{External:config.External{AdmissionEnabled:true}}
++  provider:=&external{cfg:cfg,execPath:os.Args[0],environmentVariables:[]string{"GCC_EXTERNAL_ADMISSION_STUB="+mode}}
++  result,err:=provider.CreateInstance(context.Background(),commonParams.BootstrapInstance{Name:"runner",PoolID:"pool"},common.CreateInstanceParams{})
++  if err!=nil && strings.Contains(err.Error(),"secret-must-not-echo") { t.Fatal("validation error disclosed output") }
++  if strings.Contains(string(result.ProviderFault),"secret-must-not-echo") { t.Fatal("provider fault retained unsafe payload") }
++  if mode=="invalid-status" && err==nil { t.Fatal("invalid provider status accepted") }
++ }
++}
 diff --git a/runner/providers/v0.1.1/external.go b/runner/providers/v0.1.1/external.go
-index 6e43dce..d43a9c5 100644
+index 6e43dce..3067936 100644
 --- a/runner/providers/v0.1.1/external.go
 +++ b/runner/providers/v0.1.1/external.go
 @@ -35,6 +35,7 @@ import (
@@ -522,7 +543,23 @@ index 6e43dce..d43a9c5 100644
  	if err != nil {
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"CreateInstance", // label: operation
-@@ -123,10 +146,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -112,6 +135,9 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+ 			"CreateInstance", // label: operation
+ 			e.cfg.Name,       // label: provider
+ 		).Inc()
++		if e.cfg.External.AdmissionEnabled {
++			return commonParams.ProviderInstance{}, garmErrors.NewProviderError("invalid gateway create response")
++		}
+ 		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
+ 	}
+ 
+@@ -120,13 +146,26 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+ 			"CreateInstance", // label: operation
+ 			e.cfg.Name,       // label: provider
+ 		).Inc()
++		if e.cfg.External.AdmissionEnabled {
++			return commonParams.ProviderInstance{}, garmErrors.NewProviderError("invalid gateway create response")
++		}
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
  	}
  
@@ -530,7 +567,15 @@ index 6e43dce..d43a9c5 100644
 -	slog.DebugContext(
 -		ctx, "provider returned",
 -		"output", string(retAsJs))
-+if !e.cfg.External.AdmissionEnabled {
++if e.cfg.External.AdmissionEnabled {
++		if param.Name != bootstrapParams.Name {
++			return commonParams.ProviderInstance{}, garmErrors.NewProviderError("gateway create identity mismatch")
++		}
++		if len(param.ProviderFault) != 0 {
++			param.ProviderFault = []byte("gateway reported a provider fault")
++		}
++	}
++	if !e.cfg.External.AdmissionEnabled {
 +		retAsJs, _ := json.MarshalIndent(param, "", "  ")
 +		slog.DebugContext(ctx, "provider returned", "output", string(retAsJs))
 +	} else {

@@ -43,9 +43,9 @@ Never-dispatched capacity denial, exit 75:
 {"protocol":"garm-capacity/v1","outcome":"deferred","name":"runner-1","pool_id":"pool-1","dispatched":false,"retry_after_seconds":10}
 ```
 
-Exact version, matching name/pool, explicit `dispatched:false`, bounded 5–60 second hint and matching exit code are mandatory. Unknown, duplicate or case-folded keys, trailing JSON, mismatched identities and responses over 4096 bytes are rejected. Cancellation, transport failure, malformed output or any dispatched/uncertain outcome is not benign defer. Output is bounded and drained; stderr and raw malformed stdout are never embedded in admission errors.
+Exact version, matching name/pool, explicit `dispatched:false`, bounded 5–60 second hint and matching exit code are mandatory. Unknown, duplicate or case-folded keys, trailing JSON, mismatched identities and responses over 4096 bytes are rejected. Cancellation, transport failure, malformed output or any dispatched/uncertain outcome is not benign defer. Preflight execution is bounded to ten seconds (or the caller deadline, if earlier). Output is bounded and drained; stderr and raw malformed stdout are never embedded in admission errors.
 
-For opt-in gateway configuration, Create execution also uses a bounded, redacted boundary and suppresses raw provider-response debug logging. Ordinary Create errors retain their failure semantics and **are never turned into defer**. This does not retrofit redaction or safe cleanup into every legacy Garm provider command.
+For opt-in gateway configuration, Create execution also uses a bounded, redacted boundary and suppresses raw provider-response debug logging, redacts validation errors/provider faults and verifies the returned runner name. Ordinary Create errors retain their failure semantics and **are never turned into defer**. This does not retrofit redaction or safe cleanup into every legacy Garm provider command.
 
 ## The preflight is NOT enforcement
 

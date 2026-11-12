@@ -22,20 +22,20 @@ var ErrProtocol = errors.New("invalid admission protocol response")
 // Controller identity and host placement come from trusted provider configuration.
 type Request struct {
 	Protocol string `json:"protocol"`
-	Name string `json:"name"`
-	PoolID string `json:"pool_id"`
+	Name     string `json:"name"`
+	PoolID   string `json:"pool_id"`
 }
 
 // Response is a preflight receipt only. A later Create must atomically claim
 // the same durable reservation at the gateway; replay is not a dispatch permit.
 type Response struct {
-	Protocol string `json:"protocol"`
-	Outcome string `json:"outcome"`
-	Name string `json:"name"`
-	PoolID string `json:"pool_id"`
-	Dispatched *bool `json:"dispatched"`
-	ReservationKey string `json:"reservation_key,omitempty"`
-	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	Protocol          string `json:"protocol"`
+	Outcome           string `json:"outcome"`
+	Name              string `json:"name"`
+	PoolID            string `json:"pool_id"`
+	Dispatched        *bool  `json:"dispatched"`
+	ReservationKey    string `json:"reservation_key,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
 }
 
 func validIdentity(value string) bool {

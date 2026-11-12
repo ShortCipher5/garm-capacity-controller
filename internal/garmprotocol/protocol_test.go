@@ -36,15 +36,15 @@ func TestRejectsAmbiguousOrDispatchedResponses(t *testing.T) {
 	yes := true
 	base := Response{Protocol: Version, Outcome: "deferred", Name: "runner-1", PoolID: "pool-1", Dispatched: &no, RetryAfterSeconds: 10}
 	cases := map[string]func(*Response){
-		"protocol": func(r *Response) { r.Protocol = "future" },
-		"name": func(r *Response) { r.Name = "another-runner" },
-		"pool": func(r *Response) { r.PoolID = "another-pool" },
-		"missing dispatch": func(r *Response) { r.Dispatched = nil },
-		"dispatched": func(r *Response) { r.Dispatched = &yes },
-		"retry short": func(r *Response) { r.RetryAfterSeconds = 0 },
-		"retry long": func(r *Response) { r.RetryAfterSeconds = 61 },
+		"protocol":             func(r *Response) { r.Protocol = "future" },
+		"name":                 func(r *Response) { r.Name = "another-runner" },
+		"pool":                 func(r *Response) { r.PoolID = "another-pool" },
+		"missing dispatch":     func(r *Response) { r.Dispatched = nil },
+		"dispatched":           func(r *Response) { r.Dispatched = &yes },
+		"retry short":          func(r *Response) { r.RetryAfterSeconds = 0 },
+		"retry long":           func(r *Response) { r.RetryAfterSeconds = 61 },
 		"reservation on defer": func(r *Response) { r.ReservationKey = "existing" },
-		"unknown outcome": func(r *Response) { r.Outcome = "success" },
+		"unknown outcome":      func(r *Response) { r.Outcome = "success" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
