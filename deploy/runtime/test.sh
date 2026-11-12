@@ -17,9 +17,19 @@ export PACKAGING_FIXTURE_PRIVATE="$work/fixtures/fixture-private"
 export PACKAGING_FIXTURE_SCRIPT="$repo/deploy/runtime/fixture.py"
 compose=(docker compose -p "$project" -f deploy/runtime/compose.yaml -f deploy/compose.gateway.yaml --profile capacity-preview)
 cleanup() {
+  local outcome=$?
+  if [[ $outcome != 0 ]]; then
+    # Whitelist container identity/exit state only, never logs, ENV or fixtures.
+    local ids
+    ids=$("${compose[@]}" ps -aq 2>/dev/null) || true
+    if [[ -n $ids ]]; then
+      docker inspect $ids | python3 -c 'import json,sys;print(json.dumps([{ "name":x["Name"], "status":x["State"]["Status"], "exit":x["State"]["ExitCode"], "oom":x["State"]["OOMKilled"]} for x in json.load(sys.stdin)]))' || true
+    fi
+  fi
   # Only our generated project. No existing stack/volumes and no global prune.
   "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
+  return "$outcome"
 }
 trap cleanup EXIT
 
@@ -109,6 +119,7 @@ PYVERIFY
 # No output of rendered Compose config, inspect ENV, config, keys or private fixture files.
 "${compose[@]}" config --quiet
 "${compose[@]}" up -d garm
+"${compose[@]}" exec -T garm python /fixture.py ready
 "${compose[@]}" up -d capacity-gateway
 "${compose[@]}" exec -T garm python /fixture.py probe
 "${compose[@]}" run --rm peer
@@ -203,6 +214,7 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps(record))
 PYVERIFY
 old_anchor=$("${compose[@]}" ps -q garm)
 "${compose[@]}" up -d --force-recreate garm
+"${compose[@]}" exec -T garm python /fixture.py ready
 "${compose[@]}" up -d --force-recreate capacity-gateway
 [[ $("${compose[@]}" ps -q garm) != "$old_anchor" ]]
 "${compose[@]}" exec -T garm python /fixture.py probe

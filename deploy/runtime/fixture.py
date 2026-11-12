@@ -27,7 +27,7 @@ def prepare(root):
     def openssl(*args):
         subprocess.run(['openssl', *args], cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     openssl('req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=packaging-test-ca', '-keyout', 'ca.key', '-out', 'ca.pem')
-    for name, purpose in [('server', 'serverAuth'), ('client', 'clientAuth'), ('provider', 'clientAuth'), ('wrong', 'clientAuth')]:
+    for name, purpose in [('api', 'serverAuth'), ('server', 'serverAuth'), ('client', 'clientAuth'), ('provider', 'clientAuth'), ('wrong', 'clientAuth')]:
         write(work / 'ext.cnf', f'extendedKeyUsage={purpose}\nsubjectAltName=IP:127.0.0.1\n')
         openssl('req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-subj', f'/CN=packaging-{name}', '-keyout', f'{name}.key', '-out', f'{name}.csr')
         openssl('x509', '-req', '-in', f'{name}.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '1', '-extfile', 'ext.cnf', '-out', f'{name}.pem')
@@ -37,6 +37,13 @@ def prepare(root):
         path.unlink()
     for name in ('ca.pem', 'server.pem', 'server.key', 'client.pem', 'client.key'):
         write(root / 'gateway-private' / name, (work / name).read_text())
+    # The namespace anchor must NOT retain gateway server/upstream-client keys.
+    # Its API test server has a different TLS leaf/key from the real gateway.
+    for name in ('server.pem', 'server.key', 'client.pem', 'client.key'):
+        (work / name).unlink()
+    gateway_keys = {p.read_bytes() for p in (root / 'gateway-private').glob('*.key')}
+    anchor_keys = {p.read_bytes() for p in work.glob('*.key')}
+    assert gateway_keys and anchor_keys and gateway_keys.isdisjoint(anchor_keys)
     admin, inventory = secrets.token_hex(32), secrets.token_hex(32)
     for directory in (root / 'gateway-private', work):
         write(directory / 'admin.token', admin)
@@ -75,7 +82,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply({}, 401)
             return self.reply([])
         if path == '/1.0':
-            cert = fixture('server.pem').read_text()
+            cert = fixture('api.pem').read_text()
             metadata = {'api_version': '1.0', 'auth': 'trusted', 'api_extensions': ['instance_create_start'], 'environment': {'server_clustered': False, 'server_name': 'packaging-node', 'server_version': '6.0.4', 'certificate': cert, 'certificate_fingerprint': hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest()}}
         elif path == '/1.0/instances':
             metadata = []
@@ -96,7 +103,7 @@ def fixture(name):
 def serve():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
-    context.load_cert_chain(str(fixture('server.pem')), str(fixture('server.key')))
+    context.load_cert_chain(str(fixture('api.pem')), str(fixture('api.key')))
     context.load_verify_locations(str(fixture('ca.pem')))
     context.verify_mode = ssl.CERT_REQUIRED
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 9553), Handler)
@@ -126,7 +133,23 @@ def request(port, path, method='GET', cert=None, token=None, body=None):
         client.close()
 
 
+def ready():
+    # Fixture-only CA-auth liveness; not evidence of real upstream role authority.
+    for attempt in range(60):
+        try:
+            status, data = request(9553, '/1.0', cert='provider')
+            if status == 200 and json.loads(data)['metadata']['auth'] == 'trusted':
+                print('PASS synthetic authenticated API readiness')
+                return
+        except (OSError, ssl.SSLError, http.client.HTTPException):
+            pass
+        time.sleep(0.5)
+    raise RuntimeError('synthetic API did not become available')
+
+
 def probe():
+    for forbidden in ('server.key', 'client.key', 'ledger.identity'):
+        assert not fixture(forbidden).exists(), 'gateway-only key retained by synthetic anchor'
     token = fixture('admin.token').read_text()
     for attempt in range(60):
         try:
@@ -184,8 +207,8 @@ def peer():
 
 if __name__ == '__main__':
     try:
-        {'prepare': lambda: prepare(Path(sys.argv[2])), 'serve': serve, 'probe': probe, 'peer': peer}[sys.argv[1]]()
-    except Exception:
+        {'prepare': lambda: prepare(Path(sys.argv[2])), 'serve': serve, 'ready': ready, 'probe': probe, 'peer': peer}[sys.argv[1]]()
+    except Exception as error:
         # Never dump request bodies, credentials, config or operator paths.
-        print('Packaging fixture check failed', file=sys.stderr)
+        print('Packaging fixture check failed:', type(error).__name__, file=sys.stderr)
         raise SystemExit(1)
