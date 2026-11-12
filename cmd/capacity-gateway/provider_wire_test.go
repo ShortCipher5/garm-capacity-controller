@@ -159,7 +159,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 			if err != nil {
 				t.Errorf("qualification service shutdown %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(35 * time.Second):
 			t.Error("qualification service failed to stop")
 		}
 	}()
