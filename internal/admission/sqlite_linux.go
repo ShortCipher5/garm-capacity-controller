@@ -112,10 +112,10 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 		if journal != "wal" || syncMode != 2 || foreignKeys != 1 {
 			return errors.New("required SQLite durability settings unavailable")
 		}
-		if version != 0 && version != 1 && version != 2 && version != 3 {
+		if version != 0 && version != 1 && version != 2 && version != 3 && version != 4 {
 			return errors.New("unsupported SQLite schema version")
 		}
-		if (version == 1 || version == 2 || version == 3) && application != 0x47434331 {
+		if (version == 1 || version == 2 || version == 3 || version == 4) && application != 0x47434331 {
 			return errors.New("database belongs to a different application")
 		}
 		if version == 0 {
@@ -159,6 +159,22 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 				return err
 			}
 		}
+		if version < 4 {
+			if _, err := tx.Exec(sqliteHostBindingSchema); err != nil {
+				return err
+			}
+			if version > 0 {
+				if _, err := tx.Exec("INSERT INTO host_binding_history_exclusions(host) SELECT host FROM reservations UNION SELECT host FROM inventory"); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v4", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -194,7 +210,7 @@ func sqlitePreflight(location url.URL) error {
 		}
 		return nil
 	}
-	if (version != 1 && version != 2 && version != 3) || application != 0x47434331 {
+	if (version != 1 && version != 2 && version != 3 && version != 4) || application != 0x47434331 {
 		return errors.New("unsupported or foreign SQLite database")
 	}
 	return nil
@@ -637,10 +653,12 @@ type AuditEvent struct {
 }
 
 type SQLiteSnapshot struct {
-	Ready        bool
-	Epoch        int64
-	Config       Config
-	Reservations map[string]Reservation
+	HostBindings       map[string]HostBinding
+	LegacyUnboundHosts []string
+	Ready              bool
+	Epoch              int64
+	Config             Config
+	Reservations       map[string]Reservation
 	// RecentCancellations is at most 100 entries, NEVER absence proof.
 	RecentCancellations map[string]Cancellation
 	CancellationCount   int64
@@ -678,6 +696,14 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 			return err
 		}
 		result.Inventory, err = sqliteInventory(tx)
+		if err != nil {
+			return err
+		}
+		result.LegacyUnboundHosts, err = sqliteLegacyUnboundHosts(tx, result.Config)
+		if err != nil {
+			return err
+		}
+		result.HostBindings, err = sqliteHostBindings(tx, result.Config)
 		if err != nil {
 			return err
 		}

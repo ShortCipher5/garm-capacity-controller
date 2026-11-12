@@ -13,6 +13,7 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 	common "github.com/cloudbase/garm-provider-common/params"
 )
 
@@ -130,7 +131,7 @@ func TestGatewaySubmissionCrashHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	b := &backendFixture{instances: map[string]incusapi.Instance{}}
+	b := &backendFixture{instances: map[string]incusapi.Instance{}, identity: testsupport.LoadIdentityClient(t, os.Getenv("GCC_GATEWAY_SUBMISSION_IDENTITY"))}
 	b.waitHook = func(context.Context) error {
 		if err := os.WriteFile(os.Getenv("GCC_GATEWAY_SUBMISSION_MARKER"), []byte("waiting-after-durable-submission"), 0600); err != nil {
 			return err
@@ -157,7 +158,7 @@ func TestProcessCrashDuringWaitPreservesSubmissionAndNoRecreate(t *testing.T) {
 	}
 	marker := filepath.Join(t.TempDir(), "submitted-marker")
 	child := exec.CommandContext(ctx, executable, "-test.run=^TestGatewaySubmissionCrashHelper$")
-	child.Env = append(os.Environ(), "GCC_GATEWAY_SUBMISSION_CHILD=1", "GCC_GATEWAY_SUBMISSION_DB="+path, "GCC_GATEWAY_SUBMISSION_MARKER="+marker)
+	child.Env = append(os.Environ(), "GCC_GATEWAY_SUBMISSION_CHILD=1", "GCC_GATEWAY_SUBMISSION_DB="+path, "GCC_GATEWAY_SUBMISSION_MARKER="+marker, "GCC_GATEWAY_SUBMISSION_IDENTITY="+b.identityConfiguration)
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}

@@ -104,6 +104,11 @@ func (c *Client) PhysicalIdentity(ctx context.Context) (PhysicalServerIdentity, 
 	if err != nil {
 		return PhysicalServerIdentity{}, err
 	}
+
+	if err := c.checkPinnedRoot(response); err != nil {
+		return PhysicalServerIdentity{}, err
+	}
+
 	return c.parsePhysicalIdentity(response)
 }
 
