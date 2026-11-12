@@ -79,13 +79,14 @@ type backend struct {
 	creates   atomic.Int32
 }
 
-func (b *backend) CreateAndWait(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
+func (b *backend) Create(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.creates.Add(1)
 	b.instances[s.Name] = incusapi.Instance{Name: s.Name, Status: 103, CPUMillis: s.CPUMillis, RAMMiB: s.RAMMiB, ControllerID: s.ControllerID, PoolID: s.PoolID, ReservationKey: s.ReservationKey}
 	return incusapi.Created{OperationID: "12345678-1234-1234-1234-123456789abc", ResourceID: s.Name}, nil
 }
+func (b *backend) Wait(context.Context, incusapi.Created) error { return nil }
 func (b *backend) Instance(_ context.Context, name string) (incusapi.Instance, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
