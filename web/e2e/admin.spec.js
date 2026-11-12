@@ -231,6 +231,52 @@ test("actual Garm settings use journalled typed writes and cancellation", async 
   await expect(page.getByLabel("Pool priority")).toHaveValue("2");
 });
 
+// The shared disposable server deliberately retains the later committed500
+// unknown forever. Exercise positive review withdrawal BEFORE that fault; never
+// reset/clear the real journal or pretend a discovery read unblocks it.
+test("discovery-only Garm snapshot shows summaries and removes a pending edit review", async ({ page }) => {
+  const writes = [];
+  page.on("request", (request) => {
+    if (/\/admin\/api\/v1\/garm\/(pool|repository)$/.test(new URL(request.url()).pathname)) writes.push(request);
+  });
+  await connect(page);
+  const initialRead = page.waitForResponse((response) => new URL(response.url()).pathname === "/admin/api/v1/garm" && response.request().method() === "GET");
+  await page.getByRole("button", { name: "Load Garm settings" }).click();
+  const discovered = await (await initialRead).json();
+  expect(discovered.write_blocked).toBe(false);
+  const currentPriority = discovered.settings.pools[0].priority;
+  await page.getByLabel("Pool priority").fill(String(currentPriority === 1000000 ? currentPriority - 1 : currentPriority + 1));
+  await page.getByLabel("Garm audit reason").fill("review never applied in discovery mode");
+  await expect(page.getByRole("button", { name: "Review Garm change" })).toBeEnabled();
+  await page.getByRole("button", { name: "Review Garm change" }).click();
+  await page.getByLabel("Garm management write token").fill("c".repeat(64));
+
+  // UI-only capability transition fixture. Preserve the real handler's actual
+  // discovery rows/status captured through the trusted browser connection and
+  // change ONLY its reported write capability. No Node-side HTTP/TLS bypass.
+  // This tests presentation/cancellation, not backend write authorization.
+  await page.route("**/admin/api/v1/garm", async (route) => {
+    const snapshot = structuredClone(discovered);
+    snapshot.writes_enabled = false;
+    snapshot.settings.writes_enabled = false;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(snapshot) });
+  });
+  await page.getByRole("button", { name: "Refresh Garm settings" }).click();
+  const section = page.locator("#garm-management");
+  await expect(section).toContainText("Garm editing is unavailable. Discovery only.");
+  await expect(section.getByRole("heading", { name: "Discovered pools", exact: true })).toBeVisible();
+  await expect(section).toContainText("Provider: capacity");
+  await expect(section).toContainText("Maximum runners: 4");
+  await expect(section).toContainText("example/app");
+  await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
+  await expect(section.getByRole("button", { name: /Review Garm change|Apply reviewed Garm change/ })).toHaveCount(0);
+  await expect(page.getByLabel("Garm management write token")).toHaveCount(0);
+  await page.getByRole("button", { name: "Refresh Garm settings" }).click();
+  await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
+  expect(writes).toHaveLength(0);
+});
+
+
 test("ambiguous committed Garm write remains blocked after refresh and reconnect", async ({ page }) => {
   await connect(page);
   await page.getByRole("button", { name: "Load Garm settings" }).click();
@@ -250,6 +296,7 @@ test("ambiguous committed Garm write remains blocked after refresh and reconnect
   await expect(page.getByRole("button", { name: "Review Garm change" })).toBeDisabled();
   await expect(page.locator(".garm-audit summary").first()).toContainText("unknown");
 });
+
 
 test("allowlisted Incus preflight is authenticated, audited, and never enrollment", async ({ page }) => {
   await connect(page);
