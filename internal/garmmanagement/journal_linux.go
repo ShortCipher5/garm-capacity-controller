@@ -292,6 +292,9 @@ func (j *Journal) begin(ctx context.Context, intent Intent, hash, expected strin
 				return ErrRequestConflict
 			}
 			if state == "confirmed" {
+				if !json.Valid(result) {
+					return ErrJournal
+				}
 				existing = result
 				return nil
 			}
@@ -448,6 +451,9 @@ func (j *Journal) replay(ctx context.Context, id, hash string) (json.RawMessage,
 		return nil, true, ErrRequestConflict
 	}
 	if state == "confirmed" {
+		if !json.Valid(result) {
+			return nil, true, ErrJournal
+		}
 		return result, true, nil
 	}
 	if state == "rejected" {

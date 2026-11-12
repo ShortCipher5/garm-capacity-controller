@@ -193,3 +193,8 @@ admin handler, SQLite journal and React assets. They cover real pool/repository
 writes, credential separation, immutable review/replay, commit-then-error, restart
 blocking, upstream-read outage with durable status, strict decoding and browser
 cancel/reconnect. No live infrastructure is contacted.
+
+The separate [disabled pool onboarding foundation](garm-pool-onboarding.md) adds a
+strictly default-off typed native-zero creation/journal primitive only. It has no
+runtime/HTTP/UI wiring, durable route ACK or activation path; existing console
+creation/deletion remains unavailable. It never expands configured pool scopes.

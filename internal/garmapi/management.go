@@ -40,15 +40,18 @@ type ManagementConfig struct {
 	PoolIDs       []string
 	RepositoryIDs []string
 	AllowWrites   bool
+	// Independent off-by-default foundation opt-in; not wired to HTTP/UI.
+	AllowDisabledPoolCreation bool
 }
 
 type ManagementClient struct {
-	client       *Client
-	base         string
-	pools        map[string]bool
-	repositories map[string]bool
-	writes       bool
-	mu           sync.Mutex
+	client               *Client
+	base                 string
+	pools                map[string]bool
+	repositories         map[string]bool
+	writes               bool
+	disabledPoolCreation bool
+	mu                   sync.Mutex
 }
 
 // ManagedPool deliberately omits provider specs, instance/job payloads and secrets.
@@ -91,8 +94,8 @@ func managementID(id string) bool {
 	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
 		return false
 	}
-	_, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
-	return err == nil && strings.ToLower(id) == id
+	raw, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
+	return err == nil && len(raw) == 16 && strings.ToLower(id) == id
 }
 
 func NewManagement(config ManagementConfig) (*ManagementClient, error) {
@@ -103,7 +106,7 @@ func NewManagement(config ManagementConfig) (*ManagementClient, error) {
 	if err != nil {
 		return nil, ErrManagement
 	}
-	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites}
+	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation}
 	for _, pair := range []struct {
 		ids   []string
 		scope map[string]bool

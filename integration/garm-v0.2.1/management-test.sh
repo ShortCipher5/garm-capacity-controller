@@ -18,5 +18,5 @@ cp "$here/management-runner-test.go.txt" "$work/runner/capacity_management_test.
 cp "$here/management-repository-test.go.txt" "$work/database/sql/capacity_management_test.go"
 gofmt -w "$work/runner/capacity_management_test.go" "$work/database/sql/capacity_management_test.go"
 cd "$work"
-go test -mod=vendor -tags testing -race -count=1 -timeout=8m -run 'TestPoolTestSuite/TestCapacityManagement' ./runner
+go test -mod=vendor -tags testing -race -count=1 -timeout=8m -run 'Test(Pool|Repo)TestSuite/TestCapacityManagement' ./runner
 go test -mod=vendor -tags testing -race -count=1 -timeout=8m -run 'TestRepoTestSuite/TestCapacityManagement' ./database/sql

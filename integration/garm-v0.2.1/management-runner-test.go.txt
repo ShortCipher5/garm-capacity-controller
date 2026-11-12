@@ -53,3 +53,37 @@ func (s *PoolTestSuite) TestCapacityManagementCanceledRequestIsNotFence() {
  s.Require().NoError(err)
  s.Require().Equal(priority,observed.Priority)
 }
+
+// Actual stock public Runner API: disabled/min0 creation still requires max>0
+// and an existing positive bootstrap template. No provider validation/execution
+// happens here. The native template-zero mode used by our new foundation needs
+// the separately qualified source8 patch and opted provider configuration.
+func (s *RepoTestSuite) TestCapacityManagementDisabledPoolCreateBoundary() {
+ tpl,err:=s.Fixtures.Store.CreateTemplate(s.Fixtures.AdminContext,params.CreateTemplateParams{Name:"disposable-disabled-template",Data:[]byte("not-executed"),OSType:commonParams.Linux,ForgeType:params.GithubEndpointType,IsSystem:true})
+ s.Require().NoError(err)
+ spec:=s.Fixtures.CreatePoolParams
+ spec.Enabled=false
+ spec.MinIdleRunners=0
+ spec.MaxRunners=2
+ zero:=uint(0)
+ spec.TemplateID=&zero
+ repoID:=s.Fixtures.StoreRepos["test-repo-1"].ID
+ _,err=s.Runner.CreateRepoPool(s.Fixtures.AdminContext,repoID,spec)
+ s.Require().Error(err,"stock/unopted native template-zero is unsupported")
+ spec.TemplateID=&tpl.ID
+ spec.MaxRunners=0
+ _,err=s.Runner.CreateRepoPool(s.Fixtures.AdminContext,repoID,spec)
+ s.Require().Error(err,"max0 is rejected even when disabled")
+ spec.MaxRunners=2
+ pool,err:=s.Runner.CreateRepoPool(s.Fixtures.AdminContext,repoID,spec)
+ s.Require().NoError(err)
+ s.Require().NotEmpty(pool.ID)
+ s.Require().False(pool.Enabled)
+ s.Require().Zero(pool.MinIdleRunners)
+ s.Require().Equal(uint(2),pool.MaxRunners)
+ s.Require().Empty(pool.Instances)
+ s.Fixtures.ProviderMock.AssertNumberOfCalls(s.T(),"ValidatePoolInfo",0)
+ repo,err:=s.Fixtures.Store.GetRepositoryByID(s.Fixtures.AdminContext,repoID)
+ s.Require().NoError(err)
+ s.Require().Len(repo.Pools,1,"failed attempts did not insert extra pools")
+}

@@ -96,8 +96,8 @@ func validUUID(id string) bool {
 	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' || strings.ToLower(id) != id {
 		return false
 	}
-	_, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
-	return err == nil
+	raw, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
+	return err == nil && len(raw) == 16
 }
 func requestHash(id, target, expected, kind, reason string, body any) (string, error) {
 	if !validUUID(id) || !validUUID(target) || len(expected) != 64 || strings.TrimSpace(reason) != reason || reason == "" || len(reason) > 512 {
@@ -275,6 +275,12 @@ type Observation struct {
 }
 
 func equivalent(kind string, observed, desired []byte) bool {
+	var operation struct {
+		Operation string `json:"operation"`
+	}
+	if json.Unmarshal(desired, &operation) == nil && operation.Operation == "create_disabled_pool" {
+		return false
+	} // Repository GET never proves a POST completed or captures its UUID.
 	if kind == "pool" {
 		var a, b garmapi.ManagedPool
 		if json.Unmarshal(observed, &a) != nil || json.Unmarshal(desired, &b) != nil {
