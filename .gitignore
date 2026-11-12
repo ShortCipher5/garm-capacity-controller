@@ -1,0 +1,13 @@
+*.db
+*.db-*
+*.ledger.json
+*.ledger.json.lock
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+node_modules/
+web/dist/
+coverage.out
+capacity-sim
