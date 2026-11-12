@@ -9,6 +9,23 @@ MARKER='PROFILE_DISPOSABLE_LAB=generated-image-qualification/v1'
 PROBE='/probe/profile-probe'
 DOCKER_CONFIG_PATH=None
 class Failed(Exception):pass
+PROBE_KINDS={'ok','unknown-authority','hostname','missing-loader','asset-mismatch','identity-mismatch','body-mismatch','missing-library','unsupported-elf','artifact-mismatch','http-status','response-too-large','invalid-input','environment-override','transport','filesystem','permission-denied','network-mismatch','unapproved-context'}
+class ProbeMismatch(Failed):
+ def __init__(self,wanted,actual,exit):
+  super().__init__('probe-outcome-mismatch')
+  self.wanted=wanted if wanted in PROBE_KINDS else 'unrecognized'
+  self.actual=actual if actual in PROBE_KINDS else ('invalid-response' if actual=='invalid-response' else 'unrecognized')
+  self.exit=str(exit) if type(exit)is int and -255<=exit<=255 else 'invalid'
+ def safe(self):return 'probe expected='+self.wanted+' actual='+self.actual+' exit='+self.exit
+class LoaderMismatch(Failed):
+ def __init__(self,error):
+  super().__init__('loader-rejection-mismatch')
+  self.category='other'
+  if type(error)is not str:self.category='non-string'
+  elif not error:self.category='empty'
+  elif 'exec user process caused: no such file or directory' in error:self.category='user-exec-enoent'
+  elif 'exec:' in error and '/usr/local/bin/garm' in error and 'no such file or directory' in error:self.category='target-stat-enoent'
+ def safe(self):return 'loader rejection category='+self.category
 
 def need(ok):
  if not ok:raise Failed('disposable image test failed')
@@ -34,9 +51,13 @@ def data(args):
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
 def result_kind(result,wanted,code):
- need(result.returncode==code)
- x=json.loads(result.stdout);need(set(x)=={'kind','test_probe_only','installed_stack_qualified','runtime_profile_qualified','startup_authority','deployment_authorized'})
- need(x['kind']==wanted and x['test_probe_only'] is True and all(x[k] is False for k in ('installed_stack_qualified','runtime_profile_qualified','startup_authority','deployment_authorized')))
+ try:x=json.loads(result.stdout)
+ except Exception:x=None
+ valid=type(x)is dict and set(x)=={'kind','test_probe_only','installed_stack_qualified','runtime_profile_qualified','startup_authority','deployment_authorized'}
+ valid=valid and x['test_probe_only'] is True and all(x[k] is False for k in ('installed_stack_qualified','runtime_profile_qualified','startup_authority','deployment_authorized'))
+ if not valid:raise ProbeMismatch(wanted,'invalid-response',result.returncode)
+ actual=x['kind'] if type(x['kind'])is str else 'unrecognized'
+ if type(result.returncode)is not int or result.returncode!=code or actual!=wanted:raise ProbeMismatch(wanted,actual,result.returncode)
 
 INSPECT='{"id":{{json .Id}},"image":{{json .Image}},"lab":{{json (index .Config.Labels "disposable-profile-run")}},"user":{{json .Config.User}},"entrypoint":{{json .Config.Entrypoint}},"volumes":{{json .Config.Volumes}},"network":{{json .HostConfig.NetworkMode}},"pid":{{json .HostConfig.PidMode}},"privileged":{{json .HostConfig.Privileged}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"caps_add":{{json .HostConfig.CapAdd}},"caps_drop":{{json .HostConfig.CapDrop}},"security":{{json .HostConfig.SecurityOpt}},"ports":{{json .HostConfig.PortBindings}},"restart":{{json .HostConfig.RestartPolicy.Name}},"memory":{{json .HostConfig.Memory}},"cpus":{{json .HostConfig.NanoCpus}},"pids":{{json .HostConfig.PidsLimit}},"tmpfs":{{json .HostConfig.Tmpfs}},"mounts":{{json .Mounts}},"status":{{json .State.Status}},"running":{{json .State.Running}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}}}'
 
@@ -173,11 +194,15 @@ def run():
    check(image,uid,'canary',['-nonce',nonce],additional=canary)
   phase='linkage'
   for image,uid,names in ((daemon,65531,('garm','capacity-provider')),(tools,65533,('garm-cli',))):
-   for name in names:check(image,uid,'elf',['-binary',name,'-sha256',hashes[name]])
+   for name in names:
+    phase='linkage-'+name;check(image,uid,'elf',['-binary',name,'-sha256',hashes[name]])
+  phase='linkage-missing-loader-probe'
   check(broken,65531,'elf',['-binary','garm','-sha256',hashes['garm']],expected='missing-loader',code=44)
+  phase='linkage-missing-loader-exec'
   failed=lab.create(broken,65531,'none','/usr/local/bin/garm',['--version']);r=command(['docker','start','-a',failed]);need(r.returncode!=0)
   # This deliberately keyless scratch container is the only case reading Error.
-  err=json.loads(data(['docker','inspect','--format','{{json .State.Error}}',failed]));need('exec /usr/local/bin/garm: no such file or directory' in err)
+  err=json.loads(data(['docker','inspect','--format','{{json .State.Error}}',failed]));
+  if type(err)is not str or 'exec /usr/local/bin/garm: no such file or directory' not in err:raise LoaderMismatch(err)
   phase='discovery'
   r=lab.once(daemon,65531,'none','/usr/local/bin/garm',['--version']);need(r.returncode==0 and b'v0.2.1+capacity.87e0d61751d4' in r.stdout)
   r=lab.once(tools,65533,'none','/usr/local/bin/garm-cli',['--help'],home=True);need(r.returncode==0 and r.stdout.startswith(b'CLI for the github self hosted runners manager.'))
@@ -215,7 +240,10 @@ def run():
   phase='cleanup';need(lab.cleanup());need(command(['sudo','-n','rm','-rf','--',str(work)]).returncode==0)
   with (results/'result.json').open('x') as f:json.dump(record,f,sort_keys=True,indent=2)
   print('PASS disposable historical image/profile test only; all deployment authorities false')
- except Exception:print('Disposable image/profile test failed at '+phase,file=sys.stderr);raise Failed('bounded test failed') from None
+ except Exception as error:
+  print('Disposable image/profile test failed at '+phase,file=sys.stderr)
+  if isinstance(error,(ProbeMismatch,LoaderMismatch)):print(error.safe(),file=sys.stderr)
+  raise Failed('bounded test failed') from None
  finally:
   lab.cleanup()
   # New owned lab tree only. Credentials/state are never artifacts; no repair or

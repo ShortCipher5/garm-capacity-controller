@@ -42,6 +42,12 @@ class RunnerTest(unittest.TestCase):
   for code,field,new in [(65,'kind','transport'),(42,'deployment_authorized',True),(42,'runtime_profile_qualified',0)]:
    x=dict(value);x[field]=new
    with self.assertRaises(run.Failed):run.result_kind(subprocess.CompletedProcess([],code,json.dumps(x).encode(),b''),'unknown-authority',42)
+ def test_failure_diagnostics_are_whitelisted_not_raw_output(self):
+  for value in (b'RAW-PRIVATE-SENTINEL',b'{"kind":"RAW-PRIVATE-SENTINEL"}',json.dumps({'kind':'RAW-PRIVATE-SENTINEL','test_probe_only':True,'installed_stack_qualified':False,'runtime_profile_qualified':False,'startup_authority':False,'deployment_authorized':False}).encode()):
+   with self.assertRaises(run.ProbeMismatch) as found:run.result_kind(subprocess.CompletedProcess([],49,value,b'RAW-PRIVATE-SENTINEL'),'ok',0)
+   self.assertNotIn('RAW-PRIVATE-SENTINEL',found.exception.safe());self.assertNotIn('RAW-PRIVATE-SENTINEL',str(found.exception));self.assertIn('exit=49',found.exception.safe())
+  error=run.LoaderMismatch('RAW-PRIVATE-SENTINEL');self.assertNotIn('RAW-PRIVATE-SENTINEL',str(error));self.assertEqual(error.safe(),'loader rejection category=other')
+  self.assertEqual(run.LoaderMismatch('exec user process caused: no such file or directory').safe(),'loader rejection category=user-exec-enoent')
  def record(self):return {'lab':'generated','image':'sha256:test','user':'65531:65531','network':'none','pid':'','privileged':False,'readonly':True,'caps_add':None,'caps_drop':['ALL'],'security':['no-new-privileges'],'ports':{},'restart':'no','volumes':None,'memory':512*1024*1024,'cpus':1000000000,'pids':128,'tmpfs':{'/tmp':'rw,noexec,nosuid,nodev,size=16m,uid=65531,gid=65531,mode=0700'},'mounts':[]}
  def test_topology_unsafe_controls_rejected(self):
   good=self.record();run.topology(good,'generated','sha256:test',65531,'none',[],['/tmp'])
