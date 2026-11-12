@@ -23,6 +23,7 @@ work=${1%/}
 for path in "$work" "$work.results" "$work.home" "$work.tmp" "$work.packages"; do
   [[ ! -e "$path" && ! -L "$path" ]] || { echo 'Requires NEW absolute source and isolated output paths.' >&2; exit 2; }
 done
+command -v node >/dev/null || { echo 'Already installed Node.js required; no installation attempted.' >&2; exit 2; }
 command -v dotnet >/dev/null || { echo 'Already installed .NET 8 SDK required; no installation attempted.' >&2; exit 2; }
 # No -p: an output created after the preflight (including a symlink) must fail.
 # Preserve any partial reservation on error; never reuse, remove or overwrite it.
@@ -46,10 +47,11 @@ git -C "$work" remote add origin https://github.com/actions/runner.git
 git -C "$work" fetch --quiet --depth=1 origin "$pin"
 git -C "$work" checkout --quiet --detach FETCH_HEAD
 verify_source "$work"
+timeout 10s env -i PATH="$PATH" node "$here/supervisor_contracts.cjs" "$work" > "$work.results/supervisor-contracts.json"
 target="$work/src/Test/L0/Listener/RetirementSourceContracts.cs"
 [[ ! -e "$target" && ! -L "$target" ]]
 cp "$here/RetirementSourceContracts.cs" "$target"
-for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs; do
+for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs; do
   [[ ! -e "$work/src/Test/L0/Listener/$overlay" && ! -L "$work/src/Test/L0/Listener/$overlay" ]]
   cp "$here/$overlay" "$work/src/Test/L0/Listener/$overlay"
 done
@@ -78,7 +80,7 @@ clean_dotnet test Test/Test.csproj -c Release -p:PackageRuntime=linux-x64 -p:Run
   --logger 'trx;LogFileName=retirement-source-contracts.trx' --results-directory "$work.results"
 verify_source "$work"
 cmp "$target" "$here/RetirementSourceContracts.cs"
-for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs; do
+for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs; do
   cmp "$work/src/Test/L0/Listener/$overlay" "$here/$overlay"
 done
 cmp "$override" "$here/Directory.Build.targets"
@@ -112,10 +114,14 @@ expected = {
  'FailedOrCancelledAcquisitionCannotBecomeNoAssignmentProof',
  'AcceptedButNeverDispatchedOrFailedCleanupRemainsUnresolved',
  'PollResolutionAtomicallyTransfersObligationWithoutQuiescentGap',
+ 'ClassicBusyHintPreservesSharedControlPollingButIsNotAnAssignmentSeal',
+ 'ClassicStatusCancellationCanStillReturnTheOldPollJobResponse',
+ 'ClassicSessionExpiryRecreatesUnlessSkipSessionRecoverIsSet',
+ 'BrokerBusyHintAlsoReturnsJobAndControlWithoutSealAcknowledgment',
 }
 results = root.findall('.//t:UnitTestResult', ns)
 actual = {r.attrib.get('testName', '').rsplit('.', 1)[-1] for r in results}
 if actual != expected or len(results) != len(expected) or any(r.attrib.get('outcome') != 'Passed' for r in results):
-    raise SystemExit('Exactly twelve compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
-print('Six ACTUAL pinned runner method tests and six test-only local intake experiments passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
+    raise SystemExit('Exactly sixteen compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
+print('Six ACTUAL pinned runner method tests, six local intake experiments and four actual listener interface tests passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
 PY

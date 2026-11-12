@@ -1,6 +1,8 @@
 package runnercontracts
 
 import (
+	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These local tests check only gate hygiene and pinned source availability.
@@ -205,7 +208,7 @@ func TestLocalCoordinatorRemainsDisposableAndCannotBeRetirementAuthority(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(script), "for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs") != 2 || !strings.Contains(string(script), "Exactly twelve compiled lifecycle contract tests") {
+	if strings.Count(string(script), "for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs") != 2 || !strings.Contains(string(script), "Exactly sixteen compiled lifecycle contract tests") {
 		t.Fatal("new tests must be copied, unchanged, and actually execute")
 	}
 	for _, production := range []string{"../../internal/gateway", "../../internal/retirement"} {
@@ -225,5 +228,60 @@ func TestLocalCoordinatorRemainsDisposableAndCannotBeRetirementAuthority(t *test
 				t.Fatal("experiment imported into production", production, file.Name())
 			}
 		}
+	}
+}
+
+func TestRemoteInterfaceContractsStayMockedAndNoInstall(t *testing.T) {
+	contracts, err := os.ReadFile("RemoteControlInterfaceContracts.cs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(contracts), "[Fact]") != 4 || !strings.Contains(string(contracts), "ClassicSessionExpiryRecreatesUnlessSkipSessionRecoverIsSet") {
+		t.Fatal("actual listener control/recovery contract tests missing")
+	}
+	javascript, err := os.ReadFile("supervisor_contracts.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"require('node:child_process')", "require('child_process')", "process.kill(", "execSync(", "spawnSync("} {
+		if strings.Contains(string(javascript), forbidden) {
+			t.Fatal("real external process capability in supervisor fixture", forbidden)
+		}
+	}
+	script, err := os.ReadFile("test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), "timeout 10s env -i PATH=\"$PATH\" node") || !strings.Contains(string(script), "supervisor-contracts.json") {
+		t.Fatal("existing-toolchain bounded clean supervisor fixture missing")
+	}
+}
+
+func TestActualSupervisorSourceWhenExplicitlySupplied(t *testing.T) {
+	source := os.Getenv("GCC_PINNED_ACTIONS_RUNNER_SOURCE")
+	if source == "" {
+		t.Skip("explicit source required; no automatic download or install")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("existing Node unavailable; no installation attempted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, node, "supervisor_contracts.cjs", source)
+	command.Env = []string{"PATH=" + os.Getenv("PATH")}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("actual supervisor-source fixture: %s %v", output, err)
+	}
+	var result struct {
+		Passed       []string `json:"passed"`
+		RealChildren int      `json:"real_children_spawned"`
+		RealSignals  int      `json:"real_signals_sent"`
+		Qualified    bool     `json:"restart_fence_qualified"`
+		Authority    bool     `json:"retirement_authority"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil || len(result.Passed) != 8 || result.RealChildren != 0 || result.RealSignals != 0 || result.Qualified || result.Authority {
+		t.Fatal("incorrect supervisor experiment result", string(output), err)
 	}
 }
