@@ -39,6 +39,13 @@ test("initial application renders login without an authenticated snapshot", asyn
       React.createElement(Dashboard, { data }),
     );
     assert.match(dashboard, /Historical execution plans unavailable/);
+    assert.match(dashboard, /<label for="host-attention">Show hosts<\/label>/);
+    assert.match(dashboard, /Showing 0 of 0 hosts in this snapshot/);
+    assert.match(dashboard, /No hosts configured in this ledger/);
+    assert.match(dashboard, /<label for="audit-event-kind">Event kind<\/label><select id="audit-event-kind"/);
+    assert.match(dashboard, /<label for="audit-event-host">Event host<\/label><select id="audit-event-host"/);
+    assert.match(dashboard, /Showing 0 of 0 events in this snapshot/);
+    assert.match(dashboard, /No audit events recorded/);
     assert.match(dashboard, /2 reservations remain charged/);
     assert.match(dashboard, /Original source preparation history unavailable/);
     assert.match(dashboard, /3 historical reservations remain charged/);

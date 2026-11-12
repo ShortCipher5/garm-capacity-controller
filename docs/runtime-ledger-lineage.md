@@ -42,6 +42,36 @@ The offline/test `OpenSQLite` API remains available and migrates owned legacy
 ledgers for accounting inspection, tests and exports. Its new ledgers and legacy
 migrations receive runtime-disabled `offline` kind, never active lineage.
 
+## Initialization policy field reference
+
+The `--policy` file is the standalone JSON shape defined by
+[`admission.Config`](../internal/admission/store_linux.go), not the gateway's
+`hosts`/`pools` transport and execution configuration. This reference supplies no
+host inventory, budgets, credentials or deployable defaults.
+
+| Field | Shape and existing validation |
+| --- | --- |
+| `global` | Resource budget object: `cpu_millis`, `ram_mib`, `runners`, each a nonnegative integer. |
+| `hosts` | Nonempty object keyed by nonempty ledger host IDs. Each value has `budget`, `mode`, `healthy`, `observed_at`. |
+| Host `budget` | Same resource-budget fields/units as `global`. |
+| Host `mode` | `enabled`, `disabled` or `draining`. Neither enabled nor draining certifies readiness/drain completion. |
+| Host `healthy` | Boolean recorded health state, not an instruction to probe a host. |
+| Host `observed_at` | Nonzero RFC3339 timestamp string for the recorded observation. |
+| `pools` | Nonempty object keyed by nonempty ledger pool IDs. Each value has a resource `budget` and a nonempty `hosts` array referring to IDs in this policy's host map. |
+| `max_observation_age_ns` | Positive integer duration in **nanoseconds**, not a duration string such as `"30s"`. |
+
+JSON resource/duration integers must fit Go's signed 64-bit range. Host/pool IDs
+must also agree with the later gateway configuration and its stricter startup
+checks. A ledger pool's `hosts` eligibility list is not the gateway pool's full
+image/flavor/profile/execution configuration; see
+[configured placement](durable-placement.md).
+
+Do not invent healthy status or timestamps to pass validation. Supplying fields
+is not observation evidence: initialization still leaves admission blocked, and
+runtime requires fresh reconciliation plus the separate identity/provenance and
+physical-scope prerequisites. Do not wrap this object in `initial_policy` or copy
+a full gateway configuration into `--policy`; the CLI rejects unknown fields.
+
 ## Artifacts cannot become runtime state
 
 Supported consistent online backups and restores retain lineage, host bindings,
