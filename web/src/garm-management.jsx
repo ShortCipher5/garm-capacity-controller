@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { applyGarmChange } from "./garm-client.js";
+import { canEditGarm, GarmSettingsPresentation } from "./garm-discovery.jsx";
 
 export function GarmManagement({ read }) {
   const [snapshot,setSnapshot] = useState(null), [message,setMessage] = useState(""), [busy,setBusy] = useState(false), [review,setReview] = useState(null), [kind,setKind] = useState("pool"), [target,setTarget] = useState("");
@@ -8,12 +9,12 @@ export function GarmManagement({ read }) {
   async function load() {
     if(active.current) return;
     const generation=++readGeneration.current;setBusy(true);setMessage("");
-    try { const next=await read(); if(mounted.current && generation===readGeneration.current){setSnapshot(next);if(!target)setTarget(next.settings.pools[0]?.id || "");} }
+    try { const next=await read(); if(mounted.current && generation===readGeneration.current){setSnapshot(next);if(!canEditGarm(next)){setReview(null);if(token.current)token.current.value="";}if(!target)setTarget(next.settings.pools[0]?.id || "");} }
     catch(error) { if(mounted.current && generation===readGeneration.current){setSnapshot(null);setReview(null);if(token.current)token.current.value="";setMessage(error.message || "Garm settings unavailable.");} }
     finally { if(mounted.current && generation===readGeneration.current)setBusy(false); }
   }
   function prepare(event) {
-    event.preventDefault(); if(!snapshot || snapshot.write_blocked || !snapshot.writes_enabled || uncertain.current)return;
+    event.preventDefault(); if(!canEditGarm(snapshot) || snapshot.write_blocked || uncertain.current)return;
     const form=new FormData(event.currentTarget),selected=(kind==="pool"?snapshot.settings.pools:snapshot.settings.repositories).find((v)=>v.id===target);
     if(!selected)return;
     const change={request_id:crypto.randomUUID(),target,fingerprint:selected.fingerprint,reason:String(form.get("reason")).trim()};
@@ -29,7 +30,7 @@ export function GarmManagement({ read }) {
     setReview({kind,change});setMessage("");
   }
   async function apply(event) {
-    event.preventDefault();if(active.current)return;
+    event.preventDefault();if(active.current || !review || blocked)return;
     const credential=token.current.value;token.current.value="";
     const controller=new AbortController();active.current=controller;setBusy(true);setMessage("");
     const timeout=setTimeout(()=>controller.abort(),15000);
@@ -43,7 +44,7 @@ export function GarmManagement({ read }) {
   }
   const choices=snapshot?(kind==="pool"?snapshot.settings.pools:snapshot.settings.repositories):[], selected=choices.find((v)=>v.id===target);
   const stale=review && (review.kind==="pool"?snapshot?.settings.pools:snapshot?.settings.repositories)?.find((v)=>v.id===review.change.target)?.fingerprint!==review.change.fingerprint;
-  const blocked=busy||!snapshot?.writes_enabled||snapshot?.write_blocked||uncertain.current||stale;
+  const blocked=busy||!canEditGarm(snapshot)||snapshot?.write_blocked||uncertain.current||stale;
   return <section className="card management" id="garm-management">
     <h2>Garm settings</h2>
     <p>Actual settings on explicitly configured Garm pools and repositories, separate from ledger budgets. No registration, deletion, runner placement or drain controls.</p>
@@ -54,8 +55,8 @@ export function GarmManagement({ read }) {
     {snapshot?.write_blocked && <p className="error">A durable pending or unknown operation blocks Garm writes. Reading fresh state does not fence a delayed write and cannot safely clear this block.</p>}
     {snapshot?.pending && <p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target}</p>}
     {uncertain.current && <p className="error">This session has an uncertain write. Further changes are disabled. Inspect journal status and resolve the external operation before reconnecting.</p>}
-    {snapshot && !snapshot.writes_enabled && <p>Garm writes are disabled. Discovery only.</p>}
-    {snapshot && !review && <form onSubmit={prepare}>
+    {snapshot && !canEditGarm(snapshot) && <p>Garm editing is unavailable. Discovery only.</p>}
+    {snapshot && !review && <GarmSettingsPresentation snapshot={snapshot}><form onSubmit={prepare}>
       <label>Garm object type<select aria-label="Garm object type" value={kind} onChange={(e)=>{setKind(e.target.value);setTarget((e.target.value==="pool"?snapshot.settings.pools:snapshot.settings.repositories)[0]?.id||"");}}><option value="pool">Pool settings</option><option value="repository">Repository balancing</option></select></label>
       <label>Garm object<select value={target} onChange={(e)=>setTarget(e.target.value)}>{choices.map((v)=><option key={v.id} value={v.id}>{v.owner?`${v.owner}/${v.name}`:v.id}</option>)}</select></label>
       {selected && (kind==="pool"?<div className="budget-fields" key={selected.fingerprint}>
@@ -67,8 +68,8 @@ export function GarmManagement({ read }) {
       </div>:<label key={selected.fingerprint}>Repository balancing<select aria-label="Repository balancing" name="balancer" defaultValue={selected.pool_balancing_type}>{selected.pool_balancing_type===""&&<option value="">Upstream default</option>}<option value="roundrobin">Round robin</option><option value="pack">Pack</option></select></label>)}
       <label>Garm audit reason<input name="reason" maxLength="256" required placeholder="No credentials or sensitive data" /></label>
       <button className="primary" disabled={blocked||!selected} type="submit">Review Garm change</button>
-    </form>}
-    {review && <form onSubmit={apply}>
+    </form></GarmSettingsPresentation>}
+    {review && canEditGarm(snapshot) && <form onSubmit={apply}>
       <h3>Review actual Garm change</h3><p>{review.kind}: {review.change.target}</p>
       {review.change.pool?Object.entries(review.change.pool).map(([key,value])=><p key={key}>{key}: {Array.isArray(value)?value.join(", "):String(value)}</p>):<p>Repository balancing: {review.change.balancer}</p>}
       {stale && <p className="error">Settings changed after review. Cancel and review a new change.</p>}
