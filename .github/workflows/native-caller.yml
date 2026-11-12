@@ -1,0 +1,32 @@
+name: Native caller component
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/native-caller.yml'
+      - 'deploy/runtime/native-caller/**'
+permissions:
+  contents: read
+jobs:
+  component:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: deploy/runtime/native-caller/test.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-caller-evidence
+          if-no-files-found: error
+          path: |
+            qualification-results/native-caller/upstream.txt
+            qualification-results/native-caller/recipe-revision.txt
+            qualification-results/native-caller/fixture.sha256
+            qualification-results/native-caller/recipe.sha256
+            qualification-results/native-caller/base-image.txt
+            qualification-results/native-caller/packages.tsv
+            qualification-results/native-caller/go-version.txt
+            qualification-results/native-caller/test.txt
+            qualification-results/native-caller/result.txt
