@@ -24,8 +24,10 @@ var ErrFence = errors.New("stale or inactive reconciliation fence")
 // SQLiteStore is a local, single-controller-machine allocation ledger.
 // It is an offline core, not a provider adapter or production enforcement mode.
 type SQLiteStore struct {
+	path     string
 	db       *sql.DB
 	poisoned atomic.Bool
+	closed   atomic.Bool
 	now      func() time.Time
 }
 
@@ -95,7 +97,7 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &SQLiteStore{db: db, now: time.Now}
+	s := &SQLiteStore{db: db, now: time.Now, path: absolute}
 	err = s.transaction(context.Background(), func(tx *sql.Tx) error {
 		var version, syncMode, foreignKeys, application int
 		var journal string
@@ -204,7 +206,7 @@ func sqliteObservationsFresh(config Config, now time.Time) bool {
 	return true
 }
 
-func (s *SQLiteStore) Close() error { return s.db.Close() }
+func (s *SQLiteStore) Close() error { s.closed.Store(true); return s.db.Close() }
 
 // Driver _txlock=immediate makes BeginTx acquire the write reservation before
 // reading budgets. Separate database handles/processes cannot write-skew.

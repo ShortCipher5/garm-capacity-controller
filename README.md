@@ -68,3 +68,5 @@ The `feat/provider-facade` slice binds trusted fixed pool placement, official Ga
 The `feat/gateway-rpc` slice adds separate `capacity-gateway` and `capacity-provider` executables with verified mTLS, exact client-leaf allowlisting and read-only defaults. See [service trust, configuration and unfinished lifecycle gates](docs/gateway-service.md).
 
 The `feat/host-admission-controls` slice adds durable trusted host enable/pause controls with a fresh reconciliation barrier and unchanged resource charges. It does **not** deregister idle runners or complete a drain; see [host admission controls](docs/host-admission-controls.md). No provider/admin endpoint is added.
+
+The `feat/read-only-admin` slice adds a separate opt-in TLS read-only admin API backed by actual ledger state, with no synthetic fallback. It cannot modify policy or retire runners. The React client follows in a separate focused slice. See [admin setup and read isolation](docs/read-only-admin.md). Physical retirement/job-safe draining remains blocked, not hidden behind fake controls.

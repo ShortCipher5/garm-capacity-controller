@@ -37,6 +37,7 @@ type garmConfiguration struct {
 	ScaleSets map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	Admin                *adminConfiguration           `json:"admin,omitempty"`
 	Listen               string                        `json:"listen"`
 	Controller           string                        `json:"controller"`
 	Database             string                        `json:"database"`
@@ -74,6 +75,10 @@ func serve(ctx context.Context, config configuration, provision bool) error {
 // A supplied listener is used by the offline integration tests; production calls
 // still validate and create an explicit loopback listener above.
 func serveOnListener(ctx context.Context, config configuration, provision bool, listener net.Listener) error {
+	return serveOnListeners(ctx, config, provision, listener, nil)
+}
+
+func serveOnListeners(ctx context.Context, config configuration, provision bool, listener, adminListener net.Listener) error {
 	defer listener.Close()
 	address, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !address.IP.IsLoopback() {
@@ -129,6 +134,27 @@ func serveOnListener(ctx context.Context, config configuration, provision bool, 
 	}
 	// No secrets, request bodies, URLs, panic values or provider output in logs.
 	server := &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 12 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}
+	adminServer, closeAdmin, err := newAdminServer(config.Admin, store, provision)
+	if err != nil {
+		return err
+	}
+	defer closeAdmin()
+	if adminServer != nil {
+		if adminListener == nil {
+			adminListener, err = net.Listen("tcp", adminServer.Addr)
+			if err != nil {
+				return err
+			}
+		}
+		defer adminListener.Close()
+		address, ok := adminListener.Addr().(*net.TCPAddr)
+		if !ok || !address.IP.IsLoopback() {
+			return gatewayrpc.ErrConfiguration
+		}
+	} else if adminListener != nil {
+		adminListener.Close()
+		return gatewayrpc.ErrConfiguration
+	}
 	runctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	interval := config.InitialPolicy.MaxObservationAge / 3
@@ -170,6 +196,17 @@ func serveOnListener(ctx context.Context, config configuration, provision bool, 
 		}
 	}()
 	defer func() { cancel(); <-loopDone }()
+	var adminDone chan error
+	if adminServer != nil {
+		adminDone = make(chan error, 1)
+		go func() {
+			err := adminServer.ServeTLS(adminListener, "", "")
+			adminDone <- err
+			if !errors.Is(err, http.ErrServerClosed) {
+				cancel()
+			}
+		}()
+	}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -179,10 +216,23 @@ func serveOnListener(ctx context.Context, config configuration, provision bool, 
 		if server.Shutdown(shutdown) != nil {
 			_ = server.Close()
 		}
+		if adminServer != nil {
+			adminStop, stop := context.WithTimeout(context.Background(), 15*time.Second)
+			defer stop()
+			if adminServer.Shutdown(adminStop) != nil {
+				_ = adminServer.Close()
+			}
+		}
 	}()
 	err = server.ServeTLS(listener, "", "")
 	cancel()
 	<-shutdownDone
+	if adminDone != nil {
+		adminErr := <-adminDone
+		if !errors.Is(adminErr, http.ErrServerClosed) {
+			return adminErr
+		}
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
