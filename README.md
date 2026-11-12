@@ -27,7 +27,7 @@ A JSON ledger is used deliberately for this small testable slice, not as the fin
 
 ### Try it locally
 
-Requires the Go compiler 1.23+ on Linux. The SQLite branch also requires CGO and a C compiler for its pinned SQLite driver. No credentials or infrastructure are needed.
+This integrated facade branch requires the Go compiler 1.25+ (matching its pinned provider-common dependency) on Linux. The SQLite branch also requires CGO and a C compiler for its pinned SQLite driver. No credentials or infrastructure are needed.
 
 ```sh
 go test -race ./...
@@ -62,3 +62,5 @@ Implemented: conservative admission model, durable local reservations, idempoten
 No live infrastructure was accessed or changed during initial development. No production-ready claim is made.
 
 The `feat/incus-transport` slice adds a concrete, credential-verified Incus REST transport with explicit allocation limits and bounded project inventory; see [transport boundary and remaining gates](docs/incus-transport.md). Tests use disposable mutual-TLS fixtures, not live hosts. No gateway service or production mode is enabled.
+
+The `feat/provider-facade` slice binds trusted fixed pool placement, official Garm bootstrap rendering, one-shot dispatch/readback and barrier-first Garm/Incus/operation reconciliation. It is not exposed as a gateway service yet. See [provider facade](docs/provider-facade.md).
