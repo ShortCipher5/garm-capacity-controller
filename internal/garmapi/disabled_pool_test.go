@@ -15,6 +15,7 @@ func disabledSpec() DisabledPoolSpec {
 }
 
 type disabledPoolFixture struct {
+	beforeGet   func()
 	mu          sync.Mutex
 	posts, gets int
 	status      int
@@ -53,6 +54,9 @@ func disabledPoolServer(t *testing.T, enabled bool) (*ManagementClient, *disable
 			json.NewEncoder(w).Encode(f.pool)
 		case r.Method == "GET" && r.URL.Path == "/api/v1/repositories/"+managedRepoID+"/pools/"+otherID:
 			f.gets++
+			if f.beforeGet != nil {
+				f.beforeGet()
+			}
 			json.NewEncoder(w).Encode(f.pool)
 		default:
 			t.Error("unexpected route", r.Method, r.URL.Path)
