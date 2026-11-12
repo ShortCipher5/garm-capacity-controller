@@ -1,0 +1,32 @@
+name: m2-read-only-hosted-capability-survey
+on:
+  push:
+    paths:
+      - '.github/workflows/m2-hosted-capability-survey.yml'
+      - 'integration/m2-hosted-survey/**'
+  pull_request:
+    paths:
+      - '.github/workflows/m2-hosted-capability-survey.yml'
+      - 'integration/m2-hosted-survey/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  metadata-only-not-m2-qualification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Unit-test the metadata-only survey without host/runtime probes
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s integration/m2-hosted-survey -p '*_test.py'
+      - name: Read-only installed-tool and kernel permission metadata, not kernel tests
+        id: survey
+        run: PYTHONDONTWRITEBYTECODE=1 python3 integration/m2-hosted-survey/survey.py "$RUNNER_TEMP/garm-m2-capability-survey"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() && steps.survey.outputs.results_created == 'true' }}
+        with:
+          name: m2-read-only-hosted-metadata-not-qualification
+          path: ${{ runner.temp }}/garm-m2-capability-survey/survey.json
+          if-no-files-found: error
