@@ -64,6 +64,65 @@ jobs:
           assert not Path('/run/incus/unix.socket').exists(), 'Incus daemon socket must not be mounted'
           print('Trusted source and bounded guest resource/socket checks passed')
           PY
+      - name: Numeric-only process and memory diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/gcc-numeric-diag.py" <<'PY_DIAG'
+          import json
+          import os
+          from pathlib import Path
+          import resource
+
+          # Numeric-only diagnostics: never inspect argv, environment, credentials or names.
+          def number(path):
+              try:
+                  value = path.read_text().strip()
+                  return -1 if value == 'max' else int(value)
+              except (OSError, ValueError):
+                  return -2
+
+          def counters(path, allowed):
+              result = {}
+              try:
+                  for line in path.read_text().splitlines():
+                      key, value = line.split()
+                      if key in allowed:
+                          result[key] = int(value)
+              except (OSError, ValueError):
+                  pass
+              return result
+
+          out = {'diagnostic_version': 1, 'uid': os.getuid(), 'cpu_affinity_count': len(os.sched_getaffinity(0))}
+          for name, key in [('RLIMIT_NPROC','processes'), ('RLIMIT_STACK','stack'), ('RLIMIT_AS','address_space')]:
+              out['rlimit_' + key] = list(resource.getrlimit(getattr(resource,name)))
+          for key, path in [('kernel_threads_max','/proc/sys/kernel/threads-max'), ('kernel_pid_max','/proc/sys/kernel/pid_max'), ('vm_overcommit_memory','/proc/sys/vm/overcommit_memory')]:
+              out[key] = number(Path(path))
+          base = Path('/sys/fs/cgroup')
+          current = base
+          try:
+              for line in Path('/proc/self/cgroup').read_text().splitlines():
+                  hierarchy, controllers, relative = line.split(':', 2)
+                  if hierarchy == '0' and controllers == '':
+                      candidate = base / relative.lstrip('/')
+                      if '..' not in candidate.parts and candidate.is_dir():
+                          current = candidate
+          except (OSError, ValueError):
+              pass
+          out['cgroups'] = []
+          for depth in range(16):
+              record = {'depth':depth}
+              for filename in ['pids.current','pids.max','pids.peak','memory.current','memory.max','memory.peak']:
+                  record[filename.replace('.','_')] = number(current / filename)
+              record['pids_events'] = counters(current/'pids.events', {'max'})
+              record['memory_events'] = counters(current/'memory.events', {'low','high','max','oom','oom_kill','oom_group_kill'})
+              out['cgroups'].append(record)
+              if current == base or base not in current.parents:
+                  break
+              current = current.parent
+          print(json.dumps(out, sort_keys=True))
+          PY_DIAG
+          python3 "$RUNNER_TEMP/gcc-numeric-diag.py"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
         with:
           go-version: ${{ matrix.go-version }}
@@ -76,7 +135,11 @@ jobs:
         run: |
           test -z "$(gofmt -l .)"
           go vet ./...
+          set +e
           go test -race -p=1 -parallel=1 -count=1 ./...
+          status=$?
+          if (( status != 0 )); then python3 "$RUNNER_TEMP/gcc-numeric-diag.py"; fi
+          exit "$status"
       - name: Actual pinned Garm/executable qualification
         run: integration/garm-v0.2.1/test.sh "$RUNNER_TEMP/gcc-pinned-canary"
       - name: Built UI and browser qualification
