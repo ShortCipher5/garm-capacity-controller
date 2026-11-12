@@ -1,0 +1,735 @@
+diff --git a/config/external.go b/config/external.go
+index ca98bdf..938440c 100644
+--- a/config/external.go
++++ b/config/external.go
+@@ -29,6 +29,9 @@ import (
+ // whatever programming language you wish, while still remaining compatible
+ // with garm.
+ type External struct {
++	// AdmissionEnabled opts into the pre-JIT garm-capacity/v1 command. It must
++	// only be enabled for a gateway implementing the strict admission contract.
++	AdmissionEnabled bool `toml:"admission_enabled" json:"admission-enabled"`
+ 	// InterfaceVersion is the version of the interface that the external
+ 	// provider implements. This is used to ensure compatibility between
+ 	// the external provider and garm.
+@@ -79,6 +82,9 @@ func (e *External) ExecutablePath() (string, error) {
+ }
+ 
+ func (e *External) Validate() error {
++	if e.AdmissionEnabled && e.InterfaceVersion != "v0.1.1" {
++		return fmt.Errorf("admission requires external provider interface v0.1.1")
++	}
+ 	if e.ConfigFile != "" {
+ 		if !filepath.IsAbs(e.ConfigFile) {
+ 			return fmt.Errorf("path to config file must be an absolute path")
+diff --git a/runner/common/admission.go b/runner/common/admission.go
+new file mode 100644
+index 0000000..74f707d
+--- /dev/null
++++ b/runner/common/admission.go
+@@ -0,0 +1,208 @@
++// SPDX-License-Identifier: Apache-2.0
++
++package common
++
++import (
++ "bytes"
++ "context"
++ "encoding/json"
++ "errors"
++ "fmt"
++ "io"
++ "os/exec"
++ "strings"
++ "time"
++ "unicode"
++ "unicode/utf8"
++)
++
++const AdmissionProtocolVersion = "garm-capacity/v1"
++const AdmissionDeferredExitCode = 75
++const admissionMaximumResponseBytes = 4096
++
++var errAdmissionProtocol = errors.New("invalid admission protocol response")
++
++// Request contains no bootstrap, GitHub, controller or Incus credentials.
++// Controller identity and host placement come from trusted provider configuration.
++type AdmissionRequest struct {
++	Name string `json:"name"`
++	PoolID string `json:"pool_id"`
++}
++
++// Response is a preflight receipt only. A later Create must atomically claim
++// the same durable reservation at the gateway; replay is not a dispatch permit.
++type admissionResponse struct {
++	Protocol string `json:"protocol"`
++	Outcome string `json:"outcome"`
++	Name string `json:"name"`
++	PoolID string `json:"pool_id"`
++	Dispatched *bool `json:"dispatched"`
++	ReservationKey string `json:"reservation_key,omitempty"`
++	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
++}
++
++func validAdmissionIdentity(value string) bool {
++	if len(value) == 0 || len(value) > 256 || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
++		return false
++	}
++	for _, r := range value {
++		if unicode.IsControl(r) {
++			return false
++		}
++	}
++	return true
++}
++
++func (r AdmissionRequest) validate() error {
++	if !validAdmissionIdentity(r.Name) || !validAdmissionIdentity(r.PoolID) {
++		return errAdmissionProtocol
++	}
++	return nil
++}
++
++// Parse validates exact identity, explicit no-dispatch assertion and exit-code
++// pairing. Raw child output must not be included in errors or logs.
++func parseAdmissionResponse(exitCode int, output []byte, request AdmissionRequest) (admissionResponse, error) {
++	if request.validate() != nil || len(output) > admissionMaximumResponseBytes || !uniqueAdmissionResponseKeys(output) {
++		return admissionResponse{}, errAdmissionProtocol
++	}
++	decoder := json.NewDecoder(bytes.NewReader(output))
++	decoder.DisallowUnknownFields()
++	var response admissionResponse
++	if decoder.Decode(&response) != nil || decoder.Decode(new(any)) != io.EOF {
++		return admissionResponse{}, errAdmissionProtocol
++	}
++	if response.Protocol != AdmissionProtocolVersion || response.Name != request.Name || response.PoolID != request.PoolID || response.Dispatched == nil || *response.Dispatched {
++		return admissionResponse{}, errAdmissionProtocol
++	}
++	switch response.Outcome {
++	case "reserved":
++		if exitCode != 0 || response.RetryAfterSeconds != 0 || !validAdmissionIdentity(response.ReservationKey) {
++			return admissionResponse{}, errAdmissionProtocol
++		}
++	case "deferred":
++		if exitCode != AdmissionDeferredExitCode || response.ReservationKey != "" || response.RetryAfterSeconds < 5 || response.RetryAfterSeconds > 60 {
++			return admissionResponse{}, errAdmissionProtocol
++		}
++	default:
++		return admissionResponse{}, errAdmissionProtocol
++	}
++	return response, nil
++}
++
++// encoding/json otherwise accepts duplicate and case-folded keys. Those are
++// ambiguous on a safety boundary, so the flat response schema is exact.
++func uniqueAdmissionResponseKeys(data []byte) bool {
++	allowed := map[string]bool{"protocol": true, "outcome": true, "name": true, "pool_id": true, "dispatched": true, "reservation_key": true, "retry_after_seconds": true}
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	token, err := decoder.Token()
++	if err != nil || token != json.Delim('{') {
++		return false
++	}
++	seen := map[string]bool{}
++	for decoder.More() {
++		token, err := decoder.Token()
++		key, ok := token.(string)
++		if err != nil || !ok || seen[key] || !allowed[key] {
++			return false
++		}
++		seen[key] = true
++		var value json.RawMessage
++		if decoder.Decode(&value) != nil {
++			return false
++		}
++	}
++	_, err = decoder.Token()
++	return err == nil && decoder.Decode(new(any)) == io.EOF
++}
++
++// AdmissionProvider is optional and opt-in. It runs before JIT/runner state is
++// allocated. Existing providers without admission retain their legacy behavior.
++// It does not replace the gateway's later atomic dispatch claim.
++type AdmissionProvider interface {
++ AdmitInstance(context.Context, AdmissionRequest) error
++}
++
++type admissionDeferred struct { retryAfter time.Duration }
++func (e *admissionDeferred) Error() string { return "capacity admission deferred before dispatch" }
++
++// NewAdmissionDeferred is only for a trusted, verified never-dispatched result.
++func NewAdmissionDeferred(after time.Duration) error {
++ if after < 5*time.Second || after > 60*time.Second { return errAdmissionProtocol }
++ return &admissionDeferred{retryAfter:after}
++}
++func IsAdmissionDeferred(err error) bool {
++ var deferred *admissionDeferred
++ return errors.As(err,&deferred) && deferred != nil
++}
++func AdmissionRetryAfter(err error) time.Duration {
++ var deferred *admissionDeferred
++ if errors.As(err,&deferred) && deferred != nil { return deferred.retryAfter }
++ return 0
++}
++
++type admissionOutput struct { buffer bytes.Buffer; limit int; overflow bool }
++func (w *admissionOutput) Len() int { return w.buffer.Len() }
++func (w *admissionOutput) Bytes() []byte { return w.buffer.Bytes() }
++func (w *admissionOutput) Write(data []byte) (int,error) {
++ count := len(data)
++ limit := w.limit
++ if limit==0 { limit=admissionMaximumResponseBytes }
++ remaining := limit-w.Len()
++ if len(data)>remaining { w.overflow=true; data=data[:remaining] }
++ _,_ = w.buffer.Write(data)
++ return count,nil
++}
++
++// RunAdmissionProvider uses a separate command carrying no bootstrap payload.
++// Child stdout/stderr are never interpolated into errors or logs. Output is
++// bounded while still drained so an oversized response cannot allocate freely.
++func RunAdmissionProvider(ctx context.Context, binary string, environ []string, request AdmissionRequest) error {
++ if request.validate()!=nil { return errAdmissionProtocol }
++ input,err := json.Marshal(struct {
++  Protocol string `json:"protocol"`
++  Name string `json:"name"`
++  PoolID string `json:"pool_id"`
++ }{AdmissionProtocolVersion,request.Name,request.PoolID})
++ if err!=nil { return errAdmissionProtocol }
++ output := &admissionOutput{}
++ command := exec.CommandContext(ctx,binary)
++ command.Env=environ
++ command.Stdin=bytes.NewReader(input)
++ command.Stdout=output
++ command.Stderr=io.Discard
++ runErr := command.Run()
++ if ctx.Err()!=nil { return fmt.Errorf("admission canceled: %w",ctx.Err()) }
++ if output.overflow { return errAdmissionProtocol }
++ exitCode:=0
++ if runErr!=nil {
++  var exited *exec.ExitError
++  if !errors.As(runErr,&exited) { return errors.New("admission executable unavailable") }
++  exitCode=exited.ExitCode()
++ }
++ response,err:=parseAdmissionResponse(exitCode,output.Bytes(),request)
++ if err!=nil { return errAdmissionProtocol }
++ if response.Outcome=="deferred" { return NewAdmissionDeferred(time.Duration(response.RetryAfterSeconds)*time.Second) }
++ return nil
++}
++
++// RunCreateProvider is the credential-safe execution boundary for opt-in
++// gateway creates. A create error is never converted into benign deferral.
++// Whether an external operation occurred must be resolved by the gateway ledger.
++func RunCreateProvider(ctx context.Context,binary string,environ []string,input []byte)([]byte,error) {
++ output:= &admissionOutput{limit:1<<20}
++ command:=exec.CommandContext(ctx,binary)
++ command.Env=environ
++ command.Stdin=bytes.NewReader(input)
++ command.Stdout=output
++ command.Stderr=io.Discard
++ err:=command.Run()
++ if ctx.Err()!=nil { return nil,fmt.Errorf("provider create canceled: %w",ctx.Err()) }
++ if output.overflow { return nil,errors.New("provider create response exceeded limit") }
++ if err!=nil {
++  var exited *exec.ExitError
++  if errors.As(err,&exited) { return nil,fmt.Errorf("provider create failed with exit code %d",exited.ExitCode()) }
++  return nil,errors.New("provider create executable unavailable")
++ }
++ return output.Bytes(),nil
++}
+diff --git a/runner/common/admission_test.go b/runner/common/admission_test.go
+new file mode 100644
+index 0000000..9eba341
+--- /dev/null
++++ b/runner/common/admission_test.go
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: Apache-2.0
++package common
++
++import (
++ "context"
++ "encoding/json"
++ "errors"
++ "fmt"
++ "io"
++ "os"
++ "strings"
++ "testing"
++ "time"
++)
++
++// TestMain is an executable provider stub when called by these tests. It never
++// contacts a provider, a controller, GitHub or infrastructure.
++func TestMain(m *testing.M) {
++ if mode:=os.Getenv("GCC_ADMISSION_STUB");mode!="" {
++  input,_:=io.ReadAll(os.Stdin)
++  if mode=="echo-secret-failure" {
++   fmt.Printf("stdout:%s",input)
++   fmt.Fprintf(os.Stderr,"stderr:%s",input)
++   os.Exit(1)
++  }
++  var request struct { Protocol string `json:"protocol"`; Name string `json:"name"`; PoolID string `json:"pool_id"` }
++  if json.Unmarshal(input,&request)!=nil || request.Protocol!=AdmissionProtocolVersion || os.Getenv("GARM_COMMAND")!="AdmitInstance" { os.Exit(9) }
++  var fields map[string]any
++  _=json.Unmarshal(input,&fields)
++  if len(fields)!=3 { os.Exit(10) }
++  if mode=="oversize" { fmt.Print(strings.Repeat("x",admissionMaximumResponseBytes+1));os.Exit(75) }
++  if mode=="malformed" { fmt.Print("secret-must-not-echo");os.Exit(75) }
++  if mode=="cancel" { time.Sleep(time.Minute);os.Exit(1) }
++  response:=map[string]any{"protocol":AdmissionProtocolVersion,"outcome":"deferred","name":request.Name,"pool_id":request.PoolID,"dispatched":false,"retry_after_seconds":10}
++  exit:=AdmissionDeferredExitCode
++  switch mode {
++  case "reserved": response["outcome"]="reserved";delete(response,"retry_after_seconds");response["reservation_key"]="reservation-1";exit=0
++  case "wrong-exit": exit=0
++  case "dispatched":response["dispatched"]=true
++  case "wrong-identity":response["name"]="someone-else"
++  case "stderr":fmt.Fprint(os.Stderr,"secret-must-not-echo")
++  }
++  _=json.NewEncoder(os.Stdout).Encode(response)
++  os.Exit(exit)
++ }
++ os.Exit(m.Run())
++}
++
++func TestAdmissionExecutableBoundary(t *testing.T) {
++ request:=AdmissionRequest{Name:"runner-1",PoolID:"pool-1"}
++ for _,mode:=range []string{"deferred","reserved","stderr"} {
++  err:=RunAdmissionProvider(context.Background(),os.Args[0],[]string{"GCC_ADMISSION_STUB="+mode,"GARM_COMMAND=AdmitInstance"},request)
++  if mode=="reserved" { if err!=nil { t.Fatal(err) };continue }
++  if !IsAdmissionDeferred(err) || AdmissionRetryAfter(err)!=10*time.Second { t.Fatalf("%s: %v",mode,err) }
++  if strings.Contains(err.Error(),"secret-must-not-echo") { t.Fatal("stderr leaked") }
++ }
++}
++
++func TestAdmissionMalformedAndUncertainResultsFailClosed(t *testing.T) {
++ for _,mode:=range []string{"oversize","malformed","wrong-exit","dispatched","wrong-identity"} {
++  err:=RunAdmissionProvider(context.Background(),os.Args[0],[]string{"GCC_ADMISSION_STUB="+mode,"GARM_COMMAND=AdmitInstance"},AdmissionRequest{Name:"runner-1",PoolID:"pool-1"})
++  if err==nil || IsAdmissionDeferred(err) || strings.Contains(err.Error(),"secret-must-not-echo") { t.Fatalf("unsafe %s result: %v",mode,err) }
++ }
++}
++
++func TestAdmissionCancellationIsNotDeferral(t *testing.T) {
++ ctx,cancel:=context.WithTimeout(context.Background(),250*time.Millisecond)
++ defer cancel()
++ err:=RunAdmissionProvider(ctx,os.Args[0],[]string{"GCC_ADMISSION_STUB=cancel","GARM_COMMAND=AdmitInstance"},AdmissionRequest{Name:"runner-1",PoolID:"pool-1"})
++ if !errors.Is(err,context.DeadlineExceeded) || IsAdmissionDeferred(err) { t.Fatalf("cancellation misclassified: %v",err) }
++}
++
++func TestAdmissionOutputIsBoundedAndDrained(t *testing.T) {
++ output:=&admissionOutput{}
++ count,err:=io.Copy(output,strings.NewReader(strings.Repeat("x",admissionMaximumResponseBytes*4)))
++ if err!=nil || count!=int64(admissionMaximumResponseBytes*4) || !output.overflow || output.Len()!=admissionMaximumResponseBytes { t.Fatal("unbounded or undrained output") }
++}
++
++func TestSensitiveCreateFailureDoesNotDiscloseBootstrap(t *testing.T) {
++ secret:="bootstrap-secret-must-not-echo"
++ out,err:=RunCreateProvider(context.Background(),os.Args[0],[]string{"GCC_ADMISSION_STUB=echo-secret-failure"},[]byte(secret))
++ if err==nil || out!=nil || IsAdmissionDeferred(err) || strings.Contains(err.Error(),secret) { t.Fatalf("unsafe create failure: %v",err) }
++}
++
++func TestAdmissionRejectsDuplicateAndUnknownProtocolKeys(t *testing.T) {
++ for _,payload:=range []string{
++  `{"protocol":"garm-capacity/v1","outcome":"deferred","name":"runner-1","pool_id":"pool-1","dispatched":true,"dispatched":false,"retry_after_seconds":10}`,
++  `{"Protocol":"garm-capacity/v1","outcome":"deferred","name":"runner-1","pool_id":"pool-1","dispatched":false,"retry_after_seconds":10}`,
++ } {
++  if _,err:=parseAdmissionResponse(75,[]byte(payload),AdmissionRequest{Name:"runner-1",PoolID:"pool-1"});err==nil { t.Fatal("ambiguous keys accepted") }
++ }
++}
+diff --git a/runner/pool/admission_test.go b/runner/pool/admission_test.go
+new file mode 100644
+index 0000000..8055f76
+--- /dev/null
++++ b/runner/pool/admission_test.go
+@@ -0,0 +1,60 @@
++//go:build testing
++
++package pool
++
++import (
++	"context"
++	"errors"
++	"time"
++
++	"github.com/google/go-github/v84/github"
++	"github.com/stretchr/testify/mock"
++	"github.com/cloudbase/garm/runner/common"
++)
++
++type admissionTestProvider struct {
++	common.Provider
++	result error
++	requests []common.AdmissionRequest
++}
++func (p *admissionTestProvider) AdmitInstance(_ context.Context, request common.AdmissionRequest) error {
++	p.requests = append(p.requests, request)
++	return p.result
++}
++
++func (s *PoolStressTestSuite) TestAdmissionBeforeJITAndPersistence() {
++	gate := &admissionTestProvider{Provider:s.providerMock, result:common.NewAdmissionDeferred(5*time.Second)}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	err := s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil)
++	s.Require().True(common.IsAdmissionDeferred(err))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++	s.Require().Len(gate.requests, 1)
++	s.Equal(s.pool.ID, gate.requests[0].PoolID)
++	s.NotEmpty(gate.requests[0].Name)
++	s.Empty(s.ghcliMock.Calls)
++	s.Empty(s.providerMock.Calls)
++
++	// Unexpected failures remain failures, and still cannot allocate JIT or runners.
++	ordinary := errors.New("admission transport unavailable")
++	gate.result = ordinary
++	s.ErrorIs(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil), ordinary)
++	s.Empty(s.ghcliMock.Calls)
++	s.Empty(s.providerMock.Calls)
++
++	gate.result = nil
++	s.providerMock.On("DisableJITConfig").Return(false).Once()
++	s.ghcliMock.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
++		Return(map[string]string{"test":"fresh-jit"}, &github.Runner{ID:github.Int64(42)}, nil).Once()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err = s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	s.Equal(gate.requests[2].Name, rows[0].Name)
++	s.NotEqual(gate.requests[0].Name, rows[0].Name)
++	s.Equal(1, rows[0].CreateAttempt)
++	s.Equal(int64(42), rows[0].AgentID)
++	s.providerMock.AssertNotCalled(s.T(), "CreateInstance", mock.Anything, mock.Anything, mock.Anything)
++	s.providerMock.AssertNotCalled(s.T(), "DeleteInstance", mock.Anything, mock.Anything, mock.Anything)
++}
+diff --git a/runner/pool/pool.go b/runner/pool/pool.go
+index 9f5fc19..499ea27 100644
+--- a/runner/pool/pool.go
++++ b/runner/pool/pool.go
+@@ -945,6 +945,13 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
+ 	}
+ 
+ 	name := strings.ToLower(fmt.Sprintf("%s-%s", pool.GetRunnerPrefix(), util.NewID()))
++	// Admission precedes GitHub JIT allocation and durable runner creation.
++	// A denial accepts no runner request; desired capacity remains unsatisfied.
++	if admission, ok := provider.(common.AdmissionProvider); ok {
++		if err := admission.AdmitInstance(ctx, common.AdmissionRequest{Name: name, PoolID: pool.ID}); err != nil {
++			return fmt.Errorf("admitting runner before JIT allocation: %w", err)
++		}
++	}
+ 	labels := r.getLabelsForInstance(pool)
+ 
+ 	jitConfig := make(map[string]string)
+diff --git a/runner/providers/v0.1.1/admission_test.go b/runner/providers/v0.1.1/admission_test.go
+new file mode 100644
+index 0000000..eaafdb2
+--- /dev/null
++++ b/runner/providers/v0.1.1/admission_test.go
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: Apache-2.0
++package v011
++
++import (
++ "context"
++ "encoding/json"
++ "fmt"
++ "io"
++ "os"
++ "strings"
++ "testing"
++
++ commonParams "github.com/cloudbase/garm-provider-common/params"
++ "github.com/cloudbase/garm/config"
++ "github.com/cloudbase/garm/runner/common"
++)
++
++func TestMain(m *testing.M) {
++ if mode:=os.Getenv("GCC_EXTERNAL_ADMISSION_STUB");mode!="" {
++  input,_:=io.ReadAll(os.Stdin)
++  if mode=="echo-failure" { fmt.Printf("%s",input);fmt.Fprintf(os.Stderr,"%s",input);os.Exit(1) }
++  var fields map[string]any
++  _=json.Unmarshal(input,&fields)
++  if len(fields)!=3 || fields["protocol"]!=common.AdmissionProtocolVersion || os.Getenv("GARM_COMMAND")!="AdmitInstance" || os.Getenv("GARM_CONTROLLER_ID")!="test-controller" { os.Exit(9) }
++  _=json.NewEncoder(os.Stdout).Encode(map[string]any{"protocol":common.AdmissionProtocolVersion,"outcome":"deferred","name":fields["name"],"pool_id":fields["pool_id"],"dispatched":false,"retry_after_seconds":5})
++  os.Exit(75)
++ }
++ os.Exit(m.Run())
++}
++
++func TestOptionalAdmissionIsExplicitAndCredentialFree(t *testing.T) {
++ cfg:=&config.Provider{External:config.External{AdmissionEnabled:false}}
++ provider:=&external{cfg:cfg,execPath:"/must-not-run",controllerID:"test-controller"}
++ request:=common.AdmissionRequest{Name:"runner-1",PoolID:"pool-1"}
++ if err:=provider.AdmitInstance(context.Background(),request);err!=nil { t.Fatalf("legacy behavior changed: %v",err) }
++ cfg.External.AdmissionEnabled=true
++ provider.execPath=os.Args[0]
++ provider.environmentVariables=[]string{"GCC_EXTERNAL_ADMISSION_STUB=deferred"}
++ if err:=provider.AdmitInstance(context.Background(),request);!common.IsAdmissionDeferred(err) { t.Fatalf("strict preflight not executed: %v",err) }
++}
++
++func TestOptInCreateErrorsDoNotEchoBootstrap(t *testing.T) {
++ cfg:=&config.Provider{External:config.External{AdmissionEnabled:true}}
++ provider:=&external{cfg:cfg,execPath:os.Args[0],environmentVariables:[]string{"GCC_EXTERNAL_ADMISSION_STUB=echo-failure"}}
++ secret:="bootstrap-secret-must-not-echo"
++ _,err:=provider.CreateInstance(context.Background(),commonParams.BootstrapInstance{Name:"runner",PoolID:"pool",InstanceToken:secret},common.CreateInstanceParams{})
++ if err==nil || common.IsAdmissionDeferred(err) || strings.Contains(err.Error(),secret) { t.Fatalf("unsafe create result: %v",err) }
++}
+diff --git a/runner/providers/v0.1.1/external.go b/runner/providers/v0.1.1/external.go
+index 6e43dce..d43a9c5 100644
+--- a/runner/providers/v0.1.1/external.go
++++ b/runner/providers/v0.1.1/external.go
+@@ -35,6 +35,7 @@ import (
+ )
+ 
+ var _ common.Provider = (*external)(nil)
++var _ common.AdmissionProvider = (*external)(nil)
+ 
+ func NewProvider(ctx context.Context, cfg *config.Provider, controllerID string) (common.Provider, error) {
+ 	if cfg.ProviderType != params.ExternalProvider {
+@@ -69,6 +70,23 @@ type external struct {
+ 	environmentVariables []string
+ }
+ 
++// AdmitInstance runs the optional reservation preflight before Garm creates
++// GitHub JIT credentials or runner state. Legacy configuration is unchanged.
++// Receipt success is not permission to bypass a later atomic gateway claim.
++func (e *external) AdmitInstance(ctx context.Context, request common.AdmissionRequest) error {
++	if !e.cfg.External.AdmissionEnabled {
++		return nil
++	}
++	asEnv := []string{
++		"GARM_COMMAND=AdmitInstance",
++		fmt.Sprintf("GARM_CONTROLLER_ID=%s", e.controllerID),
++		fmt.Sprintf("GARM_POOL_ID=%s", request.PoolID),
++		fmt.Sprintf("GARM_PROVIDER_CONFIG_FILE=%s", e.cfg.External.ConfigFile),
++	}
++	asEnv = append(asEnv, e.environmentVariables...)
++	return common.RunAdmissionProvider(ctx, e.execPath, asEnv, request)
++}
++
+ // CreateInstance creates a new compute instance in the provider.
+ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonParams.BootstrapInstance, _ common.CreateInstanceParams) (commonParams.ProviderInstance, error) {
+ 	extraspecs := bootstrapParams.ExtraSpecs
+@@ -97,7 +115,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+ 		e.cfg.Name,       // label: provider
+ 	).Inc()
+ 
+-	out, err := garmExec.Exec(ctx, e.execPath, asJs, asEnv)
++	var out []byte
++	if e.cfg.External.AdmissionEnabled {
++		out, err = common.RunCreateProvider(ctx, e.execPath, asEnv, asJs)
++	} else {
++		out, err = garmExec.Exec(ctx, e.execPath, asJs, asEnv)
++	}
+ 	if err != nil {
+ 		metrics.InstanceOperationFailedCount.WithLabelValues(
+ 			"CreateInstance", // label: operation
+@@ -123,10 +146,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+ 		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
+ 	}
+ 
+-	retAsJs, _ := json.MarshalIndent(param, "", "  ")
+-	slog.DebugContext(
+-		ctx, "provider returned",
+-		"output", string(retAsJs))
++if !e.cfg.External.AdmissionEnabled {
++		retAsJs, _ := json.MarshalIndent(param, "", "  ")
++		slog.DebugContext(ctx, "provider returned", "output", string(retAsJs))
++	} else {
++		slog.DebugContext(ctx, "admission gateway create completed")
++	}
+ 	return param, nil
+ }
+ 
+diff --git a/workers/scaleset/admission_test.go b/workers/scaleset/admission_test.go
+new file mode 100644
+index 0000000..be5e63f
+--- /dev/null
++++ b/workers/scaleset/admission_test.go
+@@ -0,0 +1,138 @@
++package scaleset
++
++import (
++	"context"
++	"errors"
++ "encoding/base64"
++ "encoding/json"
++ "fmt"
++ "net/http"
++ "net/http/httptest"
++ "net/url"
++ "strings"
++ "sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++ "github.com/stretchr/testify/mock"
++ "github.com/google/go-github/v84/github"
++ "github.com/cloudbase/garm/cache"
++ commonMocks "github.com/cloudbase/garm/runner/common/mocks"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++	dbCommon "github.com/cloudbase/garm/database/common"
++)
++
++type admissionTestProvider struct {
++	common.Provider // nil: any lifecycle call panics, rather than silently passing.
++	result error
++	requests []common.AdmissionRequest
++}
++func (p *admissionTestProvider) AdmitInstance(_ context.Context, request common.AdmissionRequest) error {
++	p.requests = append(p.requests, request)
++	return p.result
++}
++
++type admissionStopStore struct {
++	dbCommon.Store
++	calls int
++}
++func (s *admissionStopStore) ControllerInfo() (params.ControllerInfo, error) {
++	s.calls++
++	return params.ControllerInfo{}, errors.New("test boundary after admission")
++}
++
++func TestScaleUpAdmissionBeforeAnyAllocation(t *testing.T) {
++	gate := &admissionTestProvider{result:common.NewAdmissionDeferred(5*time.Second)}
++	store := &admissionStopStore{}
++	w := &Worker{ctx:context.Background(), provider:gate, store:store,
++		scaleSet:params.ScaleSet{Name:"test-scale", RepoID:"test-repo", Enabled:true, MinIdleRunners:2, MaxRunners:2},
++		runners:map[string]params.Instance{}}
++	w.handleScaleUp()
++	require.Len(t, gate.requests, 1) // stop this batch, not one denial per desired runner
++	require.Equal(t, "test-scale-test-repo", gate.requests[0].PoolID)
++	require.NotEmpty(t, gate.requests[0].Name)
++	require.Zero(t, store.calls) // no DB call, JIT lookup, create or cleanup can run
++	require.Empty(t, w.runners)
++
++	gate.result = errors.New("transport unavailable")
++	w.handleScaleUp()
++	require.Len(t, gate.requests, 2)
++	require.Zero(t, store.calls)
++	require.Empty(t, w.runners)
++
++	// A later target-driven iteration retries with a fresh name. The sentinel
++	// stops at the next setup boundary; this is not an end-to-end JIT success test.
++	gate.result = nil
++	w.handleScaleUp()
++	require.Len(t, gate.requests, 3)
++	require.Equal(t, 1, store.calls)
++	require.NotEqual(t, gate.requests[0].Name, gate.requests[2].Name)
++	require.Empty(t, w.runners)
++}
++
++
++type admissionRecordingStore struct {
++ dbCommon.Store
++ rows []params.Instance
++}
++func (s *admissionRecordingStore) ControllerInfo() (params.ControllerInfo, error) {
++ return params.ControllerInfo{}, nil
++}
++func (s *admissionRecordingStore) CreateScaleSetInstance(_ context.Context, _ uint, p params.CreateInstanceParams) (params.Instance, error) {
++ row := params.Instance{ID:p.Name, Name:p.Name, AgentID:p.AgentID, CreateAttempt:p.CreateAttempt}
++ s.rows = append(s.rows, row)
++ return row, nil
++}
++
++func TestScaleUpDeniedThenFreshJITAndOneRow(t *testing.T) {
++ var jitCalls atomic.Int64
++ var server *httptest.Server
++ // All HTTP terminates in this disposable loopback fixture, not GitHub.
++ server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++  if r.URL.Path == "/actions/runner-registration" {
++   payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, time.Now().Add(time.Hour).Unix())))
++   token := "eyJhbGciOiJIUzI1NiJ9."+payload+".c2ln"
++   _ = json.NewEncoder(w).Encode(params.ActionsServiceAdminInfoResponse{URL:server.URL, Token:token})
++   return
++  }
++  if strings.HasSuffix(r.URL.Path, "/generatejitconfig") {
++   jitCalls.Add(1)
++   _ = json.NewEncoder(w).Encode(params.RunnerScaleSetJitRunnerConfig{
++    Runner:&params.RunnerReference{ID:42},
++    EncodedJITConfig:base64.StdEncoding.EncodeToString([]byte(`{"test":"fresh"}`)),
++   })
++   return
++  }
++  http.Error(w, "unexpected endpoint", http.StatusNotFound)
++ }))
++ defer server.Close()
++ entity := params.ForgeEntity{ID:"prejit-scale-test", EntityType:params.ForgeEntityTypeRepository}
++ gh := commonMocks.NewGithubClient(t)
++ base, err := url.Parse(server.URL)
++ require.NoError(t, err)
++ gh.On("GetEntity").Return(entity)
++ gh.On("GithubBaseURL").Return(base)
++ gh.On("CreateEntityRegistrationToken", mock.Anything).Return(
++  &github.RegistrationToken{Token:github.String("fixture"), ExpiresAt:&github.Timestamp{Time:time.Now().Add(time.Hour)}}, nil, nil).Once()
++ cache.SetGithubClient(entity.ID, gh)
++ defer cache.DeleteGithubClient(entity.ID)
++ gate := &admissionTestProvider{result:common.NewAdmissionDeferred(5*time.Second)}
++ store := &admissionRecordingStore{}
++ w := &Worker{ctx:context.Background(), provider:gate, store:store,
++  scaleSet:params.ScaleSet{Name:"test", RepoID:entity.ID, Enabled:true, MinIdleRunners:1, MaxRunners:1},
++  runners:map[string]params.Instance{}}
++ w.handleScaleUp()
++ require.Zero(t, jitCalls.Load())
++ require.Empty(t, gh.Calls)
++ require.Empty(t, store.rows)
++ gate.result = nil
++ w.handleScaleUp()
++ require.Equal(t, int64(1), jitCalls.Load())
++ require.Len(t, store.rows, 1)
++ require.Len(t, w.runners, 1)
++ require.Equal(t, gate.requests[1].Name, store.rows[0].Name)
++ require.NotEqual(t, gate.requests[0].Name, store.rows[0].Name)
++ require.Equal(t, 1, store.rows[0].CreateAttempt)
++}
+diff --git a/workers/scaleset/scaleset.go b/workers/scaleset/scaleset.go
+index abc2426..430576c 100644
+--- a/workers/scaleset/scaleset.go
++++ b/workers/scaleset/scaleset.go
+@@ -806,19 +806,34 @@ func (w *Worker) handleScaleUp() {
+ 		return
+ 	}
+ 
+-	controllerConfig, err := w.store.ControllerInfo()
+-	if err != nil {
+-		slog.ErrorContext(w.ctx, "error getting controller config", "error", err)
+-		return
+-	}
+-
+-	scaleSetCli, err := w.GetScaleSetClient()
+-	if err != nil {
+-		slog.ErrorContext(w.ctx, "error getting scale set client", "error", err)
+-		return
+-	}
+ 	for i := w.runnerCount(); i < w.targetRunners(); i++ {
+ 		newRunnerName := strings.ToLower(fmt.Sprintf("%s-%s", w.scaleSet.GetRunnerPrefix(), util.NewID()))
++		if admission, ok := w.provider.(common.AdmissionProvider); ok {
++			poolID, err := w.pseudoPoolID()
++			if err != nil {
++				slog.ErrorContext(w.ctx, "getting admission pool identity", "error", err)
++				return
++			}
++			if err := admission.AdmitInstance(w.ctx, common.AdmissionRequest{Name: newRunnerName, PoolID: poolID}); err != nil {
++				if common.IsAdmissionDeferred(err) {
++					slog.DebugContext(w.ctx, "capacity admission deferred before JIT allocation")
++				} else {
++					slog.ErrorContext(w.ctx, "capacity admission failed", "error", err)
++				}
++				// No JIT or runner record exists. The desired count drives a later attempt.
++				return
++			}
++		}
++		controllerConfig, err := w.store.ControllerInfo()
++		if err != nil {
++			slog.ErrorContext(w.ctx, "error getting controller config", "error", err)
++			return
++		}
++		scaleSetCli, err := w.GetScaleSetClient()
++		if err != nil {
++			slog.ErrorContext(w.ctx, "error getting scale set client", "error", err)
++			return
++		}
+ 		jitConfig, err := scaleSetCli.GenerateJitRunnerConfig(w.ctx, newRunnerName, w.scaleSet.ScaleSetID)
+ 		if err != nil {
+ 			slog.ErrorContext(w.ctx, "error generating jit config", "error", err)

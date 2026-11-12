@@ -1,0 +1,28 @@
+name: pinned-garm-compat
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  garm-v021:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - run: test "$(go env CGO_ENABLED)" = 1
+      - run: integration/garm-v0.2.1/test.sh "$RUNNER_TEMP/garm-v021-compat"
+        env:
+          GOTOOLCHAIN: local
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: canonical-garm-compat-patch
+          path: ${{ runner.temp }}/garm-v021-compat.canonical.patch
+          if-no-files-found: ignore
