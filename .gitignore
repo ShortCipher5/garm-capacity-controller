@@ -17,3 +17,7 @@ coverage.out
 /private/
 *.local.json
 *.token
+
+# Disposable packaging CI summaries and Python cache, never fixture inputs.
+/qualification-results/
+__pycache__/

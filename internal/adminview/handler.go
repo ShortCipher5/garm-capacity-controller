@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
 )
 
@@ -52,28 +53,39 @@ type Event struct {
 	At         time.Time `json:"at"`
 }
 type Overview struct {
-	PolicyRevision    string         `json:"policy_revision"`
-	ManagementEnabled bool           `json:"management_enabled"`
-	Mode              string         `json:"mode"`
-	Provisioning      bool           `json:"experimental_provisioning_enabled"`
-	Ready             bool           `json:"admission_ready"`
-	Epoch             int64          `json:"epoch"`
-	At                time.Time      `json:"observed_at"`
-	Global            Allocation     `json:"global"`
-	Hosts             []Host         `json:"hosts"`
-	Pools             []Pool         `json:"pools"`
-	States            map[string]int `json:"states"`
-	Events            []Event        `json:"events"`
+	OnboardingPreflightAvailable bool           `json:"onboarding_preflight_available"`
+	ExecutionPlanCount           int64          `json:"immutable_execution_plans"`
+	UnplannedReservationCount    int64          `json:"legacy_unplanned_reservations"`
+	LegacySourcePreparationCount int64          `json:"legacy_source_preparations"`
+	GarmManagementAvailable      bool           `json:"garm_management_available"`
+	PolicyRevision               string         `json:"policy_revision"`
+	ManagementEnabled            bool           `json:"management_enabled"`
+	Mode                         string         `json:"mode"`
+	Provisioning                 bool           `json:"experimental_provisioning_enabled"`
+	Ready                        bool           `json:"admission_ready"`
+	Epoch                        int64          `json:"epoch"`
+	At                           time.Time      `json:"observed_at"`
+	Global                       Allocation     `json:"global"`
+	Hosts                        []Host         `json:"hosts"`
+	Pools                        []Pool         `json:"pools"`
+	States                       map[string]int `json:"states"`
+	Events                       []Event        `json:"events"`
 }
 type Handler struct {
-	store      *admission.SQLiteStore
-	tokenHash  [32]byte
-	writeHash  [32]byte
-	management bool
-	assets     *os.Root
-	provision  bool
-	inFlight   chan struct{}
-	Audit      func(string)
+	onboarding      *onboarding.Manager
+	onboardingProbe bool
+	onboardingHash  [32]byte
+	store           *admission.SQLiteStore
+	tokenHash       [32]byte
+	writeHash       [32]byte
+	management      bool
+	garm            GarmManager
+	garmWrites      bool
+	remoteFlight    chan struct{}
+	assets          *os.Root
+	provision       bool
+	inFlight        chan struct{}
+	Audit           func(string)
 }
 
 // Token is 32 random bytes encoded as 64 lowercase hexadecimal characters and
@@ -121,6 +133,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/onboarding" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/onboarding/") {
+		h.serveOnboarding(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/garm" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/garm/") {
+		h.serveGarm(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/policy" {
 		h.servePolicy(w, r)
 		return
@@ -157,6 +177,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view.ManagementEnabled = h.management
+		view.GarmManagementAvailable = h.garm != nil
+		view.OnboardingPreflightAvailable = h.onboarding != nil
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {
 			fail(http.StatusServiceUnavailable)
@@ -222,7 +244,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Overview, error) {
-	result := Overview{PolicyRevision: admission.PolicyRevision(state.Config), Mode: "experimental-ledger", Provisioning: provision, Ready: state.Ready, Epoch: state.Epoch, At: now, Global: Allocation{state.Config.Global, state.Allocated.Global}, Hosts: []Host{}, Pools: []Pool{}, States: map[string]int{}, Events: []Event{}}
+	result := Overview{ExecutionPlanCount: state.ExecutionPlanCount, UnplannedReservationCount: state.UnplannedReservationCount, LegacySourcePreparationCount: state.LegacySourcePreparationCount, PolicyRevision: admission.PolicyRevision(state.Config), Mode: "experimental-ledger", Provisioning: provision, Ready: state.Ready, Epoch: state.Epoch, At: now, Global: Allocation{state.Config.Global, state.Allocated.Global}, Hosts: []Host{}, Pools: []Pool{}, States: map[string]int{}, Events: []Event{}}
 	for id, host := range state.Config.Hosts {
 		drain, err := retirement.Assess(state, id, now)
 		if err != nil {

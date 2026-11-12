@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 )
@@ -103,6 +104,9 @@ func (h *Handler) servePolicy(w http.ResponseWriter, r *http.Request) {
 
 // Reject duplicate fields rather than silently applying a last-value override.
 func uniqueJSON(body []byte) bool {
+	if !utf8.Valid(body) {
+		return false
+	}
 	d := json.NewDecoder(strings.NewReader(string(body)))
 	var consume func(int) bool
 	consume = func(depth int) bool {
@@ -111,6 +115,9 @@ func uniqueJSON(body []byte) bool {
 		}
 		token, err := d.Token()
 		if err != nil {
+			return false
+		}
+		if token == nil {
 			return false
 		}
 		delim, ok := token.(json.Delim)

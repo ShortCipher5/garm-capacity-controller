@@ -1,0 +1,21 @@
+package sql
+
+import (
+ "encoding/json"
+
+ "github.com/cloudbase/garm/params"
+)
+
+func (s *RepoTestSuite) TestCapacityManagementBalancer() {
+ before:=s.Fixtures.Repos[0]
+ var update params.UpdateEntityParams
+ // The request field differs from the response's pool_balancing_type.
+ s.Require().NoError(json.Unmarshal([]byte(`{"pool_balancer_type":"pack"}`),&update))
+ after,err:=s.Store.UpdateRepository(s.adminCtx,before.ID,update)
+ s.Require().NoError(err)
+ s.Require().Equal(params.PoolBalancerTypePack,after.PoolBalancerType)
+ s.Require().Equal(before.CredentialsID,after.CredentialsID)
+ s.Require().Equal(before.AgentMode,after.AgentMode)
+ s.Require().Equal(before.Owner,after.Owner)
+ s.Require().Equal(before.Name,after.Name)
+}

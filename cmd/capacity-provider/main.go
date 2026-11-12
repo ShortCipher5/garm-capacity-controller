@@ -18,9 +18,11 @@ import (
 )
 
 type configuration struct {
-	Gateway    string               `json:"gateway"`
-	Controller string               `json:"controller"`
-	TLS        securefiles.TLSFiles `json:"tls"`
+	Gateway       string                `json:"gateway"`
+	Controller    string                `json:"controller"`
+	TLS           securefiles.TLSFiles  `json:"tls"`
+	SourceTLS     *securefiles.TLSFiles `json:"source_tls,omitempty"`
+	BootstrapMode string                `json:"bootstrap_mode,omitempty"`
 }
 
 func run(ctx context.Context, getenv func(string) string, input io.Reader, output io.Writer) int {
@@ -33,7 +35,12 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 		fmt.Fprintln(output, `["v0.1.1"]`)
 		return 0
 	case "GetConfigJSONSchema":
-		fmt.Fprintln(output, `{"type":"object","required":["gateway","controller","tls"],"additionalProperties":false,"properties":{"gateway":{"type":"string"},"controller":{"type":"string"},"tls":{"type":"object","required":["ca","certificate","key"],"additionalProperties":false,"properties":{"ca":{"type":"string"},"certificate":{"type":"string"},"key":{"type":"string"}}}}`)
+		schema := map[string]any{"type": "object", "required": []string{"gateway", "controller", "tls"}, "additionalProperties": false}
+		tlsSchema := map[string]any{"type": "object", "required": []string{"ca", "certificate", "key"}, "additionalProperties": false, "properties": map[string]any{"ca": map[string]string{"type": "string"}, "certificate": map[string]string{"type": "string"}, "key": map[string]string{"type": "string"}}}
+		schema["properties"] = map[string]any{"gateway": map[string]string{"type": "string"}, "controller": map[string]string{"type": "string"}, "tls": tlsSchema, "source_tls": tlsSchema, "bootstrap_mode": map[string]string{"type": "string", "const": "gateway-owned-default-cloudinit/v1"}}
+		if json.NewEncoder(output).Encode(schema) != nil {
+			return 1
+		}
 		return 0
 	case "GetExtraSpecsJSONSchema":
 		fmt.Fprintln(output, `{"type":"object","additionalProperties":false}`)
@@ -44,7 +51,7 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	}
 	// Refuse unsupported commands before loading any credentials or networking.
 	switch command {
-	case "AdmitInstance", "CancelAdmission", "CreateInstance", "GetInstance", "ListInstances":
+	case "AdmitInstance", "CancelAdmission", "RecordPreparation", "ValidatePreparation", "CreateInstance", "GetInstance", "ListInstances":
 	default:
 		return 1
 	}
@@ -56,7 +63,15 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	if gatewayrpc.Decode(bytes.NewReader(raw), &config) != nil || config.Controller == "" || config.Controller != getenv("GARM_CONTROLLER_ID") {
 		return 1
 	}
-	credentials, err := securefiles.LoadTLS(config.TLS)
+	files := config.TLS
+	sourceCommand := command == "RecordPreparation" || command == "ValidatePreparation"
+	if sourceCommand {
+		if config.SourceTLS == nil || config.BootstrapMode != "gateway-owned-default-cloudinit/v1" {
+			return 1
+		}
+		files = *config.SourceTLS
+	}
+	credentials, err := securefiles.LoadTLS(files)
 	if err != nil {
 		return 1
 	}
@@ -70,6 +85,32 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 		return 1
 	}
 	switch command {
+	case "RecordPreparation", "ValidatePreparation":
+		data, err := io.ReadAll(io.LimitReader(input, garmprotocol.MaximumResponseBytes+1))
+		if err != nil {
+			return 1
+		}
+		request, err := garmprotocol.DecodePreparationRequest(data)
+		if err != nil || request.PoolID != pool {
+			return 1
+		}
+		var response garmprotocol.PreparationResponse
+		if command == "RecordPreparation" {
+			response, err = client.RecordPreparation(ctx, request)
+		} else {
+			response, err = client.ValidatePreparation(ctx, request)
+		}
+		if err != nil {
+			return 1
+		}
+		encoded, err := garmprotocol.EncodePreparationResponse(response, request)
+		if err != nil {
+			return 1
+		}
+		if _, err := output.Write(append(encoded, '\n')); err != nil {
+			return 1
+		}
+		return 0
 	case "AdmitInstance":
 		var request garmprotocol.Request
 		if gatewayrpc.Decode(input, &request) != nil || request.PoolID != pool {
