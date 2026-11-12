@@ -23,4 +23,8 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: test "$(go env CGO_ENABLED)" = 1
       - run: go vet ./...
+      - name: Require real disposable Unix audit endpoint tests
+        env:
+          GCC_AUDIT_UNIX_BIND_TESTS: '1'
+        run: go test -race -count=1 -timeout=60s -run '^TestUnixAudit' -v ./internal/supervisoraudit
       - run: go test -race -count=1 ./...
