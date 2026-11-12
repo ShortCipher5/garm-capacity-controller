@@ -24,10 +24,26 @@ never adopts, truncates or cleans them up. A second check before SQLite catches
 observed races, but this is not hostile-writer isolation.
 `OpenExisting` requires the expected random local history ID. Both paths refuse
 symlinks, hardlinked files, wrong ownership, unsafe modes and missing/wrong history. Existing databases are first
-checked by raw header and a no-write immutable preflight of the initial,
-checkpointed schema/history metadata only, without quick-check or fact/audit
-scans. That stale preflight is ONLY accidental wrong-file
-protection. Actual facts are validated again through a live SQLite read transaction,
+checked by a pinned read-only/no-follow descriptor and a bounded disposable-copy
+preflight of initial static schema/history metadata only. The changing original
+is NEVER opened as immutable: a cooperating WAL checkpoint can make that unsafe
+reader report SQLITE_CORRUPT even when the actual history is valid. The private
+0700 directory/0600 copy is closed before SQLite opens it with immutable reads.
+Raw copying is NOT a coherent original database snapshot, backup, recovery source
+or fact/absence view, and no copied facts are used or returned.
+
+Source and copy bytes are capped at 16 MiB (the format caps facts at 4096). Up to
+8 fresh-copy observations share a one-second retry budget, checked between I/O
+operations; blocking filesystem I/O itself is not given a hard completion promise.
+ONLY raw SQLITE_CORRUPT from parsing the potentially torn disposable COPY permits
+another fresh guarded copy. Exact lineage/schema mismatch, filesystem/ownership/
+inode/link/sidecar changes, I/O/oversize/cleanup errors, other SQLite errors and all
+normal live validation/commit failures immediately refuse. Every copy attempt
+rechecks the pinned source descriptor, current main and parent identities, private
+modes/ownership/links and sidecars. Copy files/directories are removed on all paths.
+This remains accident protection, not hostile same-UID/root isolation.
+
+Actual facts are validated again through a proper live SQLite read transaction,
 and record/snapshot operations validate within their serialized transaction.
 No live fact, uniqueness or absence decision uses immutable reads. Failed
 initialization is left in place, never removed or silently repaired.
@@ -75,3 +91,16 @@ Other tests cover bounded snapshots, conflicts, immutable audit, unrelated-file
 preservation, path/corruption refusal and the closed-snapshot rollback limitation.
 No tests install software or access live infrastructure. Local fsync semantics
 still depend on the filesystem/storage; there is no power-loss qualification here.
+
+## Checkpoint regression
+
+A valid synthetic writer appends paired contiguous fact/audit rows in small
+transactions up to the same 4096 cap while a second connection TRUNCATE-checkpoints
+and a third repeatedly opens history. The original immutable-on-live-file code
+reproduced SQLite Code 11 at its first application_id preflight, while final proper
+locked Snapshot still validated 4096 rows. The unchanged growth assertions and
+original checkpoint stress must pass with the private-copy fix. Additional tests
+prove bounded copy-only retry/exhaustion, cleanup, oversized/persistently corrupt
+original refusal, unrelated/wrong-history preservation, no-follow source identity,
+and rejection of broken actual facts despite successful copied metadata. No test
+relaxes original live integrity or unknown-commit behavior; no action is enabled.

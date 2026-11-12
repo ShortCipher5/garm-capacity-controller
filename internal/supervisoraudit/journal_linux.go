@@ -89,17 +89,21 @@ func digest(s string) bool {
 	}
 	return true
 }
-func private(path string, dir bool) (os.FileInfo, error) {
-	i, e := os.Lstat(path)
-	if e != nil || i.Mode()&os.ModeSymlink != 0 || i.IsDir() != dir || i.Mode().Perm()&0077 != 0 || (!dir && (!i.Mode().IsRegular() || i.Mode().Perm() != 0600)) {
-		return nil, ErrHistory
+func validPrivateInfo(i os.FileInfo, dir bool) bool {
+	if i == nil || i.Mode()&os.ModeSymlink != 0 || i.IsDir() != dir || i.Mode().Perm()&0077 != 0 || (!dir && (!i.Mode().IsRegular() || i.Mode().Perm() != 0600)) {
+		return false
 	}
 	st, ok := i.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uint32(os.Geteuid()) || (!dir && st.Nlink != 1) {
+	return ok && st.Uid == uint32(os.Geteuid()) && (dir || st.Nlink == 1)
+}
+func private(path string, dir bool) (os.FileInfo, error) {
+	i, e := os.Lstat(path)
+	if e != nil || !validPrivateInfo(i, dir) {
 		return nil, ErrHistory
 	}
 	return i, nil
 }
+
 func parentPath(path string) bool {
 	// Refuse symlink components, including ancestors, not merely the final name.
 	for p := filepath.Dir(path); ; p = filepath.Dir(p) {
@@ -250,7 +254,7 @@ func OpenExisting(path, expectedHistoryID string) (*Journal, error) {
 		return nil, e
 	}
 	// Raw header rejects unrelated files without letting SQLite create sidecars.
-	raw, e := os.Open(path)
+	raw, e := openPinnedSource(path, f)
 	if e != nil {
 		return nil, ErrHistory
 	}
@@ -260,25 +264,11 @@ func OpenExisting(path, expectedHistoryID string) (*Journal, error) {
 	if e != nil || string(h[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(h[68:72]) != applicationID || binary.BigEndian.Uint32(h[60:64]) != 1 {
 		return nil, ErrHistory
 	}
-	// Immutable metadata was checkpointed during initialization. This preflight is
-	// ONLY wrong-file protection, never a live facts/absence/rollback observation.
-	u := url.URL{Scheme: "file", Path: path}
-	q := u.Query()
-	q.Set("mode", "ro")
-	q.Set("immutable", "1")
-	u.RawQuery = q.Encode()
-	pre, e := sql.Open("sqlite3", u.String())
-	if e != nil {
+	// Never declare the changing original immutable. A closed bounded private
+	// copy is only a static-metadata accident guard, NOT a backup or fact view.
+	probe := &Journal{path: path, file: f, parent: p, history: expectedHistoryID}
+	if e = probe.preflightMetadata(); e != nil {
 		return nil, ErrHistory
-	}
-	preJournal := &Journal{history: expectedHistoryID}
-	e = preJournal.validateMetadata(pre)
-	pre.Close()
-	if e != nil {
-		return nil, ErrHistory
-	}
-	if e = sidecars(path); e != nil {
-		return nil, e
 	}
 	d, e := connect(path)
 	if e != nil {
@@ -326,22 +316,40 @@ func (j *Journal) readValidate() error {
 	defer c.ExecContext(context.Background(), "ROLLBACK")
 	return j.validate(connectionReader{c})
 }
+
+// validateMetadata keeps all externally returned failures at ErrHistory.
 func (j *Journal) validateMetadata(d reader) error {
+	if e := j.inspectMetadata(d); e != nil {
+		return ErrHistory
+	}
+	return nil
+}
+
+// inspectMetadata preserves private SQL-read classification ONLY for disposable
+// copy parsing. A semantic mismatch is never classified as transient.
+func (j *Journal) inspectMetadata(d reader) error {
 	a, e := scalar(d, "PRAGMA application_id")
-	if e != nil || a != applicationID {
+	if e != nil {
+		return &metadataReadFailure{e}
+	}
+	if a != applicationID {
 		return ErrHistory
 	}
 	v, e := scalar(d, "PRAGMA user_version")
-	if e != nil || v != 1 {
+	if e != nil {
+		return &metadataReadFailure{e}
+	}
+	if v != 1 {
 		return ErrHistory
 	}
 	var id string
 	var n int
-	if e = d.QueryRow("SELECT count(*),min(id) FROM history").Scan(&n, &id); e != nil || n != 1 || id != j.history {
+	if e = d.QueryRow("SELECT count(*),min(id) FROM history").Scan(&n, &id); e != nil {
+		return &metadataReadFailure{e}
+	}
+	if n != 1 || id != j.history {
 		return ErrHistory
 	}
-	// Exact schema, including constraints, indexes and immutable triggers. This
-	// detects accidental corruption; an adversary restoring an old valid DB wins.
 	expected := map[string]bool{}
 	for _, statement := range strings.Split(schemaSQL, ";\n") {
 		statement = strings.TrimSpace(statement)
@@ -352,27 +360,33 @@ func (j *Journal) validateMetadata(d reader) error {
 	}
 	sr, e := d.Query("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
 	if e != nil {
-		return ErrHistory
+		return &metadataReadFailure{e}
 	}
 	for sr.Next() {
 		var statement string
-		if sr.Scan(&statement) != nil || !expected[statement] {
+		if e = sr.Scan(&statement); e != nil {
+			sr.Close()
+			return &metadataReadFailure{e}
+		}
+		if !expected[statement] {
 			sr.Close()
 			return ErrHistory
 		}
 		delete(expected, statement)
 	}
-	if sr.Err() != nil {
+	if e = sr.Err(); e != nil {
 		sr.Close()
-		return ErrHistory
+		return &metadataReadFailure{e}
 	}
-	sr.Close()
+	if e = sr.Close(); e != nil {
+		return &metadataReadFailure{e}
+	}
 	if len(expected) != 0 {
 		return ErrHistory
 	}
-
 	return nil
 }
+
 func (j *Journal) validate(d reader) error {
 	if e := j.validateMetadata(d); e != nil {
 		return e
