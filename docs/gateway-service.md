@@ -20,11 +20,11 @@ go run ./cmd/capacity-gateway -help
 
 ## Protocol and behavior
 
-The provider supports `AdmitInstance`, `CancelAdmission`, `CreateInstance`, `GetInstance`, `ListInstances` and non-network version/interface/schema discovery. It validates the exact Garm interface/controller/pool environment and bounded stdin. Admission preserves exit 75 plus the strict no-dispatch receipt. Unknown gateway/create outcomes return a constant error, **never not-found or a redispatch permit**.
+The provider supports `AdmitInstance`, `CancelAdmission`, `RecordPreparation`, `ValidatePreparation`, `CreateInstance`, `GetInstance`, `ListInstances` and non-network version/interface/schema discovery. It validates the exact Garm interface/controller/pool environment and bounded stdin. Admission preserves exit 75 plus the strict no-dispatch receipt. Unknown gateway/create outcomes return a constant error, **never not-found or a redispatch permit**.
 
-The RPC routes are POST-only `/v1/admit`, `/v1/cancel-admission`, `/v1/create`, `/v1/get` and `/v1/list`. No admin, reconciliation, secret, policy, delete, stop/start or remove-all route exists. Request bodies are limited to 1 MiB with exact, duplicate-free struct fields, including nested bootstrap/tool options. Responses are bounded too. Redirects and ambient proxies are refused. There are no cookies, browser local storage, permissive CORS headers or browser-facing authentication shortcuts. In-flight handler work is capped; admission and intent remain serialized in SQLite.
+The ordinary provider RPC routes are POST-only `/v1/admit`, `/v1/cancel-admission`, `/v1/create`, `/v1/get` and `/v1/list`. The separate source role uses POST-only `/v1/record-preparation` and `/v1/validate-preparation`; ordinary provider credentials cannot authorize those routes. See the [source-bound preparation contract](source-preparation-config.md). No admin, reconciliation, secret, policy, delete, stop/start or remove-all route exists. Request bodies are limited to 1 MiB with exact, duplicate-free struct fields, including nested bootstrap/tool options. Responses are bounded too. Redirects and ambient proxies are refused. There are no cookies, browser local storage, permissive CORS headers or browser-facing authentication shortcuts. In-flight handler work is capped; admission and intent remain serialized in SQLite.
 
-Creates remain **off by default**. Starting the gateway without `-allow-experimental-provisioning` permits authenticated reads only and rejects reserve/cancel/create routes. The opt-in flag is an experimental operator action, not a certification: exclusive physical scopes, trusted profiles/images/credentials, blocked alternate provisioning paths and old-writer fencing must be established separately.
+Creates remain **off by default**. Starting the gateway without `-allow-experimental-provisioning` permits authenticated reads only and rejects reserve/cancel/create and preparation routes. The opt-in flag is an experimental operator action, not a certification: exclusive physical scopes, trusted profiles/images/credentials, blocked alternate provisioning paths and old-writer fencing must be established separately.
 
 Before serving, and periodically afterwards, the gateway persists a fresh reconciliation barrier and reads Garm, Incus instances and operations. Failed/incomplete/active/unbounded inventories keep new dispatch blocked. Runtime startup is existing-only and requires the independently protected `identity_file` to match immutable initialized ledger lineage. It never creates or adopts a missing, empty, offline/legacy or different ledger. Stored SQLite policy is authoritative; `initial_policy` does not initialize runtime state. See [runtime ledger initialization and limits](runtime-ledger-lineage.md). There is no API that silently replaces persisted budgets. A server restart does not retry an old dispatch intent.
 
@@ -60,11 +60,13 @@ Gateway configuration has these top-level keys:
 - `controller`, `database`: fixed controller identity and private existing initialized local SQLite path.
 - `identity_file`: explicit private owner-only identity file, protected outside the database volume. Startup never discovers its expected identity from the mounted database.
 - `initial_policy`: retained for configuration compatibility, not used to initialize or replace runtime state. Pass a standalone admission policy JSON to the explicit NEW-only `capacity-ledger initialize` command. Initialized ledgers always start blocked.
-- `pools`: map of pool IDs to `host`, `cpu_millis`, `ram_mib`, `flavor`, `image`, `image_fingerprint`, `profiles`, `type`, `arch`. Scalesets must use the same pseudo-pool identity as the compatibility hook.
+- `pools`: map of pool IDs to either `host` or a nonempty `hosts` array (never both), optional `strategy` (`first_fit` by default or `least_runners`), and `cpu_millis`, `ram_mib`, `flavor`, `image`, `image_fingerprint`, `profiles`, `type`, `arch`. Candidates must agree with trusted host configuration and persisted ledger eligibility. See [configured multi-host placement](durable-placement.md). Scalesets must use the same pseudo-pool identity as the compatibility hook.
 - `hosts`: map of host aliases to trusted `endpoint`, `project`, and private `tls` file paths.
 - `garm`: trusted `endpoint`, private `token_file`, `tls` files, exact `providers` names and explicit numeric `scalesets` to pseudo-pool mapping. Garm inventory is read-only HTTPS plus bearer auth; no token login/refresh or credential saving is performed.
 - `server_tls`: gateway-server certificate/key and provider-client CA file paths in the same TLS-file shape.
-- `provider_fingerprints`: exact allowed client certificate fingerprints. Do not allow a broad unrelated client population.
+- `admin`: optional separate loopback TLS listener, read-token file and asset directory; omit it to disable the admin surface. See the [read-only admin configuration](read-only-admin.md) and [UI setup](admin-ui.md). Additional management/onboarding capabilities have separate configuration and opt-ins; adding the read-only listener does not enable them.
+- `provider_fingerprints`: exact allowed ordinary-provider client certificate fingerprints. Do not allow a broad unrelated client population.
+- `bootstrap_mode`, `source_fingerprints`, `preparation_pools`: required for experimental provisioning. The exact bootstrap mode, separate source-role leaf allowlist and route-scoped entry for every configured pool must satisfy the [source-bound preparation contract](source-preparation-config.md). These fields do not replace the ordinary provider role or qualify installed infrastructure. The documented Garm patch is required; stock Garm is not compatible with this contract.
 
 Use secret storage/OS credential delivery appropriate for the deployment. These examples contain no real addresses, keys, token, certificate or infrastructure configuration. `.local.json`, `.token`, PEM/key files and private workspace folders are ignored by Git, but review every commit independently.
 
@@ -88,8 +90,10 @@ upgrade, even if later cancellation removes their last reservation. Qualified
 scope import is not implemented. Keep the read-only admin view available for this
 status; never clear state or use an older image to bypass it. This is not physical
 hardware registration, foreign-project coverage, native parent-limit proof or an
-external credential fence. Runtime missing-ledger/expected-lineage qualification
-also remains open until its separate slice lands.
+external credential fence. Existing-only runtime ledger and independent-lineage checks are implemented as
+described in [runtime lineage](runtime-ledger-lineage.md). They do not establish
+external writer fencing, detect raw historical active snapshots or activate
+backup/restore artifacts.
 
 The optional admin listener supports a separately credentialed, CLI-opted-in ledger policy editor. See [management UI](admin-ui.md) for `management_token_file`, `--allow-experimental-management`, atomic conflict/audit semantics and the explicit no-drain/no-placement boundary.
 
