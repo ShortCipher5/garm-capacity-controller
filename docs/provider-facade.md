@@ -1,6 +1,6 @@
 # Policy-bound provider facade and reconciliation
 
-Status: server-side implementation, **not an exposed provider executable or qualified live scheduling service**. No infrastructure is accessed by tests. Admin authentication, isolated gateway transport and full lifecycle retirement are not enabled by this library.
+Status: server-side library used by the implemented experimental gateway and compiled provider, **not a qualified live scheduling service**. Tests use disposable API fixtures, not user infrastructure. The service supplies a separate read-authenticated admin view and isolated provider mTLS transport; the library alone supplies neither network boundary. Physical retirement and job-safe drain remain unimplemented.
 
 ## Implemented boundary
 
@@ -30,4 +30,4 @@ A project-scoped collection alone is not proof of a complete physical-host inven
 
 The consistent backup/restore APIs in [the recovery slice](backup-restore.md) keep restored copies blocked. Old gateway writers must be stopped/fenced and fresh authoritative physical inventory collected before a restored ledger is used. This library does not revoke external credentials or stop a process still using an old database.
 
-The experimental credential-isolated gateway/executable is implemented in the next stacked slice. Remaining gates: installed-provider/Incus qualification; authoritative operation recovery and proof-based retirement; job-safe drain; authenticated admin API/UI. Garm v0.2.1's small maintained pre-JIT compatibility patch is still required for benign defer semantics. No production-ready claim or live deployment is made.
+The experimental credential-isolated gateway/executable and separate read-only authenticated admin API/UI are implemented. Remaining gates: installed-provider/Incus qualification; authoritative operation recovery and proof-based retirement; job-safe drain; authenticated mutation controls and complete operational security procedures. Garm v0.2.1's small maintained pre-JIT compatibility patch is still required for benign defer semantics. No production-ready claim or live deployment is made.

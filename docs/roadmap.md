@@ -1,15 +1,22 @@
 # Focused delivery roadmap
 
-1. **Admission foundation (current draft):** offline model, durable local reservations, budgets, conservative states, idempotency, contention and restart tests. No external integration.
-2. **Read-only web overview:** Go API, simple React dashboard, fixture-only host/pool views, allocated capacity and decision history. Clearly display simulated mode; no pretend live switches.
-3. **SQLite store (in a focused draft slice):** transactional schema, WAL/local filesystem constraints, migrations, atomic admission + audit, corruption/restore tests. Match existing model tests and add cross-process fault injection.
-4. **Read-only adapters:** pinned Garm v0.2.1 and exact Incus provider version; complete bounded inventory (the pinned Garm collection is unpaginated), TLS/auth, freshness and unknown-resource accounting. No writes until tested in disposable infrastructure.
-5. **Provider admission integration (pre-JIT compatibility patch in a focused slice):** reserve-before-create, stable request identity, cross-pool serialization, retry/defer compatibility evidence and idempotent provider outcomes. Prove bypass resistance.
-6. **Reconciliation and draining:** import pre-existing resources, provider-operation recovery, confirmed deletion before release, bounded job-assignment races for idle runners; never silently terminate jobs.
-7. **Admin and operations:** authentication/authorization, external secret keys, audit retention, telemetry, policy changes, failure drills, backup/restore and an independently reviewed production readiness gate.
+## Implemented experimental foundation
 
-Priority in pool policy is not priority scheduling. Fairness, starvation bounds and queued demand need their own tested scheduler. Resource accounting and historical observed usage must remain separate.
+- Durable SQLite WAL/FULL admission with one atomic global/host/pool budget transaction, conservative charged states, one-shot dispatch intents, durable received submission correlation before operation wait and bounded multi-process contention tests. The JSON simulator remains separate from live enforcement.
+- Verified read-only Garm inventory and standalone-only Incus HTTPS/mTLS transport, with barrier-first bounded three-source reconciliation. Partial, unknown or unbounded inventory blocks new claims.
+- Maintained opt-in Garm v0.2.1 pre-JIT compatibility patch, compiled gateway-only provider and credential-isolated gateway. Disposable pinned-source/executable fixtures cover admission deferral, conservative create replay and preparation-failure cancellation with permanent tombstones. Provisioning is off by default.
+- Separate authenticated read-only TLS admin API and React view of actual ledger allocations, recorded health and conservative drain blockers. There is no synthetic fallback or policy editor.
+- Trusted ledger-only host enable/disable/draining primitives, consistent SQLite backup/restore APIs and a local operator recovery CLI. These do not fence external writers, stop jobs, prove physical retirement or qualify live recovery.
 
-Operational backup/restore acceptance is tracked explicitly in [operational-acceptance.md](operational-acceptance.md), including consistent WAL snapshots and mandatory fail-closed post-restore inventory reconciliation. Offline library APIs and a local operator CLI are implemented; there is no qualified live recovery service.
+## Remaining delivery and qualification
 
-The integrated experimental gateway/provider pair is documented in [gateway-service.md](gateway-service.md). It defaults to authenticated reads, and its incomplete destructive lifecycle prevents calling it a production replacement for the installed provider.
+1. **Create/restart recovery:** build evidence-gated recovery on the [durable pre-wait submission journal](submitted-correlation.md), including lost responses before receipt persistence, terminal evidence and immutable resource generation. Submitted/unknown records remain charged and cannot authorize blind create retry, confirmed success or timeout-based release.
+2. **Job-safe lifecycle:** establish a version-qualified assignment fence that does not cancel accepted/running work, completion and immutable-resource evidence, journaled physical deletion, and authoritative retirement before releasing charges. Existing idle runners can still accept jobs when admission is paused.
+3. **Scheduling and pool policy:** add a transactional multi-host chooser and explicit repository/pool labels, priority and idle controls. Current placement is fixed in trusted gateway configuration. Priority metadata alone is not fair scheduling; queue ownership, starvation bounds and retry semantics need separate tests.
+4. **Authenticated management:** separately authorized, attributable and conditional policy changes, accurate UI controls, security-event retention and credential rotation. Never present pause-new-claims as completed drain or allocated budgets as measured utilization.
+5. **Operator packaging and isolated CI:** validate build/Compose configuration and real disposable UID, credential, filesystem, network and resource boundaries. Keep provider switching and experimental provisioning off until separately authorized and qualified. Hosted fixture CI is not installed-stack qualification.
+6. **Operational acceptance:** qualify exact installed versions, complete physical-host/project coverage, native Incus isolation, alternate-path and old-writer fencing, failure drills, live recovery, measured historical usage and an independently reviewed production-readiness gate.
+
+Operational backup/restore acceptance is tracked in [operational-acceptance.md](operational-acceptance.md). Offline primitives and the local CLI are implemented; a live recovery service with verified external fencing and new authoritative post-restore inventory is not qualified.
+
+The integrated pair is documented in [gateway-service.md](gateway-service.md). Passing local, browser or pinned-source fixture tests does not make its incomplete destructive lifecycle a production replacement for the installed provider. No deployment is claimed or authorized by this roadmap.
