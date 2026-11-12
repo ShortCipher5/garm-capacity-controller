@@ -29,13 +29,14 @@ type Allocation struct {
 	Allocated admission.Resources `json:"allocated"`
 }
 type Host struct {
-	Drain           retirement.Assessment `json:"drain_assessment"`
-	ID              string                `json:"id"`
-	Mode            string                `json:"mode"`
-	Healthy         bool                  `json:"last_observed_healthy"`
-	Fresh           bool                  `json:"observation_fresh"`
-	ObservedAt      time.Time             `json:"observed_at"`
-	AdmissionPaused bool                  `json:"new_claims_paused"`
+	BackendBindingStatus string                `json:"backend_binding_status"`
+	Drain                retirement.Assessment `json:"drain_assessment"`
+	ID                   string                `json:"id"`
+	Mode                 string                `json:"mode"`
+	Healthy              bool                  `json:"last_observed_healthy"`
+	Fresh                bool                  `json:"observation_fresh"`
+	ObservedAt           time.Time             `json:"observed_at"`
+	AdmissionPaused      bool                  `json:"new_claims_paused"`
 	Allocation
 }
 type Pool struct {
@@ -229,7 +230,8 @@ func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Ov
 		}
 		age := now.Sub(host.ObservedAt)
 		fresh := age >= 0 && age <= state.Config.MaxObservationAge
-		result.Hosts = append(result.Hosts, Host{Drain: drain, ID: id, Mode: host.Mode, Healthy: host.Healthy, Fresh: fresh, ObservedAt: host.ObservedAt, AdmissionPaused: !provision || !state.Ready || host.Mode != "enabled" || !host.Healthy || !fresh, Allocation: Allocation{host.Budget, state.Allocated.Hosts[id]}})
+		bindingStatus := backendBindingStatus(state, id)
+		result.Hosts = append(result.Hosts, Host{BackendBindingStatus: bindingStatus, Drain: drain, ID: id, Mode: host.Mode, Healthy: host.Healthy, Fresh: fresh, ObservedAt: host.ObservedAt, AdmissionPaused: bindingStatus != "bound_observation" || !provision || !state.Ready || host.Mode != "enabled" || !host.Healthy || !fresh, Allocation: Allocation{host.Budget, state.Allocated.Hosts[id]}})
 	}
 	sort.Slice(result.Hosts, func(i, j int) bool { return result.Hosts[i].ID < result.Hosts[j].ID })
 	for id, pool := range state.Config.Pools {
@@ -255,4 +257,19 @@ func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Ov
 		result.Events = append(result.Events, Event{event.Sequence, event.Kind, event.Host, event.RequestKey, event.RecordedAt})
 	}
 	return result, nil
+}
+
+// backendBindingStatus exposes only the classification. An authenticated daemon
+// observation is not physical-hardware, whole-host or parent-quota qualification.
+// Legacy exclusion wins even if a future inconsistent snapshot also has a bind.
+func backendBindingStatus(state admission.SQLiteSnapshot, host string) string {
+	for _, legacy := range state.LegacyUnboundHosts {
+		if legacy == host {
+			return "legacy_scope_import_required"
+		}
+	}
+	if _, exists := state.HostBindings[host]; exists {
+		return "bound_observation"
+	}
+	return "unbound"
 }

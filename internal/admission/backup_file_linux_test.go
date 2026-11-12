@@ -93,9 +93,14 @@ func TestSQLiteBackupFilePreservesHistoricalSourceAndClearsFence(t *testing.T) {
 						if err := copy.db.QueryRow("SELECT count(*) FROM cancellation_history_exclusions WHERE request_key='legacy-creating'").Scan(&excluded); err != nil || excluded != 1 {
 							t.Fatalf("legacy provenance exclusion lost: %d %v", excluded, err)
 						}
-						if err := copy.db.QueryRow("PRAGMA user_version").Scan(&schema); err != nil || schema != 3 {
+						if err := copy.db.QueryRow("PRAGMA user_version").Scan(&schema); err != nil || schema != 4 {
 							t.Fatalf("artifact not current: %d %v", schema, err)
 						}
+						copiedState := sqliteSnapshot(t, copy)
+						if len(copiedState.LegacyUnboundHosts) == 0 || len(copiedState.HostBindings) != 0 {
+							t.Fatal("historical migration lost unqualified-host history")
+						}
+
 						if err := copy.CompleteReconciliation(context.Background(), Fence{Epoch: 1, Nonce: "historical-fence"}, InventorySnapshot{}); !errors.Is(err, ErrFence) {
 							t.Fatalf("source fence survived: %v", err)
 						}

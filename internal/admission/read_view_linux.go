@@ -51,7 +51,7 @@ func (s *SQLiteStore) readTransaction(ctx context.Context, read func(*sql.Tx) er
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if queryOnly != 1 || application != 0x47434331 || version != 3 {
+	if queryOnly != 1 || application != 0x47434331 || version != 4 {
 		return errors.New("read view requires an owned current ledger")
 	}
 	if err = read(tx); err != nil {
@@ -90,6 +90,14 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context) (SQLiteSnapshot, error) 
 			return err
 		}
 		result.Inventory, err = sqliteInventory(tx)
+		if err != nil {
+			return err
+		}
+		result.LegacyUnboundHosts, err = sqliteLegacyUnboundHosts(tx, result.Config)
+		if err != nil {
+			return err
+		}
+		result.HostBindings, err = sqliteHostBindings(tx, result.Config)
 		if err != nil {
 			return err
 		}

@@ -53,3 +53,9 @@ go vet ./...
 ```
 
 Tests exercise concurrent handles and separate processes; reservation/audit rollback; ambiguous-commit handle poisoning; reopen after an unfinished barrier; stale/duplicate/overlapping fences; incomplete/pre-barrier observations; global freshness expiry; conservative deduplication, orphans and missing resources; immutable bindings; host policy preservation; overflow; busy/canceled transactions; and unsupported schema/private-file checks. These are model/database tests, not an installed Garm/provider compatibility certification or a hardware fault/backup qualification.
+
+
+Schema four adds [immutable daemon bindings](durable-host-bindings.md), complete
+alias-set uniqueness under a reconciliation fence, explicit legacy charged-host
+exclusions and binding-audit provenance on physical dispatches. This narrows alias
+and remapping mistakes; it is not whole-host/external-writer or hardware proof.

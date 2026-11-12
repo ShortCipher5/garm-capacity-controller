@@ -167,3 +167,14 @@ test("management conflicts and ambiguous writes never automatically retry", asyn
   }
   let calls=0; await assert.rejects(applyPolicyChange("c".repeat(64), {}, { fetcher: async()=>{calls++;throw Error("secret transport message");} }), /outcome unknown/); assert.equal(calls,1);
 });
+
+test("host binding classification must be explicit, never hardware qualification", () => {
+  const host={id:"host-a",mode:"enabled",last_observed_healthy:true,observation_fresh:true,new_claims_paused:true,observed_at:view.observed_at,budget:resource,allocated:resource};
+  for(const status of ["bound_observation","legacy_scope_import_required","unbound"]){assert.equal(validateOverview({...view,hosts:[{...host,backend_binding_status:status}]}).hosts[0].backend_binding_status,status);}
+  for(const status of [undefined,"verified","hardware_qualified"]){assert.throws(()=>validateOverview({...view,hosts:[{...host,backend_binding_status:status}]}),/unsupported overview/);}
+});
+
+test("unbound or legacy status cannot advertise new claims allowed",()=>{
+ const host={id:"host-a",mode:"enabled",last_observed_healthy:true,observation_fresh:true,new_claims_paused:false,observed_at:view.observed_at,budget:resource,allocated:resource};
+ for(const backend_binding_status of ["unbound","legacy_scope_import_required"]){assert.throws(()=>validateOverview({...view,hosts:[{...host,backend_binding_status}]}),/unsupported overview/);}
+});

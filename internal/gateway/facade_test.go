@@ -14,27 +14,42 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 	common "github.com/cloudbase/garm-provider-common/params"
 )
 
 const operation = "12345678-1234-1234-1234-123456789abc"
 
 type backendFixture struct {
-	mu            sync.Mutex
-	instances     map[string]incusapi.Instance
-	operations    []incusapi.Operation
-	calls         atomic.Int32
-	fail          bool
-	drift         bool
-	readFail      bool
-	userdata      string
-	createFail    bool
-	waits         atomic.Int32
-	waitHook      func(context.Context) error
-	afterCreate   func()
-	createReceipt *incusapi.Created
+	identity              *incusapi.Client
+	identityConfiguration string
+	mu                    sync.Mutex
+	instances             map[string]incusapi.Instance
+	operations            []incusapi.Operation
+	calls                 atomic.Int32
+	fail                  bool
+	drift                 bool
+	readFail              bool
+	userdata              string
+	createFail            bool
+	waits                 atomic.Int32
+	waitHook              func(context.Context) error
+	afterCreate           func()
+	createReceipt         *incusapi.Created
 }
 
+func (b *backendFixture) PhysicalIdentity(ctx context.Context) (incusapi.PhysicalServerIdentity, error) {
+	if b.identity == nil {
+		return incusapi.PhysicalServerIdentity{}, ErrUnavailable
+	}
+	return b.identity.PhysicalIdentity(ctx)
+}
+func (b *backendFixture) PinPhysicalIdentity(value incusapi.PhysicalServerIdentity) error {
+	if b.identity == nil {
+		return ErrUnavailable
+	}
+	return b.identity.PinPhysicalIdentity(value)
+}
 func (b *backendFixture) Create(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
 	b.calls.Add(1)
 	b.mu.Lock()
@@ -116,7 +131,8 @@ func facadeFixtureAge(t *testing.T, age time.Duration) (*Facade, *admission.SQLi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	backend := &backendFixture{instances: map[string]incusapi.Instance{}}
+	identity := testsupport.Identity(t, "fixture-host-a")
+	backend := &backendFixture{instances: map[string]incusapi.Instance{}, identity: identity.Client, identityConfiguration: identity.Configuration}
 	policy := PoolPolicy{Host: "host-a", CPU: 1000, RAM: 1024, Flavor: "bounded-small", Image: "pinned-linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"runner-base"}, Type: "container", Arch: common.Amd64}
 	f, err := New(context.Background(), store, "controller-a", map[string]PoolPolicy{"pool-a": policy, "pool-b": policy}, map[string]Backend{"host-a": backend})
 	if err != nil {

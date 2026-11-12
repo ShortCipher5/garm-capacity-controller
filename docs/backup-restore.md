@@ -199,3 +199,14 @@ completeness, hard power-loss/process-kill fault injection, hardware durability,
 large-database performance, remote archival/encryption/retention, scheduling,
 operator authentication, or a live gateway service. These model tests are not
 production acceptance.
+
+
+## Schema-four daemon-binding history
+
+Current artifacts retain immutable daemon bindings, their audit-sequenced dispatch
+provenance and legacy charged-host binding exclusions. Versions one through four
+are accepted by the offline file exporter; historical source files remain read-only
+and are upgraded only in the new copy. Neither a copy nor a fresh baseline may
+silently bind a historically charged unqualified host. See [binding upgrade and
+open live-recovery gates](durable-host-bindings.md). Runtime expected-lineage and
+external old-writer fencing are still separate qualification requirements.

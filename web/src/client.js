@@ -29,6 +29,8 @@ export function validateOverview(value) {
         allocation(h) &&
         string(h.id) &&
         string(h.mode) &&
+        ["bound_observation", "legacy_scope_import_required", "unbound"].includes(h.backend_binding_status) &&
+        (h.backend_binding_status === "bound_observation" || h.new_claims_paused === true) &&
         bool(h.last_observed_healthy) &&
         bool(h.observation_fresh) &&
         bool(h.new_claims_paused) &&

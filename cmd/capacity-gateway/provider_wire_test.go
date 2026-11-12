@@ -90,7 +90,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		defer mu.Unlock()
 		switch {
 		case r.URL.Path == "/1.0":
-			syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}})
+			syncJSON(w, incusIdentityRoot(keys, "wire-incus"))
 		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
 			creates.Add(1)
 			var body struct {

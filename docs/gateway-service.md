@@ -75,4 +75,20 @@ Remaining gates: installed-version/physical-scope qualification; executable comp
 
 The [pinned source-to-executable qualification suite](protocol-qualification.md) exercises actual upstream Garm calls through the compiled facade and this service, including ambiguous create correlation and no redispatch. It remains local fixture qualification, not permission to enable production scheduling.
 
+
+
+## Immutable daemon-binding upgrade gate
+
+The gateway now requires [durable schema-four daemon bindings](durable-host-bindings.md)
+before physical dispatch. Actual TLS-key/origin/project/name/version observations
+must match the complete persisted alias set; unknown or changed bindings stay
+blocked. Historically charged unbound hosts cannot be automatically imported after
+upgrade, even if later cancellation removes their last reservation. Qualified
+scope import is not implemented. Keep the read-only admin view available for this
+status; never clear state or use an older image to bypass it. This is not physical
+hardware registration, foreign-project coverage, native parent-limit proof or an
+external credential fence. Runtime missing-ledger/expected-lineage qualification
+also remains open until its separate slice lands.
+
 The optional admin listener supports a separately credentialed, CLI-opted-in ledger policy editor. See [management UI](admin-ui.md) for `management_token_file`, `--allow-experimental-management`, atomic conflict/audit semantics and the explicit no-drain/no-placement boundary.
+

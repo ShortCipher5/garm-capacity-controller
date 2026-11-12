@@ -28,6 +28,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 	common "github.com/cloudbase/garm-provider-common/params"
 )
 
@@ -74,11 +75,18 @@ func rpcTLSFixture(t *testing.T, handler http.Handler) (*httptest.Server, *tls.C
 }
 
 type backend struct {
+	identity  *incusapi.Client
 	mu        sync.Mutex
 	instances map[string]incusapi.Instance
 	creates   atomic.Int32
 }
 
+func (b *backend) PhysicalIdentity(ctx context.Context) (incusapi.PhysicalServerIdentity, error) {
+	return b.identity.PhysicalIdentity(ctx)
+}
+func (b *backend) PinPhysicalIdentity(value incusapi.PhysicalServerIdentity) error {
+	return b.identity.PinPhysicalIdentity(value)
+}
 func (b *backend) Create(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -119,7 +127,7 @@ func facade(t *testing.T) (*gateway.Facade, *backend) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	b := &backend{instances: map[string]incusapi.Instance{}}
+	b := &backend{instances: map[string]incusapi.Instance{}, identity: testsupport.Identity(t, "rpc-fixture-host").Client}
 	f, err := gateway.New(context.Background(), store, "controller-a", map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, map[string]gateway.Backend{"a": b})
 	if err != nil {
 		t.Fatal(err)

@@ -59,3 +59,18 @@ The revision hashes managed policy, excluding changing health observations. Comp
 **Disabled is not drained.** Existing idle runners may still receive jobs, and a later mode change does not fence an already committed in-flight claim. Enabling is not immediate admission: it requires fresh reconciliation. These controls do not register hosts/repositories/pools, edit Garm tags/idle/max/priority, alter actual runner placement, stop jobs or retire resources. Pool host eligibility is deliberately not editable because the gateway pins placement at startup. Unknown write outcomes are reported explicitly, never automatically retried.
 
 The disposable browser suite also covers review/cancel, read-token write rejection, actual persisted mode and budget changes, audit/readiness effects, repeated apply and disconnect during an interrupted write. Passing it does not qualify production management, individual operator attribution, rotation or audit retention.
+
+## Backend binding status (schema4 prerequisite)
+
+The host view exposes only `backend_binding_status`: `unbound`,
+`bound_observation`, or `legacy_scope_import_required`. A bound observation is an
+administered daemon identity observation, not physical-hardware attestation,
+whole-host inventory, parent-quota qualification or production readiness. Raw
+fingerprints and daemon/server names are not returned in this status field.
+
+A legacy scope banner means a previously charged host is excluded from automatic
+binding, even if later cancellation leaves no current charges. Qualified legacy
+scope import is a separate workflow and is not implemented. Mode/budget controls
+remain distinct; there is no clear/reset/import button. Enabling host mode cannot
+erase historical exclusions or qualify backend capacity. See the
+[dynamic management design gaps](dynamic-management-design.md).
