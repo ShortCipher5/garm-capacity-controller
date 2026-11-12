@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -79,9 +81,12 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	var mu sync.Mutex
 	var creates atomic.Int32
 	var submittedChecks atomic.Int32
+	var evidenceChecks atomic.Int32
 	databasePath := filepath.Join(directory, "ledger.db")
 	instances := map[string]map[string]string{}
 	const operation = "12345678-1234-1234-1234-123456789abc"
+	const uuid = "11111111-1111-4111-8111-111111111111"
+	const generation = "22222222-2222-4222-8222-222222222222"
 	incus := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("project") != "runners" {
 			t.Error("wrong bounded project")
@@ -106,6 +111,8 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 				w.WriteHeader(409)
 				return
 			}
+			body.Config["volatile.uuid"] = uuid
+			body.Config["volatile.uuid.generation"] = generation
 			instances[body.Name] = body.Config
 			_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + operation + "?project=runners", "metadata": map[string]any{"id": operation}})
 		case r.URL.Path == "/1.0/instances":
@@ -140,6 +147,25 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 				return
 			}
 			syncJSON(w, map[string]any{"id": operation, "status_code": 200, "resources": map[string][]string{"instances": {"/1.0/instances/wire-1?project=runners"}}})
+		case r.URL.Path == "/1.0/operations/"+operation:
+			// The compiled provider must capture ONLY in the original submitted
+			// callback, never by replaying creation or inventing historical proof.
+			observed, err := admission.OpenSQLite(databasePath, admission.Config{})
+			if err != nil {
+				t.Error(err)
+				http.Error(w, "ledger unavailable", 500)
+				return
+			}
+			requestKey := sha256.Sum256([]byte("controller-test\x00pool-a\x00wire-1"))
+			receipt, err := observed.LookupDispatch(context.Background(), hex.EncodeToString(requestKey[:]))
+			observed.Close()
+			if mode != "confirmed" || err != nil || receipt.State != "submitted" || receipt.OperationID != operation || receipt.ResourceID != "wire-1" || receipt.HostBindingSequence <= 0 {
+				t.Errorf("capture outside original bound submitted callback: %+v %v", receipt, err)
+				http.Error(w, "invalid capture", 500)
+				return
+			}
+			evidenceChecks.Add(1)
+			syncJSON(w, map[string]any{"id": operation, "class": "task", "description": "Creating instance", "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "resources": map[string][]string{"instances": {"/1.0/instances/wire-1?project=runners"}}, "metadata": map[string]any{"private": "must-not-enter-journal"}})
 		case r.URL.Path == "/1.0/instances/wire-1/state":
 			syncJSON(w, map[string]any{"status_code": 103})
 		case r.URL.Path == "/1.0/instances/wire-1":
@@ -148,7 +174,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 				http.NotFound(w, r)
 				return
 			}
-			syncJSON(w, map[string]any{"name": "wire-1", "status_code": 103, "expanded_config": config})
+			syncJSON(w, map[string]any{"name": "wire-1", "status_code": 103, "created_at": "2026-01-01T00:00:00Z", "expanded_config": config})
 		default:
 			http.NotFound(w, r)
 		}
@@ -238,6 +264,18 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	receipt, err := store.LookupDispatch(ctx, hex.EncodeToString(requestKey[:]))
 	if err != nil || receipt.State != mode || receipt.OperationID != operation || receipt.ResourceID != "wire-1" {
 		t.Fatalf("lost durable dispatch correlation: %+v %v", receipt, err)
+	}
+	evidence, evidenceErr := store.LookupCreateEvidence(ctx, hex.EncodeToString(requestKey[:]))
+	if mode == "confirmed" {
+		if evidenceErr != nil || evidence.Observation.OperationID != operation || evidence.Observation.Identity.Subject.UUID != uuid || evidence.Observation.Identity.Subject.Generation != generation || evidence.HostBindingSequence != receipt.HostBindingSequence || evidenceChecks.Load() != 1 {
+			t.Fatalf("compiled provider lost original authenticated evidence: %+v %v checks=%d", evidence, evidenceErr, evidenceChecks.Load())
+		}
+		encoded, err := json.Marshal(evidence)
+		if err != nil || strings.Contains(string(encoded), "must-not-enter-journal") || strings.Contains(string(encoded), "bootstrap-secret") {
+			t.Fatal("compiled wire retained raw metadata/bootstrap")
+		}
+	} else if !errors.Is(evidenceErr, sql.ErrNoRows) || evidenceChecks.Load() != 0 {
+		t.Fatalf("unknown create manufactured evidence: %+v %v checks=%d", evidence, evidenceErr, evidenceChecks.Load())
 	}
 	if submittedChecks.Load() != 1 {
 		t.Fatalf("submission-before-wait checks=%d", submittedChecks.Load())

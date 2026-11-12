@@ -204,6 +204,9 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 		if _, verifyErr := f.verified(ctx, req, bootstrap.Name); verifyErr != nil {
 			return receipt, verifyErr
 		}
+		if f.collectCreateEvidence(ctx, req, created) == createEvidenceWriterBlocked {
+			return receipt, ErrUnavailable
+		}
 		receipt.State = "confirmed"
 		return receipt, nil
 	})
