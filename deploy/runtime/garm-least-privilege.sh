@@ -13,7 +13,7 @@ mkdir -p "$results"
 cleanup() {
   local outcome=$?
   if [[ $outcome != 0 ]]; then
-    docker inspect "$name" 2>/dev/null | python3 -c 'import json,sys;x=json.load(sys.stdin)[0];print(json.dumps({"status":x["State"]["Status"],"exit":x["State"]["ExitCode"],"oom":x["State"]["OOMKilled"]}))' || true
+    docker inspect "$name" 2>/dev/null | python3 -c 'import json,sys;items=json.load(sys.stdin);print(json.dumps({"container_not_created":True} if not items else {"status":items[0]["State"]["Status"],"exit":items[0]["State"]["ExitCode"],"oom":items[0]["State"]["OOMKilled"]}))' || true
   fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
@@ -27,8 +27,9 @@ python3 deploy/runtime/garm-identity.py prepare "$work/fixture"
 sudo chown -R 65531:65531 "$work/fixture/private" "$work/fixture/state"
 sudo chown -R 65532:65532 "$work/fixture/gateway-canary"
 base=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 1 --memory 512m)
-# Only harmless discovery, with no provider config or network, from the exact image.
-docker run --rm --network none "${base[@]}" --user 65531:65531 --env GARM_COMMAND=GetVersion --entrypoint /opt/garm/providers.d/garm-provider-incus "$image" >/dev/null
+# Garm version exits before config loading. Never construct an Incus provider
+# merely for discovery: bundled providers may require config before GetVersion.
+docker run --rm --network none "${base[@]}" --user 65531:65531 --entrypoint /bin/garm "$image" --version >/dev/null
 # Positive owner-read controls prove the paths/mounts work before denial tests.
 docker run --rm --network none "${base[@]}" --user 65532:65532 --mount "type=bind,src=$work/fixture/gateway-canary,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/canary >/dev/null 2>&1'
 docker run --rm --network none "${base[@]}" --user 65531:65531 --mount "type=bind,src=$work/fixture/private,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/config.toml >/dev/null 2>&1'

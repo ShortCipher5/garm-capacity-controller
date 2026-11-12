@@ -35,8 +35,10 @@ The disposable runtime uses:
 Checks inspect the actual Garm PID 1 UID/GID and every capability set, not just
 Compose metadata or a helper's `id`. The real TLS API must return its expected
 `init_required` response while certificate validation remains strict. No admin
-account or remote authority is created. The bundled Incus provider executes only
-harmless version discovery with network disabled and no provider configuration.
+account or remote authority is created. Garm itself executes only config-free version discovery before the daemon test.
+Bundled Incus providers may construct clients/configuration even for version
+discovery, so they are not invoked or configured in this identity-only lab.
+Actual provider integration remains a separate qualification gate.
 
 A separate permissions probe gives each UID a read-only mount of the other role's
 new private canary/config directory and verifies that reading is denied without
