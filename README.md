@@ -19,6 +19,8 @@ The target application manages:
 
 ## First slice: offline admission simulator
 
+The implementation is under review in [draft PR #1](https://github.com/ShortCipher5/garm-capacity-controller/pull/1). Before it is merged, check out `feat/durable-admission-foundation` to run the commands below. The default branch currently holds the project documentation.
+
 The dependency-free Go foundation serializes admission across pools and processes sharing one local ledger. It reserves capacity **before** returning success, persists through restart, and charges every reservation state, including creating, idle, running, failed and unknown. It fails closed for disabled/draining/unhealthy/stale hosts, missing pools, invalid resources and exhausted budgets. Failed or unknown creates do not release capacity. No release mechanism is implemented in this slice.
 
 A JSON ledger is used deliberately for this small testable slice, not as the final history database. It uses a separate advisory file lock, atomic replacement, file and directory sync. It is Linux-only, single-machine, local-filesystem storage. It is **not** distributed consensus, a multi-host database or proof of live provisioning safety. All callers must cooperate with the same lock. Uncertain persistence blocks that Store instance until it is reopened.
