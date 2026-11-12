@@ -241,6 +241,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
+	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
 	flag.Parse()
 	raw, err := securefiles.Read(*configPath, 1<<20)
 	if err != nil {
@@ -251,6 +252,13 @@ func main() {
 	if gatewayrpc.Decode(bytes.NewReader(raw), &config) != nil {
 		fmt.Fprintln(os.Stderr, "gateway configuration unavailable")
 		os.Exit(1)
+	}
+	if *management {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "management requires separate admin listener configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableExperimentalManagement = true
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()

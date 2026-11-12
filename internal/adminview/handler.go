@@ -1,5 +1,5 @@
-// Package adminview provides a separate authenticated READ-ONLY admin surface.
-// It cannot provision, mutate policy, retire resources or access provider secrets.
+// Package adminview provides separately authorized read and ledger-policy surfaces.
+// It cannot provision, retire resources or access provider secrets.
 package adminview
 
 import (
@@ -22,7 +22,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
 )
 
-var ErrConfiguration = errors.New("invalid read-only admin configuration")
+var ErrConfiguration = errors.New("invalid admin configuration")
 
 type Allocation struct {
 	Budget    admission.Resources `json:"budget"`
@@ -51,24 +51,28 @@ type Event struct {
 	At         time.Time `json:"at"`
 }
 type Overview struct {
-	Mode         string         `json:"mode"`
-	Provisioning bool           `json:"experimental_provisioning_enabled"`
-	Ready        bool           `json:"admission_ready"`
-	Epoch        int64          `json:"epoch"`
-	At           time.Time      `json:"observed_at"`
-	Global       Allocation     `json:"global"`
-	Hosts        []Host         `json:"hosts"`
-	Pools        []Pool         `json:"pools"`
-	States       map[string]int `json:"states"`
-	Events       []Event        `json:"events"`
+	PolicyRevision    string         `json:"policy_revision"`
+	ManagementEnabled bool           `json:"management_enabled"`
+	Mode              string         `json:"mode"`
+	Provisioning      bool           `json:"experimental_provisioning_enabled"`
+	Ready             bool           `json:"admission_ready"`
+	Epoch             int64          `json:"epoch"`
+	At                time.Time      `json:"observed_at"`
+	Global            Allocation     `json:"global"`
+	Hosts             []Host         `json:"hosts"`
+	Pools             []Pool         `json:"pools"`
+	States            map[string]int `json:"states"`
+	Events            []Event        `json:"events"`
 }
 type Handler struct {
-	store     *admission.SQLiteStore
-	tokenHash [32]byte
-	assets    *os.Root
-	provision bool
-	inFlight  chan struct{}
-	Audit     func(string)
+	store      *admission.SQLiteStore
+	tokenHash  [32]byte
+	writeHash  [32]byte
+	management bool
+	assets     *os.Root
+	provision  bool
+	inFlight   chan struct{}
+	Audit      func(string)
 }
 
 // Token is 32 random bytes encoded as 64 lowercase hexadecimal characters and
@@ -116,6 +120,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/policy" {
+		h.servePolicy(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/admin/api/") {
 		if r.URL.Path != "/admin/api/v1/overview" {
 			fail(http.StatusNotFound)
@@ -147,6 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusServiceUnavailable)
 			return
 		}
+		view.ManagementEnabled = h.management
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {
 			fail(http.StatusServiceUnavailable)
@@ -212,7 +221,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Overview, error) {
-	result := Overview{Mode: "experimental-ledger", Provisioning: provision, Ready: state.Ready, Epoch: state.Epoch, At: now, Global: Allocation{state.Config.Global, state.Allocated.Global}, Hosts: []Host{}, Pools: []Pool{}, States: map[string]int{}, Events: []Event{}}
+	result := Overview{PolicyRevision: admission.PolicyRevision(state.Config), Mode: "experimental-ledger", Provisioning: provision, Ready: state.Ready, Epoch: state.Epoch, At: now, Global: Allocation{state.Config.Global, state.Allocated.Global}, Hosts: []Host{}, Pools: []Pool{}, States: map[string]int{}, Events: []Event{}}
 	for id, host := range state.Config.Hosts {
 		drain, err := retirement.Assess(state, id, now)
 		if err != nil {

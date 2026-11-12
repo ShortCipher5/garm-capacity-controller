@@ -1,6 +1,6 @@
-# Read-only management UI
+# Ledger management UI
 
-The React client in `web/` is an experimental **real ledger view**, not a simulator and not a production qualification. It has no synthetic fallback. It reads only the same-origin `GET /admin/api/v1/overview` API on the separate TLS admin listener. It cannot access the provider RPC surface or change infrastructure.
+The React client in `web/` is an experimental **real ledger view**, not a simulator and not a production qualification. It has no synthetic fallback. It reads the same-origin `GET /admin/api/v1/overview` API on the separate TLS admin listener. An explicitly enabled separate management role can edit bounded ledger policy. It cannot access the provider RPC surface or mutate Garm/Incus infrastructure.
 
 ## Build
 
@@ -45,3 +45,17 @@ The browser suite builds the production assets and launches a disposable loopbac
 Browser checks cover real authentication and ledger values, repeated refresh, failed authentication and reconnect, interrupted login cancellation, logout and late-response fencing, failed refresh, page exit, reload and back/forward behavior, empty browser storage, mobile overflow, and desktop/mobile screenshots. The client unit suite separately verifies exact read-only fetch options, malformed payload rejection, disconnect fencing and stale-failure isolation.
 
 These tests are local evidence, not live deployment or infrastructure qualification.
+
+## Experimental ledger policy editor
+
+Management is **off by default**. Supply a separate owner-only `admin.management_token_file` containing an independently generated 32-byte random lowercase-hex token, and start the gateway with `--allow-experimental-management`. Both are required; a file without the flag, a flag without the file, or reuse of the read token fails startup. Provider mTLS identities and the read token never authorize these writes. The management token does not implicitly grant the read role. No Garm/Incus credential belongs in either browser field.
+
+After connecting with the read token, the policy section offers host enabled/disabled mode, global budget, host budget and existing ledger-pool budget. Review a concrete change and an audit reason, then enter the separate management token to apply it. The token input clears on submission; each action requires it again. Cancel clears the review without submitting. Disconnect/page exit removes the form, clears credentials and fences late responses. An interrupted request may already have committed: reconnect and inspect policy/audit rather than assuming cancellation undoes it.
+
+`POST /admin/api/v1/policy` accepts at most 8192 bytes of strict JSON (no unknown/duplicate fields). It requires TLS, the distinct bearer token, JSON media type and same-origin browser requests, with no cookie auth or CORS. Its bounded fields are `revision`, `action`, `target`, optional `budget` or `mode`, and `reason` (1–256 non-control bytes). Actions are `global_budget` (empty target), `host_budget`, `pool_budget`, and `host_mode` (`enabled` or `disabled`). Resource budgets are nonnegative integers no larger than JavaScript's maximum safe integer. The overview supplies `policy_revision` and `management_enabled`.
+
+The revision hashes managed policy, excluding changing health observations. Comparison, policy edit, readiness/fence invalidation and durable audit happen in one `BEGIN IMMEDIATE` transaction, serialized with admission. A stale policy returns 409, without a write. Effective edits close readiness until fresh authoritative reconciliation; a no-op preserves the current fence. Audit records include the management role (not a per-person identity), prior affected value, concrete edit and reason. Do not put credentials or sensitive data in reasons. Existing charges are never released, including when budgets fall below allocation. The recent audit view is bounded to 100 events, not a retention/export policy.
+
+**Disabled is not drained.** Existing idle runners may still receive jobs, and a later mode change does not fence an already committed in-flight claim. Enabling is not immediate admission: it requires fresh reconciliation. These controls do not register hosts/repositories/pools, edit Garm tags/idle/max/priority, alter actual runner placement, stop jobs or retire resources. Pool host eligibility is deliberately not editable because the gateway pins placement at startup. Unknown write outcomes are reported explicitly, never automatically retried.
+
+The disposable browser suite also covers review/cancel, read-token write rejection, actual persisted mode and budget changes, audit/readiness effects, repeated apply and disconnect during an interrupted write. Passing it does not qualify production management, individual operator attribution, rotation or audit retention.

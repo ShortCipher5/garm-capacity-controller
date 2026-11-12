@@ -2,7 +2,7 @@
 
 A lightweight Go control plane **above [Garm](https://github.com/cloudbase/garm)** for GitHub Actions runners on multiple [Incus](https://linuxcontainers.org/incus/) hosts, with a React management view and durable SQLite capacity ledger.
 
-> **Experimental, not production-qualified.** The real gateway and provider integration are implemented and tested against disposable authenticated API fixtures. Provisioning is off by default. The web application is read-only. Physical retirement, automatic job-safe drain and installed-infrastructure recovery qualification remain incomplete. Do not replace an existing provider just because CI passes.
+> **Experimental, not production-qualified.** The real gateway and provider integration are implemented and tested against disposable authenticated API fixtures. Provisioning is off by default. The web application reads the real ledger and optionally edits bounded ledger policy using a separate write credential. Physical retirement, automatic job-safe drain and installed-infrastructure recovery qualification remain incomplete. Do not replace an existing provider just because CI passes.
 
 ## Why this is needed
 
@@ -15,7 +15,7 @@ Garm remains responsible for runner demand and GitHub integration. This controll
 - **Barrier-first reconciliation** of Garm runners, Incus instances, operations and reservations, including orphans and unknown outcomes.
 - **Explicit host enable/pause primitives**, without pretending that pausing claims prevents idle runners accepting jobs.
 - **Credential isolation**: Garm receives gateway-only mTLS credentials, never Incus keys or database access.
-- **A real read-only React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. No mock fallback or fake mutation controls.
+- **A real React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. Separately authorized, reviewed host-mode and budget changes; no mock fallback.
 - **Consistent SQLite backup/restore primitives**, with admission blocked and new authoritative reconciliation required after restore.
 
 The full goal also includes repository labels/priority/idle controls, safe lifecycle management and historical measured usage. These are not all implemented. Allocations are not measured utilization, and a priority field is not a fair scheduler.
@@ -28,7 +28,7 @@ The full goal also includes repository labels/priority/idle controls, safe lifec
 | Garm integration | Pinned v0.2.1 pre-JIT compatibility patch and actual compiled-provider protocol harness | Requires the documented patch; installed stack not qualified |
 | Provisioning | Verified Incus HTTPS/mTLS, explicit limits, durable at-most-once intent and readback | Experimental opt-in; full physical-host coverage must be proved |
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
-| Administration | Separate TLS read-token API and responsive React ledger view | Read-only; no policy editor or retirement button |
+| Administration | Separate TLS read/write roles and responsive React ledger view | Opt-in separate write role for ledger host modes and budgets; no Garm pool editor or retirement button |
 | Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
 | Cancellation | Atomic never-dispatched tombstones, authenticated provider command and optional Garm preparation-failure hook | No dispatched/unknown-create or physical retirement release |
 
@@ -86,7 +86,7 @@ Do not copy only an open WAL database file. Use the [consistent backup procedure
 
 ## Next
 
-Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then authenticated mutation controls and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
+Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then broader authenticated Garm administration and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
 
 No live controller deployment is claimed. Tests must never access live runner infrastructure or commit credentials, private host addresses or user-specific configuration.
 

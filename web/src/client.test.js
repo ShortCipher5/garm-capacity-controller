@@ -5,11 +5,14 @@ import {
   SessionEnded,
   validateOverview,
   endpoint,
+  applyPolicyChange,
 } from "./client.js";
 const token = "a".repeat(64);
 const resource = { cpu_millis: 0, ram_mib: 0, runners: 0 };
 const view = {
   mode: "experimental-ledger",
+  management_enabled: false,
+  policy_revision: "f".repeat(64),
   experimental_provisioning_enabled: false,
   admission_ready: false,
   epoch: 0,
@@ -143,4 +146,24 @@ test("default native-style fetch retains its global receiver", async (t) => {
   assert.deepEqual(await session.refresh(), view);
   assert.equal(calls, 2);
   session.disconnect();
+});
+
+test("management action uses distinct one-shot same-origin write contract", async () => {
+  const change = { revision: "f".repeat(64), action: "host_mode", target: "host-a", mode: "disabled", reason: "test" };
+  let calls = 0;
+  const fetcher = async function(url, options) {
+    calls++; assert.equal(this, globalThis); assert.equal(url, "/admin/api/v1/policy");
+    assert.equal(options.method, "POST"); assert.equal(options.headers.Authorization, `Bearer ${"c".repeat(64)}`);
+    assert.equal(options.headers["Content-Type"], "application/json");
+    assert.equal(options.credentials, "omit"); assert.equal(options.cache, "no-store"); assert.equal(options.redirect, "error");
+    assert.deepEqual(JSON.parse(options.body), change); return { ok: true, status: 200, json: async () => ({ applied: true }) };
+  };
+  await applyPolicyChange("c".repeat(64), change, { fetcher }); assert.equal(calls, 1);
+  await assert.rejects(applyPolicyChange("bad", change, { fetcher }), /management token/); assert.equal(calls, 1);
+});
+test("management conflicts and ambiguous writes never automatically retry", async () => {
+  for (const [status, message] of [[409,/Policy changed/],[401,/read token cannot/],[503,/outcome unavailable/]]) {
+    let calls=0; await assert.rejects(applyPolicyChange("c".repeat(64), {}, { fetcher: async()=> {calls++; return {status,ok:false};} }), message); assert.equal(calls,1);
+  }
+  let calls=0; await assert.rejects(applyPolicyChange("c".repeat(64), {}, { fetcher: async()=>{calls++;throw Error("secret transport message");} }), /outcome unknown/); assert.equal(calls,1);
 });

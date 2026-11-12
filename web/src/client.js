@@ -15,6 +15,9 @@ export function validateOverview(value) {
   if (
     !object(value) ||
     value.mode !== "experimental-ledger" ||
+    !bool(value.management_enabled) ||
+    typeof value.policy_revision !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.policy_revision) ||
     !bool(value.experimental_provisioning_enabled) ||
     !bool(value.admission_ready) ||
     !integer(value.epoch) ||
@@ -127,5 +130,30 @@ export class ReadSession {
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+// One reviewed action only: no credential persistence, automatic retries,
+// cookies, redirects, query tokens or configurable remote endpoint.
+export async function applyPolicyChange(token, change, { signal, fetcher = globalThis.fetch } = {}) {
+  if (!/^[0-9a-f]{64}$/.test(token)) throw new Error("Enter the 64-character lowercase hexadecimal management token.");
+  let response;
+  try {
+    response = await fetcher.call(globalThis, "/admin/api/v1/policy", {
+      method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(change), credentials: "omit", cache: "no-store", redirect: "error", signal,
+    });
+  } catch {
+    throw new Error("Change outcome unknown. Refresh policy and audit before attempting another change. No automatic retry was made.");
+  }
+  if (response.status === 409) throw new Error("Policy changed since review. Refresh the snapshot, cancel this review and review a new change.");
+  if (response.status === 401) throw new Error("Management token rejected. The read token cannot authorize changes.");
+  if (response.status === 400) throw new Error("Policy change rejected. No change was applied.");
+  if (response.status === 404) throw new Error("Management is disabled on this server.");
+  if (!response.ok) throw new Error("Change outcome unavailable. Refresh policy and audit before attempting another change. No automatic retry was made.");
+  try {
+    if ((await response.json()).applied !== true) throw new Error();
+  } catch {
+    throw new Error("Change confirmation unavailable. Refresh policy and audit before attempting another change. No automatic retry was made.");
   }
 }

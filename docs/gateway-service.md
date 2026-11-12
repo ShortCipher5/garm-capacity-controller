@@ -1,6 +1,6 @@
 # Experimental credential-isolated gateway
 
-This slice adds actual Go executables and a provider-only RPC boundary. **It is not production-qualified and has not been run against live Garm or Incus.** Destructive lifecycle, proof-based retirement, job-safe drain and admin mutation controls remain incomplete; the separate TLS read-token API and real React ledger view are implemented. Do not replace an existing provider or enable production scheduling from these examples.
+This slice adds actual Go executables and a provider-only RPC boundary. **It is not production-qualified and has not been run against live Garm or Incus.** Destructive lifecycle, proof-based retirement, job-safe drain and broader Garm administration remain incomplete; separate TLS read/write roles and a real React ledger policy editor are implemented. Do not replace an existing provider or enable production scheduling from these examples.
 
 ## Processes and trust
 
@@ -71,6 +71,8 @@ Use secret storage/OS credential delivery appropriate for the deployment. These 
 
 [The backup/restore library](backup-restore.md) uses SQLite's consistent online backup and produces admission-blocked standalone artifacts; it is **not a live recovery service**; the local `capacity-ledger` CLI wraps its offline primitives. Restore into a new path only after stopping/fencing all old external writers. A fresh complete authoritative Garm/Incus/operation inventory, including post-backup resources and operations, is mandatory before opt-in scheduling. The service cannot revoke a different process's credentials or make an old database harmless.
 
-Remaining gates: installed-version/physical-scope qualification; executable compatibility against the exact Garm deployment; authoritative recovery and proof-based retirement; job-safe deregistration/drain; admin mutation controls; security-event retention and credential rotation procedures. No merge, deployment or production-ready claim is made by this slice.
+Remaining gates: installed-version/physical-scope qualification; executable compatibility against the exact Garm deployment; authoritative recovery and proof-based retirement; job-safe deregistration/drain; broader Garm administration; security-event retention and credential rotation procedures. No merge, deployment or production-ready claim is made by this slice.
 
 The [pinned source-to-executable qualification suite](protocol-qualification.md) exercises actual upstream Garm calls through the compiled facade and this service, including ambiguous create correlation and no redispatch. It remains local fixture qualification, not permission to enable production scheduling.
+
+The optional admin listener supports a separately credentialed, CLI-opted-in ledger policy editor. See [management UI](admin-ui.md) for `management_token_file`, `--allow-experimental-management`, atomic conflict/audit semantics and the explicit no-drain/no-placement boundary.
