@@ -128,3 +128,26 @@ func (c *Client) List(ctx context.Context, pool string) ([]common.ProviderInstan
 	}
 	return result, nil
 }
+
+// CancelAdmission only returns the gateway's strict tombstone receipt. A lost
+// response is not proof of release; retrying the exact identity is idempotent.
+func (c *Client) CancelAdmission(ctx context.Context, request garmprotocol.Request) (garmprotocol.CancellationResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 9*time.Second)
+	defer cancel()
+	if request.Validate() != nil {
+		return garmprotocol.CancellationResponse{}, ErrConfiguration
+	}
+	var response garmprotocol.CancellationResponse
+	if err := c.call(ctx, "/v1/cancel-admission", request, &response); err != nil {
+		return garmprotocol.CancellationResponse{}, err
+	}
+	data, err := json.Marshal(response)
+	if err != nil {
+		return garmprotocol.CancellationResponse{}, ErrUnavailable
+	}
+	result, err := garmprotocol.ParseCancellation(0, data, request)
+	if err != nil {
+		return garmprotocol.CancellationResponse{}, ErrUnavailable
+	}
+	return result, nil
+}

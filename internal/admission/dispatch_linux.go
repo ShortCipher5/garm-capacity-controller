@@ -86,6 +86,17 @@ func (s *SQLiteStore) ClaimDispatch(ctx context.Context, req Request) (*Dispatch
 		if err != nil {
 			return err
 		}
+		if !validRequest(req) {
+			return deny("dispatch_denied_invalid_request", ErrDenied)
+		}
+		if cancelled, err := cancellationRecord(tx, req.Key); err == nil {
+			if cancelled.Request != req {
+				return deny("dispatch_denied_cancelled_identity_conflict", ErrConflict)
+			}
+			return deny("dispatch_denied_cancelled_request", ErrCancelled)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		reservation, exists := reservations[req.Key]
 		if !validRequest(req) || !exists {
 			return deny("dispatch_denied_missing_reservation", ErrDenied)

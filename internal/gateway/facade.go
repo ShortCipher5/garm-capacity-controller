@@ -203,3 +203,27 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	}
 	return common.ProviderInstance{ProviderID: bootstrap.Name, Name: bootstrap.Name, OSType: common.Linux, OSArch: policy.Arch, Status: common.InstanceRunning}, nil
 }
+
+// CancelAdmission cancels only an exact provably never-dispatched reservation.
+// The ledger atomically checks dispatch/inventory and tombstones its identity.
+// This cannot cancel an unknown create, retire a runner or issue a backend call.
+func (f *Facade) CancelAdmission(ctx context.Context, request garmprotocol.Request) (garmprotocol.CancellationResponse, error) {
+	if request.Validate() != nil {
+		return garmprotocol.CancellationResponse{}, ErrPolicy
+	}
+	req, _, err := f.request(request.Name, request.PoolID)
+	if err != nil {
+		return garmprotocol.CancellationResponse{}, err
+	}
+	cancelled, err := f.store.CancelUndispatched(ctx, req)
+	if err != nil {
+		return garmprotocol.CancellationResponse{}, ErrUnavailable
+	}
+	no := false
+	replay := cancelled.Replay
+	result := garmprotocol.CancellationResponse{Protocol: garmprotocol.Version, Outcome: "cancelled", Name: request.Name, PoolID: request.PoolID, Dispatched: &no, ReservationKey: req.Key, Replay: &replay}
+	if _, err := garmprotocol.EncodeCancellation(result, request); err != nil {
+		return garmprotocol.CancellationResponse{}, ErrUnavailable
+	}
+	return result, nil
+}

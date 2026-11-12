@@ -1,6 +1,6 @@
 # Experimental credential-isolated gateway
 
-This slice adds actual Go executables and a provider-only RPC boundary. **It is not production-qualified and has not been run against live Garm or Incus.** Destructive lifecycle, proof-based retirement, job-safe drain and the authenticated admin UI remain incomplete. Do not replace an existing provider or enable production scheduling from these examples.
+This slice adds actual Go executables and a provider-only RPC boundary. **It is not production-qualified and has not been run against live Garm or Incus.** Destructive lifecycle, proof-based retirement, job-safe drain and admin mutation controls remain incomplete; the separate TLS read-token API and real React ledger view are implemented. Do not replace an existing provider or enable production scheduling from these examples.
 
 ## Processes and trust
 
@@ -20,13 +20,15 @@ go run ./cmd/capacity-gateway -help
 
 ## Protocol and behavior
 
-The provider supports `AdmitInstance`, `CreateInstance`, `GetInstance`, `ListInstances` and non-network version/interface/schema discovery. It validates the exact Garm interface/controller/pool environment and bounded stdin. Admission preserves exit 75 plus the strict no-dispatch receipt. Unknown gateway/create outcomes return a constant error, **never not-found or a redispatch permit**.
+The provider supports `AdmitInstance`, `CancelAdmission`, `CreateInstance`, `GetInstance`, `ListInstances` and non-network version/interface/schema discovery. It validates the exact Garm interface/controller/pool environment and bounded stdin. Admission preserves exit 75 plus the strict no-dispatch receipt. Unknown gateway/create outcomes return a constant error, **never not-found or a redispatch permit**.
 
-The RPC routes are POST-only `/v1/admit`, `/v1/create`, `/v1/get` and `/v1/list`. No admin, reconciliation, secret, policy, delete, stop/start or remove-all route exists. Request bodies are limited to 1 MiB with exact, duplicate-free struct fields, including nested bootstrap/tool options. Responses are bounded too. Redirects and ambient proxies are refused. There are no cookies, browser local storage, permissive CORS headers or browser-facing authentication shortcuts. In-flight handler work is capped; admission and intent remain serialized in SQLite.
+The RPC routes are POST-only `/v1/admit`, `/v1/cancel-admission`, `/v1/create`, `/v1/get` and `/v1/list`. No admin, reconciliation, secret, policy, delete, stop/start or remove-all route exists. Request bodies are limited to 1 MiB with exact, duplicate-free struct fields, including nested bootstrap/tool options. Responses are bounded too. Redirects and ambient proxies are refused. There are no cookies, browser local storage, permissive CORS headers or browser-facing authentication shortcuts. In-flight handler work is capped; admission and intent remain serialized in SQLite.
 
-Creates remain **off by default**. Starting the gateway without `-allow-experimental-provisioning` permits authenticated reads only and rejects reserve/create routes. The opt-in flag is an experimental operator action, not a certification: exclusive physical scopes, trusted profiles/images/credentials, blocked alternate provisioning paths and old-writer fencing must be established separately.
+Creates remain **off by default**. Starting the gateway without `-allow-experimental-provisioning` permits authenticated reads only and rejects reserve/cancel/create routes. The opt-in flag is an experimental operator action, not a certification: exclusive physical scopes, trusted profiles/images/credentials, blocked alternate provisioning paths and old-writer fencing must be established separately.
 
 Before serving, and periodically afterwards, the gateway persists a fresh reconciliation barrier and reads Garm, Incus instances and operations. Failed/incomplete/active/unbounded inventories keep new dispatch blocked. Stored SQLite policy wins over `initial_policy` when opening an existing database. There is no API that silently replaces persisted budgets. A server restart does not retry an old dispatch intent.
+
+The cancellation command proves only never-dispatched status within the authoritative ledger and writes a permanent no-recreate tombstone. Any dispatch intent, unknown/confirmed create or linked resource refuses cancellation. No physical delete is sent. See [cancellation constraints](undispatched-cancellation.md).
 
 The periodic read is **not** the admission safety boundary. Every create still requires the durable one-shot claim and explicit limits. Project inventory alone cannot certify the entire physical host. An already committed claim is in-flight, not remotely fenced by a later reconciliation/drain.
 
@@ -69,6 +71,6 @@ Use secret storage/OS credential delivery appropriate for the deployment. These 
 
 [The backup/restore library](backup-restore.md) uses SQLite's consistent online backup and produces admission-blocked standalone artifacts; it is **not a backup CLI or live recovery service**. Restore into a new path only after stopping/fencing all old external writers. A fresh complete authoritative Garm/Incus/operation inventory, including post-backup resources and operations, is mandatory before opt-in scheduling. The service cannot revoke a different process's credentials or make an old database harmless.
 
-Remaining gates: installed-version/physical-scope qualification; executable compatibility against the exact Garm deployment; authoritative recovery and proof-based retirement; job-safe deregistration/drain; read-only then authenticated admin UI; security-event retention and credential rotation procedures. No merge, deployment or production-ready claim is made by this slice.
+Remaining gates: installed-version/physical-scope qualification; executable compatibility against the exact Garm deployment; authoritative recovery and proof-based retirement; job-safe deregistration/drain; admin mutation controls; security-event retention and credential rotation procedures. No merge, deployment or production-ready claim is made by this slice.
 
 The [pinned source-to-executable qualification suite](protocol-qualification.md) exercises actual upstream Garm calls through the compiled facade and this service, including ambiguous create correlation and no redispatch. It remains local fixture qualification, not permission to enable production scheduling.

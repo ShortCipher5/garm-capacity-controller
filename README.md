@@ -30,7 +30,7 @@ The full goal also includes repository labels/priority/idle controls, safe lifec
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
 | Administration | Separate TLS read-token API and responsive React ledger view | Read-only; no policy editor or retirement button |
 | Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
-| Cancellation | Strict never-dispatched cancellation protocol in this draft | Transactional tombstones and preparation-failure integration are a dependent slice |
+| Cancellation | Atomic never-dispatched tombstones and authenticated provider command | Automatic Garm preparation-failure hook qualification follows |
 
 See [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).
 
@@ -78,7 +78,7 @@ CPU is integer millicores and RAM is MiB. Budgets bound **declared allocations**
 
 Every physical provisioning path must pass the same authoritative ledger. Alternate credentials, other projects, queued work from an old writer and untracked host workloads can invalidate that boundary. A later mode change is not a remote fence for an already committed in-flight claim.
 
-Creating, idle, running, failed, unknown and deleting resources stay charged. A timeout, missing list row, restart or provider failure does not prove safe release. Never-dispatched cancellation requires a separate atomic proof and permanent no-recreate identity tombstone; the protocol alone does not provide that proof.
+Creating, idle, running, failed, unknown and deleting resources stay charged. A timeout, missing list row, restart or provider failure does not prove safe release. [Never-dispatched cancellation](docs/undispatched-cancellation.md) requires an exact fresh creating reservation, no dispatch intent or linked resource, and a permanent no-recreate identity tombstone. Every dispatched or uncertain create remains charged.
 
 **Paused is not drained.** Existing idle runners can still receive jobs. Physical retirement needs an assignment/job-safety fence, verified deletion and authoritative recovery. These paths remain blocked rather than hidden behind unsafe controls. See [job-safe retirement](docs/job-safe-retirement.md).
 
