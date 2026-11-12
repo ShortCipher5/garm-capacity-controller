@@ -185,3 +185,23 @@ func TestHostedQualificationHasNoLiveOrSecretInputs(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamGarmLeastPrivilegeLabCannotImplyInstalledQualification(t *testing.T) {
+	harness := repositoryFile(t, "deploy/runtime/garm-least-privilege.sh")
+	for _, required := range []string{"RUNNER_ENVIRONMENT", "github-hosted", "--network none", "--user 65531:65531", "--cap-drop ALL", "no-new-privileges", "umask 077", "CapBnd", "NoNewPrivs", "installed_stack_qualified", "deployment_authorized"} {
+		if !strings.Contains(harness, required) {
+			t.Fatalf("missing least-privilege lab boundary: %s", required)
+		}
+	}
+	for _, forbidden := range []string{"--privileged", "docker login", "docker system prune", "--network host", "--pid host", "secrets."} {
+		if strings.Contains(harness, forbidden) {
+			t.Fatalf("unsafe least-privilege lab operation: %s", forbidden)
+		}
+	}
+	plan := repositoryFile(t, "deploy/garm-least-privilege.md")
+	for _, required := range []string{"new generated empty state", "not authorization", "missing database", "effective runtime UID", "wrong-mount protection", "job-safe retirement/drain"} {
+		if !strings.Contains(plan, required) {
+			t.Fatalf("missing installed-stack gate: %s", required)
+		}
+	}
+}

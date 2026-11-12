@@ -45,3 +45,30 @@ jobs:
           path: qualification-results/*.json
           if-no-files-found: ignore
           retention-days: 7
+  upstream-garm-nonroot-lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Exercise exact public Garm image without root or capabilities
+        run: deploy/runtime/garm-least-privilege.sh
+      - name: Summarize disposable-only boundary
+        if: always()
+        shell: bash
+        run: |
+          echo '## Stock Garm non-root lab' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Generated empty state only. No live volumes, provider configuration, credentials, jobs or installation migration. A pass does not qualify any installed stack.' >> "$GITHUB_STEP_SUMMARY"
+          if test -f qualification-results/garm-nonroot-lab.json; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat qualification-results/garm-nonroot-lab.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: garm-nonroot-lab-public-status
+          path: qualification-results/garm-nonroot-lab.json
+          if-no-files-found: ignore
+          retention-days: 7
