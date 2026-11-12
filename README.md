@@ -66,3 +66,5 @@ The `feat/incus-transport` slice adds a concrete, credential-verified Incus REST
 The `feat/provider-facade` slice binds trusted fixed pool placement, official Garm bootstrap rendering, one-shot dispatch/readback and barrier-first Garm/Incus/operation reconciliation. It is not exposed as a gateway service yet. See [provider facade](docs/provider-facade.md).
 
 The `feat/gateway-rpc` slice adds separate `capacity-gateway` and `capacity-provider` executables with verified mTLS, exact client-leaf allowlisting and read-only defaults. See [service trust, configuration and unfinished lifecycle gates](docs/gateway-service.md).
+
+The `feat/host-admission-controls` slice adds durable trusted host enable/pause controls with a fresh reconciliation barrier and unchanged resource charges. It does **not** deregister idle runners or complete a drain; see [host admission controls](docs/host-admission-controls.md). No provider/admin endpoint is added.

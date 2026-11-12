@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -603,6 +604,7 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 }
 
 type AuditEvent struct {
+	Host       string
 	Sequence   int64
 	Kind       string
 	RequestKey string
@@ -661,6 +663,10 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 			var at string
 			if err := rows.Scan(&event.Sequence, &event.Kind, &event.RequestKey, &at); err != nil {
 				return err
+			}
+			if strings.HasPrefix(event.Kind, "host_mode_") {
+				event.Host = event.RequestKey
+				event.RequestKey = ""
 			}
 			event.RecordedAt, err = time.Parse(time.RFC3339Nano, at)
 			if err != nil {
