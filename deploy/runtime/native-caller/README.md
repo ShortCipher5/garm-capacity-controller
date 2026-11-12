@@ -3,6 +3,8 @@
 This separate disposable lab executes pinned Incus6.0.4's actual
 `instance.CreateInternal` with its actual native test-cluster helper. It is NOT
 the compile-only native experiment, and does not include its dormant patch.
+The fixture is stored as `.go.txt` so the controller module cannot compile
+Incus-internal imports; it is copied as `_test.go` only inside pinned upstream.
 Only the supplied same-package test is overlaid onto pristine upstream commit
 `a99413afd0c742da3bba10eb4f75d639f9dbbd32`.
 
