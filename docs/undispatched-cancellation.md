@@ -3,8 +3,9 @@
 This is a **trusted SQLite transaction** and authenticated experimental provider
 command, not runner retirement or provider DeleteInstance. It makes no GitHub or
 Incus request. No browser mutation, timeout-based release or live rollout is
-enabled. The optional pinned Garm preparation-failure hook is a separate dependent
-qualification; this command does not itself automatically clean up JIT failures.
+enabled. The optional [pinned Garm preparation-failure hook](../integration/garm-v0.2.1/README.md)
+invokes this command after admitted JIT/row preparation failures. It never uses
+a physical Create failure as cancellation proof.
 
 `CancelAdmission` uses the same verified provider mTLS identity and trusted fixed
 pool placement as admission. `/v1/cancel-admission` is unavailable in default
