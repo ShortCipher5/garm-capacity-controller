@@ -1,0 +1,24 @@
+# Allowlist: never send checkout-local secrets, ledgers, fixtures or history to
+# the Docker daemon/build cache. New build inputs require explicit review.
+**
+!Dockerfile
+!go.mod
+!go.sum
+!cmd/
+!cmd/**/*.go
+!internal/
+!internal/**/*.go
+!web/
+!web/package.json
+!web/package-lock.json
+!web/index.html
+!web/src/
+!web/src/**
+# Defense in depth for accidental files in allowed source directories.
+**/*.local.json
+**/*.token
+**/*.pem
+**/*.key
+**/*.db
+**/*.db-*
+**/.env*

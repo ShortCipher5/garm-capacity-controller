@@ -55,7 +55,7 @@ func TestManagementDistinctAuthorizationAndBoundedRequests(t *testing.T) {
 	if send(write, "application/json", "", []byte(strings.Repeat("x", 8193))) != 413 {
 		t.Fatal("unbounded request")
 	}
-	for _, bad := range []string{`{"revision":"a","action":"host_mode","action":"global_budget"}`, `{"unknown":true}`, `{"Action":"host_mode"}`, `{"action":"host_mode","Action":"global_budget"}`, `{"budget":{"CPU_MILLIS":1}}`, `{} {}`, `{"budget":{"cpu_millis":1,"cpu_millis":2}}`} {
+	for _, bad := range []string{`{"revision":"a","action":"host_mode","action":"global_budget"}`, `{"unknown":true}`, `{"reason":null}`, `{"budget":{"cpu_millis":null}}`, `{"Action":"host_mode"}`, `{"action":"host_mode","Action":"global_budget"}`, `{"budget":{"CPU_MILLIS":1}}`, `{} {}`, `{"budget":{"cpu_millis":1,"cpu_millis":2}}`} {
 		if send(write, "application/json", "", []byte(bad)) != 400 {
 			t.Fatalf("bad JSON accepted: %s", bad)
 		}

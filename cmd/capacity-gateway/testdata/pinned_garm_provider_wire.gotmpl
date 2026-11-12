@@ -3,47 +3,142 @@
 package v011
 
 import (
- "context"
-"errors"
- garmErrors "github.com/cloudbase/garm-provider-common/errors"
- "os"
- "testing"
-"strings"
+	"context"
+	"encoding/json"
+	"errors"
+	garmErrors "github.com/cloudbase/garm-provider-common/errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 
- commonParams "github.com/cloudbase/garm-provider-common/params"
- "github.com/cloudbase/garm/config"
- "github.com/cloudbase/garm/params"
- "github.com/cloudbase/garm/runner/common"
+	commonParams "github.com/cloudbase/garm-provider-common/params"
+	"github.com/cloudbase/garm/config"
+	"github.com/cloudbase/garm/params"
+	"github.com/cloudbase/garm/runner/common"
 )
-func TestCapacityGatewayCompiledProviderWire(t *testing.T){
- binary:=os.Getenv("GCC_WIRE_PROVIDER_BINARY");configuration:=os.Getenv("GCC_WIRE_PROVIDER_CONFIG")
- if binary==""||configuration==""{t.Fatal("qualification requires disposable fixture environment")}
- cfg:=&config.Provider{Name:"capacity",ProviderType:params.ExternalProvider,External:config.External{AdmissionEnabled:true,InterfaceVersion:"v0.1.1",ProviderExecutable:binary,ConfigFile:configuration}}
- provider,err:=NewProvider(context.Background(),cfg,"controller-test");if err!=nil{t.Fatal(err)}
- admission,ok:=provider.(common.AdmissionProvider);if !ok{t.Fatal("missing actual pre-JIT interface")}
- cancellation,ok:=provider.(common.AdmissionCancellationProvider);if !ok{t.Fatal("missing actual preparation-failure cleanup interface")}
- unused:=common.AdmissionRequest{Name:"wire-unused",PoolID:"pool-a"}
- if err:=admission.AdmitInstance(context.Background(),unused);err!=nil{t.Fatal(err)}
- for i:=0;i<2;i++{if err:=cancellation.CancelAdmission(context.Background(),unused);err!=nil{t.Fatalf("actual cancellation/replay: %v",err)}}
- if err:=admission.AdmitInstance(context.Background(),unused);err==nil||common.IsAdmissionDeferred(err){t.Fatal("cancelled identity readmitted/deferred")}
- request:=common.AdmissionRequest{Name:"wire-1",PoolID:"pool-a"}
- if err:=admission.AdmitInstance(context.Background(),request);err!=nil{t.Fatalf("actual Garm preflight: %v",err)}
- osType:="linux";arch:="x64";download:="https://example.invalid/disposable-runner.tar.gz";filename:="runner.tar.gz"
- bootstrap:=commonParams.BootstrapInstance{Name:request.Name,PoolID:request.PoolID,OSType:commonParams.Linux,OSArch:commonParams.Amd64,Flavor:"small",Image:"linux",RepoURL:"https://github.com/example/disposable",CallbackURL:"https://example.invalid/callback",MetadataURL:"https://example.invalid/metadata",InstanceToken:"disposable-wire-bootstrap-token",ExtraSpecs:[]byte("{}"),JitConfigEnabled:true,Tools:[]commonParams.RunnerApplicationDownload{{OS:&osType,Architecture:&arch,DownloadURL:&download,Filename:&filename}}}
- cancelledBootstrap:=bootstrap;cancelledBootstrap.Name=unused.Name
- if _,err:=provider.CreateInstance(context.Background(),cancelledBootstrap,common.CreateInstanceParams{});err==nil||common.IsAdmissionDeferred(err){t.Fatal("cancelled identity recreated/deferred")}
- if os.Getenv("GCC_WIRE_OUTCOME")=="unknown"{
-  for i:=0;i<2;i++{_,err:=provider.CreateInstance(context.Background(),bootstrap,common.CreateInstanceParams{});if err==nil||common.IsAdmissionDeferred(err)||errors.Is(err,garmErrors.ErrNotFound)||strings.Contains(err.Error(),"disposable-wire-bootstrap-token")||strings.Contains(err.Error(),"private-unknown-fault"){t.Fatalf("ambiguous create was retried/deferred/leaked: %v",err)}}
-  if err:=cancellation.CancelAdmission(context.Background(),request);err==nil{t.Fatal("unknown dispatch cancelled")}
-  if err:=admission.AdmitInstance(context.Background(),common.AdmissionRequest{Name:"wire-2",PoolID:request.PoolID});!common.IsAdmissionDeferred(err){t.Fatalf("unknown allocation released capacity: %v",err)}
-  return
- }
- for i:=0;i<2;i++{instance,err:=provider.CreateInstance(context.Background(),bootstrap,common.CreateInstanceParams{});if err!=nil||instance.Name!=request.Name||instance.ProviderID!=request.Name||instance.Status!=commonParams.InstanceRunning{t.Fatalf("actual Garm create/replay %+v %v",instance,err)}}
- if err:=cancellation.CancelAdmission(context.Background(),request);err==nil{t.Fatal("confirmed dispatch cancelled")}
- var get common.GetInstanceParams;get.GetInstanceV011.PoolInfo.ID=request.PoolID
- instance,err:=provider.GetInstance(context.Background(),request.Name,get);if err!=nil||instance.Name!=request.Name{t.Fatalf("actual Garm get %+v %v",instance,err)}
- instances,err:=provider.ListInstances(context.Background(),request.PoolID,common.ListInstancesParams{});if err!=nil||len(instances)!=1||instances[0].Name!=request.Name{t.Fatalf("actual Garm list %+v %v",instances,err)}
- // The only slot is durably reserved. This is genuine pre-JIT backpressure,
- // not a Create failure masquerading as an undispatched deferral.
- if err:=admission.AdmitInstance(context.Background(),common.AdmissionRequest{Name:"wire-2",PoolID:request.PoolID});!common.IsAdmissionDeferred(err){t.Fatalf("actual Garm defer was not recognized: %v",err)}
+
+func TestCapacityGatewayCompiledProviderWire(t *testing.T) {
+	binary := os.Getenv("GCC_WIRE_PROVIDER_BINARY")
+	configuration := os.Getenv("GCC_WIRE_PROVIDER_CONFIG")
+	if binary == "" || configuration == "" {
+		t.Fatal("qualification requires disposable fixture environment")
+	}
+	cfg := &config.Provider{Name: "capacity", ProviderType: params.ExternalProvider, External: config.External{AdmissionEnabled: true, CapacityBootstrapMode: common.CapacityBootstrapMode, InterfaceVersion: "v0.1.1", ProviderExecutable: binary, ConfigFile: configuration}}
+	provider, err := NewProvider(context.Background(), cfg, "controller-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, ok := provider.(common.AdmissionProvider)
+	if !ok {
+		t.Fatal("missing actual pre-JIT interface")
+	}
+	cancellation, ok := provider.(common.AdmissionCancellationProvider)
+	if !ok {
+		t.Fatal("missing actual preparation-failure cleanup interface")
+	}
+	unused := common.AdmissionRequest{Name: "wire-unused", PoolID: "pool-a"}
+	if err := admission.AdmitInstance(context.Background(), unused); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := cancellation.CancelAdmission(context.Background(), unused); err != nil {
+			t.Fatalf("actual cancellation/replay: %v", err)
+		}
+	}
+	if err := admission.AdmitInstance(context.Background(), unused); err == nil || common.IsAdmissionDeferred(err) {
+		t.Fatal("cancelled identity readmitted/deferred")
+	}
+	request := common.AdmissionRequest{Name: "wire-1", PoolID: "pool-a"}
+	if err := admission.AdmitInstance(context.Background(), request); err != nil {
+		t.Fatalf("actual Garm preflight: %v", err)
+	}
+	osType := "linux"
+	arch := "x64"
+	download := "https://example.invalid/disposable-runner.tar.gz"
+	filename := "runner.tar.gz"
+	bootstrap := commonParams.BootstrapInstance{Name: request.Name, PoolID: request.PoolID, OSType: commonParams.Linux, OSArch: commonParams.Amd64, Flavor: "small", Image: "linux", RepoURL: "https://github.com/example/disposable", CallbackURL: "https://example.invalid/callback", MetadataURL: "https://example.invalid/metadata", InstanceToken: "disposable-wire-bootstrap-token", ExtraSpecs: []byte("{}"), JitConfigEnabled: true, Tools: []commonParams.RunnerApplicationDownload{{OS: &osType, Architecture: &arch, DownloadURL: &download, Filename: &filename}}}
+
+	preparation, ok := provider.(common.PreparationProvider)
+	if !ok || !preparation.PreparationEnabled() {
+		t.Fatal("missing strict original preparation source hook")
+	}
+	if _, err := provider.CreateInstance(context.Background(), bootstrap, common.CreateInstanceParams{}); err == nil {
+		t.Fatal("direct Create bypassed missing source receipt")
+	}
+	original := common.PreparationRequest{Protocol: common.PreparationVersion, Name: request.Name, PoolID: request.PoolID, InstanceID: "33333333-3333-4333-8333-333333333333", AgentID: 42, Generation: 0, ProviderName: "capacity", EntityType: "repository", EntityID: "22222222-2222-4222-8222-222222222222", ForgeEndpointName: "disposable-forge", JITEnabled: true}
+	for i := 0; i < 2; i++ {
+		if err := preparation.RecordPreparation(context.Background(), original); err != nil {
+			t.Fatalf("actual source command record/replay %v", err)
+		}
+	}
+	changed := original
+	changed.AgentID++
+	if err := preparation.RecordPreparation(context.Background(), changed); err == nil {
+		t.Fatal("changed original receipt accepted")
+	}
+	// This remains an explicit disposable Garm API fixture, NOT actual AddRunner.
+	// The separate full-source harness must establish SQL publication ordering.
+	row := []any{map[string]any{"id": original.InstanceID, "name": original.Name, "pool_id": original.PoolID, "agent_id": original.AgentID, "generation": original.Generation, "provider_name": original.ProviderName, "status": "pending_create", "runner_status": "pending"}}
+	raw, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := os.Getenv("GCC_WIRE_ROW_FILE")
+	if !filepath.IsAbs(target) {
+		t.Fatal("missing disposable row fixture path")
+	}
+	if err := os.WriteFile(target+".new", raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(target+".new", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := preparation.ValidatePreparation(context.Background(), original); err != nil {
+		t.Fatalf("actual row validation %v", err)
+	}
+	cancelledBootstrap := bootstrap
+	cancelledBootstrap.Name = unused.Name
+	if _, err := provider.CreateInstance(context.Background(), cancelledBootstrap, common.CreateInstanceParams{}); err == nil || common.IsAdmissionDeferred(err) {
+		t.Fatal("cancelled identity recreated/deferred")
+	}
+	if os.Getenv("GCC_WIRE_OUTCOME") == "unknown" {
+		for i := 0; i < 2; i++ {
+			_, err := provider.CreateInstance(context.Background(), bootstrap, common.CreateInstanceParams{})
+			if err == nil || common.IsAdmissionDeferred(err) || errors.Is(err, garmErrors.ErrNotFound) || strings.Contains(err.Error(), "disposable-wire-bootstrap-token") || strings.Contains(err.Error(), "private-unknown-fault") {
+				t.Fatalf("ambiguous create was retried/deferred/leaked: %v", err)
+			}
+		}
+		if err := cancellation.CancelAdmission(context.Background(), request); err == nil {
+			t.Fatal("unknown dispatch cancelled")
+		}
+		if err := admission.AdmitInstance(context.Background(), common.AdmissionRequest{Name: "wire-2", PoolID: request.PoolID}); !common.IsAdmissionDeferred(err) {
+			t.Fatalf("unknown allocation released capacity: %v", err)
+		}
+		return
+	}
+	for i := 0; i < 2; i++ {
+		instance, err := provider.CreateInstance(context.Background(), bootstrap, common.CreateInstanceParams{})
+		if err != nil || instance.Name != request.Name || instance.ProviderID != request.Name || instance.Status != commonParams.InstanceRunning {
+			t.Fatalf("actual Garm create/replay %+v %v", instance, err)
+		}
+	}
+	if err := cancellation.CancelAdmission(context.Background(), request); err == nil {
+		t.Fatal("confirmed dispatch cancelled")
+	}
+	var get common.GetInstanceParams
+	get.GetInstanceV011.PoolInfo.ID = request.PoolID
+	instance, err := provider.GetInstance(context.Background(), request.Name, get)
+	if err != nil || instance.Name != request.Name {
+		t.Fatalf("actual Garm get %+v %v", instance, err)
+	}
+	instances, err := provider.ListInstances(context.Background(), request.PoolID, common.ListInstancesParams{})
+	if err != nil || len(instances) != 1 || instances[0].Name != request.Name {
+		t.Fatalf("actual Garm list %+v %v", instances, err)
+	}
+	// The only slot is durably reserved. This is genuine pre-JIT backpressure,
+	// not a Create failure masquerading as an undispatched deferral.
+	if err := admission.AdmitInstance(context.Background(), common.AdmissionRequest{Name: "wire-2", PoolID: request.PoolID}); !common.IsAdmissionDeferred(err) {
+		t.Fatalf("actual Garm defer was not recognized: %v", err)
+	}
 }

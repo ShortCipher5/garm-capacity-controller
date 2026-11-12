@@ -2,6 +2,26 @@
 
 **Staged source patch and executable test harness. Not deployed. Not a complete controller or gateway.** This applies only to [Garm v0.2.1, commit 154638445c3949c1958b01812f69d9a1e4d82684](https://github.com/cloudbase/garm/tree/154638445c3949c1958b01812f69d9a1e4d82684). The exact installed Incus provider binary remains unqualified. Do not apply this patch to a live controller from these instructions.
 
+## Explicit bootstrap and no-template enrollment
+
+Opted-in normal pools require the exact configured gateway-owned bootstrap mode,
+`template_id: 0` and empty/`{}` extra specs. Custom templates, shell mode and custom
+options are refused BEFORE admission/JIT, never silently dropped. Only this mode
+skips Garm's wrapper injection; the gateway's custom-script rejection is unchanged.
+A narrow pinned API extension maps explicit zero to SQL NULL only for providers
+configured for this exact capability. This is NOT stock Garm compatibility:
+stock create rejects template zero and stock generic update violates its FK.
+Legacy nil/default/nonzero selection is unchanged; legacy zero stays rejected.
+See [source contract and official HTTP-controller/SQLite tests](source-preparation.md).
+
+## Original-source row preparation
+
+The source patch now also requires original preparation receipts for opted-in
+normal pools, including JIT. See [exact ordering, failure holds and offline
+qualification](source-preparation.md). The prior zero-agent marker is not a
+normal-JIT proof. Scale-set provisioning is held in receipt mode; compatible
+schema/issuer/gateway integration remains a separate mandatory gate.
+
 ## Why a pre-JIT hook, not a provider-error trick
 
 Stock Garm interprets Create errors as failure, attempts cleanup, increments bounded failure attempts during recovery and may delete runner state. Both normal pools and scale sets do this. There is no existing benign capacity-defer wire outcome.
@@ -19,6 +39,7 @@ External provider configuration must explicitly opt in:
 ```toml
 interface_version = "v0.1.1"
 admission_enabled = true
+capacity_bootstrap_mode = "gateway-owned-default-cloudinit/v1"
 ```
 
 This is an addition to the external provider section, not a complete installation configuration. Default/legacy providers are unchanged. Enabling it against an incompatible executable fails closed; do not enable it against the unmodified Incus provider binary.

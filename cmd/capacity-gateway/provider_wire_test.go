@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gatewayrpc"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
@@ -83,6 +84,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	var submittedChecks atomic.Int32
 	var evidenceChecks atomic.Int32
 	databasePath := filepath.Join(directory, "ledger.db")
+	rowFile := filepath.Join(directory, "garm-public-row.json")
 	instances := map[string]map[string]string{}
 	const operation = "12345678-1234-1234-1234-123456789abc"
 	const uuid = "11111111-1111-4111-8111-111111111111"
@@ -180,10 +182,27 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		}
 	}))
 	garm := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/instances" {
-			t.Error("wrong actual Garm inventory route")
+		if r.Header.Get("Authorization") != "Bearer disposable-inventory-token" {
+			t.Error("wrong Garm fixture authentication")
 		}
-		_, _ = w.Write([]byte(`[]`))
+		switch r.URL.Path {
+		case "/api/v1/pools/pool-a":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "pool-a", "provider_name": "capacity", "repo_id": "22222222-2222-4222-8222-222222222222", "generation": 0, "enable_shell": false, "enabled": true, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "endpoint": map[string]string{"name": "disposable-forge"}})
+		case "/api/v1/instances":
+			raw, err := os.ReadFile(rowFile)
+			if errors.Is(err, os.ErrNotExist) {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			if err != nil {
+				http.Error(w, "inventory unavailable", 503)
+				return
+			}
+			_, _ = w.Write(raw)
+		default:
+			t.Error("unexpected actual Garm fixture route")
+			http.NotFound(w, r)
+		}
 	}))
 	token := filepath.Join(directory, "garm.token")
 	if err := os.WriteFile(token, []byte("disposable-inventory-token"), 0600); err != nil {
@@ -197,6 +216,12 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	fingerprint := sha256.Sum256(keys.provider.Certificate[0])
 	budget := admission.Resources{CPU: 1000, RAM: 1024, Runners: 1}
 	config := configuration{Listen: address, Controller: "controller-test", Database: databasePath, InitialPolicy: admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}, Pools: map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, Hosts: map[string]hostConfiguration{"a": {Endpoint: incus.URL, Project: "runners", TLS: keys.otherFiles}}, Garm: garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}}, ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(fingerprint[:])}}
+	sourceFingerprint := sha256.Sum256(keys.other.Certificate[0])
+	sourceActor := hex.EncodeToString(sourceFingerprint[:])
+	generationZero, jitEnabled := uint64(0), true
+	config.BootstrapMode = "gateway-owned-default-cloudinit/v1"
+	config.SourceFingerprints = []string{sourceActor}
+	config.PreparationPools = map[string]gateway.PreparationPoolPolicy{"pool-a": {ProviderName: "capacity", EntityType: "repository", EntityID: "22222222-2222-4222-8222-222222222222", ForgeEndpointName: "disposable-forge", Generation: &generationZero, JITEnabled: &jitEnabled, SourceFingerprints: []string{sourceActor}}}
 	running, cancelService := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	initializeRuntimeFixture(t, &config)
@@ -234,11 +259,36 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Merely trusted/provider-authorized leaves cannot issue source metadata,
+	// and the source leaf cannot take ordinary provider actions.
+	request := garmprotocol.PreparationRequest{Protocol: garmprotocol.PreparationVersion, Name: "wire-1", PoolID: "pool-a", InstanceID: "33333333-3333-4333-8333-333333333333", AgentID: 42, Generation: 0, ProviderName: "capacity", EntityType: "repository", EntityID: "22222222-2222-4222-8222-222222222222", ForgeEndpointName: "disposable-forge", JITEnabled: true}
+	if _, err := client.RecordPreparation(ctx, request); err == nil {
+		t.Fatal("ordinary provider leaf minted source proof")
+	}
+	sourceTLS, err := securefiles.LoadTLS(keys.otherFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceClient, err := gatewayrpc.NewClient("https://"+address, sourceTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sourceClient.Close()
+	if _, _, err := sourceClient.Admit(ctx, garmprotocol.Request{Protocol: garmprotocol.Version, Name: "source-role-bypass", PoolID: "pool-a"}); err == nil {
+		t.Fatal("source leaf admitted provider work")
+	}
+	outside := request
+	outside.PoolID = "outside-route"
+	if _, err := sourceClient.RecordPreparation(ctx, outside); err == nil {
+		t.Fatal("source leaf escaped exact route grant")
+	}
 	providerConfiguration := struct {
-		Gateway    string               `json:"gateway"`
-		Controller string               `json:"controller"`
-		TLS        securefiles.TLSFiles `json:"tls"`
-	}{"https://" + address, "controller-test", keys.providerFiles}
+		Gateway       string                `json:"gateway"`
+		Controller    string                `json:"controller"`
+		TLS           securefiles.TLSFiles  `json:"tls"`
+		SourceTLS     *securefiles.TLSFiles `json:"source_tls"`
+		BootstrapMode string                `json:"bootstrap_mode"`
+	}{Gateway: "https://" + address, Controller: "controller-test", TLS: keys.providerFiles, SourceTLS: &keys.otherFiles, BootstrapMode: "gateway-owned-default-cloudinit/v1"}
 	raw, err := json.Marshal(providerConfiguration)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +299,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	}
 	command := exec.CommandContext(ctx, goBinary, "test", "-mod=vendor", "-tags", "testing", "-race", "-count=1", "-timeout=3m", "-run", "^TestCapacityGatewayCompiledProviderWire$", "./runner/providers/v0.1.1")
 	command.Dir = work
-	command.Env = append(os.Environ(), "GCC_WIRE_PROVIDER_BINARY="+binary, "GCC_WIRE_PROVIDER_CONFIG="+providerPath, "GCC_WIRE_OUTCOME="+mode)
+	command.Env = append(os.Environ(), "GCC_WIRE_PROVIDER_BINARY="+binary, "GCC_WIRE_PROVIDER_CONFIG="+providerPath, "GCC_WIRE_OUTCOME="+mode, "GCC_WIRE_ROW_FILE="+rowFile)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("actual pinned Garm/executable protocol failed: %v\n%s", err, output)
@@ -264,6 +314,10 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	receipt, err := store.LookupDispatch(ctx, hex.EncodeToString(requestKey[:]))
 	if err != nil || receipt.State != mode || receipt.OperationID != operation || receipt.ResourceID != "wire-1" {
 		t.Fatalf("lost durable dispatch correlation: %+v %v", receipt, err)
+	}
+	original, err := store.LookupOriginalPreparation(ctx, hex.EncodeToString(requestKey[:]))
+	if err != nil || original.Original != request || original.Source.Role != "source" || original.Source.ClientFingerprint != sourceActor || original.RecordSequence <= 0 || original.HostBindingSequence != receipt.HostBindingSequence {
+		t.Fatalf("compiled source receipt lost identity/role/binding %+v %v", original, err)
 	}
 	evidence, evidenceErr := store.LookupCreateEvidence(ctx, hex.EncodeToString(requestKey[:]))
 	if mode == "confirmed" {
