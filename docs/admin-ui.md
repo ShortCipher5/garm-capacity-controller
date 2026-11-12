@@ -48,7 +48,7 @@ These tests are local evidence, not live deployment or infrastructure qualificat
 
 ## Experimental ledger policy editor
 
-Management is **off by default**. Supply a separate owner-only `admin.management_token_file` containing an independently generated 32-byte random lowercase-hex token, and start the gateway with `--allow-experimental-management`. Both are required; a file without the flag, a flag without the file, or reuse of the read token fails startup. Provider mTLS identities and the read token never authorize these writes. The management token does not implicitly grant the read role. No Garm/Incus credential belongs in either browser field.
+Management is **off by default**. Supply a separate owner-only `admin.management_token_file` containing an independently generated 32-byte random lowercase-hex token, and start the gateway with `--allow-experimental-management`. Both are required; a file without an enabled management capability, a flag without the file, or reuse of the read token fails startup. The optional read-only onboarding probe has its own independent flag and credential validation; enabling it does not enable policy writes. Provider mTLS identities and the read token never authorize these writes. The management token does not implicitly grant the read role. No Garm/Incus credential belongs in either browser field.
 
 After connecting with the read token, the policy section offers host enabled/disabled mode, global budget, host budget and existing ledger-pool budget. Review a concrete change and an audit reason, then enter the separate management token to apply it. The token input clears on submission; each action requires it again. Cancel clears the review without submitting. Disconnect/page exit removes the form, clears credentials and fences late responses. An interrupted request may already have committed: reconnect and inspect policy/audit rather than assuming cancellation undoes it.
 
@@ -95,3 +95,11 @@ scope import is a separate workflow and is not implemented. Mode/budget controls
 remain distinct; there is no clear/reset/import button. Enabling host mode cannot
 erase historical exclusions or qualify backend capacity. See the
 [dynamic management design gaps](dynamic-management-design.md).
+
+## Optional read-only onboarding preflight
+
+[Incus onboarding preflight](incus-onboarding-preflight.md) checks only static
+private transport references. Discovery uses the read role; an explicit audited
+read additionally requires the independent management role and probe opt-in.
+The UI never accepts a URL, key or certificate and cannot enroll/activate a
+backend or qualify physical capacity. Admission state is unchanged; audit grows.

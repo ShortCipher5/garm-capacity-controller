@@ -146,6 +146,14 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	if config.Admin != nil {
 		config.Admin.garmRuntime = remoteManager
 	}
+	onboardingManager, closeOnboarding, err := newOnboardingControl(config.Admin, store)
+	if err != nil {
+		return err
+	}
+	defer closeOnboarding()
+	if config.Admin != nil {
+		config.Admin.onboardingRuntime = onboardingManager
+	}
 	adminServer, closeAdmin, err := newAdminServer(config.Admin, store, provision)
 	if err != nil {
 		return err
@@ -255,6 +263,7 @@ func main() {
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
+	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
 	flag.Parse()
 	raw, err := securefiles.Read(*configPath, 1<<20)
 	if err != nil {
@@ -279,6 +288,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableExperimentalGarmManagement = true
+	}
+	if *onboardingProbes {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "onboarding probes require separate admin authorization and explicit opt-in")
+			os.Exit(1)
+		}
+		config.Admin.EnableExperimentalOnboardingProbes = true
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()

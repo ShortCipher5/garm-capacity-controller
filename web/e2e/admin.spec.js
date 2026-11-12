@@ -250,3 +250,46 @@ test("ambiguous committed Garm write remains blocked after refresh and reconnect
   await expect(page.getByRole("button", { name: "Review Garm change" })).toBeDisabled();
   await expect(page.locator(".garm-audit summary").first()).toContainText("unknown");
 });
+
+test("allowlisted Incus preflight is authenticated, audited, and never enrollment", async ({ page }) => {
+  await connect(page);
+  await page.getByRole("button", { name: "Load preflight profiles", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Allowlisted Incus profile", exact: true })).toHaveValue("candidate-b");
+  await page.getByLabel("Preflight audit reason", { exact: true }).fill("browser onboarding read-only check");
+  await page.getByLabel("Preflight management token", { exact: true }).fill(token);
+  await page.getByRole("button", { name: "Run read-only preflight", exact: true }).click();
+  await expect(page.locator("#onboarding-preflight")).toContainText("read token cannot authorize a probe");
+  await expect(page.getByLabel("Preflight management token", { exact: true })).toHaveValue("");
+  await page.getByLabel("Preflight management token", { exact: true }).fill("c".repeat(64));
+  await page.getByRole("button", { name: "Run read-only preflight", exact: true }).dblclick();
+  await expect(page.locator(".preflight-result")).toContainText("Authenticated daemon observation: available · version 6.0.4");
+  await expect(page.locator(".preflight-result")).toContainText("No enrollment or activation occurred. Capacity remains unqualified.");
+  await expect(page.locator("body")).not.toContainText("private-fixture-onboarding-daemon");
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  await expect(page.getByText("onboarding_probe_requested", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("onboarding_probe_completed", { exact: true })).toHaveCount(1);
+  await expect(page.locator("#hosts h3")).toHaveCount(1);
+  await expect(page.locator("#onboarding-preflight").getByRole("button", { name: /Enroll|Activate|Reset|Clear legacy/ })).toHaveCount(0);
+  expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0,0]);
+});
+
+test("disconnect during preflight cannot restore a result or write credential", async ({ page }) => {
+  await connect(page);
+  await page.getByRole("button", { name: "Load preflight profiles", exact: true }).click();
+  await page.getByLabel("Preflight audit reason", { exact: true }).fill("interrupted onboarding read");
+  await page.getByLabel("Preflight management token", { exact: true }).fill("c".repeat(64));
+  let release, entered;
+  const started = new Promise((resolve) => entered = resolve);
+  await page.route("**/admin/api/v1/onboarding/probe", async (route) => { entered(); await new Promise((resolve) => release = resolve); try { await route.continue(); } catch {} });
+  await page.getByRole("button", { name: "Run read-only preflight", exact: true }).click();
+  await started;
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  release();
+  await expect(page.getByLabel("Admin read token")).toHaveValue("");
+  await expect(page.locator(".preflight-result")).toHaveCount(0);
+  await expect(page.getByLabel("Preflight management token", { exact: true })).toHaveCount(0);
+  await page.unroute("**/admin/api/v1/onboarding/probe");
+  await connect(page);
+  await page.getByRole("button", { name: "Load preflight profiles", exact: true }).click();
+  await expect(page.getByLabel("Preflight management token", { exact: true })).toHaveValue("");
+});

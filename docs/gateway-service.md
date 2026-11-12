@@ -99,3 +99,10 @@ allowlists, owner-only durable journal, independent remote-write CLI opt-in and
 operator external-writer acknowledgement. See [Garm management](garm-management.md).
 The provider inventory credential is not reused. No registration, native-placement,
 job-safe retirement or production recovery gate is supplied by this editor.
+
+Optional `admin.incus_onboarding.profiles` supplies static private Incus transport
+references for [read-only onboarding preflight](incus-onboarding-preflight.md).
+No startup probe or dynamic host enrollment occurs. Explicit checks additionally
+require `--allow-experimental-onboarding-probes` and the separate management
+token, without enabling unrelated ledger-policy writes; successful daemon observations never qualify capacity or activate
+placement.

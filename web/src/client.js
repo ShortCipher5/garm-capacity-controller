@@ -1,3 +1,4 @@
+import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboarding-client.js";
 import { validateGarm } from "./garm-client.js";
 
 // This client has no persistence and no configurable remote endpoint.
@@ -70,6 +71,8 @@ export class ReadSession {
   #token = "";
   #generation = 0;
   #request;
+  #onboardingRequest;
+  #onboardingGeneration=0;
   #remoteRequest;
   #remoteGeneration = 0;
   constructor(fetcher = globalThis.fetch) {
@@ -78,6 +81,9 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+    this.#onboardingGeneration++;
+    this.#onboardingRequest?.abort();
+    this.#onboardingRequest=undefined;
     this.#generation++;
     this.#remoteGeneration++;
     this.#remoteRequest?.abort();
@@ -94,6 +100,26 @@ export class ReadSession {
       );
     this.#token = token;
     return this.refresh();
+  }
+  async onboardingSnapshot() {
+    if (!this.#token) throw new SessionEnded();
+    this.#onboardingRequest?.abort();
+    const generation = ++this.#onboardingGeneration;
+    const controller = new AbortController(); this.#onboardingRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await this.fetcher("/admin/api/v1/onboarding", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (generation !== this.#onboardingGeneration) throw new SessionEnded();
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new OnboardingResponseError("Onboarding preflight profiles are unavailable.");
+      const result = validateOnboardingDiscovery(await response.json());
+      if (generation !== this.#onboardingGeneration) throw new SessionEnded();
+      return result;
+    } catch (error) {
+      if (generation !== this.#onboardingGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
+      if (error instanceof SessionEnded || error instanceof OnboardingResponseError) throw error;
+      throw new OnboardingResponseError("Onboarding preflight discovery failed. No server was enrolled.");
+    } finally { clearTimeout(timeout); }
   }
   async garmSnapshot() {
     if (!this.#token) throw new SessionEnded();
