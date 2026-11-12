@@ -3,8 +3,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"log"
+	"math/big"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -17,6 +25,30 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 )
+
+// testCertificate creates a fresh, in-memory key for this disposable server.
+// Only its public-key fingerprint is written for the test browser allowlist.
+func testCertificate() (tls.Certificate, string, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "disposable-admin-browser-test"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, DNSNames: []string{"localhost"}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return tls.Certificate{}, "", err
+	}
+	hash := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, base64.StdEncoding.EncodeToString(hash[:]), nil
+}
 
 func main() {
 	dir, err := os.MkdirTemp("", "admin-browser-test-")
@@ -57,7 +89,16 @@ func main() {
 	server := httptest.NewUnstartedServer(handler)
 	server.Listener.Close()
 	server.Listener = listener
-	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	certificate, spki, err := testCertificate()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Worker fixtures read this only after Playwright's readiness probe succeeds.
+	if err := os.WriteFile(".admin-test-spki", []byte(spki+"\n"), 0600); err != nil {
+		log.Fatal(err)
+	}
+	defer os.Remove(".admin-test-spki")
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
 	server.StartTLS()
 	defer server.Close()
 	log.Print("Disposable browser fixture ready on https://127.0.0.1:4173")

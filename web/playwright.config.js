@@ -7,11 +7,8 @@ export default defineConfig({
   use: {
     baseURL: "https://127.0.0.1:4173",
     browserName: "chromium",
-    ignoreHTTPSErrors: true,
+    ignoreHTTPSErrors: false,
     viewport: { width: 1440, height: 1100 },
-    launchOptions: process.env.CHROMIUM_PATH
-      ? { executablePath: process.env.CHROMIUM_PATH }
-      : {},
   },
   webServer: {
     command: 'npm run build && "${GO_BINARY:-go}" run ./e2e/server',

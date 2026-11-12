@@ -313,13 +313,28 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			if creates.Load() != 0 {
 				t.Fatal("admission/read paths dispatched a physical create")
 			}
+			if !provision {
+				// A verified TLS connection that has not finished its first HTTP header is
+				// StateNew. net/http deliberately grants it a >5s quiescence window during
+				// graceful Shutdown; do not impose a shorter test deadline than the server.
+				pending, err := tls.Dial("tcp", address, clientTLS)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pending.Close()
+				if _, err := pending.Write([]byte("POST /v1/list HTTP/1.1\r\nHost: localhost\r\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cancel()
 			select {
 			case err := <-done:
 				if err != nil {
 					t.Fatalf("shutdown %v", err)
 				}
-			case <-time.After(5 * time.Second):
+			// Both listeners each have a configured 15s graceful window. This
+			// bound includes those windows and scheduling margin, not an infinite wait.
+			case <-time.After(35 * time.Second):
 				t.Fatal("service did not stop")
 			}
 			adminConnection, adminErr := net.DialTimeout("tcp", adminAddress, 100*time.Millisecond)

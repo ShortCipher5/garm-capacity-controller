@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./fixtures.js";
 const token = "a".repeat(64);
 async function connect(page) {
   await page.goto("/");
