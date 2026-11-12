@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -153,7 +154,7 @@ func (f *Facade) verified(ctx context.Context, req admission.Request, name strin
 // The bootstrap and rendered userdata are neither journaled nor logged here.
 func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance) (common.ProviderInstance, error) {
 	req, policy, err := f.request(bootstrap.Name, bootstrap.PoolID)
-	if err != nil || bootstrap.Flavor != policy.Flavor || bootstrap.Image != policy.Image || bootstrap.OSType != common.Linux || bootstrap.OSArch != policy.Arch || len(bootstrap.ExtraSpecs) != 0 {
+	if err != nil || bootstrap.Flavor != policy.Flavor || bootstrap.Image != policy.Image || bootstrap.OSType != common.Linux || bootstrap.OSArch != policy.Arch || (len(bootstrap.ExtraSpecs) != 0 && !bytes.Equal(bytes.TrimSpace(bootstrap.ExtraSpecs), []byte("{}"))) {
 		return common.ProviderInstance{}, ErrPolicy
 	}
 	// Restrict this slice to the official default cloud-init path, not custom scripts.

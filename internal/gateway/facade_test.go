@@ -108,7 +108,7 @@ func bootstrap(name, pool string) common.BootstrapInstance {
 	arch := "x64"
 	download := "https://example.invalid/disposable-runner.tar.gz"
 	filename := "actions-runner-linux-x64.tar.gz"
-	return common.BootstrapInstance{Name: name, PoolID: pool, OSType: common.Linux, OSArch: common.Amd64, Flavor: "bounded-small", Image: "pinned-linux", RepoURL: "https://github.com/example/disposable", CallbackURL: "https://example.invalid/callback", MetadataURL: "https://example.invalid/metadata", InstanceToken: "bootstrap-secret-must-not-persist", JitConfigEnabled: true, Tools: []common.RunnerApplicationDownload{{OS: &osType, Architecture: &arch, DownloadURL: &download, Filename: &filename}}}
+	return common.BootstrapInstance{Name: name, PoolID: pool, OSType: common.Linux, OSArch: common.Amd64, Flavor: "bounded-small", Image: "pinned-linux", RepoURL: "https://github.com/example/disposable", CallbackURL: "https://example.invalid/callback", MetadataURL: "https://example.invalid/metadata", InstanceToken: "bootstrap-secret-must-not-persist", ExtraSpecs: []byte("{}"), JitConfigEnabled: true, Tools: []common.RunnerApplicationDownload{{OS: &osType, Architecture: &arch, DownloadURL: &download, Filename: &filename}}}
 }
 func preflight(t *testing.T, f *Facade, name, pool string) {
 	t.Helper()
