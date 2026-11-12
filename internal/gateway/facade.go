@@ -50,10 +50,12 @@ type PoolPolicy struct {
 }
 
 type Facade struct {
-	store      *admission.SQLiteStore
-	controller string
-	pools      map[string]PoolPolicy
-	hosts      map[string]Backend
+	store             *admission.SQLiteStore
+	controller        string
+	pools             map[string]PoolPolicy
+	hosts             map[string]Backend
+	preparationRoutes map[string]preparationRoute
+	preparationSource PreparationSource
 }
 
 func key(controller, pool, name string) string {
@@ -61,7 +63,7 @@ func key(controller, pool, name string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func New(ctx context.Context, store *admission.SQLiteStore, controller string, pools map[string]PoolPolicy, hosts map[string]Backend) (*Facade, error) {
+func New(ctx context.Context, store *admission.SQLiteStore, controller string, pools map[string]PoolPolicy, hosts map[string]Backend, preparations ...PreparationSettings) (*Facade, error) {
 	if store == nil || controller == "" || strings.ContainsRune(controller, 0) || len(pools) == 0 || len(hosts) == 0 {
 		return nil, ErrPolicy
 	}
@@ -114,6 +116,14 @@ func New(ctx context.Context, store *admission.SQLiteStore, controller string, p
 		policy.Profiles = append([]string(nil), policy.Profiles...)
 		f.pools[id] = policy
 	}
+	if len(preparations) > 1 {
+		return nil, ErrPolicy
+	}
+	if len(preparations) == 1 {
+		if err := f.configurePreparations(preparations[0]); err != nil {
+			return nil, err
+		}
+	}
 	return f, nil
 }
 
@@ -140,7 +150,13 @@ func (f *Facade) Admit(ctx context.Context, request garmprotocol.Request) (int, 
 	if err != nil {
 		return 0, nil, err
 	}
-	_, err = f.store.AdmitPlacement(ctx, admission.PlacementRequest{Key: req.Key, Pool: req.Pool, Resources: req.Resources, Execution: executionImage(f.controller, request.Name, policy), Hosts: append([]string(nil), policy.Hosts...), Strategy: policy.Strategy})
+	if f.preparationAdmissionCheck(ctx, req.Pool) != nil {
+		// Known upstream/configuration drift is benign backpressure BEFORE a
+		// reservation or source JIT. Never adopt a newer generation silently.
+		err = admission.ErrReconciliation
+	} else {
+		_, err = f.store.AdmitPlacement(ctx, admission.PlacementRequest{Key: req.Key, Pool: req.Pool, Resources: req.Resources, Execution: executionImage(f.controller, request.Name, policy), Hosts: append([]string(nil), policy.Hosts...), Strategy: policy.Strategy})
+	}
 	no := false
 	response := garmprotocol.Response{Protocol: garmprotocol.Version, Name: request.Name, PoolID: request.PoolID, Dispatched: &no}
 	exit := 0
@@ -179,6 +195,15 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	if err != nil || bootstrap.Flavor != policy.Flavor || bootstrap.Image != policy.Image || bootstrap.OSType != common.Linux || bootstrap.OSArch != policy.Arch || (len(bootstrap.ExtraSpecs) != 0 && !bytes.Equal(bytes.TrimSpace(bootstrap.ExtraSpecs), []byte("{}"))) {
 		return common.ProviderInstance{}, ErrPolicy
 	}
+	requirePreparation := f.PreparationConfigured() || f.RuntimeOriginalPreparationRequired()
+	var sourceReceipt admission.OriginalPreparationReceipt
+	var sourceRow admission.GarmRowObservation
+	if requirePreparation {
+		sourceReceipt, sourceRow, err = f.preparedCreate(ctx, plan, bootstrap.JitConfigEnabled)
+		if err != nil {
+			return common.ProviderInstance{}, ErrUnavailable
+		}
+	}
 	// Restrict this slice to the official default cloud-init path, not custom scripts.
 	if bootstrap.UserDataOptions.EnableBootDebug || len(bootstrap.UserDataOptions.ExtraPackages) != 0 {
 		return common.ProviderInstance{}, ErrPolicy
@@ -199,7 +224,7 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	if err != nil {
 		return common.ProviderInstance{}, ErrUnavailable
 	}
-	_, err = f.store.ExecutePlannedDispatch(ctx, plan, binding, func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
+	execute := func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
 		created, createErr := f.hosts[req.Host].Create(ctx, spec)
 		receipt := admission.DispatchReceipt{State: "unknown", OperationID: created.OperationID, ResourceID: created.ResourceID}
 		if createErr != nil {
@@ -229,14 +254,19 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 		}
 		receipt.State = "confirmed"
 		return receipt, nil
-	})
+	}
+	if requirePreparation {
+		_, err = f.store.ExecutePreparedDispatch(ctx, plan, binding, sourceReceipt, sourceRow, execute)
+	} else {
+		_, err = f.store.ExecutePlannedDispatch(ctx, plan, binding, execute)
+	}
 	if err != nil {
 		// A confirmed replay may return the same verified resource, but never create.
 		if !errors.Is(err, admission.ErrDispatchClaimed) {
 			return common.ProviderInstance{}, ErrUnavailable
 		}
 		record, lookupErr := f.store.LookupDispatch(ctx, req.Key)
-		if lookupErr != nil || record.State != "confirmed" || record.ResourceID != bootstrap.Name || record.HostBindingSequence != binding.Sequence {
+		if lookupErr != nil || record.State != "confirmed" || record.ResourceID != bootstrap.Name || record.HostBindingSequence != binding.Sequence || (requirePreparation && record.OriginalPreparationSequence != sourceReceipt.RecordSequence) {
 			return common.ProviderInstance{}, ErrUnavailable
 		}
 	}

@@ -76,7 +76,12 @@ func TestServiceBothModesRejectMissingRuntimeStateWithoutCreatingIt(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				err = serveOnListener(context.Background(), configuration{Database: database, IdentityFile: identity}, provision, listener)
+				config := configuration{Database: database, IdentityFile: identity}
+				if provision {
+					config.BootstrapMode = "gateway-owned-default-cloudinit/v1"
+					config.SourceFingerprints = []string{strings.Repeat("c", 64)}
+				}
+				err = serveOnListener(context.Background(), config, provision, listener)
 				if !errors.Is(err, admission.ErrRuntimeLineage) {
 					t.Fatalf("service did not reject lineage first: %v", err)
 				}

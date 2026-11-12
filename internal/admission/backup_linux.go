@@ -332,5 +332,8 @@ func sqliteCheckArtifact(ctx context.Context, s *SQLiteStore) error {
 	if _, err = s.Snapshot(ctx); err != nil {
 		return err
 	}
-	return sqliteCheckExecutionPlans(ctx, s)
+	if err := sqliteCheckExecutionPlans(ctx, s); err != nil {
+		return err
+	}
+	return sqliteCheckOriginalPreparations(ctx, s)
 }

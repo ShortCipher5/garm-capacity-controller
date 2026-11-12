@@ -131,6 +131,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </button>
         </header>
         <Notice />
+        {data.legacy_source_preparations > 0 && <div className="notice" role="status"><strong>Original source preparation history unavailable</strong><span>{data.legacy_source_preparations} historical reservations remain charged but cannot be retroactively qualified for creation. Reconciliation, current runner metadata and this console cannot reset or import their original JIT history.</span></div>}
         {data.legacy_unplanned_reservations > 0 && <div className="notice" role="status"><strong>Historical execution plans unavailable</strong><span>{data.legacy_unplanned_reservations} reservations remain charged but lack immutable execution plans. They cannot be created or automatically imported. This console cannot reset or clear their history.</span></div>}
         {data.hosts.some((host) => host.backend_binding_status === "legacy_scope_import_required") && <div className="notice" role="status"><strong>Legacy backend scope import required</strong><span>Previously charged hosts cannot auto-bind, including after later cancellation removes charges. A separate qualified scope-import workflow is required and is not implemented. Mode and budget edits do not clear this exclusion.</span></div>}
         <div className="snapshot-meta" role="status">

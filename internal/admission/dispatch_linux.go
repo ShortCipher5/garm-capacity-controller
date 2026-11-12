@@ -37,13 +37,14 @@ func (p DispatchPermit) ReservationKey() string { return p.key }
 func (p DispatchPermit) ID() string             { return p.id }
 
 type DispatchRecord struct {
-	HostBindingSequence int64
-	ReservationKey      string
-	State               string
-	OperationID         string
-	ResourceID          string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	HostBindingSequence         int64
+	OriginalPreparationSequence int64
+	ReservationKey              string
+	State                       string
+	OperationID                 string
+	ResourceID                  string
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
 }
 
 // DispatchReceipt contains bounded identifiers only, never bootstrap payloads,
@@ -57,7 +58,7 @@ type DispatchReceipt struct {
 func dispatchRecord(tx *sql.Tx, key string) (DispatchRecord, string, error) {
 	var record DispatchRecord
 	var permit, created, updated string
-	err := tx.QueryRow("SELECT reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,COALESCE(host_binding_sequence,0) FROM dispatches WHERE reservation_key=?", key).Scan(&record.ReservationKey, &permit, &record.State, &record.OperationID, &record.ResourceID, &created, &updated, &record.HostBindingSequence)
+	err := tx.QueryRow("SELECT reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,COALESCE(host_binding_sequence,0),COALESCE(original_preparation_sequence,0) FROM dispatches WHERE reservation_key=?", key).Scan(&record.ReservationKey, &permit, &record.State, &record.OperationID, &record.ResourceID, &created, &updated, &record.HostBindingSequence, &record.OriginalPreparationSequence)
 	if err != nil {
 		return DispatchRecord{}, "", err
 	}
@@ -73,7 +74,7 @@ func dispatchRecord(tx *sql.Tx, key string) (DispatchRecord, string, error) {
 // current readiness/health/budgets, not merely the old reservation receipt.
 // Existing intent never produces a second permit, including after restart.
 func (s *SQLiteStore) ClaimDispatch(ctx context.Context, req Request) (*DispatchPermit, error) {
-	return s.claimDispatch(ctx, req, nil, nil)
+	return s.claimDispatch(ctx, req, nil, nil, nil)
 }
 
 // ClaimDispatchBound additionally checks the gateway's exact immutable backend
@@ -82,9 +83,9 @@ func (s *SQLiteStore) ClaimDispatchBound(ctx context.Context, req Request, bindi
 	if !validHostBinding(binding) || binding.Sequence <= 0 || binding.Host != req.Host {
 		return nil, ErrHostBinding
 	}
-	return s.claimDispatch(ctx, req, &binding, nil)
+	return s.claimDispatch(ctx, req, &binding, nil, nil)
 }
-func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *HostBinding, plan *ExecutionPlan) (*DispatchPermit, error) {
+func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *HostBinding, plan *ExecutionPlan, prepared *preparedDispatch) (*DispatchPermit, error) {
 	var permit *DispatchPermit
 	var outcome error
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
@@ -132,10 +133,21 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 				return deny("dispatch_denied_execution_plan", ErrExecutionPlan)
 			}
 		}
+		if s.runtimeID != "" && prepared == nil {
+			return deny("dispatch_denied_missing_original_preparation", ErrOriginalPreparation)
+		}
+		if prepared != nil {
+			if err := sqlitePreparedDispatch(tx, req, binding, plan, prepared, s.now(), config.MaxObservationAge); err != nil {
+				return deny("dispatch_denied_original_preparation", err)
+			}
+		}
 		if _, _, err := dispatchRecord(tx, req.Key); err == nil {
 			return deny("dispatch_replay_blocked", ErrDispatchClaimed)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		if prepared != nil && (!prepared.Row.CreationEligible || !prepared.Row.PreparationShape) {
+			return deny("dispatch_denied_source_row_state", ErrOriginalPreparation)
 		}
 		if binding != nil {
 			stored, err := scanHostBinding(tx.QueryRow("SELECT host,server_key,origin,scope,server_name,server_version,bound_sequence,bound_at FROM host_bindings WHERE host=?", req.Host).Scan)
@@ -179,11 +191,14 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 		}
 		id := hex.EncodeToString(nonce[:])
 		at := s.now().UTC().Format(time.RFC3339Nano)
-		var bindingSequence any
+		var bindingSequence, originalSequence any
+		if prepared != nil {
+			originalSequence = prepared.Receipt.RecordSequence
+		}
 		if binding != nil {
 			bindingSequence = binding.Sequence
 		}
-		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence) VALUES(?,?,'intent','','',?,?,?)", req.Key, id, at, at, bindingSequence); err != nil {
+		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence,original_preparation_sequence) VALUES(?,?,'intent','','',?,?,?,?)", req.Key, id, at, at, bindingSequence, originalSequence); err != nil {
 			return err
 		}
 		if err := sqliteAudit(tx, "dispatch_claimed", req.Key, s.now()); err != nil {
@@ -288,7 +303,7 @@ func (s *SQLiteStore) LookupDispatch(ctx context.Context, key string) (DispatchR
 // remains charged and cannot be retried by replaying this method. The callback
 // must enforce immutable host/resource placement and use verified credentials.
 func (s *SQLiteStore) ExecuteDispatch(ctx context.Context, req Request, execute func(context.Context, DispatchPermit) (DispatchReceipt, error)) (DispatchRecord, error) {
-	return s.executeDispatch(ctx, req, nil, nil, execute)
+	return s.executeDispatch(ctx, req, nil, nil, nil, execute)
 }
 
 // ExecuteDispatchBound is a trusted offline/legacy test helper. Active runtime
@@ -297,7 +312,7 @@ func (s *SQLiteStore) ExecuteDispatchBound(ctx context.Context, req Request, bin
 	if !validHostBinding(binding) || binding.Sequence <= 0 || binding.Host != req.Host {
 		return DispatchRecord{}, ErrHostBinding
 	}
-	return s.executeDispatch(ctx, req, &binding, nil, execute)
+	return s.executeDispatch(ctx, req, &binding, nil, nil, execute)
 }
 
 // ExecutePlannedDispatch is the physical multi-host gateway path. The exact
@@ -307,14 +322,14 @@ func (s *SQLiteStore) ExecutePlannedDispatch(ctx context.Context, plan Execution
 	if !validHostBinding(binding) || binding.Sequence <= 0 || binding.Host != plan.Request.Host || plan.HostBindingSequence != binding.Sequence {
 		return DispatchRecord{}, ErrHostBinding
 	}
-	return s.executeDispatch(ctx, plan.Request, &binding, &plan, execute)
+	return s.executeDispatch(ctx, plan.Request, &binding, &plan, nil, execute)
 }
 
-func (s *SQLiteStore) executeDispatch(ctx context.Context, req Request, binding *HostBinding, plan *ExecutionPlan, execute func(context.Context, DispatchPermit) (DispatchReceipt, error)) (DispatchRecord, error) {
+func (s *SQLiteStore) executeDispatch(ctx context.Context, req Request, binding *HostBinding, plan *ExecutionPlan, prepared *preparedDispatch, execute func(context.Context, DispatchPermit) (DispatchReceipt, error)) (DispatchRecord, error) {
 	if execute == nil {
 		return DispatchRecord{}, ErrDenied
 	}
-	permit, err := s.claimDispatch(ctx, req, binding, plan)
+	permit, err := s.claimDispatch(ctx, req, binding, plan, prepared)
 	if err != nil {
 		return DispatchRecord{}, err
 	}

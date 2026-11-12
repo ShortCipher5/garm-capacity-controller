@@ -26,6 +26,7 @@ export function validateOverview(value) {
     !integer(value.epoch) ||
     !integer(value.immutable_execution_plans) ||
     !integer(value.legacy_unplanned_reservations) ||
+    !integer(value.legacy_source_preparations) ||
     !time(value.observed_at) ||
     !allocation(value.global) ||
     !Array.isArray(value.hosts) ||

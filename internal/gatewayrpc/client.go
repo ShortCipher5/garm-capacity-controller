@@ -151,3 +151,32 @@ func (c *Client) CancelAdmission(ctx context.Context, request garmprotocol.Reque
 	}
 	return result, nil
 }
+
+func (c *Client) originalPreparation(ctx context.Context, request garmprotocol.PreparationRequest, validate bool) (garmprotocol.PreparationResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 9*time.Second)
+	defer cancel()
+	if request.Validate() != nil {
+		return garmprotocol.PreparationResponse{}, ErrConfiguration
+	}
+	path, outcome := "/v1/record-preparation", "recorded"
+	if validate {
+		path, outcome = "/v1/validate-preparation", "validated"
+	}
+	// Keep raw response bytes: decoding/re-encoding would invent omitted zero/bool
+	// fields and could turn a missing generation0 into an accepted acknowledgement.
+	var raw json.RawMessage
+	if err := c.call(ctx, path, request, &raw); err != nil {
+		return garmprotocol.PreparationResponse{}, err
+	}
+	result, err := garmprotocol.ParsePreparationResponse(0, raw, request, outcome)
+	if err != nil {
+		return garmprotocol.PreparationResponse{}, ErrUnavailable
+	}
+	return result, nil
+}
+func (c *Client) RecordPreparation(ctx context.Context, request garmprotocol.PreparationRequest) (garmprotocol.PreparationResponse, error) {
+	return c.originalPreparation(ctx, request, false)
+}
+func (c *Client) ValidatePreparation(ctx context.Context, request garmprotocol.PreparationRequest) (garmprotocol.PreparationResponse, error) {
+	return c.originalPreparation(ctx, request, true)
+}

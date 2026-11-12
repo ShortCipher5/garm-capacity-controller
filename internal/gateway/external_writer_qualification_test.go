@@ -47,7 +47,25 @@ func externalWriterFixture(t *testing.T, backend Backend, controller string) (*F
 	if err := f.Reconcile(context.Background(), garmRows{}); err != nil {
 		t.Fatal(err)
 	}
+	configureSourceFixture(t, f)
 	return f, store
+}
+
+// Use the SAME active schema8 source-receipt and prepared Facade boundary as
+// production. These explicit local source fixtures do not attest real GitHub.
+func externalWriterPrepare(t *testing.T, f *Facade, name string) {
+	t.Helper()
+	preflight(t, f, name, "pool-a")
+	source, ok := f.preparationSource.(*mutablePreparationSource)
+	if !ok {
+		t.Fatal("missing explicit source fixture")
+	}
+	route := f.preparationRoutes["pool-a"]
+	actor := ""
+	for fingerprint := range route.actors {
+		actor = fingerprint
+	}
+	publishOriginalFixture(t, f, source, actor, name)
 }
 
 func TestCounterexampleSeparateRuntimeLedgersCanExceedOneSharedPhysicalBudget(t *testing.T) {
@@ -55,8 +73,8 @@ func TestCounterexampleSeparateRuntimeLedgersCanExceedOneSharedPhysicalBudget(t 
 	shared := &backendFixture{instances: map[string]incusapi.Instance{}, identity: identity.Client, identityConfiguration: identity.Configuration}
 	first, firstStore := externalWriterFixture(t, shared, "controller-a")
 	second, secondStore := externalWriterFixture(t, shared, "controller-b")
-	preflight(t, first, "runner-first", "pool-a")
-	preflight(t, second, "runner-second", "pool-a")
+	externalWriterPrepare(t, first, "runner-first")
+	externalWriterPrepare(t, second, "runner-second")
 	if _, err := first.Create(context.Background(), bootstrap("runner-first", "pool-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +117,7 @@ func TestCounterexampleLocalBarrierDoesNotFenceAlreadyDeliveredDispatch(t *testi
 	identity := testsupport.Identity(t, "paused-writer-daemon")
 	backend := &pausedExternalWriter{backendFixture: &backendFixture{instances: map[string]incusapi.Instance{}, identity: identity.Client, identityConfiguration: identity.Configuration}, entered: make(chan struct{}), resume: make(chan struct{})}
 	f, store := externalWriterFixture(t, backend, "controller-a")
-	preflight(t, f, "runner-paused", "pool-a")
+	externalWriterPrepare(t, f, "runner-paused")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -149,7 +167,7 @@ func TestCounterexampleProjectCompleteInventoryDoesNotBoundWholePhysicalAsset(t 
 	physical := &backendFixture{instances: map[string]incusapi.Instance{"foreign-guest": {Name: "foreign-guest", Status: 103, ControllerID: "foreign-controller", PoolID: "foreign-pool", CPUMillis: 1000, RAMMiB: 1024}}, identity: identity.Client, identityConfiguration: identity.Configuration}
 	backend := &projectOnlyExternalBackend{backendFixture: physical}
 	f, store := externalWriterFixture(t, backend, "controller-a")
-	preflight(t, f, "managed-guest", "pool-a")
+	externalWriterPrepare(t, f, "managed-guest")
 	if _, err := f.Create(context.Background(), bootstrap("managed-guest", "pool-a")); err != nil {
 		t.Fatal(err)
 	}

@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 )
@@ -123,7 +125,7 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 		return nil, ErrInventory
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, (8<<20)+1))
-	if err != nil || len(body) > 8<<20 {
+	if err != nil || len(body) > 8<<20 || !utf8.Valid(body) {
 		return nil, ErrInventory
 	}
 	trimmed := bytes.TrimSpace(body)
@@ -148,7 +150,7 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 		if !c.providers[provider] {
 			continue
 		}
-		instance := gateway.GarmInstance{}
+		instance := gateway.GarmInstance{ProviderName: provider}
 		instance.Name, err = textField(fields, "name", true)
 		if err != nil || seen[instance.Name] {
 			return nil, ErrInventory
@@ -202,6 +204,25 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 				}
 			}
 		}
+		instance.AgentID = agentID
+		instance.ScaleSetID = scaleSet
+		if !preparationAliases(fields, []string{"id", "generation", "agent_id", "scale_set_id", "provider_name", "pool_id", "name", "status", "runner_status", "provider_id", "job"}) {
+			return nil, ErrInventory
+		}
+		id, err := textField(fields, "id", false)
+		if err != nil {
+			return nil, ErrInventory
+		}
+		if id != "" && !preparationUUID(id) {
+			return nil, ErrInventory
+		}
+		instance.RowID = id
+		if raw, known := fields["generation"]; known {
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &instance.Generation) != nil || instance.Generation > math.MaxInt64 {
+				return nil, ErrInventory
+			}
+			instance.IdentityFieldsKnown = id != ""
+		}
 		instance.Busy = runner == "active" || runner == "busy"
 		instance.Idle = runner == "idle"
 		// A job object is conservatively treated as busy, without decoding its private details.
@@ -213,6 +234,7 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 		// private job data is retained. "creating" and pending runner state alone
 		// never qualify. Default JIT normal-pool rows have nonzero agents and
 		// require source-bound JIT provenance; scalesets are excluded too.
+		instance.SourcePreparationPending = (instance.State == "pending_create" || instance.State == "creating") && runner == "pending" && instance.ProviderID == "" && !instance.Busy && !instance.Idle && scaleSet == 0
 		instance.PreparationPending = instance.State == "pending_create" && runner == "pending" && instance.ProviderID == "" && agentID == 0 && !instance.Busy && !instance.Idle && scaleSet == 0
 		result = append(result, instance)
 	}

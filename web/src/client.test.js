@@ -17,7 +17,7 @@ const view = {
   admission_ready: false,
   epoch: 0,
   immutable_execution_plans: 0,
-  legacy_unplanned_reservations: 0,
+  legacy_unplanned_reservations: 0, legacy_source_preparations:0,
   observed_at: "2026-01-01T00:00:00Z",
   global: { budget: resource, allocated: resource },
   hosts: [],
@@ -182,5 +182,5 @@ test("unbound or legacy status cannot advertise new claims allowed",()=>{
 });
 
 test("immutable execution-plan counters are explicit and cannot invent migration", () => {
- for(const field of ["immutable_execution_plans","legacy_unplanned_reservations"]){for(const invalid of [undefined,-1,NaN,"0"]){const candidate=structuredClone(view);candidate[field]=invalid;assert.throws(()=>validateOverview(candidate));}}
+ for(const field of ["immutable_execution_plans","legacy_unplanned_reservations","legacy_source_preparations"]){for(const invalid of [undefined,-1,NaN,"0"]){const candidate=structuredClone(view);candidate[field]=invalid;assert.throws(()=>validateOverview(candidate));}}
 });

@@ -12,11 +12,12 @@ Garm remains responsible for runner demand and GitHub integration. This controll
 
 - **One global admission transaction** covering global, per-host and pool CPU/RAM/runner budgets.
 - **Atomic configured multi-host placement** with [immutable execution settings](docs/durable-placement.md), conservative policy revocation and no ambiguous-create failover.
+- **Source-bound normal-pool preparation** with separate route-scoped source credentials, original JIT/SQL row identity and receipt-before-publication ordering. Requires the [explicit patched bootstrap contract](docs/source-preparation-config.md); no positive-agent status-only exception.
 - **Durable reservations and one-shot dispatch intents** before physical creation. A lost response remains charged, not retried as a new create.
 - **Barrier-first reconciliation** of Garm runners, Incus instances, operations and reservations, including orphans and unknown outcomes.
 - **Explicit host enable/pause primitives**, without pretending that pausing claims prevents idle runners accepting jobs.
 - **Durable daemon bindings** and fresh TLS pinning to reject known duplicate aliases and backend drift before dispatch. This is not whole-physical-host proof.
-- **Credential isolation**: Garm receives gateway-only mTLS credentials, never Incus keys or database access.
+- **Credential isolation**: Garm receives gateway-only mTLS credentials, never Incus keys or capacity-ledger access.
 - **A real React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. Separately authorized, reviewed host-mode and budget changes; no mock fallback.
 - **Consistent SQLite backup/restore primitives**, with admission blocked and new authoritative reconciliation required after restore.
 
@@ -27,12 +28,12 @@ The full goal also includes safe lifecycle management and historical measured us
 | Component | Implemented | Remaining qualification |
 | --- | --- | --- |
 | Admission | SQLite WAL/FULL, `BEGIN IMMEDIATE`, atomic budget/reservation/audit and process-race tests | One authoritative local ledger, not distributed consensus |
-| Garm integration | Pinned v0.2.1 pre-JIT compatibility patch and actual compiled-provider protocol harness | Requires the documented patch; installed stack not qualified |
+| Garm integration | Pinned v0.2.1 admission/bootstrap API patch, original JIT receipts and actual API/SQL/AddRunner/poll-to-compiled-gateway harness | Requires the documented patch; installed stack not qualified |
 | Provisioning | Verified Incus HTTPS/mTLS, explicit limits, durable at-most-once intent and readback | Experimental opt-in; full physical-host coverage must be proved |
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
 | Administration | Separate TLS read/write roles and responsive React ledger view | Opt-in separate write role for ledger host modes and budgets; scoped journalled Garm settings editor; no registration or retirement button |
-| Backend identity | [Immutable daemon bindings](docs/durable-host-bindings.md), transactional dispatch provenance and alias/TLS rotation tests | Legacy charged hosts need unimplemented scope import; hidden projects, multiple daemons per host and admission-ledger runtime lineage remain gated |
-| Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
+| Backend identity | [Immutable daemon bindings](docs/durable-host-bindings.md), transactional dispatch provenance and alias/TLS rotation tests | Legacy charged hosts need unimplemented scope import; hidden projects, multiple daemons per host, raw rollback and external writer fencing remain gated |
+| Recovery | Consistent online SQLite backup/restore APIs and operator CLI; NEW-only runtime initialization with independent lineage | Archives/restores remain runtime-disabled; external history/writer fencing and live recovery drills required |
 | Cancellation | Atomic never-dispatched tombstones, authenticated provider command and optional Garm preparation-failure hook | No dispatched/unknown-create or physical retirement release |
 
 See [Garm settings management](docs/garm-management.md), [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).

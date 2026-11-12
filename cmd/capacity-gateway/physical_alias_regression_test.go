@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"net"
 	"net/http"
@@ -93,9 +94,13 @@ func TestServiceDuplicateDaemonAliasesFailClosedBeforeDispatch(t *testing.T) {
 	firstRoots.Store(0)
 	secondRoots.Store(0)
 	garm := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/instances" || r.Header.Get("Authorization") != "Bearer disposable-alias-token" {
+		if r.Method != http.MethodGet || (r.URL.Path != "/api/v1/instances" && r.URL.Path != "/api/v1/pools/pool-a" && r.URL.Path != "/api/v1/pools/pool-b") || r.Header.Get("Authorization") != "Bearer disposable-alias-token" {
 			t.Error("wrong Garm inventory authentication or method")
 			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/pools/") {
+			_ = json.NewEncoder(w).Encode(sourcePoolMetadataFixture(strings.TrimPrefix(r.URL.Path, "/api/v1/pools/")))
 			return
 		}
 		_, _ = w.Write([]byte(`[]`))
@@ -136,6 +141,16 @@ func TestServiceDuplicateDaemonAliasesFailClosedBeforeDispatch(t *testing.T) {
 		},
 		Garm:      garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}},
 		ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(providerHash[:])},
+	}
+	sourceHash := sha256.Sum256(keys.other.Certificate[0])
+	sourceActor := hex.EncodeToString(sourceHash[:])
+	generation := uint64(0)
+	jit := true
+	config.BootstrapMode = "gateway-owned-default-cloudinit/v1"
+	config.SourceFingerprints = []string{sourceActor}
+	config.PreparationPools = map[string]gateway.PreparationPoolPolicy{}
+	for id := range config.Pools {
+		config.PreparationPools[id] = gateway.PreparationPoolPolicy{ProviderName: "capacity", EntityType: "repository", EntityID: "22222222-2222-4222-8222-222222222222", ForgeEndpointName: "github-fixture", Generation: &generation, JITEnabled: &jit, SourceFingerprints: []string{sourceActor}}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

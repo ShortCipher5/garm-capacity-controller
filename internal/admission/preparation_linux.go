@@ -13,11 +13,13 @@ import (
 // an exact immutable execution plan, a still-charged reservation and NO dispatch.
 // Never accept this structure from provider/browser JSON or cache it across fences.
 type GarmPreparation struct {
-	Fence               Fence
-	Request             Request
-	Name                string
-	HostBindingSequence int64
-	ObservedAt          time.Time
+	Fence                       Fence
+	Request                     Request
+	Name                        string
+	HostBindingSequence         int64
+	ObservedAt                  time.Time
+	OriginalPreparationSequence int64
+	OriginalRow                 GarmRowObservation
 }
 
 // LookupDispatchReadOnly cannot grant a dispatch permit or poison the writer on
@@ -63,6 +65,19 @@ func sqliteGarmPreparations(tx *sql.Tx, config Config, fence Fence, snapshot Inv
 		binding, err := scanHostBinding(tx.QueryRow("SELECT host,server_key,origin,scope,server_name,server_version,bound_sequence,bound_at FROM host_bindings WHERE host=?", req.Host).Scan)
 		if err != nil || binding.Sequence != preparation.HostBindingSequence {
 			return ErrReconciliation
+		}
+		if preparation.OriginalPreparationSequence != 0 {
+			receipt, err := originalPreparationRecord(tx, req.Key)
+			if err != nil || receipt.RecordSequence != preparation.OriginalPreparationSequence || !preparation.OriginalRow.PreparationShape || !preparation.OriginalRow.ObservedAt.Equal(preparation.ObservedAt) || sqlitePreparedDispatch(tx, req, &binding, &plan, &preparedDispatch{Receipt: receipt, Row: preparation.OriginalRow}, now, config.MaxObservationAge) != nil {
+				return ErrReconciliation
+			}
+		} else {
+			// The historical zero-agent simulation proof cannot qualify an active
+			// runtime row; every runtime creation now needs original source history.
+			var runtimeKind string
+			if tx.QueryRow("SELECT runtime_kind FROM ledger_lineage WHERE id=1").Scan(&runtimeKind) != nil || runtimeKind == "active" {
+				return ErrReconciliation
+			}
 		}
 		if _, _, err = dispatchRecord(tx, req.Key); !errors.Is(err, sql.ErrNoRows) {
 			return ErrReconciliation

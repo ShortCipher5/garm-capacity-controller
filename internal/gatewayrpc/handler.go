@@ -28,27 +28,47 @@ const MaximumRequestBytes = 1 << 20
 const MaximumResponseBytes = 1 << 20
 
 type Handler struct {
-	facade       *gateway.Facade
-	fingerprints map[string]bool
-	provision    bool
-	inFlight     chan struct{}
-	Audit        func(string)
+	facade             *gateway.Facade
+	fingerprints       map[string]bool
+	sourceFingerprints map[string]bool
+	provision          bool
+	inFlight           chan struct{}
+	Audit              func(string)
 }
 
 // NewHandler authenticates a verified client chain AND an explicit leaf SHA256
 // allowlist. CA membership alone does not authorize another controller. One
 // facade/identity scope per listener; certificate revocation requires replacement.
-func NewHandler(facade *gateway.Facade, allowed []string, allowExperimentalProvisioning bool) (*Handler, error) {
-	if facade == nil || len(allowed) == 0 {
+func NewHandler(facade *gateway.Facade, allowed []string, allowExperimentalProvisioning bool, sourceAllowed ...[]string) (*Handler, error) {
+	if facade == nil || len(allowed) == 0 || (allowExperimentalProvisioning && facade.RuntimeOriginalPreparationRequired() && !facade.PreparationConfigured()) {
 		return nil, ErrConfiguration
 	}
-	h := &Handler{facade: facade, fingerprints: map[string]bool{}, provision: allowExperimentalProvisioning, inFlight: make(chan struct{}, 64)}
+	h := &Handler{facade: facade, fingerprints: map[string]bool{}, sourceFingerprints: map[string]bool{}, provision: allowExperimentalProvisioning, inFlight: make(chan struct{}, 64)}
 	for _, value := range allowed {
 		decoded, err := hex.DecodeString(value)
 		if err != nil || len(decoded) != 32 || value != strings.ToLower(value) || h.fingerprints[value] {
 			return nil, ErrConfiguration
 		}
 		h.fingerprints[value] = true
+	}
+	if len(sourceAllowed) > 1 {
+		return nil, ErrConfiguration
+	}
+	if len(sourceAllowed) == 1 {
+		for _, fp := range sourceAllowed[0] {
+			raw, err := hex.DecodeString(fp)
+			if err != nil || len(raw) != 32 || hex.EncodeToString(raw) != fp || h.sourceFingerprints[fp] || h.fingerprints[fp] {
+				return nil, ErrConfiguration
+			}
+			h.sourceFingerprints[fp] = true
+		}
+	}
+	if facade.PreparationConfigured() {
+		for _, fp := range facade.PreparationFingerprints() {
+			if !h.sourceFingerprints[fp] {
+				return nil, ErrConfiguration
+			}
+		}
 	}
 	return h, nil
 }
@@ -92,7 +112,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
-	if !h.fingerprints[hex.EncodeToString(hash[:])] {
+	actor := hex.EncodeToString(hash[:])
+	sourceCommand := r.URL.Path == "/v1/record-preparation" || r.URL.Path == "/v1/validate-preparation"
+	if (sourceCommand && !h.sourceFingerprints[actor]) || (!sourceCommand && !h.fingerprints[actor]) {
 		fail(http.StatusForbidden)
 		return
 	}
@@ -111,12 +133,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnsupportedMediaType)
 		return
 	}
-	if (r.URL.Path == "/v1/admit" || r.URL.Path == "/v1/create" || r.URL.Path == "/v1/cancel-admission") && !h.provision {
+	if (r.URL.Path == "/v1/admit" || r.URL.Path == "/v1/create" || r.URL.Path == "/v1/cancel-admission" || sourceCommand) && !h.provision {
 		fail(http.StatusForbidden)
 		return
 	}
 	var result any
 	switch r.URL.Path {
+	case "/v1/record-preparation", "/v1/validate-preparation":
+		data, err := io.ReadAll(io.LimitReader(r.Body, garmprotocol.MaximumResponseBytes+1))
+		if err != nil {
+			fail(http.StatusBadRequest)
+			return
+		}
+		request, err := garmprotocol.DecodePreparationRequest(data)
+		if err != nil {
+			fail(http.StatusBadRequest)
+			return
+		}
+		if !h.facade.AuthorizePreparationPool(request.PoolID, actor) {
+			fail(http.StatusForbidden)
+			return
+		}
+		var response garmprotocol.PreparationResponse
+		if r.URL.Path == "/v1/record-preparation" {
+			response, err = h.facade.RecordPreparation(r.Context(), request, actor)
+		} else {
+			response, err = h.facade.ValidatePreparation(r.Context(), request, actor)
+		}
+		if err != nil {
+			fail(http.StatusServiceUnavailable)
+			return
+		}
+		result = response
 	case "/v1/admit":
 		var request garmprotocol.Request
 		if Decode(r.Body, &request) != nil {

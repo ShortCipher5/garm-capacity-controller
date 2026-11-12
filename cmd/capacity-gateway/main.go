@@ -37,17 +37,20 @@ type garmConfiguration struct {
 	ScaleSets map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
-	Admin                *adminConfiguration           `json:"admin,omitempty"`
-	Listen               string                        `json:"listen"`
-	Controller           string                        `json:"controller"`
-	Database             string                        `json:"database"`
-	IdentityFile         string                        `json:"identity_file"`
-	InitialPolicy        admission.Config              `json:"initial_policy"`
-	Pools                map[string]gateway.PoolPolicy `json:"pools"`
-	Hosts                map[string]hostConfiguration  `json:"hosts"`
-	Garm                 garmConfiguration             `json:"garm"`
-	ServerTLS            securefiles.TLSFiles          `json:"server_tls"`
-	ProviderFingerprints []string                      `json:"provider_fingerprints"`
+	PreparationPools     map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
+	SourceFingerprints   []string                                 `json:"source_fingerprints,omitempty"`
+	BootstrapMode        string                                   `json:"bootstrap_mode,omitempty"`
+	Admin                *adminConfiguration                      `json:"admin,omitempty"`
+	Listen               string                                   `json:"listen"`
+	Controller           string                                   `json:"controller"`
+	Database             string                                   `json:"database"`
+	IdentityFile         string                                   `json:"identity_file"`
+	InitialPolicy        admission.Config                         `json:"initial_policy"`
+	Pools                map[string]gateway.PoolPolicy            `json:"pools"`
+	Hosts                map[string]hostConfiguration             `json:"hosts"`
+	Garm                 garmConfiguration                        `json:"garm"`
+	ServerTLS            securefiles.TLSFiles                     `json:"server_tls"`
+	ProviderFingerprints []string                                 `json:"provider_fingerprints"`
 }
 
 type redactedConnectionLog struct{}
@@ -85,6 +88,9 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	if !ok || !address.IP.IsLoopback() {
 		return gatewayrpc.ErrConfiguration
 	}
+	if provision && (config.BootstrapMode != "gateway-owned-default-cloudinit/v1" || len(config.PreparationPools) != len(config.Pools) || len(config.SourceFingerprints) == 0) {
+		return gatewayrpc.ErrConfiguration
+	}
 	store, err := admission.OpenRuntimeSQLite(config.Database, config.IdentityFile)
 	if err != nil {
 		return err
@@ -103,10 +109,6 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 		defer client.Close()
 		backends[id] = client
 	}
-	f, err := gateway.New(ctx, store, config.Controller, config.Pools, backends)
-	if err != nil {
-		return err
-	}
 	token, err := securefiles.Read(config.Garm.TokenFile, 16384)
 	if err != nil {
 		return err
@@ -120,7 +122,15 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 		return err
 	}
 	defer garm.Close()
-	handler, err := gatewayrpc.NewHandler(f, config.ProviderFingerprints, provision)
+	options := []gateway.PreparationSettings{}
+	if len(config.PreparationPools) > 0 {
+		options = append(options, gateway.PreparationSettings{Endpoint: config.Garm.Endpoint, Providers: config.Garm.Providers, Policies: config.PreparationPools, Source: garm})
+	}
+	f, err := gateway.New(ctx, store, config.Controller, config.Pools, backends, options...)
+	if err != nil {
+		return err
+	}
+	handler, err := gatewayrpc.NewHandler(f, config.ProviderFingerprints, provision, config.SourceFingerprints)
 	if err != nil {
 		return err
 	}

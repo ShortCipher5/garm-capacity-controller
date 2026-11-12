@@ -440,7 +440,7 @@ func TestPlacementRuntimeMigratesQualifiedV6WithoutInventingOldPlans(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
+	if _, err := db.Exec("DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -450,7 +450,7 @@ func TestPlacementRuntimeMigratesQualifiedV6WithoutInventingOldPlans(t *testing.
 	}
 	defer store.Close()
 	var version int
-	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != sqliteCurrentVersion {
 		t.Fatalf("migration %d %v", version, err)
 	}
 	if sqliteSnapshot(t, store).Ready {
@@ -468,7 +468,7 @@ func TestPlacementLegacyV6ChargeCannotAcquireNewPlanAfterMigration(t *testing.T)
 	if _, err := s.Admit(ctx, Request{Key: req.Key, Pool: req.Pool, Host: "a", Resources: req.Resources}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
+	if _, err := s.db.Exec("DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
 		t.Fatal(err)
 	}
 	path := s.path
@@ -612,8 +612,8 @@ func TestPlacementActiveRuntimeRefusesLegacyPlanlessDispatchAPIs(t *testing.T) {
 	if calls != 0 {
 		t.Fatal("legacy path invoked callback")
 	}
-	if _, err := s.ExecutePlannedDispatch(ctx, plan, state.HostBindings[plan.Request.Host], callback); err != nil || calls != 1 {
-		t.Fatalf("qualified plan %d %v", calls, err)
+	if _, err := s.ExecutePlannedDispatch(ctx, plan, state.HostBindings[plan.Request.Host], callback); !errors.Is(err, ErrOriginalPreparation) || calls != 0 {
+		t.Fatalf("plan without original source history %d %v", calls, err)
 	}
 }
 func TestPlacementProcessWorker(t *testing.T) {
