@@ -137,3 +137,14 @@ uses no user secret, image registry push or installed host. Source review and
 native tests do not substitute for its exact hosted runtime result. Neither a
 draft/workflow nor a green disposable result authorizes production image registry
 publication, host assessment/setup, startup, rollback, recovery or deployment.
+
+### Missing-loader exec attribution
+
+The scratch negative first checks the exact Garm hash and ELF interpreter absence
+with the static probe. The hosted OCI implementation then reports the actual
+`exec /usr/local/bin/garm: no such file or directory` failure on captured stderr,
+with empty stdout and `State.Error`, exited status, matching start/container exit
+255, and no OOM. All these conditions are required together. Empty `State.Error`,
+a generic ENOENT, or an arbitrary nonzero exit is not success. Another engine
+outcome fails closed for separate diagnosis; this is not a production launcher
+or a general Docker/runc error parser.

@@ -53,6 +53,16 @@ class RunnerTest(unittest.TestCase):
   self.assertEqual(error.safe(),'loader rejection category=empty start-exit=127 stdout=other stderr=target-exec-enoent state=exited state-exit=127 oom=false');self.assertNotIn('RAW-PRIVATE-SENTINEL',str(error))
   error=run.LoaderMismatch('',subprocess.CompletedProcess([],object(),b'',b'RAW-PRIVATE-SENTINEL'),{'status':'RAW-PRIVATE-SENTINEL','exit':'RAW-PRIVATE-SENTINEL','oom':'RAW-PRIVATE-SENTINEL'})
   self.assertNotIn('RAW-PRIVATE-SENTINEL',error.safe());self.assertIn('state=unrecognized state-exit=invalid oom=invalid',error.safe())
+ def test_missing_loader_exec_requires_specific_observed_outcome(self):
+  error=b'exec /usr/local/bin/garm: no such file or directory'
+  state={'error':'','status':'exited','exit':255,'oom':False}
+  start=subprocess.CompletedProcess([],255,b'',error)
+  self.assertTrue(run.missing_loader_rejected(start,state))
+  for code,out,err in [(0,b'',error),(1,b'',error),(255,b'',b''),(255,b'',b'no such file or directory'),(255,b'',b'exec /other: no such file or directory'),(255,b'unexpected',error)]:
+   self.assertFalse(run.missing_loader_rejected(subprocess.CompletedProcess([],code,out,err),state))
+  for field,value in [('error','unrelated runtime failure'),('error',None),('status','running'),('status','created'),('exit',1),('exit',True),('oom',True),('oom',0)]:
+   changed=dict(state);changed[field]=value;self.assertFalse(run.missing_loader_rejected(start,changed))
+  self.assertFalse(run.missing_loader_rejected(start,{}))
  def record(self):return {'lab':'generated','image':'sha256:test','user':'65531:65531','network':'none','pid':'','privileged':False,'readonly':True,'caps_add':None,'caps_drop':['ALL'],'security':['no-new-privileges'],'ports':{},'restart':'no','volumes':None,'memory':512*1024*1024,'cpus':1000000000,'pids':128,'tmpfs':{'/tmp':'rw,noexec,nosuid,nodev,size=16m,uid=65531,gid=65531,mode=0700'},'mounts':[]}
  def test_topology_unsafe_controls_rejected(self):
   good=self.record();run.topology(good,'generated','sha256:test',65531,'none',[],['/tmp'])

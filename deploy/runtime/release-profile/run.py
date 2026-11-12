@@ -25,6 +25,13 @@ def loader_category(value):
  if 'exec:' in value and '/usr/local/bin/garm' in value and 'no such file or directory' in value:return 'target-stat-enoent'
  return 'other'
 def safe_exit(value):return str(value) if type(value)is int and -255<=value<=255 else 'invalid'
+def missing_loader_rejected(start,state):
+ # Observed hosted OCI path: the target-specific exec failure is on stderr,
+ # while State.Error is empty. Empty State.Error or any nonzero exit ALONE is
+ # never evidence. The identical binary hash and typed missing-loader probe
+ # must already have passed in this unchanged scratch image before this call.
+ return type(start.returncode)is int and start.returncode==255 and start.stdout==b'' and type(start.stderr)is bytes and b'exec /usr/local/bin/garm: no such file or directory' in start.stderr and state.get('error')=='' and state.get('status')=='exited' and type(state.get('exit'))is int and state['exit']==255 and state.get('oom') is False
+
 class LoaderMismatch(Failed):
  def __init__(self,error,start=None,state=None):
   super().__init__('loader-rejection-mismatch')
@@ -210,7 +217,7 @@ def run():
   failed=lab.create(broken,65531,'none','/usr/local/bin/garm',['--version']);r=command(['docker','start','-a',failed]);need(r.returncode!=0)
   # This deliberately keyless scratch container is the only case reading Error.
   state=json.loads(data(['docker','inspect','--format','{"error":{{json .State.Error}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}}}',failed]));err=state['error']
-  if type(err)is not str or 'exec /usr/local/bin/garm: no such file or directory' not in err:raise LoaderMismatch(err,r,state)
+  if not missing_loader_rejected(r,state):raise LoaderMismatch(err,r,state)
   phase='discovery'
   r=lab.once(daemon,65531,'none','/usr/local/bin/garm',['--version']);need(r.returncode==0 and b'v0.2.1+capacity.87e0d61751d4' in r.stdout)
   r=lab.once(tools,65533,'none','/usr/local/bin/garm-cli',['--help'],home=True);need(r.returncode==0 and r.stdout.startswith(b'CLI for the github self hosted runners manager.'))
