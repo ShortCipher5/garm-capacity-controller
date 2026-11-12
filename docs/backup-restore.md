@@ -1,3 +1,5 @@
+> Runtime recovery gate: schema 6 preserves immutable ledger lineage but stamps every supported backup and restore as permanently runtime-disabled. Offline readiness/reconciliation cannot activate an artifact. `capacity-gateway` refuses these artifacts even when their ID matches its independent identity file. There is no activation command or boolean bypass. The inventory/fencing procedures below remain necessary recovery research, not a supported runtime activation workflow. See [runtime ledger lineage](runtime-ledger-lineage.md).
+
 # Consistent SQLite backup and fail-closed restore
 
 This is a **local offline recovery primitive**, not a live production recovery

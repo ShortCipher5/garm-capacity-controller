@@ -14,6 +14,9 @@ import (
 // Request cancellation can roll back its view, never poison the shared writer.
 // No core ambiguous-write-commit classification is relaxed by this method.
 func (s *SQLiteStore) readTransaction(ctx context.Context, read func(*sql.Tx) error) error {
+	if err := s.runtimePathCheck(); err != nil {
+		return err
+	}
 	if s.closed.Load() {
 		return sql.ErrConnDone
 	}
@@ -53,6 +56,11 @@ func (s *SQLiteStore) readTransaction(ctx context.Context, read func(*sql.Tx) er
 	}
 	if queryOnly != 1 || application != 0x47434331 || version != sqliteCurrentVersion {
 		return errors.New("read view requires an owned current ledger")
+	}
+	if s.runtimeID != "" {
+		if err := sqliteRuntimeIdentity(tx.QueryRow, s.runtimeID); err != nil {
+			return err
+		}
 	}
 	if err = read(tx); err != nil {
 		return err

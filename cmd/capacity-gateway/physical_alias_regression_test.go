@@ -139,6 +139,7 @@ func TestServiceDuplicateDaemonAliasesFailClosedBeforeDispatch(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	initializeRuntimeFixture(t, &config)
 	go func() { done <- serveOnListener(ctx, config, true, listener) }()
 	exited := false
 	t.Cleanup(func() {

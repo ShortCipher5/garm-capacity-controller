@@ -84,6 +84,8 @@ Creating, idle, running, failed, unknown and deleting resources stay charged. A 
 
 **Paused is not drained.** Existing idle runners can still receive jobs. Physical retirement needs an assignment/job-safety fence, verified deletion and authoritative recovery. These paths remain blocked rather than hidden behind unsafe controls. See [job-safe retirement](docs/job-safe-retirement.md).
 
+Runtime startup never creates or adopts missing state. Use [NEW-only initialization with independently protected lineage](docs/runtime-ledger-lineage.md). Supported archives/restores cannot be activated by this service.
+
 Do not copy only an open WAL database file. Use the [consistent backup procedure](docs/backup-restore.md), fence old writers before historical restore, recover post-backup history and collect new complete authoritative inventory before scheduling.
 
 ## Next

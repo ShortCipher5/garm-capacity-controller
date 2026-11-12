@@ -24,14 +24,16 @@ var ErrFence = errors.New("stale or inactive reconciliation fence")
 // SQLiteStore is a local, single-controller-machine allocation ledger.
 // It is an offline core, not a provider adapter or production enforcement mode.
 type SQLiteStore struct {
-	path     string
-	db       *sql.DB
-	poisoned atomic.Bool
-	closed   atomic.Bool
-	now      func() time.Time
+	path        string
+	db          *sql.DB
+	poisoned    atomic.Bool
+	closed      atomic.Bool
+	now         func() time.Time
+	runtimeID   string
+	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 5
+const sqliteCurrentVersion = 6
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -68,17 +70,23 @@ PRAGMA user_version=1;
 // OpenSQLite never imports or overwrites the original JSON ledger. Initial
 // configuration applies only to an empty database. Inventory starts blocked.
 func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
+	return openSQLite(path, initial, "", "")
+}
+
+func openSQLite(path string, initial Config, initializeID, runtimeID string) (*SQLiteStore, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil || path == "" {
 		return nil, errors.New("a local database path is required")
 	}
-	f, err := os.OpenFile(absolute, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-	if err == nil {
-		if err = f.Close(); err != nil {
+	if runtimeID == "" {
+		f, err := os.OpenFile(absolute, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		if err == nil {
+			if err = f.Close(); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-	} else if !errors.Is(err, os.ErrExist) {
-		return nil, err
 	}
 	info, err := os.Lstat(absolute)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
@@ -87,6 +95,11 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 	location := url.URL{Scheme: "file", Path: absolute}
 	// Inspect existing ownership read-only before configuring WAL. Refusing a
 	// foreign database must not first change its persistent journal mode.
+	if runtimeID != "" {
+		if err := sqliteRuntimePreflight(absolute, runtimeID); err != nil {
+			return nil, err
+		}
+	}
 	if err := sqlitePreflight(location); err != nil {
 		return nil, err
 	}
@@ -101,7 +114,7 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &SQLiteStore{db: db, now: time.Now, path: absolute}
+	s := &SQLiteStore{db: db, now: time.Now, path: absolute, runtimeID: runtimeID, runtimeFile: info}
 	err = s.transaction(context.Background(), func(tx *sql.Tx) error {
 		var version, syncMode, foreignKeys, application int
 		var journal string
@@ -187,6 +200,25 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 				return err
 			}
 		}
+		if version < 6 {
+			if _, err := tx.Exec(sqliteRuntimeSchema); err != nil {
+				return err
+			}
+			id, kind := initializeID, "active"
+			if id == "" {
+				id, err = sqliteNewLineage()
+				kind = "offline"
+				if err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec("INSERT INTO ledger_lineage(id,lineage_id,runtime_kind) VALUES(1,?,?)", id, kind); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v6", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -254,6 +286,9 @@ func (s *SQLiteStore) Close() error { s.closed.Store(true); return s.db.Close() 
 // Driver _txlock=immediate makes BeginTx acquire the write reservation before
 // reading budgets. Separate database handles/processes cannot write-skew.
 func (s *SQLiteStore) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
+	if err := s.runtimePathCheck(); err != nil {
+		return err
+	}
 	if s.poisoned.Load() {
 		return ErrUncertain
 	}
@@ -268,6 +303,11 @@ func (s *SQLiteStore) transaction(ctx context.Context, fn func(*sql.Tx) error) e
 	}()
 	if s.poisoned.Load() {
 		return ErrUncertain
+	}
+	if s.runtimeID != "" {
+		if err := sqliteRuntimeIdentity(tx.QueryRow, s.runtimeID); err != nil {
+			return err
+		}
 	}
 	if err := fn(tx); err != nil {
 		return err
