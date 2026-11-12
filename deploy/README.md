@@ -1,0 +1,193 @@
+# Experimental deployment packaging
+
+This directory supplies an **opt-in packaging candidate**, not a live deployment,
+provider migration or production-ready controller. It does not change any stack,
+install credentials, create a policy, turn on admission, or retire resources.
+The Compose overlay starts with provisioning OFF. The admin UI remains read-only.
+Do not replace a working Garm provider: physical retirement and job-safe drain
+are still missing. Packaging cannot make those missing lifecycle features safe.
+
+## Deployment topology and choice
+
+The gateway accepts only explicit loopback listener addresses. Do not patch that
+check away, add host networking, or expose an unauthenticated forwarding proxy.
+For an existing Compose Garm stack, the candidate overlay shares the **Garm
+service's network namespace only** (`network_mode: service:garm`). Garm's external
+provider can then call `https://127.0.0.1:9443` without any published gateway port.
+Provider RPC still requires TLS 1.3, a trusted server certificate, a verified
+client certificate and the exact configured client-leaf fingerprint.
+
+Network sharing is not credential sharing. The gateway runs as UID/GID 65532;
+Garm must run under a different, dedicated **non-root** UID, with all capabilities
+dropped and no Docker/Incus socket, host PID namespace, privileged mode, or access
+to gateway credentials/state. A root or privileged Garm container and untrusted
+jobs colocated with control-plane credentials do not meet this isolation model.
+Do not mount any gateway private/state directory into Garm or runner guests.
+The read-only provider configuration and client keys belong only to the Garm UID.
+Separate OS users but one shared secret volume is not isolation.
+
+The exact stack service name, network routes to trusted Garm/Incus APIs, DNS,
+UID mapping (including rootless/user-namespace remapping), filesystem backing,
+and certificate names must be checked before this overlay can be applied.
+`service:garm` is a template reference, not discovery. Do not create a dummy Garm
+service to satisfy Compose validation. Recreating Garm changes its network
+namespace; stop/recreate the gateway with it during an approved maintenance window.
+Do not assume an orphaned sidecar still shares the new Garm listener namespace.
+The overlay has no `ports`, host network, proxy, socket, or automatic restart.
+It caps the candidate gateway at one CPU and 512 MiB; account for that controller
+overhead separately from runner budgets and qualify the limits on the actual
+ledger/inventory size. An OOM/limit failure does not prove resources disappeared.
+The 45-second stop grace exceeds the two sequential 15-second listener shutdown
+budgets plus overhead; forced termination still requires conservative recovery.
+
+If sharing a namespace conflicts with the stack's security boundary, run the
+services as separate native Linux OS identities on the same machine, or use a
+reviewed end-to-end authenticated private tunnel. A normal Compose bridge cannot
+reach a listener bound to another container's loopback. Choosing a new topology,
+listener exposure, or proxy is a separate security review, not an overlay tweak.
+
+## Offline build and artifact handling
+
+Build in a clean checkout after the normal repository checks. Linux + a C compiler
+and CGO are required for the gateway. The Dockerfile builds the actual SQLite
+implementation with CGO enabled, and the React production assets from the pinned
+npm lockfile. It does not contain a demo backend or fixture data. The provider-only
+artifact also requires CGO because of transitive package dependencies; it contains
+no deployment configuration or credentials. Both binaries are dynamically linked
+against the builder's Debian libc. Never set CGO to zero to bypass SQLite.
+
+```sh
+# Local-only image build, not a publish or deploy command.
+docker build --target gateway -t capacity-gateway:review .
+# BuildKit exports the provider binary, not an image that can run Garm.
+docker build --target provider-artifact --output type=local,dest=./provider-export .
+```
+
+`.dockerignore` is an allowlist: private configuration, keys, tokens, ledgers,
+Git history, existing node_modules and generated assets do not enter the context.
+Never pass credentials as build arguments, ENV, build context, or image layers.
+The image includes public application code and assets only. The tagged upstream
+base images are **not immutable locks**: resolve, review, and pin their digests
+and record the source commit, platform, dependency checks and final image digest
+in the private deployment change before publishing or using the image. The local
+review tag above is not a deployment reference. The overlay requires an explicit
+image value; use an immutable digest, never `latest` or a moving review tag.
+
+Review the provider binary and exact Garm compatibility patch separately. Export
+and install it only in a reviewed Garm image matching the qualified OS/architecture **and libc/loader** (Debian bookworm in
+this candidate). An Alpine/musl or older-glibc Garm image cannot be assumed
+compatible. Qualify the exact artifact inside the intended Garm runtime before
+installation; do not replace that runtime merely to satisfy this packaging.
+Do not replace the current provider or enable its admission hook as part of a
+read-only preview. The overlay does not change the Garm service or supply its
+private configuration. See [the pinned qualification](../docs/protocol-qualification.md).
+
+## Private configuration and durable state
+
+Use an operator-controlled private deployment directory outside this public
+repository. Do not publish an actual stack, endpoint list, host inventory,
+budget, certificate, token, or output of a rendered private Compose config.
+The overlay accepts only directory locations and an image reference as variables,
+never secret values in environment variables or arguments.
+
+Precreate two separate real directories on a trusted **local** filesystem:
+
+| Container path | Owner/mode | Purpose |
+| --- | --- | --- |
+| `/run/capacity-private` | gateway UID 65532, `0700`; files `0600` | read-only gateway config, TLS and API-token files |
+| `/var/lib/capacity-gateway` | gateway UID 65532, `0700`; files `0600` | persistent ledger **and** its WAL/SHM sidecars |
+
+Account for the Docker engine's UID mapping when setting ownership on the host.
+Ancestors must be trusted and not writable by jobs/unrelated users. No symlinks,
+shared group permissions, world-readable Docker secrets, automatic host-path
+creation, NFS/SMB, temporary state volume, or shared independent writers. The
+container runs non-root with a read-only root filesystem; only the state bind is
+writable. Do not loosen ownership checks or run the gateway as root to repair a
+mount. Do not mount the main database file alone: SQLite must create WAL/SHM in
+its parent directory. Backups and host filesystem snapshots need a separately
+qualified consistency procedure.
+
+Construct the private `gateway.local.json` using
+[the full gateway configuration contract](../docs/gateway-service.md). Set:
+
+- `listen`: `127.0.0.1:9443`.
+- `database`: `/var/lib/capacity-gateway/ledger.db`.
+- Every gateway TLS/token path: a private regular file under `/run/capacity-private`.
+- `controller`, trusted hosts/projects, fixed pool placement, bounded initial
+  policy, and read-only Garm inventory credentials: actual reviewed values.
+- `provider_fingerprints`: only exact authorized DER client-leaf SHA-256 values.
+- Optional `admin.listen`: `127.0.0.1:9444`, separate server TLS/read-token files,
+  and `admin.assets`: `/usr/local/share/capacity-admin`. Omit `admin` to disable it.
+
+The JSON shape is intentionally not filled with guessed infrastructure or budgets.
+The runtime validates it and fails closed. All configuration, CA, certificate,
+key and token files must belong to the running UID, even public CA files.
+Do not use default Compose file-backed `secrets` permissions without verifying
+ownership/mode: common root-owned `0444` mounts are deliberately rejected.
+
+The provider's **separate** private config/key directory belongs to the Garm UID.
+It contains only controller identity, `https://127.0.0.1:9443` and provider mTLS
+files, not Incus credentials, Garm inventory token, admin read token or ledger.
+Both server certificates must cover the configured IP/hostname. Do not disable
+TLS verification. Plan approved certificate/read-token rotation and log retention;
+rotation currently requires private file replacement plus a controlled restart.
+
+## Preview acceptance and publication boundary
+
+Run `go test -race -count=1 ./...`, `go vet ./...`, `gofmt -l .`, and the web tests
+and build. The packaging contract tests run as part of the Go suite. Container
+builds and disposable Compose runtime checks are **additional** gates, not covered
+by those static tests. Validate the merged private stack with the supported Docker
+Compose plugin offline before any start; do not share its rendered output publicly.
+The overlay requires `CAPACITY_GATEWAY_IMAGE`, `CAPACITY_PRIVATE_DIR`, and
+`CAPACITY_STATE_DIR`, and is inactive unless profile `capacity-preview` is selected.
+
+A reviewed, authorized first run must leave the supplied command unchanged:
+there is no `-allow-experimental-provisioning`. There is deliberately no automatic
+health check: a listening process or ledger-read success does not establish complete
+physical scope, fresh authoritative reconciliation or admission qualification.
+Do not report the stack production-ready from an HTTP 200 or container "running".
+The preview performs authenticated external inventory **reads**, writes local
+reconciliation/audit state and may automatically migrate an owned SQLite schema.
+Use a new private preview ledger, or a validated backup under a separate new path;
+never casually point a new image at the live ledger for a compatibility check.
+
+Before an authorized disposable runtime check, verify:
+
+1. All container user/capability/mount boundaries above; private files fail closed
+   with wrong owner/mode. The Garm identity cannot read gateway secret/state paths.
+2. The gateway uses actual CGO SQLite WAL + FULL durability and preserves state
+   across gateway recreation. Refusing a stale/failed inventory leaves admission
+   blocked. Never equate a single missing resource with deletion evidence.
+3. Unauthenticated, wrong-leaf and wrong-role calls fail; the provider can reach
+   the loopback mTLS listener; no other network interface exposes either listener.
+4. The optional UI uses the separate read credential and actual ledger; it cannot
+   admit/create. For remote access use an approved end-to-end TLS tunnel to this
+   namespace, not a new published provider port or public bearer-token URL.
+5. Stop/recreate Garm and gateway together in the disposable stack and verify
+   network namespace attachment. An interrupted gateway does not redispatch old
+   intent, release unknown resources or silently re-enable creation.
+
+No startup/deployment command is given here: applying this overlay can start or
+recreate the Garm dependency and needs its own reviewed change and authorization.
+Publishing a generic packaging PR is not permission to touch a live stack.
+
+## Recovery, rollback and remaining blockers
+
+Preserve the entire private state directory and stop/fence every old writer before
+restoring or changing versions. Never copy only an open `.db`, delete `-wal`/`-shm`,
+run `docker compose down -v`, or clear a ledger to fix a failed preview. Use the
+[consistent backup/restore API and procedure](../docs/backup-restore.md); there is
+no production backup CLI. Keep credentials separately. A historical ledger cannot
+prove later external work vanished. New images can migrate owned schema forward;
+rolling back the image may then refuse the database. Do not downgrade/hand-edit
+schema or substitute an older ledger to force startup. Preserve evidence, fence
+old credentials, restore into a new path and complete authoritative reconciliation
+before any new provisioning is considered.
+
+Still required before integration into an existing runner stack: exact installed
+Garm/provider compatibility, full physical-host scope and bypass fencing, upstream
+credential/role review, tested container build/runtime and filesystem durability,
+operator-approved networking/admin access, owned-schema backup/rollback procedure,
+and the missing proof-based physical retirement/job-safe drain lifecycle. This
+packaging does not authorize production scheduling or change those gates.
