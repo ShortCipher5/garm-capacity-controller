@@ -1,0 +1,206 @@
+// Test-only helper compiled in a disposable exact patched Garm source module.
+// Not an installer, production startup guard, or real-data recovery tool.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	commonutil "github.com/cloudbase/garm-provider-common/util"
+	"github.com/cloudbase/garm/auth"
+	"github.com/cloudbase/garm/config"
+	dbsql "github.com/cloudbase/garm/database/sql"
+	"github.com/cloudbase/garm/database/watcher"
+	"github.com/cloudbase/garm/params"
+	jwt "github.com/golang-jwt/jwt/v5"
+	_ "github.com/mattn/go-sqlite3"
+)
+
+type expected struct {
+	Token, Controller, User, Blob, JWT string
+	Object                             uint
+	Private                            map[string]string
+}
+
+func must(e error) {
+	if e != nil {
+		panic("synthetic operation failed")
+	}
+}
+func require(b bool) {
+	if !b {
+		panic("synthetic invariant failed")
+	}
+}
+func random() string {
+	b := make([]byte, 16)
+	_, e := rand.Read(b)
+	must(e)
+	return hex.EncodeToString(b)
+}
+func digest(b []byte) string { v := sha256.Sum256(b); return hex.EncodeToString(v[:]) }
+func private(path string, dir bool) {
+	s, e := os.Lstat(path)
+	must(e)
+	if dir {
+		require(s.IsDir() && s.Mode().Perm() == 0700)
+	} else {
+		require(s.Mode().IsRegular() && s.Mode().Perm() == 0600)
+	}
+	st := s.Sys().(*syscall.Stat_t)
+	require(st.Uid == uint32(os.Getuid()) && st.Gid == uint32(os.Getgid()))
+	if !dir {
+		require(st.Nlink == 1)
+	}
+}
+func open(path string) *sql.DB {
+	d, e := sql.Open("sqlite3", "file:"+path+"?mode=ro&_query_only=1")
+	must(e)
+	must(d.Ping())
+	return d
+}
+func main() {
+	defer func() {
+		if recover() != nil {
+			fmt.Fprintln(os.Stderr, "Synthetic Garm migration helper rejected operation")
+			os.Exit(1)
+		}
+	}()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syscall.Umask(0077)
+	require(len(os.Args) == 3)
+	action, root := os.Args[1], os.Args[2]
+	require(strings.HasPrefix(filepath.Base(root), "garm-synthetic-storage-"))
+	p := filepath.Join(root, "private")
+	state := filepath.Join(root, "state")
+	marker, e := os.ReadFile(filepath.Join(p, ".synthetic-only"))
+	must(e)
+	require(string(marker) == "NEW GENERATED FIXTURE ONLY\n")
+	cfg, e := config.NewConfig(filepath.Join(p, "config.toml"))
+	must(e)
+	require(cfg.Database.SQLite.DBFile == filepath.Join(state, "controller.db"))
+	file := filepath.Join(p, "expected.json")
+	if action == "seed" {
+		_, e = os.Stat(file)
+		require(os.IsNotExist(e))
+		for _, n := range []string{"controller.db", "blob-controller.db"} {
+			_, e = os.Lstat(filepath.Join(state, n))
+			require(os.IsNotExist(e))
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		watcher.InitWatcher(ctx)
+		defer watcher.CloseWatcher()
+		store, e := dbsql.NewSQLDatabase(ctx, cfg.Database)
+		must(e)
+		c, e := store.InitController()
+		must(e)
+		u, e := store.CreateUser(ctx, params.NewUserParams{Username: "syntheticfixture", Email: "fixture@example.invalid", Password: random(), Enabled: true})
+		must(e)
+		ctx = auth.SetUserID(auth.SetAdmin(ctx, true), u.ID)
+		_, e = store.CreateGithubEndpoint(ctx, params.CreateGithubEndpointParams{Name: "synthetic-endpoint", APIBaseURL: "https://api.example.invalid", BaseURL: "https://example.invalid", UploadBaseURL: "https://uploads.example.invalid"})
+		must(e)
+		x := expected{Token: "nonfunctional-fixture-" + random(), Controller: c.ControllerID.String(), User: u.ID, Blob: random(), Private: map[string]string{}}
+		_, e = store.CreateGithubCredentials(ctx, params.CreateGithubCredentialsParams{Name: "synthetic-only", Endpoint: "synthetic-endpoint", AuthType: params.ForgeAuthTypePAT, PAT: params.GithubPAT{OAuth2Token: x.Token}})
+		must(e)
+		object, e := store.CreateFileObject(ctx, params.CreateFileObjectParams{Name: "synthetic.bin", Size: int64(len(x.Blob)), Tags: []string{"synthetic-only"}}, bytes.NewReader([]byte(x.Blob)))
+		must(e)
+		x.Object = object.ID
+		x.JWT, e = auth.NewAuthenticator(cfg.JWTAuth, store).GetJWTToken(ctx)
+		must(e)
+		entries, e := os.ReadDir(p)
+		must(e)
+		for _, n := range entries {
+			require(!n.IsDir())
+			data, e := os.ReadFile(filepath.Join(p, n.Name()))
+			must(e)
+			x.Private[n.Name()] = digest(data)
+		}
+		data, e := json.Marshal(x)
+		must(e)
+		must(os.WriteFile(file, data, 0600))
+		fmt.Println("PASS explicit NEW synthetic populated Garm storage seeded")
+		return
+	}
+	require(action == "guard")
+	// Fixed lab bind roots/parents are trusted; every supplied private/state leaf is
+	// owner-only and non-linked. This is not monotonic historical-restore authority.
+	private(p, true)
+	private(state, true)
+	private(file, false)
+	var x expected
+	data, e := os.ReadFile(file)
+	must(e)
+	must(json.Unmarshal(data, &x))
+	require(len(x.Private) > 3)
+	entries, e := os.ReadDir(p)
+	must(e)
+	require(len(entries) == len(x.Private)+1)
+	for name, hash := range x.Private {
+		require(filepath.Base(name) == name)
+		path := filepath.Join(p, name)
+		private(path, false)
+		b, e := os.ReadFile(path)
+		must(e)
+		require(digest(b) == hash)
+	}
+	entries, e = os.ReadDir(state)
+	must(e)
+	allowed := map[string]bool{"controller.db": true, "blob-controller.db": true, "controller.db-wal": true, "controller.db-shm": true, "blob-controller.db-wal": true, "blob-controller.db-shm": true}
+	for _, n := range entries {
+		require(allowed[n.Name()])
+		private(filepath.Join(state, n.Name()), false)
+	}
+	for _, n := range []string{"controller.db", "blob-controller.db"} {
+		private(filepath.Join(state, n), false)
+	}
+	main := open(filepath.Join(state, "controller.db"))
+	defer main.Close()
+	var integrity, controller string
+	must(main.QueryRow("PRAGMA integrity_check").Scan(&integrity))
+	require(integrity == "ok")
+	must(main.QueryRow("SELECT controller_id FROM controller_infos").Scan(&controller))
+	require(controller == x.Controller)
+	var count int
+	must(main.QueryRow("SELECT count(*) FROM controller_infos").Scan(&count))
+	require(count == 1)
+	must(main.QueryRow("SELECT count(*) FROM users WHERE id=?", x.User).Scan(&count))
+	require(count == 1)
+	var sealed []byte
+	must(main.QueryRow("SELECT payload FROM github_credentials WHERE name='synthetic-only'").Scan(&sealed))
+	plaintext, e := commonutil.Unseal(sealed, []byte(cfg.Database.Passphrase))
+	must(e)
+	var credential params.GithubPAT
+	must(json.Unmarshal(plaintext, &credential))
+	require(credential.OAuth2Token == x.Token)
+	token, e := jwt.Parse(x.JWT, func(t *jwt.Token) (any, error) {
+		require(t.Method == jwt.SigningMethodHS256)
+		return []byte(cfg.JWTAuth.Secret), nil
+	}, jwt.WithValidMethods([]string{"HS256"}))
+	must(e)
+	require(token.Valid)
+	blob := open(filepath.Join(state, "blob-controller.db"))
+	defer blob.Close()
+	must(blob.QueryRow("PRAGMA integrity_check").Scan(&integrity))
+	require(integrity == "ok")
+	var content []byte
+	must(blob.QueryRow("SELECT content FROM file_blobs WHERE file_object_id=?", x.Object).Scan(&content))
+	require(string(content) == x.Blob)
+	// Positive actual upstream read from immutable payload; no API or provider call.
+	require(len(content) > 0)
+	_, e = io.Copy(io.Discard, bytes.NewReader(content))
+	must(e)
+	fmt.Println("PASS existing synthetic pair/controller/encrypted credential/JWT/blob and private file guard")
+}
