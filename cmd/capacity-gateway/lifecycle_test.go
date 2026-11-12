@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
@@ -162,6 +163,24 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			budget := admission.Resources{CPU: 2000, RAM: 4096, Runners: 2}
 			config := configuration{Listen: address, Controller: "controller-test", Database: filepath.Join(directory, "ledger.db"), InitialPolicy: admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: 3 * time.Second}, Pools: map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, Hosts: map[string]hostConfiguration{"a": {Endpoint: incus.URL, Project: "runners", TLS: keys.otherFiles}}, Garm: garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}}, ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(hash[:])}}
 
+			adminListener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			adminAddress := adminListener.Addr().String()
+			adminToken := strings.Repeat("c", 64)
+			adminTokenPath := filepath.Join(directory, "admin.token")
+			if err := os.WriteFile(adminTokenPath, []byte(adminToken), 0600); err != nil {
+				t.Fatal(err)
+			}
+			assets := filepath.Join(directory, "ui")
+			if err := os.Mkdir(assets, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(assets, "index.html"), []byte("<!doctype html><title>Read-only app shell</title>"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			config.Admin = &adminConfiguration{Listen: adminAddress, TLS: keys.serverFiles, TokenFile: adminTokenPath, Assets: assets}
 			// Exercise the real private JSON configuration path, not only typed setup.
 			rawConfig, err := json.Marshal(config)
 			if err != nil {
@@ -182,7 +201,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			config = decoded
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- serveOnListener(ctx, config, provision, listener) }()
+			go func() { done <- serveOnListeners(ctx, config, provision, listener, adminListener) }()
 			defer cancel()
 			clientTLS := &tls.Config{RootCAs: keys.root, Certificates: []tls.Certificate{keys.provider}, MinVersion: tls.VersionTLS13}
 			client, err := gatewayrpc.NewClient("https://"+address, clientTLS)
@@ -203,6 +222,41 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 					t.Fatalf("actual service startup failed %v", err)
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+			adminClient := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: keys.root, MinVersion: tls.VersionTLS13}}}
+			defer adminClient.CloseIdleConnections()
+			for _, authorized := range []bool{false, true} {
+				request, _ := http.NewRequest("GET", "https://"+adminAddress+"/admin/api/v1/overview", nil)
+				if authorized {
+					request.Header.Set("Authorization", "Bearer "+adminToken)
+				}
+				response, err := adminClient.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !authorized {
+					response.Body.Close()
+					if response.StatusCode != 401 {
+						t.Fatal("admin view lacked independent bearer authentication")
+					}
+					continue
+				}
+				var view adminview.Overview
+				err = json.NewDecoder(response.Body).Decode(&view)
+				response.Body.Close()
+				if response.StatusCode != 200 || err != nil || view.Provisioning != provision || view.Mode != "experimental-ledger" {
+					t.Fatalf("actual admin view %+v %v status%d", view, err, response.StatusCode)
+				}
+			}
+			mutation, _ := http.NewRequest("POST", "https://"+adminAddress+"/v1/create", strings.NewReader(`{}`))
+			mutation.Header.Set("Authorization", "Bearer "+adminToken)
+			response, err := adminClient.Do(mutation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode < 400 {
+				t.Fatal("read-only admin token reached create route")
 			}
 			request := garmprotocol.Request{Protocol: garmprotocol.Version, Name: "runner-1", PoolID: "pool-a"}
 			exit, _, err := client.Admit(context.Background(), request)
@@ -259,14 +313,34 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			if creates.Load() != 0 {
 				t.Fatal("admission/read paths dispatched a physical create")
 			}
+			if !provision {
+				// A verified TLS connection that has not finished its first HTTP header is
+				// StateNew. net/http deliberately grants it a >5s quiescence window during
+				// graceful Shutdown; do not impose a shorter test deadline than the server.
+				pending, err := tls.Dial("tcp", address, clientTLS)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pending.Close()
+				if _, err := pending.Write([]byte("POST /v1/list HTTP/1.1\r\nHost: localhost\r\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cancel()
 			select {
 			case err := <-done:
 				if err != nil {
 					t.Fatalf("shutdown %v", err)
 				}
-			case <-time.After(5 * time.Second):
+			// Both listeners each have a configured 15s graceful window. This
+			// bound includes those windows and scheduling margin, not an infinite wait.
+			case <-time.After(35 * time.Second):
 				t.Fatal("service did not stop")
+			}
+			adminConnection, adminErr := net.DialTimeout("tcp", adminAddress, 100*time.Millisecond)
+			if adminErr == nil {
+				adminConnection.Close()
+				t.Fatal("admin listener remained open after shutdown")
 			}
 			connection, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
 			if err == nil {
