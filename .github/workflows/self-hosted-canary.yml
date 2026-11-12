@@ -1,0 +1,97 @@
+name: trusted-isolated-self-hosted-canary
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/self-hosted-canary]
+permissions:
+  contents: read
+concurrency:
+  group: gcc-isolated-self-hosted-canary
+  cancel-in-progress: false
+jobs:
+  qualification:
+    if: >-
+      github.repository == 'ShortCipher5/garm-capacity-controller' &&
+      github.repository_owner == 'ShortCipher5' &&
+      github.actor == 'ShortCipher5' &&
+      github.ref == 'refs/heads/ci/self-hosted-canary' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Linux, X64, gcc-ci]
+    timeout-minutes: 20
+    strategy:
+      max-parallel: 1
+      matrix:
+        go-version: ['1.26.x']
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: '-p=2'
+      GOTOOLCHAIN: local
+    steps:
+      # Immutable reviewed owner-authored source, never a fork/PR checkout or input ref.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 424e8d59c6b6a90ed9954e4c433f2d7566ccd85e
+          persist-credentials: false
+      - name: Verify trusted source and bounded guest resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 424e8d59c6b6a90ed9954e4c433f2d7566ccd85e
+          python3 - <<'PY'
+          from pathlib import Path
+          base = Path('/sys/fs/cgroup')
+          memory = (base / 'memory.max').read_text().strip()
+          quota, period = (base / 'cpu.max').read_text().split()
+          processes = (base / 'pids.max').read_text().strip()
+          swap = (base / 'memory.swap.max').read_text().strip()
+          assert memory != 'max' and 0 < int(memory) <= 4 * 1024**3, 'finite guest memory bound required'
+          quota_bounded = quota != 'max' and 0 < int(quota) <= 2 * int(period)
+          effective = base / 'cpuset.cpus.effective'
+          cpus = set()
+          if effective.exists():
+              for part in effective.read_text().strip().split(','):
+                  if not part:
+                      continue
+                  bounds = part.split('-')
+                  first, last = int(bounds[0]), int(bounds[-1])
+                  assert len(bounds) <= 2 and 0 <= first <= last <= 4095, 'valid CPU set required'
+                  cpus.update(range(first, last + 1))
+          assert quota_bounded or 0 < len(cpus) <= 2, 'finite guest CPU quota or effective CPU-set bound required'
+          assert processes != 'max' and 0 < int(processes) <= 512, 'finite guest process bound required'
+          assert swap == '0', 'guest swap must be disabled'
+          assert not Path('/var/run/docker.sock').exists(), 'host/container daemon socket must not be mounted'
+          assert not Path('/var/lib/incus/unix.socket').exists(), 'Incus daemon socket must not be mounted'
+          assert not Path('/run/incus/unix.socket').exists(), 'Incus daemon socket must not be mounted'
+          print('Trusted source and bounded guest resource/socket checks passed')
+          PY
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+      - if: hashFiles('web/package.json') != ''
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Controller race tests and static checks
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: Actual pinned Garm/executable qualification
+        run: integration/garm-v0.2.1/test.sh "$RUNNER_TEMP/gcc-pinned-canary"
+      - name: Built UI and browser qualification
+        if: hashFiles('web/package.json') != ''
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npx playwright install --with-deps chromium
+          npm run test:ui
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: isolated-self-hosted-canary-results
+          path: |
+            web/test-results/
+            ${{ runner.temp }}/gcc-pinned-canary.canonical.patch
+          if-no-files-found: ignore
