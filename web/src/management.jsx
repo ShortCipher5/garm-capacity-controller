@@ -38,6 +38,7 @@ export function Management({ data, refresh }) {
   return <section id="management" className="card management">
     <h2>Ledger policy management</h2>
     <p>Separate write authorization required. These controls change declared admission policy, not Garm pool registration, labels, idle counts or actual runner placement.</p>
+    {action === "host_mode" && selected?.backend_binding_status === "legacy_scope_import_required" && <p className="error">This host has a legacy scope exclusion. A mode change cannot import, reset or clear it. Qualified scope import is not implemented.</p>}
     <p className="drain-warning">Disabling pauses new claims only. It does not drain runners, stop jobs or revoke already committed in-flight claims. Enabling requires fresh reconciliation. Lowering a budget never releases existing charges.</p>
     {!review ? <form onSubmit={prepare}>
       <label>Policy control<select value={action} onChange={(e) => changeAction(e.target.value)}>{Object.entries(labels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>

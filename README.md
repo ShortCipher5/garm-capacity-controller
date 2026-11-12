@@ -14,6 +14,7 @@ Garm remains responsible for runner demand and GitHub integration. This controll
 - **Durable reservations and one-shot dispatch intents** before physical creation. A lost response remains charged, not retried as a new create.
 - **Barrier-first reconciliation** of Garm runners, Incus instances, operations and reservations, including orphans and unknown outcomes.
 - **Explicit host enable/pause primitives**, without pretending that pausing claims prevents idle runners accepting jobs.
+- **Durable daemon bindings** and fresh TLS pinning to reject known duplicate aliases and backend drift before dispatch. This is not whole-physical-host proof.
 - **Credential isolation**: Garm receives gateway-only mTLS credentials, never Incus keys or database access.
 - **A real React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. Separately authorized, reviewed host-mode and budget changes; no mock fallback.
 - **Consistent SQLite backup/restore primitives**, with admission blocked and new authoritative reconciliation required after restore.
@@ -29,6 +30,7 @@ The full goal also includes safe lifecycle management and historical measured us
 | Provisioning | Verified Incus HTTPS/mTLS, explicit limits, durable at-most-once intent and readback | Experimental opt-in; full physical-host coverage must be proved |
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
 | Administration | Separate TLS read/write roles and responsive React ledger view | Opt-in separate write role for ledger host modes and budgets; scoped journalled Garm settings editor; no registration or retirement button |
+| Backend identity | [Immutable daemon bindings](docs/durable-host-bindings.md), transactional dispatch provenance and alias/TLS rotation tests | Legacy charged hosts need unimplemented scope import; hidden projects, multiple daemons per host and admission-ledger runtime lineage remain gated |
 | Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
 | Cancellation | Atomic never-dispatched tombstones, authenticated provider command and optional Garm preparation-failure hook | No dispatched/unknown-create or physical retirement release |
 
@@ -81,6 +83,8 @@ Every physical provisioning path must pass the same authoritative ledger. Altern
 Creating, idle, running, failed, unknown and deleting resources stay charged. A timeout, missing list row, restart or provider failure does not prove safe release. [Never-dispatched cancellation](docs/undispatched-cancellation.md) requires an exact fresh creating reservation, no dispatch intent or linked resource, and a permanent no-recreate identity tombstone. Every dispatched or uncertain create remains charged.
 
 **Paused is not drained.** Existing idle runners can still receive jobs. Physical retirement needs an assignment/job-safety fence, verified deletion and authoritative recovery. These paths remain blocked rather than hidden behind unsafe controls. See [job-safe retirement](docs/job-safe-retirement.md).
+
+Runtime startup never creates or adopts missing state. Use [NEW-only initialization with independently protected lineage](docs/runtime-ledger-lineage.md). Supported archives/restores cannot be activated by this service.
 
 Do not copy only an open WAL database file. Use the [consistent backup procedure](docs/backup-restore.md), fence old writers before historical restore, recover post-backup history and collect new complete authoritative inventory before scheduling.
 

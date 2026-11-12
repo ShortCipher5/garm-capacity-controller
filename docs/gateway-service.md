@@ -26,7 +26,7 @@ The RPC routes are POST-only `/v1/admit`, `/v1/cancel-admission`, `/v1/create`, 
 
 Creates remain **off by default**. Starting the gateway without `-allow-experimental-provisioning` permits authenticated reads only and rejects reserve/cancel/create routes. The opt-in flag is an experimental operator action, not a certification: exclusive physical scopes, trusted profiles/images/credentials, blocked alternate provisioning paths and old-writer fencing must be established separately.
 
-Before serving, and periodically afterwards, the gateway persists a fresh reconciliation barrier and reads Garm, Incus instances and operations. Failed/incomplete/active/unbounded inventories keep new dispatch blocked. Stored SQLite policy wins over `initial_policy` when opening an existing database. There is no API that silently replaces persisted budgets. A server restart does not retry an old dispatch intent.
+Before serving, and periodically afterwards, the gateway persists a fresh reconciliation barrier and reads Garm, Incus instances and operations. Failed/incomplete/active/unbounded inventories keep new dispatch blocked. Runtime startup is existing-only and requires the independently protected `identity_file` to match immutable initialized ledger lineage. It never creates or adopts a missing, empty, offline/legacy or different ledger. Stored SQLite policy is authoritative; `initial_policy` does not initialize runtime state. See [runtime ledger initialization and limits](runtime-ledger-lineage.md). There is no API that silently replaces persisted budgets. A server restart does not retry an old dispatch intent.
 
 The cancellation command proves only never-dispatched status within the authoritative ledger and writes a permanent no-recreate tombstone. Any dispatch intent, unknown/confirmed create or linked resource refuses cancellation. No physical delete is sent. See [cancellation constraints](undispatched-cancellation.md).
 
@@ -57,8 +57,9 @@ The gateway server certificate must actually cover the configured endpoint IP/ho
 Gateway configuration has these top-level keys:
 
 - `listen`: explicit loopback IP/port, e.g. `127.0.0.1:9443`.
-- `controller`, `database`: fixed controller identity and private local SQLite path.
-- `initial_policy`: the ledger's global/host/pool budgets, host modes/nonzero initial observation timestamps, and `max_observation_age_ns`. New ledgers always start blocked, regardless of initial health. Existing persisted policy is not overwritten.
+- `controller`, `database`: fixed controller identity and private existing initialized local SQLite path.
+- `identity_file`: explicit private owner-only identity file, protected outside the database volume. Startup never discovers its expected identity from the mounted database.
+- `initial_policy`: retained for configuration compatibility, not used to initialize or replace runtime state. Pass a standalone admission policy JSON to the explicit NEW-only `capacity-ledger initialize` command. Initialized ledgers always start blocked.
 - `pools`: map of pool IDs to `host`, `cpu_millis`, `ram_mib`, `flavor`, `image`, `image_fingerprint`, `profiles`, `type`, `arch`. Scalesets must use the same pseudo-pool identity as the compatibility hook.
 - `hosts`: map of host aliases to trusted `endpoint`, `project`, and private `tls` file paths.
 - `garm`: trusted `endpoint`, private `token_file`, `tls` files, exact `providers` names and explicit numeric `scalesets` to pseudo-pool mapping. Garm inventory is read-only HTTPS plus bearer auth; no token login/refresh or credential saving is performed.
@@ -69,11 +70,26 @@ Use secret storage/OS credential delivery appropriate for the deployment. These 
 
 ## Restore and remaining acceptance gates
 
-[The backup/restore library](backup-restore.md) uses SQLite's consistent online backup and produces admission-blocked standalone artifacts; it is **not a live recovery service**; the local `capacity-ledger` CLI wraps its offline primitives. Restore into a new path only after stopping/fencing all old external writers. A fresh complete authoritative Garm/Incus/operation inventory, including post-backup resources and operations, is mandatory before opt-in scheduling. The service cannot revoke a different process's credentials or make an old database harmless.
+[The backup/restore library](backup-restore.md) uses SQLite's consistent online backup and produces admission-blocked standalone artifacts; it is **not a live recovery service**; the local `capacity-ledger` CLI wraps its offline primitives. Restore into a new path only after stopping/fencing all old external writers. A fresh complete authoritative Garm/Incus/operation inventory, including post-backup resources and operations, would be necessary but is not sufficient for safe recovery. Supported backup/restore artifacts are permanently runtime-disabled, even after offline reconciliation; this service has no activation path or override. The service cannot revoke a different process's credentials or make an old database harmless.
 
 Remaining gates: installed-version/physical-scope qualification; executable compatibility against the exact Garm deployment; authoritative recovery and proof-based retirement; job-safe deregistration/drain; broader Garm administration; security-event retention and credential rotation procedures. No merge, deployment or production-ready claim is made by this slice.
 
 The [pinned source-to-executable qualification suite](protocol-qualification.md) exercises actual upstream Garm calls through the compiled facade and this service, including ambiguous create correlation and no redispatch. It remains local fixture qualification, not permission to enable production scheduling.
+
+
+
+## Immutable daemon-binding upgrade gate
+
+The gateway now requires [durable schema-four daemon bindings](durable-host-bindings.md)
+before physical dispatch. Actual TLS-key/origin/project/name/version observations
+must match the complete persisted alias set; unknown or changed bindings stay
+blocked. Historically charged unbound hosts cannot be automatically imported after
+upgrade, even if later cancellation removes their last reservation. Qualified
+scope import is not implemented. Keep the read-only admin view available for this
+status; never clear state or use an older image to bypass it. This is not physical
+hardware registration, foreign-project coverage, native parent-limit proof or an
+external credential fence. Runtime missing-ledger/expected-lineage qualification
+also remains open until its separate slice lands.
 
 The optional admin listener supports a separately credentialed, CLI-opted-in ledger policy editor. See [management UI](admin-ui.md) for `management_token_file`, `--allow-experimental-management`, atomic conflict/audit semantics and the explicit no-drain/no-placement boundary.
 

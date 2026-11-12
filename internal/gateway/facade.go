@@ -175,7 +175,11 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	if incusapi.ValidateSpec(spec) != nil {
 		return common.ProviderInstance{}, ErrPolicy
 	}
-	_, err = f.store.ExecuteDispatch(ctx, req, func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
+	binding, err := f.boundBackend(ctx, req.Host)
+	if err != nil {
+		return common.ProviderInstance{}, ErrUnavailable
+	}
+	_, err = f.store.ExecuteDispatchBound(ctx, req, binding, func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
 		created, createErr := f.hosts[req.Host].Create(ctx, spec)
 		receipt := admission.DispatchReceipt{State: "unknown", OperationID: created.OperationID, ResourceID: created.ResourceID}
 		if createErr != nil {
@@ -209,7 +213,7 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 			return common.ProviderInstance{}, ErrUnavailable
 		}
 		record, lookupErr := f.store.LookupDispatch(ctx, req.Key)
-		if lookupErr != nil || record.State != "confirmed" || record.ResourceID != bootstrap.Name {
+		if lookupErr != nil || record.State != "confirmed" || record.ResourceID != bootstrap.Name || record.HostBindingSequence != binding.Sequence {
 			return common.ProviderInstance{}, ErrUnavailable
 		}
 	}

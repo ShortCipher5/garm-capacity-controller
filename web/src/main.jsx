@@ -19,6 +19,11 @@ function Brand() {
     </div>
   );
 }
+function BackendBinding({ status }) {
+  if (status === "legacy_scope_import_required") return <p className="error">Legacy charged host scope requires a separate qualified import workflow. This console cannot clear, reset or auto-bind it, even after later cancellation.</p>;
+  if (status === "bound_observation") return <p className="muted">Backend binding: authenticated daemon observation only. Not physical-hardware, whole-host capacity or parent-quota qualification.</p>;
+  return <p className="drain-warning">Backend unbound. Enabling host mode does not establish a binding or qualify capacity.</p>;
+}
 function Notice() {
   return (
     <div className="notice">
@@ -125,6 +130,7 @@ function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
           </button>
         </header>
         <Notice />
+        {data.hosts.some((host) => host.backend_binding_status === "legacy_scope_import_required") && <div className="notice" role="status"><strong>Legacy backend scope import required</strong><span>Previously charged hosts cannot auto-bind, including after later cancellation removes charges. A separate qualified scope-import workflow is required and is not implemented. Mode and budget edits do not clear this exclusion.</span></div>}
         <div className="snapshot-meta" role="status">
           <span>
             Snapshot {date(data.observed_at)} · Epoch {fmt(data.epoch)}
@@ -173,6 +179,7 @@ function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
                         : "New claims allowed"}
                     </span>
                   </div>
+                  <BackendBinding status={h.backend_binding_status} />
                   <Usage allocation={h} />
                   <div className="host-footer">
                     <span>

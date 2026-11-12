@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -38,6 +37,7 @@ type Client struct {
 	base    url.URL
 	project string
 	http    *http.Client
+	pin     *identityPinState
 }
 
 func New(endpoint, project string, credentials *tls.Config) (*Client, error) {
@@ -62,9 +62,10 @@ func New(endpoint, project string, credentials *tls.Config) (*Client, error) {
 		return nil, ErrConfiguration
 	}
 	transportTLS.ServerName = base.Hostname()
-	transport := &http.Transport{TLSClientConfig: transportTLS, Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext, ResponseHeaderTimeout: 15 * time.Second, MaxIdleConnsPerHost: 4}
+	transport := &identityTransport{initial: newIncusTransport(transportTLS)}
+	pin := &identityPinState{config: transportTLS.Clone(), transport: transport}
 	base.Path = ""
-	return &Client{base: *base, project: project, http: &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &Client{base: *base, project: project, pin: pin, http: &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }
@@ -245,7 +246,12 @@ func (c *Client) trusted(ctx context.Context, requireCreate bool) error {
 	if err != nil {
 		return err
 	}
-	return validateTrustedRoot(response, requireCreate)
+
+	if err := validateTrustedRoot(response, requireCreate); err != nil {
+		return err
+	}
+	return c.checkPinnedRoot(response)
+
 }
 
 func validateTrustedRoot(response envelope, requireCreate bool) error {

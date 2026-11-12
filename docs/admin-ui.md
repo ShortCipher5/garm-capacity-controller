@@ -80,3 +80,18 @@ restart; the console has no blind clear/retry or recovery button. Status and the
 up to25 recent scoped sanitized operation records remain visible when the upstream service is
 unavailable, provided the journal itself can be read. See the full
 [configuration, concurrency and recovery boundaries](garm-management.md).
+
+## Backend binding status (schema4 prerequisite)
+
+The host view exposes only `backend_binding_status`: `unbound`,
+`bound_observation`, or `legacy_scope_import_required`. A bound observation is an
+administered daemon identity observation, not physical-hardware attestation,
+whole-host inventory, parent-quota qualification or production readiness. Raw
+fingerprints and daemon/server names are not returned in this status field.
+
+A legacy scope banner means a previously charged host is excluded from automatic
+binding, even if later cancellation leaves no current charges. Qualified legacy
+scope import is a separate workflow and is not implemented. Mode/budget controls
+remain distinct; there is no clear/reset/import button. Enabling host mode cannot
+erase historical exclusions or qualify backend capacity. See the
+[dynamic management design gaps](dynamic-management-design.md).

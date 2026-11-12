@@ -36,12 +36,13 @@ func (p DispatchPermit) ReservationKey() string { return p.key }
 func (p DispatchPermit) ID() string             { return p.id }
 
 type DispatchRecord struct {
-	ReservationKey string
-	State          string
-	OperationID    string
-	ResourceID     string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	HostBindingSequence int64
+	ReservationKey      string
+	State               string
+	OperationID         string
+	ResourceID          string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // DispatchReceipt contains bounded identifiers only, never bootstrap payloads,
@@ -55,7 +56,7 @@ type DispatchReceipt struct {
 func dispatchRecord(tx *sql.Tx, key string) (DispatchRecord, string, error) {
 	var record DispatchRecord
 	var permit, created, updated string
-	err := tx.QueryRow("SELECT reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at FROM dispatches WHERE reservation_key=?", key).Scan(&record.ReservationKey, &permit, &record.State, &record.OperationID, &record.ResourceID, &created, &updated)
+	err := tx.QueryRow("SELECT reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,COALESCE(host_binding_sequence,0) FROM dispatches WHERE reservation_key=?", key).Scan(&record.ReservationKey, &permit, &record.State, &record.OperationID, &record.ResourceID, &created, &updated, &record.HostBindingSequence)
 	if err != nil {
 		return DispatchRecord{}, "", err
 	}
@@ -71,6 +72,18 @@ func dispatchRecord(tx *sql.Tx, key string) (DispatchRecord, string, error) {
 // current readiness/health/budgets, not merely the old reservation receipt.
 // Existing intent never produces a second permit, including after restart.
 func (s *SQLiteStore) ClaimDispatch(ctx context.Context, req Request) (*DispatchPermit, error) {
+	return s.claimDispatch(ctx, req, nil)
+}
+
+// ClaimDispatchBound additionally checks the gateway's exact immutable backend
+// binding in the same transaction that grants the one-shot dispatch permit.
+func (s *SQLiteStore) ClaimDispatchBound(ctx context.Context, req Request, binding HostBinding) (*DispatchPermit, error) {
+	if !validHostBinding(binding) || binding.Sequence <= 0 || binding.Host != req.Host {
+		return nil, ErrHostBinding
+	}
+	return s.claimDispatch(ctx, req, &binding)
+}
+func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *HostBinding) (*DispatchPermit, error) {
 	var permit *DispatchPermit
 	var outcome error
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
@@ -109,6 +122,12 @@ func (s *SQLiteStore) ClaimDispatch(ctx context.Context, req Request) (*Dispatch
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		if binding != nil {
+			stored, err := scanHostBinding(tx.QueryRow("SELECT host,server_key,origin,scope,server_name,server_version,bound_sequence,bound_at FROM host_bindings WHERE host=?", req.Host).Scan)
+			if err != nil || !stored.Matches(*binding) || stored.Sequence != binding.Sequence {
+				return deny("dispatch_denied_host_binding", ErrHostBinding)
+			}
+		}
 		if !ready || epoch == int64(1<<63-1) {
 			return deny("dispatch_denied_reconciliation", ErrReconciliation)
 		}
@@ -145,7 +164,11 @@ func (s *SQLiteStore) ClaimDispatch(ctx context.Context, req Request) (*Dispatch
 		}
 		id := hex.EncodeToString(nonce[:])
 		at := s.now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at) VALUES(?,?,'intent','','',?,?)", req.Key, id, at, at); err != nil {
+		var bindingSequence any
+		if binding != nil {
+			bindingSequence = binding.Sequence
+		}
+		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence) VALUES(?,?,'intent','','',?,?,?)", req.Key, id, at, at, bindingSequence); err != nil {
 			return err
 		}
 		if err := sqliteAudit(tx, "dispatch_claimed", req.Key, s.now()); err != nil {
@@ -250,10 +273,22 @@ func (s *SQLiteStore) LookupDispatch(ctx context.Context, key string) (DispatchR
 // remains charged and cannot be retried by replaying this method. The callback
 // must enforce immutable host/resource placement and use verified credentials.
 func (s *SQLiteStore) ExecuteDispatch(ctx context.Context, req Request, execute func(context.Context, DispatchPermit) (DispatchReceipt, error)) (DispatchRecord, error) {
+	return s.executeDispatch(ctx, req, nil, execute)
+}
+
+// ExecuteDispatchBound is the physical gateway path. A preflight reservation
+// alone cannot bypass the persisted alias/backend binding at dispatch claim.
+func (s *SQLiteStore) ExecuteDispatchBound(ctx context.Context, req Request, binding HostBinding, execute func(context.Context, DispatchPermit) (DispatchReceipt, error)) (DispatchRecord, error) {
+	if !validHostBinding(binding) || binding.Sequence <= 0 || binding.Host != req.Host {
+		return DispatchRecord{}, ErrHostBinding
+	}
+	return s.executeDispatch(ctx, req, &binding, execute)
+}
+func (s *SQLiteStore) executeDispatch(ctx context.Context, req Request, binding *HostBinding, execute func(context.Context, DispatchPermit) (DispatchReceipt, error)) (DispatchRecord, error) {
 	if execute == nil {
 		return DispatchRecord{}, ErrDenied
 	}
-	permit, err := s.ClaimDispatch(ctx, req)
+	permit, err := s.claimDispatch(ctx, req, binding)
 	if err != nil {
 		return DispatchRecord{}, err
 	}

@@ -41,6 +41,7 @@ type configuration struct {
 	Listen               string                        `json:"listen"`
 	Controller           string                        `json:"controller"`
 	Database             string                        `json:"database"`
+	IdentityFile         string                        `json:"identity_file"`
 	InitialPolicy        admission.Config              `json:"initial_policy"`
 	Pools                map[string]gateway.PoolPolicy `json:"pools"`
 	Hosts                map[string]hostConfiguration  `json:"hosts"`
@@ -84,7 +85,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	if !ok || !address.IP.IsLoopback() {
 		return gatewayrpc.ErrConfiguration
 	}
-	store, err := admission.OpenSQLite(config.Database, config.InitialPolicy)
+	store, err := admission.OpenRuntimeSQLite(config.Database, config.IdentityFile)
 	if err != nil {
 		return err
 	}
@@ -168,7 +169,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	}
 	runctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	interval := config.InitialPolicy.MaxObservationAge / 3
+	interval := time.Second
 	// Existing persisted policy wins over initial policy, including freshness.
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {

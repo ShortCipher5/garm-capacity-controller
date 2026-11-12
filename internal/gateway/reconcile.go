@@ -42,6 +42,9 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 	// Freshness is measured from collection start, not the end of a slow last
 	// request. Earlier source views must not be relabelled freshly observed.
 	observedAt := time.Now()
+	if err := f.bindBackends(ctx, fence, observedAt); err != nil {
+		return err
+	}
 	rows, err := garm.Instances(ctx)
 	if err != nil {
 		return ErrUnavailable

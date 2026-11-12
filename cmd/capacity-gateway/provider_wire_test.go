@@ -90,7 +90,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		defer mu.Unlock()
 		switch {
 		case r.URL.Path == "/1.0":
-			syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}})
+			syncJSON(w, incusIdentityRoot(keys, "wire-incus"))
 		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
 			creates.Add(1)
 			var body struct {
@@ -173,6 +173,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	config := configuration{Listen: address, Controller: "controller-test", Database: databasePath, InitialPolicy: admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}, Pools: map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, Hosts: map[string]hostConfiguration{"a": {Endpoint: incus.URL, Project: "runners", TLS: keys.otherFiles}}, Garm: garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}}, ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(fingerprint[:])}}
 	running, cancelService := context.WithCancel(ctx)
 	done := make(chan error, 1)
+	initializeRuntimeFixture(t, &config)
 	go func() { done <- serveOnListener(running, config, true, listener) }()
 	defer func() {
 		cancelService()

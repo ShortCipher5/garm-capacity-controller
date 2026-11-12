@@ -18,10 +18,16 @@ import (
 // readiness. The artifact itself is admission-blocked and has no usable fence.
 // This is an offline recovery primitive, not a live gateway recovery workflow.
 func (s *SQLiteStore) BackupSQLite(ctx context.Context, destination string) error {
+	if err := s.runtimePathCheck(); err != nil {
+		return err
+	}
 	if s.poisoned.Load() {
 		return ErrUncertain
 	}
 	return sqliteExport(ctx, s.db, destination, "backup_created", func() error {
+		if err := s.runtimePathCheck(); err != nil {
+			return err
+		}
 		if s.poisoned.Load() {
 			return ErrUncertain
 		}
@@ -69,7 +75,7 @@ func sqliteExportFile(ctx context.Context, input, destination, auditKind string)
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 1 && version != 2 && version != 3 {
+	if !sqliteSupportedVersion(version) {
 		return errors.New("export requires an owned versioned ledger")
 	}
 	return sqliteExport(ctx, db, destination, auditKind, func() error { return nil })
@@ -164,6 +170,13 @@ func sqliteExport(ctx context.Context, source *sql.DB, destination, auditKind st
 		return err
 	}
 	if err := artifact.transaction(ctx, func(tx *sql.Tx) error {
+		kind := "archive"
+		if auditKind == "backup_restored" {
+			kind = "restored"
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE ledger_lineage SET runtime_kind=? WHERE id=1", kind); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, "UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
 			return err
 		}

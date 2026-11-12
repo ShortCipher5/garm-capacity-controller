@@ -1,3 +1,5 @@
+> Runtime recovery gate: schema 6 preserves immutable ledger lineage but stamps every supported backup and restore as permanently runtime-disabled. Offline readiness/reconciliation cannot activate an artifact. `capacity-gateway` refuses these artifacts even when their ID matches its independent identity file. There is no activation command or boolean bypass. The inventory/fencing procedures below remain necessary recovery research, not a supported runtime activation workflow. See [runtime ledger lineage](runtime-ledger-lineage.md).
+
 # Consistent SQLite backup and fail-closed restore
 
 This is a **local offline recovery primitive**, not a live production recovery
@@ -91,8 +93,7 @@ publication it checks application/schema ownership, SQLite integrity, foreign
 keys, stored policy, and allocation accounting. It preserves reservations,
 inventory, dispatch intents/outcomes, included cancellation tombstones, and prior audit history, then durably sets
 `ready=0` and clears the reconciliation nonce and barrier timestamp. An audit
-entry records `backup_created` or `backup_restored` on the copy. Owned version-one
-and version-two inputs receive dispatch/cancellation migrations through current version three on the copy only. Included tombstones are preserved; later history absent from an older backup must be recovered or old identities quarantined before replay. See [cancellation history limits](undispatched-cancellation.md).
+entry records `backup_created` or `backup_restored` on the copy. Owned older inputs receive conservative migrations through current version five on the copy only, preserving included cancellation, daemon-binding and CREATE-observation history and their provenance exclusions. Included tombstones are preserved; later history absent from an older backup must be recovered or old identities quarantined before replay. See [cancellation history limits](undispatched-cancellation.md).
 
 The finished artifact is closed in DELETE journal mode with all committed data
 in its single private database file. File sync, an atomic same-filesystem
@@ -199,3 +200,21 @@ completeness, hard power-loss/process-kill fault injection, hardware durability,
 large-database performance, remote archival/encryption/retention, scheduling,
 operator authentication, or a live gateway service. These model tests are not
 production acceptance.
+
+
+## Schema-four daemon-binding history
+
+Current artifacts retain immutable daemon bindings, their audit-sequenced dispatch
+provenance and legacy charged-host binding exclusions. Versions one through four
+are accepted by the offline file exporter; historical source files remain read-only
+and are upgraded only in the new copy. Neither a copy nor a fresh baseline may
+silently bind a historically charged unqualified host. See [binding upgrade and
+open live-recovery gates](durable-host-bindings.md). Runtime expected-lineage and
+external old-writer fencing are still separate qualification requirements.
+
+Schema-five artifacts also preserve the immutable original-CREATE observation
+journal and binding-audit association. The [journal's recovery limits](create-observation-journal.md)
+apply: observations absent from a historical backup are not reconstructed by
+migration, and stored terminal observations are not release or fencing authority.
+Owned schema versions 1 through 5 are supported; older source files are inspected
+read-only and migrations affect only the new exported artifact.
