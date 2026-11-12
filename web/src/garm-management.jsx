@@ -56,7 +56,7 @@ export function GarmManagement({ read }) {
     {uncertain.current && <p className="error">This session has an uncertain write. Further changes are disabled. Inspect journal status and resolve the external operation before reconnecting.</p>}
     {snapshot && !snapshot.writes_enabled && <p>Garm writes are disabled. Discovery only.</p>}
     {snapshot && !review && <form onSubmit={prepare}>
-      <label>Garm object type<select value={kind} onChange={(e)=>{setKind(e.target.value);setTarget((e.target.value==="pool"?snapshot.settings.pools:snapshot.settings.repositories)[0]?.id||"");}}><option value="pool">Pool settings</option><option value="repository">Repository balancing</option></select></label>
+      <label>Garm object type<select aria-label="Garm object type" value={kind} onChange={(e)=>{setKind(e.target.value);setTarget((e.target.value==="pool"?snapshot.settings.pools:snapshot.settings.repositories)[0]?.id||"");}}><option value="pool">Pool settings</option><option value="repository">Repository balancing</option></select></label>
       <label>Garm object<select value={target} onChange={(e)=>setTarget(e.target.value)}>{choices.map((v)=><option key={v.id} value={v.id}>{v.owner?`${v.owner}/${v.name}`:v.id}</option>)}</select></label>
       {selected && (kind==="pool"?<div className="budget-fields" key={selected.fingerprint}>
         <label>Pool enabled<select name="enabled" defaultValue={String(selected.enabled)}><option value="true">Enabled</option><option value="false">Disabled, not drained</option></select></label>
@@ -64,7 +64,7 @@ export function GarmManagement({ read }) {
         <label>Maximum runners<input name="max_runners" type="number" min={selected.min_idle_runners} max="1000000" step="1" defaultValue={selected.max_runners} required /></label>
         <label>Minimum idle runners<input name="min_idle_runners" type="number" min={selected.min_idle_runners} max="1000000" step="1" defaultValue={selected.min_idle_runners} required /></label>
         <label>Future-runner tags, one per line<textarea name="tags" defaultValue={selected.tags.join("\n")} maxLength="8192" /></label>
-      </div>:<label key={selected.fingerprint}>Repository balancing<select name="balancer" defaultValue={selected.pool_balancing_type}>{selected.pool_balancing_type===""&&<option value="">Upstream default</option>}<option value="roundrobin">Round robin</option><option value="pack">Pack</option></select></label>)}
+      </div>:<label key={selected.fingerprint}>Repository balancing<select aria-label="Repository balancing" name="balancer" defaultValue={selected.pool_balancing_type}>{selected.pool_balancing_type===""&&<option value="">Upstream default</option>}<option value="roundrobin">Round robin</option><option value="pack">Pack</option></select></label>)}
       <label>Garm audit reason<input name="reason" maxLength="256" required placeholder="No credentials or sensitive data" /></label>
       <button className="primary" disabled={blocked||!selected} type="submit">Review Garm change</button>
     </form>}
