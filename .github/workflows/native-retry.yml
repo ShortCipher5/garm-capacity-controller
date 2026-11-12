@@ -1,0 +1,32 @@
+name: Native transaction retry component
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/native-retry.yml'
+      - 'deploy/runtime/native-retry/**'
+permissions:
+  contents: read
+jobs:
+  component:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: deploy/runtime/native-retry/test.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-retry-evidence
+          if-no-files-found: error
+          path: |
+            qualification-results/native-retry/upstream.txt
+            qualification-results/native-retry/recipe-revision.txt
+            qualification-results/native-retry/fixture.sha256
+            qualification-results/native-retry/recipe.sha256
+            qualification-results/native-retry/base-image.txt
+            qualification-results/native-retry/packages.tsv
+            qualification-results/native-retry/go-version.txt
+            qualification-results/native-retry/test.txt
+            qualification-results/native-retry/result.txt
