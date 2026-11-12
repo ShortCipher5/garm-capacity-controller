@@ -29,16 +29,28 @@ func (s *SQLiteStore) BackupSQLite(ctx context.Context, destination string) erro
 	})
 }
 
+// BackupSQLiteFile exports an existing private ledger through a read-only handle.
+// It never creates or migrates the source database. Like BackupSQLite, its
+// standalone artifact is admission-blocked and includes committed WAL contents.
+// A live source may still have cooperating writers; this is not writer fencing.
+func BackupSQLiteFile(ctx context.Context, source, destination string) error {
+	return sqliteExportFile(ctx, source, destination, "backup_created")
+}
+
 // RestoreSQLite exports a private owned backup to a NEW private database path.
 // It never overwrites a database or returns a ready Store. Before using the
 // result, callers must stop/fence old external writers, then begin a NEW
 // reconciliation and collect authoritative complete inventory after its barrier.
 // A historical snapshot cannot prove the absence of post-backup resources.
 func RestoreSQLite(ctx context.Context, backup, destination string) error {
+	return sqliteExportFile(ctx, backup, destination, "backup_restored")
+}
+
+func sqliteExportFile(ctx context.Context, input, destination, auditKind string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	source, err := sqlitePrivatePath(backup, true)
+	source, err := sqlitePrivatePath(input, true)
 	if err != nil {
 		return err
 	}
@@ -58,9 +70,9 @@ func RestoreSQLite(ctx context.Context, backup, destination string) error {
 		return err
 	}
 	if version != 1 && version != 2 {
-		return errors.New("restore requires an owned versioned ledger")
+		return errors.New("export requires an owned versioned ledger")
 	}
-	return sqliteExport(ctx, db, destination, "backup_restored", func() error { return nil })
+	return sqliteExport(ctx, db, destination, auditKind, func() error { return nil })
 }
 
 // The parent must be private: atomic publication and SQLite sidecar handling

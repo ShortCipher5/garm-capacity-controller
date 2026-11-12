@@ -3,24 +3,75 @@
 This is a **local offline recovery primitive**, not a live production recovery
 workflow or a backup service. It does not connect to Garm or Incus, stop old
 writers, schedule backups, manage encryption keys, or resume a gateway. No live
-infrastructure was accessed to qualify it. There is no backup/restore CLI.
+infrastructure was accessed to qualify it. The `capacity-ledger` CLI wraps these
+local primitives; it does not automate the live recovery procedure.
+
+## Local operator CLI
+
+Build on Linux with CGO and the pinned SQLite dependencies:
+
+```sh
+go build -o ./capacity-ledger ./cmd/capacity-ledger
+./capacity-ledger --help
+
+# Existing private local ledger; cooperating writers may remain active.
+./capacity-ledger backup --source /private/ledger/source.db \
+    --destination /private/backups/new-snapshot.db
+
+# FIRST stop/fence old writers, provider execution, collectors and queued replay.
+# This flag acknowledges work performed separately. It does not perform or prove it.
+./capacity-ledger restore --source /private/backups/new-snapshot.db \
+    --destination /private/recovery/new-ledger.db --old-writers-fenced
+```
+
+The tool never creates a missing source, migrates the source in place, overwrites
+an existing destination, removes existing sidecars, starts a service, changes a
+gateway configuration, or enables admission. Both commands open an existing source
+read-only and use the same WAL-aware SQLite export and artifact validation as the
+library. Historical schema migrations apply to the copy only. Destinations and
+source paths must satisfy the private-file and local-filesystem rules below.
+There are no `--force`, `--ready`, reconciliation, or resume options.
+
+Restore refuses to run without explicit `--old-writers-fenced` acknowledgement.
+That acknowledgement is **not a fencing mechanism or evidence of safe recovery**.
+Keep every old external execution path and queued request replay fenced. Preserve
+newer dispatch/cancellation history, quarantine request identities whose complete
+history cannot be recovered, and account for ambiguous in-flight work before
+using the restored path. The complete operator procedure below remains mandatory.
+The CLI never collects inventory and cannot verify external credentials, physical
+allocation boundaries, or post-backup operation history.
+
+Exit codes: `0` confirms publication of a standalone private **admission-blocked**
+artifact; `2` means invalid usage or missing fencing acknowledgement; `1` means
+failure/interruption; `3` means an uncertain result that may already have installed
+the destination. Never interpret a nonzero exit as proof the destination is absent.
+For an uncertain result, retain the source and backup, inspect the destination
+offline, and use a fresh destination for another attempt. Errors deliberately omit
+raw driver messages, source contents, and operator-supplied paths/arguments.
+SIGINT/SIGTERM cancel export; the same library cancellation/durability limits apply.
+Successful restore prints the mandatory fresh barrier/inventory and stopped
+scheduling reminder, not a claim that recovery or external fencing is complete.
 
 ## Supported APIs
 
 Linux, CGO, and the pinned SQLite driver are required. From code in this module:
 
 ```go
+// Existing path opened read-only; no source creation or in-place migration.
+err := admission.BackupSQLiteFile(ctx, "/private/ledger/source.db",
+    "/private/backups/new-file-snapshot.db")
+
 // source is an already-open *admission.SQLiteStore.
-err := source.BackupSQLite(ctx, "/private/backups/new-snapshot.db")
+err = source.BackupSQLite(ctx, "/private/backups/new-snapshot.db")
 
 // The original and snapshot are not overwritten. No ready Store is returned.
 err = admission.RestoreSQLite(ctx, "/private/backups/new-snapshot.db",
     "/private/recovery/new-ledger.db")
 ```
 
-Both destination paths must be **new**. Their immediate parent directories must
+All destination paths must be **new**. Their immediate parent directories must
 already exist, be real directories rather than symlinks, and have no group or
-other permission bits (normally mode `0700`). A restore input must likewise be a
+other permission bits (normally mode `0700`). An input to `BackupSQLiteFile` or `RestoreSQLite` must likewise be a
 private regular file (normally `0600`) in a private real parent directory, not a
 symlink. A destination with an existing database, symlink, WAL, SHM, or rollback
 journal is rejected. Use a dedicated local filesystem, not NFS. The trusted
@@ -55,7 +106,9 @@ stopped while inspecting and cleaning crash remnants.
 Exports honor cancellation and have an additional 30-second bound; SQLite lock
 calls can delay cancellation briefly. A busy or continuously changing large
 source may therefore fail rather than wait forever. A poisoned source handle is
-not backed up. An error wrapping `ErrUncertain` means installation happened but
+not backed up through its method. The file entry point cannot inspect another
+process's poisoned handle or determine its external operation history; preserve
+that evidence separately. An error wrapping `ErrUncertain` means installation happened but
 a later sync/cleanup could not be verified. Do not treat it as success or blindly
 retry over the same path. Keep the old database, inspect the named output, and
 use a fresh destination for another attempt. Filesystem/hardware power-loss
@@ -112,6 +165,7 @@ interpret a missing historical intent as permission to retry a create.
 
 ```sh
 go test -race -count=1 ./internal/admission -run SQLiteBackup
+go test -race -count=1 ./cmd/capacity-ledger
 go test -race -count=1 ./...
 go vet ./...
 gofmt -l .
@@ -124,6 +178,12 @@ preservation, refusal before a new reconciliation, post-backup creating orphans,
 missing-resource retention, incomplete inventories, truncated/empty inputs,
 private paths, symlinks, destination sidecars, no-overwrite concurrent publication,
 canceled export cleanup, and poisoned source handles.
+
+CLI tests additionally exercise the actual built executable, required fencing
+acknowledgement, argument validation before database access, missing-source
+refusal, redacted errors and uncertainty handling, private standalone output,
+destination sidecar preservation, committed WAL contents, historical source
+preservation, and restored dispatch refusal until new complete reconciliation.
 
 Not qualified: real Garm/Incus recovery, old-writer fencing, adapter inventory
 completeness, hard power-loss/process-kill fault injection, hardware durability,

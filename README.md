@@ -72,3 +72,8 @@ The `feat/host-admission-controls` slice adds durable trusted host enable/pause 
 The `feat/read-only-admin` slice adds a separate opt-in TLS read-only admin API backed by actual ledger state, with no synthetic fallback. It cannot modify policy or retire runners. The React client follows in a separate focused slice. See [admin setup and read isolation](docs/read-only-admin.md). Physical retirement/job-safe draining remains blocked, not hidden behind fake controls.
 
 The `feat/read-only-admin-ui` slice pairs that API with the actual React ledger view: memory-only read credentials, refresh/logout fencing, no fixture fallback and no mutation controls. See [the UI](docs/admin-ui.md). Browser qualification runs separately in CI; installed infrastructure and job-safe retirement are still not qualified.
+
+Local operator backup/restore: build `./cmd/capacity-ledger` and follow the
+[fail-closed recovery procedure](docs/backup-restore.md). It produces new private,
+WAL-consistent, admission-blocked artifacts only. External old-writer fencing and
+a NEW complete authoritative reconciliation are still mandatory before use.
