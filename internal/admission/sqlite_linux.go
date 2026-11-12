@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 6
+const sqliteCurrentVersion = 9
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -216,6 +216,44 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 			if err := sqliteAudit(tx, "schema_migrated_v6", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 7 {
+			if _, err := tx.Exec(sqlitePlacementSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v7", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 8 {
+			if _, err := tx.Exec(sqliteOriginalPreparationSchema); err != nil {
+				return err
+			}
+			if version > 0 {
+				if _, err := tx.Exec("INSERT INTO original_preparation_history_exclusions SELECT request_key FROM reservations"); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v8", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 9 {
+			if _, err := tx.Exec(sqliteInactivePoolRouteSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v9", "", s.now()); err != nil {
 				return err
 			}
 		}
@@ -594,8 +632,9 @@ type HostObservation struct {
 }
 
 type InventorySnapshot struct {
-	Hosts     []HostObservation
-	Resources []InventoryResource
+	Preparations []GarmPreparation
+	Hosts        []HostObservation
+	Resources    []InventoryResource
 }
 
 func validInventory(r InventoryResource) bool {
@@ -646,6 +685,9 @@ func (s *SQLiteStore) CompleteReconciliation(ctx context.Context, fence Fence, s
 		if err != nil {
 			return err
 		}
+		if err := sqliteGarmPreparations(tx, config, fence, snapshot, reservations, previous, began, now); err != nil {
+			return err
+		}
 		existing := map[[2]string]InventoryResource{}
 		for _, resource := range previous {
 			existing[[2]string{resource.Host, resource.ID}] = resource
@@ -656,8 +698,9 @@ func (s *SQLiteStore) CompleteReconciliation(ctx context.Context, fence Fence, s
 		}
 		for _, resource := range snapshot.Resources {
 			identity := [2]string{resource.Host, resource.ID}
-			pool, poolOK := config.Pools[resource.Pool]
-			if !validInventory(resource) || !seenHosts[resource.Host] || !poolOK || !contains(pool.Hosts, resource.Host) || seen[identity] {
+			_, poolOK := config.Pools[resource.Pool]
+			// Eligibility limits NEW placement, never visibility of existing charge.
+			if !validInventory(resource) || !seenHosts[resource.Host] || !poolOK || seen[identity] {
 				return ErrReconciliation
 			}
 			seen[identity] = true
@@ -705,12 +748,15 @@ type AuditEvent struct {
 }
 
 type SQLiteSnapshot struct {
-	HostBindings       map[string]HostBinding
-	LegacyUnboundHosts []string
-	Ready              bool
-	Epoch              int64
-	Config             Config
-	Reservations       map[string]Reservation
+	ExecutionPlanCount           int64
+	UnplannedReservationCount    int64
+	LegacySourcePreparationCount int64
+	HostBindings                 map[string]HostBinding
+	LegacyUnboundHosts           []string
+	Ready                        bool
+	Epoch                        int64
+	Config                       Config
+	Reservations                 map[string]Reservation
 	// RecentCancellations is at most 100 entries, NEVER absence proof.
 	RecentCancellations map[string]Cancellation
 	CancellationCount   int64
@@ -741,6 +787,13 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 		}
 		result.Reservations, err = sqliteReservations(tx)
 		if err != nil {
+			return err
+		}
+		result.ExecutionPlanCount, result.UnplannedReservationCount, err = sqliteExecutionPlanCounts(tx)
+		if err != nil {
+			return err
+		}
+		if err := tx.QueryRow("SELECT count(*) FROM original_preparation_history_exclusions e JOIN reservations r ON r.request_key=e.request_key").Scan(&result.LegacySourcePreparationCount); err != nil {
 			return err
 		}
 		result.RecentCancellations, result.CancellationCount, err = sqliteRecentCancellations(tx)

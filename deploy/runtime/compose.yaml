@@ -1,0 +1,49 @@
+# EXPLICITLY SYNTHETIC test topology, never a live-stack replacement.
+services:
+  garm:
+    image: python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
+    user: "65531:65531"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 128m
+    restart: "no"
+    command: [python, /fixture.py, serve]
+    volumes:
+      - type: bind
+        source: ${PACKAGING_FIXTURE_SCRIPT:?set the disposable fixture script}
+        target: /fixture.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PACKAGING_FIXTURE_PRIVATE:?set disposable fixture credentials}
+        target: /fixture-private
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [isolated]
+  peer:
+    image: python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
+    profiles: [test-peer]
+    user: "65531:65531"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    restart: "no"
+    command: [python, /fixture.py, peer]
+    volumes:
+      - type: bind
+        source: ${PACKAGING_FIXTURE_SCRIPT:?set the disposable fixture script}
+        target: /fixture.py
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [isolated]
+networks:
+  isolated:
+    internal: true

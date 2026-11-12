@@ -34,6 +34,11 @@ import (
 
 func rpcTLSFixture(t *testing.T, handler http.Handler) (*httptest.Server, *tls.Config) {
 	t.Helper()
+	server, credentials, _ := rpcTLSRolesFixture(t, handler)
+	return server, credentials
+}
+func rpcTLSRolesFixture(t *testing.T, handler http.Handler) (*httptest.Server, *tls.Config, func(int64) *tls.Config) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +76,10 @@ func rpcTLSFixture(t *testing.T, handler http.Handler) (*httptest.Server, *tls.C
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{cert(2, false)}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool, MinVersion: tls.VersionTLS13}
 	server.StartTLS()
 	t.Cleanup(server.Close)
-	return server, &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{cert(3, true)}, MinVersion: tls.VersionTLS13}
+	credentials := func(serial int64) *tls.Config {
+		return &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{cert(serial, true)}, MinVersion: tls.VersionTLS13}
+	}
+	return server, credentials(3), credentials
 }
 
 type backend struct {
