@@ -48,6 +48,11 @@ class RunnerTest(unittest.TestCase):
    self.assertNotIn('RAW-PRIVATE-SENTINEL',found.exception.safe());self.assertNotIn('RAW-PRIVATE-SENTINEL',str(found.exception));self.assertIn('exit=49',found.exception.safe())
   error=run.LoaderMismatch('RAW-PRIVATE-SENTINEL');self.assertNotIn('RAW-PRIVATE-SENTINEL',str(error));self.assertEqual(error.safe(),'loader rejection category=other')
   self.assertEqual(run.LoaderMismatch('exec user process caused: no such file or directory').safe(),'loader rejection category=user-exec-enoent')
+  start=subprocess.CompletedProcess([],127,b'RAW-PRIVATE-SENTINEL',b'exec /usr/local/bin/garm: no such file or directory RAW-PRIVATE-SENTINEL')
+  error=run.LoaderMismatch('',start,{'status':'exited','exit':127,'oom':False,'error':'RAW-PRIVATE-SENTINEL'})
+  self.assertEqual(error.safe(),'loader rejection category=empty start-exit=127 stdout=other stderr=target-exec-enoent state=exited state-exit=127 oom=false');self.assertNotIn('RAW-PRIVATE-SENTINEL',str(error))
+  error=run.LoaderMismatch('',subprocess.CompletedProcess([],object(),b'',b'RAW-PRIVATE-SENTINEL'),{'status':'RAW-PRIVATE-SENTINEL','exit':'RAW-PRIVATE-SENTINEL','oom':'RAW-PRIVATE-SENTINEL'})
+  self.assertNotIn('RAW-PRIVATE-SENTINEL',error.safe());self.assertIn('state=unrecognized state-exit=invalid oom=invalid',error.safe())
  def record(self):return {'lab':'generated','image':'sha256:test','user':'65531:65531','network':'none','pid':'','privileged':False,'readonly':True,'caps_add':None,'caps_drop':['ALL'],'security':['no-new-privileges'],'ports':{},'restart':'no','volumes':None,'memory':512*1024*1024,'cpus':1000000000,'pids':128,'tmpfs':{'/tmp':'rw,noexec,nosuid,nodev,size=16m,uid=65531,gid=65531,mode=0700'},'mounts':[]}
  def test_topology_unsafe_controls_rejected(self):
   good=self.record();run.topology(good,'generated','sha256:test',65531,'none',[],['/tmp'])

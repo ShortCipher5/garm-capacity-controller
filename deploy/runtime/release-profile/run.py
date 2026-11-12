@@ -17,15 +17,23 @@ class ProbeMismatch(Failed):
   self.actual=actual if actual in PROBE_KINDS else ('invalid-response' if actual=='invalid-response' else 'unrecognized')
   self.exit=str(exit) if type(exit)is int and -255<=exit<=255 else 'invalid'
  def safe(self):return 'probe expected='+self.wanted+' actual='+self.actual+' exit='+self.exit
+def loader_category(value):
+ if type(value)is not str:return 'non-string'
+ if not value:return 'empty'
+ if 'exec /usr/local/bin/garm: no such file or directory' in value:return 'target-exec-enoent'
+ if 'exec user process caused: no such file or directory' in value:return 'user-exec-enoent'
+ if 'exec:' in value and '/usr/local/bin/garm' in value and 'no such file or directory' in value:return 'target-stat-enoent'
+ return 'other'
+def safe_exit(value):return str(value) if type(value)is int and -255<=value<=255 else 'invalid'
 class LoaderMismatch(Failed):
- def __init__(self,error):
+ def __init__(self,error,start=None,state=None):
   super().__init__('loader-rejection-mismatch')
-  self.category='other'
-  if type(error)is not str:self.category='non-string'
-  elif not error:self.category='empty'
-  elif 'exec user process caused: no such file or directory' in error:self.category='user-exec-enoent'
-  elif 'exec:' in error and '/usr/local/bin/garm' in error and 'no such file or directory' in error:self.category='target-stat-enoent'
- def safe(self):return 'loader rejection category='+self.category
+  self.category=loader_category(error);self.details=''
+  if start is not None and state is not None:
+   status=state.get('status');status=status if status in ('created','restarting','running','removing','paused','exited','dead') else 'unrecognized'
+   oom=state.get('oom');oom=str(oom).lower() if type(oom)is bool else 'invalid'
+   self.details=' start-exit='+safe_exit(start.returncode)+' stdout='+loader_category(start.stdout.decode(errors='replace'))+' stderr='+loader_category(start.stderr.decode(errors='replace'))+' state='+status+' state-exit='+safe_exit(state.get('exit'))+' oom='+oom
+ def safe(self):return 'loader rejection category='+self.category+self.details
 
 def need(ok):
  if not ok:raise Failed('disposable image test failed')
@@ -201,8 +209,8 @@ def run():
   phase='linkage-missing-loader-exec'
   failed=lab.create(broken,65531,'none','/usr/local/bin/garm',['--version']);r=command(['docker','start','-a',failed]);need(r.returncode!=0)
   # This deliberately keyless scratch container is the only case reading Error.
-  err=json.loads(data(['docker','inspect','--format','{{json .State.Error}}',failed]));
-  if type(err)is not str or 'exec /usr/local/bin/garm: no such file or directory' not in err:raise LoaderMismatch(err)
+  state=json.loads(data(['docker','inspect','--format','{"error":{{json .State.Error}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}}}',failed]));err=state['error']
+  if type(err)is not str or 'exec /usr/local/bin/garm: no such file or directory' not in err:raise LoaderMismatch(err,r,state)
   phase='discovery'
   r=lab.once(daemon,65531,'none','/usr/local/bin/garm',['--version']);need(r.returncode==0 and b'v0.2.1+capacity.87e0d61751d4' in r.stdout)
   r=lab.once(tools,65533,'none','/usr/local/bin/garm-cli',['--help'],home=True);need(r.returncode==0 and r.stdout.startswith(b'CLI for the github self hosted runners manager.'))
