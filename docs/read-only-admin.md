@@ -1,6 +1,6 @@
 # Separate read-only administration surface
 
-This experimental slice adds a **real SQLite ledger view**, not simulated data. It does not add policy writes, runner deletion, release, pool editing or a complete drain workflow. The provider's mTLS scope and startup provisioning flag remain separate.
+This page describes the experimental **read-role SQLite ledger view**, not simulated data. Its read credential does not authorize policy writes, Garm settings writes, explicit onboarding probes, runner deletion or release. The shared admin listener can additionally serve separately configured and authorized [ledger policy controls](admin-ui.md#experimental-ledger-policy-editor), [Garm settings](garm-management.md) and [onboarding preflight](incus-onboarding-preflight.md). Those optional capabilities do not provide a complete drain workflow. The provider's mTLS scope and startup provisioning flag remain separate.
 
 ## Optional configuration
 
@@ -29,17 +29,19 @@ The UI sends the read token only in an Authorization header and retains it only 
 
 ## API and data boundary
 
-Only same-origin `GET /admin/api/v1/overview` is available. It returns global/host/pool budgets and conservative allocations, last-observed health/freshness, admission readiness, experimental startup provisioning enablement, accounted state counts and recent target/mode audit events. It deliberately omits bootstrap, callback URLs, bearer/Incus keys, provider faults, guest userdata, instance names and arbitrary job details.
+The baseline read-role endpoint is same-origin `GET /admin/api/v1/overview`. It returns global/host/pool budgets and conservative allocations, last-observed health/freshness, admission readiness, experimental startup provisioning enablement, accounted state counts and recent target/mode audit events. It deliberately omits bootstrap, callback URLs, bearer/Incus keys, provider faults, guest userdata, instance names and arbitrary job details.
 
-All counts come from one consistent ledger snapshot. Linked inventory is deduplicated against reservations; unknown/failed/missing work remains charged. These are declared allocations, not measured CPU/RAM utilization, guaranteed available slots, historical usage telemetry or a fresh physical-host probe. The timestamp identifies the served snapshot. Positive readiness does not qualify all physical scopes or production safety.
+When their respective backend configuration is present, the read role can also use `GET /admin/api/v1/garm` for scoped settings discovery and `GET /admin/api/v1/onboarding` for configured preflight discovery. These are distinct from the ledger overview; discovery does not authorize writes or execute an onboarding probe. Management actions require their separate credential and applicable opt-ins described in the linked feature guides.
+
+All overview counts come from one consistent ledger snapshot. Linked inventory is deduplicated against reservations; unknown/failed/missing work remains charged. These are declared allocations, not measured CPU/RAM utilization, guaranteed available slots, historical usage telemetry or a fresh physical-host probe. The timestamp identifies the served snapshot. Positive readiness does not qualify all physical scopes or production safety.
 
 Each host also includes a non-destructive drain assessment: last-observed allocation counts and explicit blockers. It never grants delete/release permission or infers drain completion from zero rows or a mode. Existing idle runners can still accept jobs. See [job-safe retirement limits](job-safe-retirement.md).
 
 ## Read cancellation isolation
 
-Administrative reads use an independent **SQLite `mode=ro`, `query_only` deferred transaction**. A browser disconnect/cancel rolls back only its view and cannot poison the shared admission writer. Expired readiness is displayed as false without modifying metadata/audit; admission/dispatch and reconciliation still enforce and persist their own freshness guards. Closed or poisoned writer state fails the view closed. The conservative ambiguous-write-commit handling is unchanged.
+Ledger overview reads use an independent **SQLite `mode=ro`, `query_only` deferred transaction**. A browser disconnect/cancel rolls back only its view and cannot poison the shared admission writer. Expired readiness is displayed as false without modifying metadata/audit; admission/dispatch and reconciliation still enforce and persist their own freshness guards. Closed or poisoned writer state fails the view closed. The conservative ambiguous-write-commit handling is unchanged.
 
-Tests cancel just before a read commit repeatedly, reject writes on the read connection, verify ordinary admission still works, and retain the original ambiguous-commit poison test. The admin token has no policy/provisioning route, even when experimental provider provisioning is enabled.
+Tests cancel just before a read commit repeatedly, reject writes on the read connection, verify ordinary admission still works, and retain the original ambiguous-commit poison test. The admin read token has no policy/provisioning write authority, even when experimental provider provisioning is enabled.
 
 ## Static delivery and shutdown
 
@@ -47,4 +49,4 @@ The public app shell contains no private ledger data. Assets are confined with `
 
 The optional admin server shares lifecycle with the provider service but not its authentication role. Startup validates private full JSON configuration before serving; shutdown closes both listeners. Actual TLS lifecycle tests cover unauthenticated versus authenticated admin reads, provider reserve behavior, denied cross-role create attempts, failed authoritative reconciliation and shutdown.
 
-No infrastructure is deployed or modified by this slice. Full mutation authorization, attributable admin writes, safe retirement/release and installed physical-host qualification remain explicit gates.
+The read-only configuration shown here does not enable management actions or deploy infrastructure. Scoped management authorization exists under the separate feature contracts; individual operator attribution, safe retirement/release and installed physical-host qualification remain incomplete. A successful read or discovery response is not production qualification.
