@@ -41,6 +41,7 @@ type configuration struct {
 	Listen               string                        `json:"listen"`
 	Controller           string                        `json:"controller"`
 	Database             string                        `json:"database"`
+	IdentityFile         string                        `json:"identity_file"`
 	InitialPolicy        admission.Config              `json:"initial_policy"`
 	Pools                map[string]gateway.PoolPolicy `json:"pools"`
 	Hosts                map[string]hostConfiguration  `json:"hosts"`
@@ -84,7 +85,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	if !ok || !address.IP.IsLoopback() {
 		return gatewayrpc.ErrConfiguration
 	}
-	store, err := admission.OpenSQLite(config.Database, config.InitialPolicy)
+	store, err := admission.OpenRuntimeSQLite(config.Database, config.IdentityFile)
 	if err != nil {
 		return err
 	}
@@ -134,6 +135,17 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	}
 	// No secrets, request bodies, URLs, panic values or provider output in logs.
 	server := &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 12 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}
+	if err := validateGarmManagementRouting(config); err != nil {
+		return err
+	}
+	remoteManager, closeRemote, err := newGarmControl(config.Admin, string(bytes.TrimSpace(token)), config.Database)
+	if err != nil {
+		return err
+	}
+	defer closeRemote()
+	if config.Admin != nil {
+		config.Admin.garmRuntime = remoteManager
+	}
 	adminServer, closeAdmin, err := newAdminServer(config.Admin, store, provision)
 	if err != nil {
 		return err
@@ -157,7 +169,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	}
 	runctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	interval := config.InitialPolicy.MaxObservationAge / 3
+	interval := time.Second
 	// Existing persisted policy wins over initial policy, including freshness.
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -242,6 +254,7 @@ func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
+	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
 	flag.Parse()
 	raw, err := securefiles.Read(*configPath, 1<<20)
 	if err != nil {
@@ -259,6 +272,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableExperimentalManagement = true
+	}
+	if *remoteManagement {
+		if !*management || config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "Garm management requires separate management authorization and explicit opt-in")
+			os.Exit(1)
+		}
+		config.Admin.EnableExperimentalGarmManagement = true
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()

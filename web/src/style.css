@@ -752,3 +752,7 @@ td {
 .budget-fields { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .8rem; }
 .event p { overflow-wrap: anywhere; }
 @media (max-width: 640px) { .budget-fields { grid-template-columns: 1fr; } }
+.garm-audit { margin-top: 1.5rem; }
+.garm-audit details { padding: .8rem 0; border-top: 1px solid #cbd5e1; }
+.garm-audit p { overflow-wrap: anywhere; }
+.management textarea { min-height: 6rem; padding: .7rem; width: 100%; border: 1px solid #cbd5e1; border-radius: .5rem; resize: vertical; }

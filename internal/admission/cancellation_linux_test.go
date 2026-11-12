@@ -371,6 +371,9 @@ func TestCancellationMigrationExcludesAllOldV1V2Reservations(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.Close()
+			// Schema-four upgrade closes inherited readiness; a fresh complete
+			// baseline still cannot erase legacy cancellation exclusions.
+			reconcileSQLite(t, s, nil)
 			if _, err := s.CancelUndispatched(context.Background(), legacy); !errors.Is(err, ErrDenied) {
 				t.Fatalf("legacy history treated as proof: %v", err)
 			}

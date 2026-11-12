@@ -14,12 +14,15 @@ import (
 )
 
 type adminConfiguration struct {
-	EnableExperimentalManagement bool                 `json:"-"`
-	Listen                       string               `json:"listen"`
-	TLS                          securefiles.TLSFiles `json:"tls"`
-	ManagementTokenFile          string               `json:"management_token_file,omitempty"`
-	TokenFile                    string               `json:"token_file"`
-	Assets                       string               `json:"assets"`
+	GarmManagement                   *garmManagementConfiguration `json:"garm_management,omitempty"`
+	EnableExperimentalGarmManagement bool                         `json:"-"`
+	garmRuntime                      adminview.GarmManager
+	EnableExperimentalManagement     bool                 `json:"-"`
+	Listen                           string               `json:"listen"`
+	TLS                              securefiles.TLSFiles `json:"tls"`
+	ManagementTokenFile              string               `json:"management_token_file,omitempty"`
+	TokenFile                        string               `json:"token_file"`
+	Assets                           string               `json:"assets"`
 }
 
 func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, provision bool) (*http.Server, func(), error) {
@@ -68,6 +71,19 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, err
 		}
+	}
+	if config.GarmManagement != nil {
+		if config.garmRuntime == nil {
+			cleanup()
+			return nil, noop, adminview.ErrConfiguration
+		}
+		if err := handler.SetGarmManager(config.garmRuntime, config.EnableExperimentalGarmManagement); err != nil {
+			cleanup()
+			return nil, noop, err
+		}
+	} else if config.EnableExperimentalGarmManagement {
+		cleanup()
+		return nil, noop, adminview.ErrConfiguration
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

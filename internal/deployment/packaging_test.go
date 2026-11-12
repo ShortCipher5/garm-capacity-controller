@@ -160,3 +160,28 @@ func TestRecoveryToolIsSeparateAndQualificationIsNotDeployment(t *testing.T) {
 		}
 	}
 }
+
+func TestHostedQualificationHasNoLiveOrSecretInputs(t *testing.T) {
+	workflow := repositoryFile(t, ".github/workflows/packaging.yml")
+	for _, required := range []string{"runs-on: ubuntu-24.04", "contents: read", "persist-credentials: false", "deploy/runtime/test.sh", "qualification-results/*.json"} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("missing hosted isolation contract: %s", required)
+		}
+	}
+	for _, forbidden := range []string{"pull_request_target", "self-hosted", "secrets.", "write-all", "contents: write"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("unsafe workflow input: %s", forbidden)
+		}
+	}
+	harness := repositoryFile(t, "deploy/runtime/test.sh")
+	for _, required := range []string{"RUNNER_TEMP", "--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 65532:65532", "installed_stack_qualified", "--force-recreate"} {
+		if !strings.Contains(harness, required) {
+			t.Fatalf("missing disposable runtime boundary: %s", required)
+		}
+	}
+	for _, forbidden := range []string{"--privileged", "/var/run/docker.sock", "docker system prune", "docker login", "compose down -v"} {
+		if strings.Contains(harness, forbidden) {
+			t.Fatalf("unsafe harness operation: %s", forbidden)
+		}
+	}
+}

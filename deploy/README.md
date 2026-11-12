@@ -98,7 +98,7 @@ Precreate two separate real directories on a trusted **local** filesystem:
 
 | Container path | Owner/mode | Purpose |
 | --- | --- | --- |
-| `/run/capacity-private` | gateway UID 65532, `0700`; files `0600` | read-only gateway config, TLS and API-token files |
+| `/run/capacity-private` | gateway UID 65532, `0700`; files `0600` | read-only gateway config, independent ledger identity, TLS and API-token files |
 | `/var/lib/capacity-gateway` | gateway UID 65532, `0700`; files `0600` | persistent ledger **and** its WAL/SHM sidecars |
 
 Account for the Docker engine's UID mapping when setting ownership on the host.
@@ -115,10 +115,12 @@ Construct the private `gateway.local.json` using
 [the full gateway configuration contract](../docs/gateway-service.md). Set:
 
 - `listen`: `127.0.0.1:9443`.
-- `database`: `/var/lib/capacity-gateway/ledger.db`.
+- `database`: `/var/lib/capacity-gateway/ledger.db`, an existing explicitly initialized runtime ledger.
+- `identity_file`: `/run/capacity-private/ledger.identity`, owner-only and independently protected outside the state bind. Never derive or regenerate it from a mounted database.
 - Every gateway TLS/token path: a private regular file under `/run/capacity-private`.
-- `controller`, trusted hosts/projects, fixed pool placement, bounded initial
-  policy, and read-only Garm inventory credentials: actual reviewed values.
+- `controller`, trusted hosts/projects, fixed pool placement and read-only Garm
+  inventory credentials: actual reviewed values. Persisted initialized policy is
+  authoritative; `initial_policy` cannot initialize or replace runtime state.
 - `provider_fingerprints`: only exact authorized DER client-leaf SHA-256 values.
 - Optional `admin.listen`: `127.0.0.1:9444`, separate server TLS/read-token files,
   and `admin.assets`: `/usr/local/share/capacity-admin`. Omit `admin` to disable it.
@@ -154,10 +156,15 @@ There is deliberately no automatic health check: a listening process or ledger-r
 success does not establish complete physical scope, fresh authoritative reconciliation
 or admission qualification.
 Do not report the stack production-ready from an HTTP 200 or container "running".
-The preview performs authenticated external inventory **reads**, writes local
-reconciliation/audit state and may automatically migrate an owned SQLite schema.
-Use a new private preview ledger, or a validated backup under a separate new path;
-never casually point a new image at the live ledger for a compatibility check.
+The preview performs authenticated external inventory **reads** and writes local
+reconciliation/audit state. Runtime startup is existing-only and never initializes,
+adopts or migrates missing/legacy/foreign state. Prepare a NEW private test ledger
+and independent identity only through the explicitly authorized `capacity-ledger
+initialize` operation described in [runtime lineage](../docs/runtime-ledger-lineage.md).
+Never derive the expected identity from the mounted database or add initialization
+to an entrypoint, restart, install or upgrade hook. Supported backup/restore
+artifacts are permanently runtime-disabled, even with a matching identity; do not
+point the gateway at one for a compatibility check or claim a recovery activation.
 
 Before an authorized disposable runtime check, verify:
 
@@ -190,11 +197,15 @@ procedure](../docs/backup-restore.md). The CLI is available in the separate
 default command only prints help. It is an offline recovery primitive, not a
 production backup service or proof that old writers are fenced. Keep credentials
 separately. A historical ledger cannot prove later external work vanished.
-New images can migrate owned schema forward;
-rolling back the image may then refuse the database. Do not downgrade/hand-edit
+Normal runtime requires the current initialized schema and matching independent
+identity. Supported archives/restores never become runtime state, and no activation
+command or boolean exists. Offline inspection/migration does not activate them.
+A raw historical active copy with the same identity is not rollback-detectable and
+is not a supported recovery route. A different image may refuse the database. Do not downgrade/hand-edit
 schema or substitute an older ledger to force startup. Preserve evidence, fence
-old credentials, restore into a new path and complete authoritative reconciliation
-before any new provisioning is considered.
+old credentials and preserve artifacts for offline inspection. Fresh authoritative
+reconciliation and external fencing remain necessary but cannot activate a supported
+archive or restore. A safe live recovery/activation workflow remains unimplemented.
 
 Still required before integration into an existing runner stack: exact installed
 Garm/provider compatibility, full physical-host scope and bypass fencing, upstream
@@ -210,7 +221,9 @@ Use only an immutable reviewed `ledger-tool` image built from the same source
 revision/schema as the gateway. Its Debian runtime and CGO build match the
 gateway; do not export the binary into an unqualified Alpine or older-glibc host.
 It runs as UID/GID 65532 and has no gateway credentials, network client, server,
-automatic schedule, service-start or admission-enable capability. The gateway
+automatic schedule, service-start or admission-enable capability. Its explicit
+NEW-only initialize command creates a ledger and independent identity; normal
+gateway startup and Compose never invoke it. The gateway
 overlay deliberately does not mount backups or start this tool.
 
 For an independently authorized local backup/restore, run it with network disabled,
@@ -223,12 +236,15 @@ copy the main open database alone. Do not mount Docker/Incus sockets, gateway
 credentials, the entire host filesystem or a shared job workspace. Do not grant
 root/capabilities or relax file modes to resolve an ownership failure.
 
-The backup and restore subcommands and explicit restore-fencing acknowledgement
+The explicit new-only initialization, backup and restore subcommands and restore-fencing acknowledgement
 are documented in [backup/restore](../docs/backup-restore.md). Destinations must be
 new. Do not automatically retry uncertain results, restore over an active ledger,
 resume scheduling, or interpret the acknowledgement as a fence. This image covers
-only the admission ledger; a separately introduced Garm-mutation journal requires
-its own qualified backup/restore primitive and persistent directory. Do not use
+only the admission ledger. The Garm-mutation journal has a separate persistent
+directory and independent configured lineage; its own explicit new-only initializer
+is not included in this image. Neither a missing journal nor a lineage mismatch
+may be repaired by startup/restart. Its archives remain inspection-only pending a
+qualified recovery workflow. Do not use
 `capacity-ledger` on an unrelated database.
 
 See the [disposable qualification plan](qualification.md) before treating any image

@@ -14,6 +14,9 @@ import (
 // Request cancellation can roll back its view, never poison the shared writer.
 // No core ambiguous-write-commit classification is relaxed by this method.
 func (s *SQLiteStore) readTransaction(ctx context.Context, read func(*sql.Tx) error) error {
+	if err := s.runtimePathCheck(); err != nil {
+		return err
+	}
 	if s.closed.Load() {
 		return sql.ErrConnDone
 	}
@@ -51,8 +54,13 @@ func (s *SQLiteStore) readTransaction(ctx context.Context, read func(*sql.Tx) er
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if queryOnly != 1 || application != 0x47434331 || version != 3 {
+	if queryOnly != 1 || application != 0x47434331 || version != sqliteCurrentVersion {
 		return errors.New("read view requires an owned current ledger")
+	}
+	if s.runtimeID != "" {
+		if err := sqliteRuntimeIdentity(tx.QueryRow, s.runtimeID); err != nil {
+			return err
+		}
 	}
 	if err = read(tx); err != nil {
 		return err
@@ -85,11 +93,23 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context) (SQLiteSnapshot, error) 
 		if err != nil {
 			return err
 		}
+		result.ExecutionPlanCount, result.UnplannedReservationCount, err = sqliteExecutionPlanCounts(tx)
+		if err != nil {
+			return err
+		}
 		result.RecentCancellations, result.CancellationCount, err = sqliteRecentCancellations(tx)
 		if err != nil {
 			return err
 		}
 		result.Inventory, err = sqliteInventory(tx)
+		if err != nil {
+			return err
+		}
+		result.LegacyUnboundHosts, err = sqliteLegacyUnboundHosts(tx, result.Config)
+		if err != nil {
+			return err
+		}
+		result.HostBindings, err = sqliteHostBindings(tx, result.Config)
 		if err != nil {
 			return err
 		}

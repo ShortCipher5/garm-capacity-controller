@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
+import { GarmManagement } from "./garm-management.jsx";
 import { Management } from "./management.jsx";
 
 const fmt = (n) => n.toLocaleString();
@@ -17,6 +18,11 @@ function Brand() {
       </span>
     </div>
   );
+}
+function BackendBinding({ status }) {
+  if (status === "legacy_scope_import_required") return <p className="error">Legacy charged host scope requires a separate qualified import workflow. This console cannot clear, reset or auto-bind it, even after later cancellation.</p>;
+  if (status === "bound_observation") return <p className="muted">Backend binding: authenticated daemon observation only. Not physical-hardware, whole-host capacity or parent-quota qualification.</p>;
+  return <p className="drain-warning">Backend unbound. Enabling host mode does not establish a binding or qualify capacity.</p>;
 }
 function Notice() {
   return (
@@ -78,7 +84,7 @@ function Usage({ allocation, metric = false }) {
     );
   });
 }
-function Dashboard({ data, busy, refresh, disconnect }) {
+function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
   return (
     <>
       <aside className="sidebar">
@@ -124,6 +130,8 @@ function Dashboard({ data, busy, refresh, disconnect }) {
           </button>
         </header>
         <Notice />
+        {data.legacy_unplanned_reservations > 0 && <div className="notice" role="status"><strong>Historical execution plans unavailable</strong><span>{data.legacy_unplanned_reservations} reservations remain charged but lack immutable execution plans. They cannot be created or automatically imported. This console cannot reset or clear their history.</span></div>}
+        {data.hosts.some((host) => host.backend_binding_status === "legacy_scope_import_required") && <div className="notice" role="status"><strong>Legacy backend scope import required</strong><span>Previously charged hosts cannot auto-bind, including after later cancellation removes charges. A separate qualified scope-import workflow is required and is not implemented. Mode and budget edits do not clear this exclusion.</span></div>}
         <div className="snapshot-meta" role="status">
           <span>
             Snapshot {date(data.observed_at)} · Epoch {fmt(data.epoch)}
@@ -137,6 +145,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
           </span>
         </div>
         <Management data={data} refresh={refresh} />
+        {data.garm_management_available && <GarmManagement read={readGarm} />}
         <div className="metrics">
           <Usage allocation={data.global} metric />
         </div>
@@ -171,6 +180,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
                         : "New claims allowed"}
                     </span>
                   </div>
+                  <BackendBinding status={h.backend_binding_status} />
                   <Usage allocation={h} />
                   <div className="host-footer">
                     <span>
@@ -339,6 +349,10 @@ function App() {
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
+        readGarm={async () => {
+          try { return await session.current.garmSnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
       />
     );
   return (
@@ -352,6 +366,7 @@ function App() {
           Incus credentials belong here.
         </p>
         <Notice />
+        {data.legacy_unplanned_reservations > 0 && <div className="notice" role="status"><strong>Historical execution plans unavailable</strong><span>{data.legacy_unplanned_reservations} reservations remain charged but lack immutable execution plans. They cannot be created or automatically imported. This console cannot reset or clear their history.</span></div>}
         <form
           onSubmit={(e) => {
             e.preventDefault();

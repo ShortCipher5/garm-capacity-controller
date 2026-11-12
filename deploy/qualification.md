@@ -1,6 +1,13 @@
 # Disposable image/runtime qualification plan
 
-Status: **plan, not executed container qualification**. Source tests and native
+Status: **plan, not executed container qualification**. A dedicated
+GitHub-hosted [disposable workflow](../.github/workflows/packaging.yml) now runs
+`deploy/runtime/test.sh` on pull requests. Its published JSON contains public
+image references and booleans only, never ephemeral credentials or fixtures.
+A green job means its synthetic checks passed, not installed-stack qualification.
+The exact public Garm image probe records provider execution/libc and default UID
+blockers without changing that runtime; `installed_stack_qualified` stays false.
+ Source tests and native
 CGO builds do not qualify an image, Docker engine, private Compose stack or host
 filesystem. Never use the live runner stack, credentials, provider volume, ledger,
 job workspace, host network or Docker/Incus socket as test inputs.
@@ -44,10 +51,13 @@ or apply its live-stack overlay for these checks.
 - Invalid usage exits 2. Restore without `--old-writers-fenced` exits 2 **before**
   touching any path, even when supplied paths are inaccessible. No path/secret is
   echoed in errors. Verify behavior in the container, not just host unit tests.
-- Generate synthetic admission-ledger fixtures with the actual current SQLite
+- Explicitly initialize NEW synthetic admission-ledger fixtures and a separate
+  independently protected identity file with the actual packaged CLI/SQLite
   implementation in a private local test directory. Include charged resources,
   cancellation/dispatch evidence and a committed transaction retained in WAL.
-  Use no copied production ledger or real credential. A fixture is not a qualified
+  Use no copied production ledger or real credential. Normal gateway startup must
+  reject missing, mismatched and archive/restored state without creating sidecars
+  or running initialization. Never derive the expected identity from a mounted DB. A fixture is not a qualified
   physical-host inventory. Build any fixture helper only in the disposable test
   workspace, not in the production image.
 - Mount the **whole source directory** read-only at `/source` and a different
@@ -60,6 +70,9 @@ or apply its live-stack overlay for these checks.
 - Restore the synthetic snapshot to another new path only after simulating and
   documenting stopped/fenced test writers. Verify readiness/fences remain cleared,
   charges and supported schema evidence survive, and the source is untouched.
+  Both supported backups and restores are permanently runtime-disabled; verify
+  even matching independent identity cannot start the gateway. No recovery
+  activation is shipped or implied by completing offline reconciliation.
 - Exercise wrong owner/mode, symlink paths, missing/existing destinations, sidecar
   collisions, read-only destination, low disk space and concurrent exporters.
   For interruption/kill tests, inspect outcomes offline and retain uncertain
@@ -115,12 +128,34 @@ backup schema/rollback and namespace recreation results. Synthetic container
 success still does not qualify actual physical coverage, bypass fencing, job-safe
 drain/retirement, upstream credential roles or real operator recovery.
 
-A future Garm-mutation journal needs separate durable storage and its own safe
-backup/restore tests; restoring it must remain write-blocked pending authoritative
-fencing. The admission-ledger tool must not be applied to that database.
+The separately implemented Garm-mutation journal needs its own durable storage,
+independently configured expected lineage and qualified backup/restore tests;
+restoring it must remain write-blocked pending an unimplemented authoritative
+activation/fencing workflow. Never initialize/adopt it on normal startup or
+derive expected lineage from the mounted journal. The admission-ledger tool must not be applied to that database.
 
 Only after the disposable gates pass can an operator review the **exact** target
 stack and separately authorize any deployment. Do not change its UID/capabilities,
 credentials, networking, provider or scheduling under this plan. If the live stack
 does not meet the documented isolation model, report the blocker and leave it
 unchanged. This plan contains no live deployment command or permission to deploy.
+
+## Automated coverage and remaining gates
+
+The workflow digest-locks all production bases for its run, builds the actual
+gateway/recovery/provider targets, checks native image identity/capability/rootfs
+behavior, explicit new-only ledger/independent-identity initialization, missing/
+wrong-mount/archive nonactivation, wrong owner/mode rejection, synthetic Compose namespace/mount/role
+isolation, actual gateway mTLS and loopback listeners, static web serving, live
+WAL-aware CLI backup and blocked restore, and namespace recreation. The separate
+public Garm digest is executed only for UID/interface discovery, with no network
+or configuration. Its incompatibility is reported explicitly and never repaired
+by modifying the image or installing a loader.
+
+This does not yet automate low-disk/interrupted/concurrent container export,
+full browser interaction, image-layer secret canary scanning, power-loss durability,
+all-negative ownership/symlink cases, legacy charged-ledger upgrades or any actual
+physical-host/job-safe lifecycle. Existing Go/browser tests cover their documented
+local contracts separately. Do not convert a missing automated gate into a pass.
+The shell harness requires a disposable runner and removes only its generated
+Compose project/test directory; do not point it at an existing host or stack.

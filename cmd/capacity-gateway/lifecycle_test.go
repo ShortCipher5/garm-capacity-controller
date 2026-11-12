@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -43,6 +44,11 @@ type testCredentials struct {
 	serverFiles   securefiles.TLSFiles
 	providerFiles securefiles.TLSFiles
 	otherFiles    securefiles.TLSFiles
+}
+
+func incusIdentityRoot(keys testCredentials, name string) map[string]any {
+	hash := sha256.Sum256(keys.server.Certificate[0])
+	return map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}, "environment": map[string]any{"server_clustered": false, "server_name": name, "server_version": "6.0.4", "certificate": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: keys.server.Certificate[0]})), "certificate_fingerprint": fmt.Sprintf("%x", hash)}}
 }
 
 func credentials(t *testing.T) testCredentials {
@@ -129,7 +135,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/1.0":
-					syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}})
+					syncJSON(w, incusIdentityRoot(keys, "lifecycle-incus"))
 				case "/1.0/instances":
 					syncJSON(w, []any{})
 				case "/1.0/operations":
@@ -201,6 +207,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			config = decoded
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
+			initializeRuntimeFixture(t, &config)
 			go func() { done <- serveOnListeners(ctx, config, provision, listener, adminListener) }()
 			defer cancel()
 			clientTLS := &tls.Config{RootCAs: keys.root, Certificates: []tls.Certificate{keys.provider}, MinVersion: tls.VersionTLS13}
