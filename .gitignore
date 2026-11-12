@@ -10,4 +10,4 @@
 node_modules/
 web/dist/
 coverage.out
-capacity-sim
+/capacity-sim
