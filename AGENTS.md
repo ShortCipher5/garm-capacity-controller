@@ -9,7 +9,7 @@ This is an experimental control plane above Garm, not a replacement for it.
 - Unknown or failed resources remain charged until authoritative reconciliation proves absence.
 - Never reclaim capacity on timeout, failed creation, missing list entry or controller restart alone.
 - Existing idle runners can still accept jobs after admission is stopped. Drain is not merely disable-create.
-- Keep simulation visibly separate from production integration. No live adapter is implemented yet.
+- Keep simulation visibly separate from production integration. A concrete REST transport exists, but no qualified live gateway/service is enabled.
 - Run `go test -race ./...`, `go vet ./...`, and `gofmt -l .` before publishing Go changes.
 - Keep pull requests focused and draft. Do not merge or deploy without authorization.
 - SQLite tests require Linux + CGO + a C compiler. Use the pinned module and checksums; do not silently disable database tests.

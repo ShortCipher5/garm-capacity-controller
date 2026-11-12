@@ -60,3 +60,5 @@ The `feat/gateway-dispatch` slice adds a durable one-shot backend execution boun
 Implemented: conservative admission model, durable local reservations, idempotency, cross-process locking and concurrency/restart tests. Not implemented: production adapters, production admin authentication, credential storage, real reconciliation, release, historical telemetry, priority scheduling or production drain. CI tests the model only. Passing CI is not a certification of Garm/provider compatibility.
 
 No live infrastructure was accessed or changed during initial development. No production-ready claim is made.
+
+The `feat/incus-transport` slice adds a concrete, credential-verified Incus REST transport with explicit allocation limits and bounded project inventory; see [transport boundary and remaining gates](docs/incus-transport.md). Tests use disposable mutual-TLS fixtures, not live hosts. No gateway service or production mode is enabled.

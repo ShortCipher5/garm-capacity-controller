@@ -24,10 +24,10 @@ index ca98bdf..938440c 100644
  			return fmt.Errorf("path to config file must be an absolute path")
 diff --git a/runner/common/admission.go b/runner/common/admission.go
 new file mode 100644
-index 0000000..4bfdf5c
+index 0000000..991f206
 --- /dev/null
 +++ b/runner/common/admission.go
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,252 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +package common
@@ -247,10 +247,10 @@ index 0000000..4bfdf5c
 +	return nil
 +}
 +
-+// RunCreateProvider is the credential-safe execution boundary for opt-in
++// RunProviderCommand is the credential-safe execution boundary for opt-in
 +// gateway creates. A create error is never converted into benign deferral.
 +// Whether an external operation occurred must be resolved by the gateway ledger.
-+func RunCreateProvider(ctx context.Context, binary string, environ []string, input []byte) ([]byte, error) {
++func RunProviderCommand(ctx context.Context, binary string, environ []string, input []byte) ([]byte, error) {
 +	output := &admissionOutput{limit: 1 << 20}
 +	command := exec.CommandContext(ctx, binary)
 +	command.Env = environ
@@ -267,15 +267,22 @@ index 0000000..4bfdf5c
 +	if err != nil {
 +		var exited *exec.ExitError
 +		if errors.As(err, &exited) {
-+			return nil, fmt.Errorf("provider create failed with exit code %d", exited.ExitCode())
++			return nil, &ProviderCommandError{Code: exited.ExitCode()}
 +		}
 +		return nil, errors.New("provider create executable unavailable")
 +	}
 +	return output.Bytes(), nil
 +}
++
++// ProviderCommandError exposes only a numeric code, never child output.
++type ProviderCommandError struct{ Code int }
++
++func (e *ProviderCommandError) Error() string {
++	return fmt.Sprintf("provider command failed with exit code %d", e.Code)
++}
 diff --git a/runner/common/admission_test.go b/runner/common/admission_test.go
 new file mode 100644
-index 0000000..639631b
+index 0000000..1daba50
 --- /dev/null
 +++ b/runner/common/admission_test.go
 @@ -0,0 +1,136 @@
@@ -399,7 +406,7 @@ index 0000000..639631b
 +
 +func TestSensitiveCreateFailureDoesNotDiscloseBootstrap(t *testing.T) {
 +	secret := "bootstrap-secret-must-not-echo"
-+	out, err := RunCreateProvider(context.Background(), os.Args[0], []string{"GCC_ADMISSION_STUB=echo-secret-failure"}, []byte(secret))
++	out, err := RunProviderCommand(context.Background(), os.Args[0], []string{"GCC_ADMISSION_STUB=echo-secret-failure"}, []byte(secret))
 +	if err == nil || out != nil || IsAdmissionDeferred(err) || strings.Contains(err.Error(), secret) {
 +		t.Fatalf("unsafe create failure: %v", err)
 +	}
@@ -504,17 +511,19 @@ index 9f5fc19..499ea27 100644
  	jitConfig := make(map[string]string)
 diff --git a/runner/providers/v0.1.1/admission_test.go b/runner/providers/v0.1.1/admission_test.go
 new file mode 100644
-index 0000000..ef1ab68
+index 0000000..af713b8
 --- /dev/null
 +++ b/runner/providers/v0.1.1/admission_test.go
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,116 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package v011
 +
 +import (
 +	"context"
 +	"encoding/json"
++	"errors"
 +	"fmt"
++	garmErrors "github.com/cloudbase/garm-provider-common/errors"
 +	"io"
 +	"os"
 +	"strings"
@@ -528,6 +537,15 @@ index 0000000..ef1ab68
 +func TestMain(m *testing.M) {
 +	if mode := os.Getenv("GCC_EXTERNAL_ADMISSION_STUB"); mode != "" {
 +		input, _ := io.ReadAll(os.Stdin)
++		if mode == "list" {
++			_ = json.NewEncoder(os.Stdout).Encode([]commonParams.ProviderInstance{{Name: "runner", ProviderID: "runner", Status: commonParams.InstanceRunning}})
++			os.Exit(0)
++		}
++		if mode == "not-found" {
++			fmt.Fprint(os.Stderr, "must-not-echo")
++			os.Exit(30)
++		}
++
 +		if mode == "echo-failure" {
 +			fmt.Printf("%s", input)
 +			fmt.Fprintf(os.Stderr, "%s", input)
@@ -596,8 +614,25 @@ index 0000000..ef1ab68
 +		}
 +	}
 +}
++
++func TestOptInInventorySuccessAndLookupNotFound(t *testing.T) {
++	cfg := &config.Provider{External: config.External{AdmissionEnabled: true}}
++	provider := &external{cfg: cfg, execPath: os.Args[0], environmentVariables: []string{"GCC_EXTERNAL_ADMISSION_STUB=list"}}
++	instances, err := provider.ListInstances(context.Background(), "pool", common.ListInstancesParams{})
++	if err != nil || len(instances) != 1 || instances[0].Name != "runner" {
++		t.Fatalf("successful inventory rejected: %+v %v", instances, err)
++	}
++	provider.environmentVariables = []string{"GCC_EXTERNAL_ADMISSION_STUB=not-found"}
++	_, err = provider.GetInstance(context.Background(), "missing", common.GetInstanceParams{})
++	if !errors.Is(err, garmErrors.ErrNotFound) || strings.Contains(err.Error(), "must-not-echo") {
++		t.Fatalf("lookup not-found mapping/redaction: %v", err)
++	}
++	if instances, err = provider.ListInstances(context.Background(), "pool", common.ListInstancesParams{}); err == nil || len(instances) != 0 || strings.Contains(err.Error(), "must-not-echo") {
++		t.Fatalf("failed inventory accepted or leaked: %+v %v", instances, err)
++	}
++}
 diff --git a/runner/providers/v0.1.1/external.go b/runner/providers/v0.1.1/external.go
-index 6e43dce..ffc0a76 100644
+index 6e43dce..327c3f0 100644
 --- a/runner/providers/v0.1.1/external.go
 +++ b/runner/providers/v0.1.1/external.go
 @@ -35,6 +35,7 @@ import (
@@ -639,7 +674,7 @@ index 6e43dce..ffc0a76 100644
 -	out, err := garmExec.Exec(ctx, e.execPath, asJs, asEnv)
 +	var out []byte
 +	if e.cfg.External.AdmissionEnabled {
-+		out, err = common.RunCreateProvider(ctx, e.execPath, asEnv, asJs)
++		out, err = common.RunProviderCommand(ctx, e.execPath, asEnv, asJs)
 +	} else {
 +		out, err = garmExec.Exec(ctx, e.execPath, asJs, asEnv)
 +	}
@@ -687,6 +722,81 @@ index 6e43dce..ffc0a76 100644
  	return param, nil
  }
  
+@@ -193,8 +232,17 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+ 		"GetInstance", // label: operation
+ 		e.cfg.Name,    // label: provider
+ 	).Inc()
+-	out, err := garmExec.Exec(ctx, e.execPath, nil, asEnv)
++	var out []byte
++	if e.cfg.External.AdmissionEnabled {
++		out, err = common.RunProviderCommand(ctx, e.execPath, asEnv, nil)
++	} else {
++		out, err = garmExec.Exec(ctx, e.execPath, nil, asEnv)
++	}
+ 	if err != nil {
++		var commandError *common.ProviderCommandError
++		if e.cfg.External.AdmissionEnabled && errors.As(err, &commandError) && commandError.Code == commonExecution.ExitCodeNotFound {
++			return commonParams.ProviderInstance{}, garmErrors.ErrNotFound
++		}
+ 		metrics.InstanceOperationFailedCount.WithLabelValues(
+ 			"GetInstance", // label: operation
+ 			e.cfg.Name,    // label: provider
+@@ -208,6 +256,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+ 			"GetInstance", // label: operation
+ 			e.cfg.Name,    // label: provider
+ 		).Inc()
++		if e.cfg.External.AdmissionEnabled {
++			return commonParams.ProviderInstance{}, garmErrors.NewProviderError("invalid gateway lookup response")
++		}
+ 		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
+ 	}
+ 
+@@ -216,6 +267,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+ 			"GetInstance", // label: operation
+ 			e.cfg.Name,    // label: provider
+ 		).Inc()
++		if e.cfg.External.AdmissionEnabled {
++			return commonParams.ProviderInstance{}, garmErrors.NewProviderError("invalid gateway lookup response")
++		}
+ 		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
+ 	}
+ 
+@@ -245,8 +299,13 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+ 		e.cfg.Name,      // label: provider
+ 	).Inc()
+ 
+-	out, err := garmExec.Exec(ctx, e.execPath, nil, asEnv)
+-	if err == nil {
++	var out []byte
++	if e.cfg.External.AdmissionEnabled {
++		out, err = common.RunProviderCommand(ctx, e.execPath, asEnv, nil)
++	} else {
++		out, err = garmExec.Exec(ctx, e.execPath, nil, asEnv)
++	}
++	if err != nil {
+ 		metrics.InstanceOperationFailedCount.WithLabelValues(
+ 			"ListInstances", // label: operation
+ 			e.cfg.Name,      // label: provider
+@@ -260,6 +319,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+ 			"ListInstances", // label: operation
+ 			e.cfg.Name,      // label: provider
+ 		).Inc()
++		if e.cfg.External.AdmissionEnabled {
++			return nil, garmErrors.NewProviderError("invalid gateway inventory response")
++		}
+ 		return []commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
+ 	}
+ 
+@@ -270,6 +332,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+ 				"ListInstances", // label: operation
+ 				e.cfg.Name,      // label: provider
+ 			).Inc()
++			if e.cfg.External.AdmissionEnabled {
++				return nil, garmErrors.NewProviderError("invalid gateway inventory response")
++			}
+ 			return []commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
+ 		}
+ 		ret[idx] = inst
 diff --git a/workers/scaleset/admission_test.go b/workers/scaleset/admission_test.go
 new file mode 100644
 index 0000000..147af79
