@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS audit (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
  request_key TEXT NOT NULL, recorded_at TEXT NOT NULL
 ) STRICT;
+PRAGMA application_id=0x47434331;
 PRAGMA user_version=1;
 `
 
@@ -77,6 +78,11 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 		return nil, errors.New("database must be a private regular file")
 	}
 	location := url.URL{Scheme: "file", Path: absolute}
+	// Inspect existing ownership read-only before configuring WAL. Refusing a
+	// foreign database must not first change its persistent journal mode.
+	if err := sqlitePreflight(location); err != nil {
+		return nil, err
+	}
 	query := url.Values{
 		"mode": {"rw"}, "_busy_timeout": {"5000"}, "_foreign_keys": {"on"},
 		"_journal_mode": {"WAL"}, "_synchronous": {"FULL"}, "_txlock": {"immediate"},
@@ -90,10 +96,10 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 	db.SetMaxIdleConns(1)
 	s := &SQLiteStore{db: db, now: time.Now}
 	err = s.transaction(context.Background(), func(tx *sql.Tx) error {
-		var version, syncMode, foreignKeys int
+		var version, syncMode, foreignKeys, application int
 		var journal string
 		for pragma, target := range map[string]any{
-			"PRAGMA user_version": &version, "PRAGMA synchronous": &syncMode,
+			"PRAGMA user_version": &version, "PRAGMA application_id": &application, "PRAGMA synchronous": &syncMode,
 			"PRAGMA foreign_keys": &foreignKeys, "PRAGMA journal_mode": &journal,
 		} {
 			if err := tx.QueryRow(pragma).Scan(target); err != nil {
@@ -106,7 +112,13 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 		if version != 0 && version != 1 {
 			return errors.New("unsupported SQLite schema version")
 		}
+		if version == 1 && application != 0x47434331 {
+			return errors.New("database belongs to a different application")
+		}
 		if version == 0 {
+			if err := sqliteEmptyDatabase(tx, application); err != nil {
+				return err
+			}
 			if err := validateConfig(initial); err != nil {
 				return err
 			}
@@ -129,6 +141,58 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// sqlitePreflight does not configure persistent pragmas or create schema.
+func sqlitePreflight(location url.URL) error {
+	location.RawQuery = "mode=ro&_busy_timeout=5000"
+	db, err := sql.Open("sqlite3", location.String())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var version, application int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if err := db.QueryRow("PRAGMA application_id").Scan(&application); err != nil {
+		return err
+	}
+	if version == 0 {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 || application != 0 {
+			return errors.New("refusing a nonempty or foreign unversioned database")
+		}
+		return nil
+	}
+	if version != 1 || application != 0x47434331 {
+		return errors.New("unsupported or foreign SQLite database")
+	}
+	return nil
+}
+
+func sqliteEmptyDatabase(tx *sql.Tx, application int) error {
+	var count int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 || application != 0 {
+		return errors.New("refusing a nonempty or foreign unversioned database")
+	}
+	return nil
+}
+
+func sqliteObservationsFresh(config Config, now time.Time) bool {
+	for _, host := range config.Hosts {
+		age := now.Sub(host.ObservedAt)
+		if age < 0 || age > config.MaxObservationAge {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *SQLiteStore) Close() error { return s.db.Close() }
@@ -321,14 +385,11 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		}
 		// Global accounting depends on every host/source view remaining fresh.
 		// Expiry consumes readiness until a new barrier and snapshot succeed.
-		for _, observedHost := range config.Hosts {
-			age := s.now().Sub(observedHost.ObservedAt)
-			if age < 0 || age > config.MaxObservationAge {
-				if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
-					return err
-				}
-				return deny("denied_global_freshness", ErrReconciliation)
+		if !sqliteObservationsFresh(config, s.now()) {
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
 			}
+			return deny("denied_global_freshness", ErrReconciliation)
 		}
 		host, hostOK := config.Hosts[req.Host]
 		pool, poolOK := config.Pools[req.Pool]
@@ -551,6 +612,8 @@ type SQLiteSnapshot struct {
 }
 
 // Snapshot returns one transactionally consistent view and the last 100 events.
+// It also durably consumes expired readiness, so Ready never reports a stale
+// snapshot as eligible merely because no new admission has been attempted.
 func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 	var result SQLiteSnapshot
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
@@ -558,6 +621,15 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 		result.Config, result.Ready, result.Epoch, _, err = sqliteMetadata(tx)
 		if err != nil {
 			return err
+		}
+		if result.Ready && !sqliteObservationsFresh(result.Config, s.now()) {
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "readiness_expired", "", s.now()); err != nil {
+				return err
+			}
+			result.Ready = false
 		}
 		result.Reservations, err = sqliteReservations(tx)
 		if err != nil {

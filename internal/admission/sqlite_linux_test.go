@@ -567,3 +567,50 @@ func TestSQLiteCrossProcessAdmission(t *testing.T) {
 		t.Fatalf("cross-process global cap bypass: %+v", state.Allocated)
 	}
 }
+
+func TestSQLiteRejectsForeignUnversionedDatabaseWithoutChangingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "foreign.db")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE unrelated(value TEXT); INSERT INTO unrelated VALUES('preserve-me')"); err != nil {
+		t.Fatal(err)
+	}
+	if opened, err := OpenSQLite(path, fixture(time.Now())); err == nil {
+		opened.Close()
+		t.Fatal("foreign database accepted")
+	}
+	var value, journal string
+	var count int
+	if err := db.QueryRow("SELECT value FROM unrelated").Scan(&value); err != nil || value != "preserve-me" {
+		t.Fatalf("foreign data changed: %q %v", value, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name='metadata'").Scan(&count); err != nil || count != 0 {
+		t.Fatal("controller schema installed into foreign database")
+	}
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil || journal != "delete" {
+		t.Fatalf("foreign journal mode changed: %q %v", journal, err)
+	}
+}
+
+func TestSQLiteSnapshotExpiresReadinessWithoutAdmission(t *testing.T) {
+	s := sqliteFixtureStore(t, fixture(time.Now()), true)
+	s.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	if sqliteSnapshot(t, s).Ready {
+		t.Fatal("read-only view advertised stale readiness")
+	}
+	s.now = time.Now
+	if sqliteSnapshot(t, s).Ready {
+		t.Fatal("snapshot expiry was not durable")
+	}
+	if _, err := s.Admit(context.Background(), request("still-blocked")); !errors.Is(err, ErrReconciliation) {
+		t.Fatal("expired snapshot readiness silently reopened")
+	}
+}

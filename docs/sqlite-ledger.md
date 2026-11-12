@@ -8,7 +8,7 @@ This slice implements an **offline accounting core**, not live Garm/Incus enforc
 
 SQLite uses WAL, FULL synchronous durability, foreign keys, STRICT tables and a bounded busy timeout. Every operation runs in a `BEGIN IMMEDIATE` transaction: all global/host/pool budget reads, reservation writes and the corresponding audit event commit together. Cooperating handles and processes sharing the same local database serialize before reading capacity, so independent repository pools cannot write-skew the model's global budget. A busy, canceled, corrupt or unavailable database returns no new admission. An ambiguous commit outcome blocks the affected Store handle rather than retrying an external action.
 
-Only initial database creation accepts initial policy. Reopening does not reset budgets, readiness, reservations or observation age. A different initial config cannot silently replace existing policy. Schema version 1 is established transactionally; unknown versions are rejected. There is no JSON migration, policy editor, retention job or release API yet.
+Only initial database creation accepts initial policy. Reopening does not reset budgets, readiness, reservations or observation age. A different initial config cannot silently replace existing policy. Schema version 1 and an application ID are established transactionally; unknown versions and unrelated nonempty databases are rejected. Ownership is inspected read-only before enabling WAL, so refusing a foreign database does not first change its journal mode. There is no JSON migration, policy editor, retention job or release API yet.
 
 ## Reconciliation barrier
 
@@ -19,7 +19,7 @@ A new database starts with admission blocked, even if policy contains healthy ho
 3. `CompleteReconciliation(ctx, fence, snapshot)` atomically validates and imports those bounded allocations, updates host observation freshness/health, records an audit event and opens admission. It consumes its nonce. Old, overlapping, wrong-nonce or already-consumed completions cannot reopen or alter state.
 4. A crash after Begin, invalid/partial response, unknown identity, arithmetic overflow or duplicate binding leaves the durable barrier closed. A new Begin supersedes an abandoned collector. No timeout opens the barrier.
 
-Every new admission rechecks readiness and **all hosts'** observation freshness inside its budget transaction. If any required view expires or moves into the future, admission closes readiness until a new barrier and complete snapshot succeed. Observation updates preserve enabled/draining/disabled policy; they cannot re-enable a host. An unhealthy target remains ineligible.
+Every new admission rechecks readiness and **all hosts'** observation freshness inside its budget transaction. Snapshot reads also consume expired readiness, so an overview never reports an expired view as ready merely because no new admission was attempted. If any required view expires or moves into the future, admission closes readiness until a new barrier and complete snapshot succeed. Observation updates preserve enabled/draining/disabled policy; they cannot re-enable a host. An unhealthy target remains ineligible.
 
 These fences coordinate the local ledger only. They do not fence Garm, Incus, a provider executable or a second independent database. Production startup/recovery must reconcile before admitting against externally changing infrastructure. Snapshot completeness, source identities and bypass resistance must still be proven by pinned disposable-stack integration tests.
 
