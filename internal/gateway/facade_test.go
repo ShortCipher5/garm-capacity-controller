@@ -31,6 +31,7 @@ type backendFixture struct {
 	drift                 bool
 	readFail              bool
 	userdata              string
+	lastSpec              incusapi.InstanceSpec
 	createFail            bool
 	waits                 atomic.Int32
 	waitHook              func(context.Context) error
@@ -55,6 +56,7 @@ func (b *backendFixture) Create(_ context.Context, s incusapi.InstanceSpec) (inc
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.userdata = s.UserData
+	b.lastSpec = s
 	instance := incusapi.Instance{Name: s.Name, Status: 103, CPUMillis: s.CPUMillis, RAMMiB: s.RAMMiB, ControllerID: s.ControllerID, PoolID: s.PoolID, ReservationKey: s.ReservationKey}
 	if b.drift {
 		instance.RAMMiB++

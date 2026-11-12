@@ -1,27 +1,408 @@
+diff --git a/apiserver/controllers/capacity_bootstrap_test.go b/apiserver/controllers/capacity_bootstrap_test.go
+new file mode 100644
+index 0000000..22cdab8
+--- /dev/null
++++ b/apiserver/controllers/capacity_bootstrap_test.go
+@@ -0,0 +1,177 @@
++package controllers
++
++import (
++	"bytes"
++	"context"
++	"database/sql"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/cloudbase/garm/config"
++	"github.com/cloudbase/garm/database"
++	"github.com/cloudbase/garm/database/watcher"
++	garmTesting "github.com/cloudbase/garm/internal/testing"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner"
++	"github.com/cloudbase/garm/runner/common"
++	"github.com/gorilla/mux"
++	"github.com/stretchr/testify/require"
++)
++
++// These are the actual HTTP controllers and public Runner API over real SQLite.
++// Authentication middleware is NOT under test: requests have a fixture admin
++// context. No pool manager is started, and provider executables are never run.
++func TestGatewayBootstrapExplicitZeroHTTPEnrollmentAndLegacySemantics(t *testing.T) {
++	watcher.SetWatcher(&garmTesting.MockWatcher{})
++	ctx := context.Background()
++	dbConfig := garmTesting.GetTestSqliteDBConfig(t)
++	store, err := database.NewDatabase(ctx, dbConfig)
++	require.NoError(t, err)
++	admin := garmTesting.ImpersonateAdminContext(ctx, store, t)
++	_, err = store.InitController()
++	require.NoError(t, err)
++	provider := func(name, mode string, enabled bool) config.Provider {
++		return config.Provider{Name: name, ProviderType: params.ExternalProvider, External: config.External{InterfaceVersion: "v0.1.1", AdmissionEnabled: enabled, CapacityBootstrapMode: mode, ProviderExecutable: "/disposable-never-executed-provider"}}
++	}
++	// Construct against an empty entity set, so startup cannot create pool managers.
++	actual, err := runner.NewRunner(ctx, config.Config{Providers: []config.Provider{provider("capacity", common.CapacityBootstrapMode, true), provider("legacy", "", false), provider("unsupported", "wrong-mode", true)}}, store, nil)
++	require.NoError(t, err)
++	// Construct the later opted-in configuration while the entity set is still
++	// empty. Enrollment itself still goes through the real public HTTP handler.
++	enrolledRunner, err := runner.NewRunner(ctx, config.Config{Providers: []config.Provider{provider("legacy", common.CapacityBootstrapMode, true)}}, store, nil)
++	require.NoError(t, err)
++	endpoint := garmTesting.CreateDefaultGithubEndpoint(admin, store, t)
++	creds := garmTesting.CreateTestGithubCredentials(admin, "disposable-creds", store, t, endpoint)
++	repo, err := store.CreateRepository(admin, "disposable-owner", "disposable-repo", creds, "disposable-webhook", params.PoolBalancerTypeRoundRobin, false)
++	require.NoError(t, err)
++	tpl, err := store.CreateTemplate(admin, params.CreateTemplateParams{Name: "disposable-default", Data: []byte("not-executed"), OSType: "linux", ForgeType: params.GithubEndpointType, IsSystem: true})
++	require.NoError(t, err)
++	api, err := NewAPIController(actual, nil, nil, nil, nil, config.APIServer{})
++	require.NoError(t, err)
++	sqlDB, err := sql.Open("sqlite3", dbConfig.SQLite.DBFile)
++	require.NoError(t, err)
++	defer sqlDB.Close()
++	create := func(providerName string, template any, extra any) (*httptest.ResponseRecorder, params.Pool) {
++		body := map[string]any{"provider_name": providerName, "max_runners": 2, "min_idle_runners": 0, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "tags": []string{"linux"}, "extra_specs": extra}
++		if template != nil {
++			body["template_id"] = template
++		}
++		raw, _ := json.Marshal(body)
++		request := httptest.NewRequest(http.MethodPost, "http://example.invalid/repositories/"+repo.ID+"/pools", bytes.NewReader(raw)).WithContext(admin)
++		request = mux.SetURLVars(request, map[string]string{"repoID": repo.ID})
++		response := httptest.NewRecorder()
++		api.CreateRepoPoolHandler(response, request)
++		var pool params.Pool
++		if response.Code == http.StatusOK {
++			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &pool))
++		}
++		return response, pool
++	}
++	update := func(id string, body map[string]any, entity bool) (*httptest.ResponseRecorder, params.Pool) {
++		raw, _ := json.Marshal(body)
++		request := httptest.NewRequest(http.MethodPut, "http://example.invalid/pools/"+id, bytes.NewReader(raw)).WithContext(admin)
++		request = mux.SetURLVars(request, map[string]string{"repoID": repo.ID, "poolID": id})
++		response := httptest.NewRecorder()
++		if entity {
++			api.UpdateRepoPoolHandler(response, request)
++		} else {
++			api.UpdatePoolByIDHandler(response, request)
++		}
++		var pool params.Pool
++		if response.Code == http.StatusOK {
++			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &pool))
++		}
++		return response, pool
++	}
++	nullTemplate := func(id string, wantNull bool) {
++		var actual sql.NullInt64
++		require.NoError(t, sqlDB.QueryRow("SELECT template_id FROM pools WHERE id=?", id).Scan(&actual))
++		require.Equal(t, !wantNull, actual.Valid)
++	}
++	response, pool := create("capacity", 0, map[string]any{})
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	require.Zero(t, pool.TemplateID)
++	nullTemplate(pool.ID, true)
++	response, pool = update(pool.ID, map[string]any{"template_id": 0}, true)
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	nullTemplate(pool.ID, true)
++	org, err := store.CreateOrganization(admin, "disposable-org", creds, "disposable-webhook", params.PoolBalancerTypeRoundRobin, false)
++	require.NoError(t, err)
++	enterprise, err := store.CreateEnterprise(admin, "disposable-enterprise", creds, "disposable-webhook", params.PoolBalancerTypeRoundRobin, false)
++	require.NoError(t, err)
++	for _, scope := range []struct {
++		id, key        string
++		create, update http.HandlerFunc
++	}{{org.ID, "orgID", api.CreateOrgPoolHandler, api.UpdateOrgPoolHandler}, {enterprise.ID, "enterpriseID", api.CreateEnterprisePoolHandler, api.UpdateEnterprisePoolHandler}} {
++		body := map[string]any{"provider_name": "capacity", "template_id": 0, "max_runners": 2, "min_idle_runners": 0, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "tags": []string{"linux"}, "extra_specs": map[string]any{}}
++		raw, _ := json.Marshal(body)
++		request := httptest.NewRequest(http.MethodPost, "http://example.invalid/disposable/pools", bytes.NewReader(raw)).WithContext(admin)
++		request = mux.SetURLVars(request, map[string]string{scope.key: scope.id})
++		response := httptest.NewRecorder()
++		scope.create(response, request)
++		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++		var created params.Pool
++		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &created))
++		nullTemplate(created.ID, true)
++		request = httptest.NewRequest(http.MethodPut, "http://example.invalid/disposable/pools", bytes.NewBufferString(`{"template_id":0}`)).WithContext(admin)
++		request = mux.SetURLVars(request, map[string]string{scope.key: scope.id, "poolID": created.ID})
++		response = httptest.NewRecorder()
++		scope.update(response, request)
++		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++		nullTemplate(created.ID, true)
++	}
++
++	// Existing legacy default/nonzero selection remains unchanged.
++	response, legacy := create("legacy", nil, map[string]any{})
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	require.NotZero(t, legacy.TemplateID)
++	defaultTemplate, err := store.GetTemplate(admin, legacy.TemplateID)
++	require.NoError(t, err)
++	require.Equal(t, "github_linux", defaultTemplate.Name)
++	nullTemplate(legacy.ID, false)
++	response, explicit := create("legacy", tpl.ID, map[string]any{})
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	require.Equal(t, tpl.ID, explicit.TemplateID)
++	response, _ = create("legacy", 0, map[string]any{})
++	require.NotEqual(t, http.StatusOK, response.Code)
++	response, _ = update(legacy.ID, map[string]any{"template_id": 0}, false)
++	require.NotEqual(t, http.StatusOK, response.Code)
++	nullTemplate(legacy.ID, false)
++	// A forged internal flag cannot clear a legacy template through public JSON.
++	response, _ = update(legacy.ID, map[string]any{"CapacityTemplateClear": true, "capacity_template_clear": true}, false)
++	require.Equal(t, http.StatusOK, response.Code)
++	nullTemplate(legacy.ID, false)
++	// Explicit capacity opt-in, not template ID alone, permits SQL NULL enrollment.
++	var beforeInvalid int
++	require.NoError(t, sqlDB.QueryRow("SELECT COUNT(*) FROM pools").Scan(&beforeInvalid))
++	for _, item := range []struct {
++		provider string
++		template any
++		extra    any
++	}{{"capacity", nil, map[string]any{}}, {"capacity", tpl.ID, map[string]any{}}, {"capacity", 0, map[string]any{"runner_install_template": "not-allowed"}}, {"capacity", 0, map[string]any{"limits.cpu": "99"}}, {"unsupported", 0, map[string]any{}}} {
++		response, _ = create(item.provider, item.template, item.extra)
++		require.NotEqual(t, http.StatusOK, response.Code)
++		var afterInvalid int
++		require.NoError(t, sqlDB.QueryRow("SELECT COUNT(*) FROM pools").Scan(&afterInvalid))
++		require.Equal(t, beforeInvalid, afterInvalid)
++	}
++	response, _ = update(pool.ID, map[string]any{"template_id": tpl.ID}, false)
++	require.NotEqual(t, http.StatusOK, response.Code)
++	nullTemplate(pool.ID, true)
++	response, _ = update(pool.ID, map[string]any{"extra_specs": map[string]any{"runner_install_template": "not-allowed"}}, true)
++	require.NotEqual(t, http.StatusOK, response.Code)
++	nullTemplate(pool.ID, true)
++
++	// A pool legitimately created through the legacy public API can be explicitly
++	// enrolled after the trusted provider configuration changes. No direct SQL edit.
++	enrollmentAPI, err := NewAPIController(enrolledRunner, nil, nil, nil, nil, config.APIServer{})
++	require.NoError(t, err)
++	api = enrollmentAPI
++	response, enrolled := update(legacy.ID, map[string]any{"template_id": 0, "extra_specs": map[string]any{}}, false)
++	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
++	require.Zero(t, enrolled.TemplateID)
++	nullTemplate(legacy.ID, true)
++	require.Greater(t, enrolled.Generation, legacy.Generation)
++}
+diff --git a/config/capacity_bootstrap_test.go b/config/capacity_bootstrap_test.go
+new file mode 100644
+index 0000000..836d56a
+--- /dev/null
++++ b/config/capacity_bootstrap_test.go
+@@ -0,0 +1,23 @@
++package config
++
++import (
++	"os"
++	"testing"
++)
++
++func TestCapacityBootstrapModeRequiresExplicitPairedAdmissionOptIn(t *testing.T) {
++	executable, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, item := range []struct {
++		admission bool
++		mode      string
++		valid     bool
++	}{{false, "", true}, {true, "", false}, {true, "unknown", false}, {false, "gateway-owned-default-cloudinit/v1", false}, {true, "gateway-owned-default-cloudinit/v1", true}} {
++		cfg := External{AdmissionEnabled: item.admission, CapacityBootstrapMode: item.mode, InterfaceVersion: "v0.1.1", ProviderExecutable: executable}
++		if (cfg.Validate() == nil) != item.valid {
++			t.Fatal("bootstrap mode pairing accepted/rejected incorrectly", item)
++		}
++	}
++}
 diff --git a/config/external.go b/config/external.go
-index ca98bdf..938440c 100644
+index ca98bdf..2eb01a7 100644
 --- a/config/external.go
 +++ b/config/external.go
-@@ -29,6 +29,9 @@ import (
+@@ -29,6 +29,12 @@ import (
  // whatever programming language you wish, while still remaining compatible
  // with garm.
  type External struct {
 +	// AdmissionEnabled opts into the pre-JIT garm-capacity/v1 command. It must
 +	// only be enabled for a gateway implementing the strict admission contract.
 +	AdmissionEnabled bool `toml:"admission_enabled" json:"admission-enabled"`
++	// CapacityBootstrapMode explicitly selects fixed gateway-owned cloud-init.
++	// Garm templates/custom options are incompatible with this mode.
++	CapacityBootstrapMode string `toml:"capacity_bootstrap_mode" json:"capacity-bootstrap-mode"`
  	// InterfaceVersion is the version of the interface that the external
  	// provider implements. This is used to ensure compatibility between
  	// the external provider and garm.
-@@ -79,6 +82,9 @@ func (e *External) ExecutablePath() (string, error) {
+@@ -79,6 +85,13 @@ func (e *External) ExecutablePath() (string, error) {
  }
  
  func (e *External) Validate() error {
++	if (e.AdmissionEnabled && e.CapacityBootstrapMode != "gateway-owned-default-cloudinit/v1") || (!e.AdmissionEnabled && e.CapacityBootstrapMode != "") {
++		return fmt.Errorf("capacity admission requires explicit gateway-owned default bootstrap mode")
++	}
++
 +	if e.AdmissionEnabled && e.InterfaceVersion != "v0.1.1" {
 +		return fmt.Errorf("admission requires external provider interface v0.1.1")
 +	}
  	if e.ConfigFile != "" {
  		if !filepath.IsAbs(e.ConfigFile) {
  			return fmt.Errorf("path to config file must be an absolute path")
+diff --git a/database/sql/instances.go b/database/sql/instances.go
+index c59e979..bbec8dd 100644
+--- a/database/sql/instances.go
++++ b/database/sql/instances.go
+@@ -92,6 +92,13 @@ func (s *sqlDatabase) CreateInstance(ctx context.Context, poolID string, param p
+ 			AgentID:           param.AgentID,
+ 			Generation:        param.Generation,
+ 		}
++		if param.AdmissionInstanceID != "" {
++			id, err := uuid.Parse(param.AdmissionInstanceID)
++			if err != nil || id.String() != param.AdmissionInstanceID || id.Version() != 4 || id.Variant() != uuid.RFC4122 {
++				return errors.New("invalid original preparation row identity")
++			}
++			newInstance.Base.ID = id
++		}
+ 		q = tx.Create(&newInstance)
+ 		if q.Error != nil {
+ 			return fmt.Errorf("error creating instance: %w", q.Error)
+diff --git a/database/sql/preparation_test.go b/database/sql/preparation_test.go
+new file mode 100644
+index 0000000..4c45732
+--- /dev/null
++++ b/database/sql/preparation_test.go
+@@ -0,0 +1,27 @@
++package sql
++
++import (
++	"encoding/json"
++	"github.com/cloudbase/garm/params"
++	"github.com/google/uuid"
++)
++
++func (s *InstancesTestSuite) TestPreparationPrivatePreallocatedRowUUID() {
++	entity, err := s.Fixtures.Org.GetEntity()
++	s.Require().NoError(err)
++	pool, err := s.Store.CreateEntityPool(s.adminCtx, entity, params.CreatePoolParams{ProviderName: "preparation-fixture", MaxRunners: 10, Image: "pinned-image", Flavor: "small", OSType: "linux", OSArch: "amd64", Tags: []string{"linux"}})
++	s.Require().NoError(err)
++	id := uuid.NewString()
++	row, err := s.Store.CreateInstance(s.adminCtx, pool.ID, params.CreateInstanceParams{Name: "preallocated", AdmissionInstanceID: id, AgentID: 42})
++	s.Require().NoError(err)
++	s.Equal(id, row.ID)
++	_, err = s.Store.CreateInstance(s.adminCtx, pool.ID, params.CreateInstanceParams{Name: "duplicate-id", AdmissionInstanceID: id})
++	s.Require().Error(err)
++	for _, bad := range []string{"bad", "00000000-0000-0000-0000-000000000000", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"} {
++		_, err = s.Store.CreateInstance(s.adminCtx, pool.ID, params.CreateInstanceParams{Name: "bad-id", AdmissionInstanceID: bad})
++		s.Require().Error(err)
++	}
++	var input params.CreateInstanceParams
++	s.Require().NoError(json.Unmarshal([]byte(`{"AdmissionInstanceID":"`+uuid.NewString()+`","admission_instance_id":"`+uuid.NewString()+`"}`), &input))
++	s.Empty(input.AdmissionInstanceID)
++}
+diff --git a/database/sql/util.go b/database/sql/util.go
+index f5f4763..6a14c48 100644
+--- a/database/sql/util.go
++++ b/database/sql/util.go
+@@ -608,7 +608,10 @@ func (s *sqlDatabase) updatePool(tx *gorm.DB, pool Pool, param params.UpdatePool
+ 		updates["max_runners"] = *param.MaxRunners
+ 	}
+ 
+-	if param.TemplateID != nil && (pool.TemplateID == nil || *param.TemplateID != *pool.TemplateID) {
++	if param.CapacityTemplateClear && pool.TemplateID != nil {
++		updates["template_id"] = nil
++		incrementGeneration = true
++	} else if param.TemplateID != nil && (pool.TemplateID == nil || *param.TemplateID != *pool.TemplateID) {
+ 		updates["template_id"] = param.TemplateID
+ 	}
+ 
+diff --git a/params/requests.go b/params/requests.go
+index 12979ce..b732bc1 100644
+--- a/params/requests.go
++++ b/params/requests.go
+@@ -161,6 +161,10 @@ type NewUserParams struct {
+ 
+ // swagger:model UpdatePoolParams
+ type UpdatePoolParams struct {
++	// CapacityTemplateClear is set only by the trusted gateway-mode API policy.
++	// Explicit template_id:0 maps to SQL NULL, never a public generic FK bypass.
++	CapacityTemplateClear bool `json:"-"`
++
+ 	RunnerPrefix
+ 
+ 	Tags                   []string            `json:"tags,omitempty"`
+@@ -183,6 +187,10 @@ type UpdatePoolParams struct {
+ }
+ 
+ type CreateInstanceParams struct {
++	// AdmissionInstanceID is a trusted source-only preallocated database row UUID.
++	// It cannot be supplied through an API request or inferred from a runner name.
++	AdmissionInstanceID string `json:"-"`
++
+ 	Name         string                      `json:"name,omitempty"`
+ 	OSType       commonParams.OSType         `json:"os_type,omitempty"`
+ 	OSArch       commonParams.OSArch         `json:"os_arch,omitempty"`
+diff --git a/runner/capacity_bootstrap.go b/runner/capacity_bootstrap.go
+new file mode 100644
+index 0000000..5810ed4
+--- /dev/null
++++ b/runner/capacity_bootstrap.go
+@@ -0,0 +1,63 @@
++// SPDX-License-Identifier: Apache-2.0
++package runner
++
++import (
++	"context"
++
++	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++)
++
++func (r *Runner) capacityBootstrapProvider(name string) bool {
++	provider, ok := r.providers[name]
++	return ok && common.GatewayBootstrapEnabled(provider)
++}
++func (r *Runner) capacityCreateTemplate(ctx context.Context, entity params.ForgeEntity, param params.CreatePoolParams) (*uint, error) {
++	if r.capacityBootstrapProvider(param.ProviderName) {
++		candidate := params.Pool{TemplateID: 0, ExtraSpecs: param.ExtraSpecs, EnableShell: param.EnableShell, OSType: param.OSType, OSArch: param.OSArch}
++		if param.TemplateID == nil || *param.TemplateID != 0 || common.GatewayBootstrapPool(candidate) != nil {
++			return nil, runnerErrors.NewBadRequestError("gateway bootstrap requires explicit template_id 0 and no custom options")
++		}
++		// SQL NULL is the actual no-template representation; never a foreign key 0.
++		return nil, nil
++	}
++	template, err := r.findTemplate(ctx, entity, param.OSType, param.TemplateID)
++	if err != nil {
++		return nil, err
++	}
++	return &template.ID, nil
++}
++func (r *Runner) capacityUpdateTemplate(pool params.Pool, param params.UpdatePoolParams) (params.UpdatePoolParams, error) {
++	// This private flag cannot be authorized by JSON. Only this trusted provider
++	// capability + explicit public template_id:0 may map it to SQL NULL.
++	param.CapacityTemplateClear = false
++	if !r.capacityBootstrapProvider(pool.ProviderName) {
++		return param, nil
++	}
++	effective := pool
++	if param.TemplateID != nil {
++		if *param.TemplateID != 0 {
++			return params.UpdatePoolParams{}, runnerErrors.NewBadRequestError("gateway bootstrap does not accept selected templates")
++		}
++		effective.TemplateID = 0
++		param.CapacityTemplateClear = true
++		param.TemplateID = nil
++	}
++	if param.ExtraSpecs != nil {
++		effective.ExtraSpecs = param.ExtraSpecs
++	}
++	if param.EnableShell != nil {
++		effective.EnableShell = *param.EnableShell
++	}
++	if param.OSType != "" {
++		effective.OSType = param.OSType
++	}
++	if param.OSArch != "" {
++		effective.OSArch = param.OSArch
++	}
++	if common.GatewayBootstrapPool(effective) != nil {
++		return params.UpdatePoolParams{}, runnerErrors.NewBadRequestError("gateway bootstrap requires no template or custom options")
++	}
++	return param, nil
++}
 diff --git a/runner/common/admission.go b/runner/common/admission.go
 new file mode 100644
 index 0000000..9976261
@@ -581,10 +962,10 @@ index 0000000..1144b87
 +}
 diff --git a/runner/common/admission_test.go b/runner/common/admission_test.go
 new file mode 100644
-index 0000000..3fa52dc
+index 0000000..58964d0
 --- /dev/null
 +++ b/runner/common/admission_test.go
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,145 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package common
 +
@@ -603,6 +984,11 @@ index 0000000..3fa52dc
 +// TestMain is an executable provider stub when called by these tests. It never
 +// contacts a provider, a controller, GitHub or infrastructure.
 +func TestMain(m *testing.M) {
++	if mode := os.Getenv("GCC_PREPARATION_STUB"); mode != "" {
++		runPreparationStub(mode)
++		return
++	}
++
 +	if mode := os.Getenv("GCC_CANCELLATION_STUB"); mode != "" {
 +		runCancellationStub(mode)
 +		return
@@ -725,6 +1111,541 @@ index 0000000..3fa52dc
 +		}
 +	}
 +}
+diff --git a/runner/common/preparation.go b/runner/common/preparation.go
+new file mode 100644
+index 0000000..32ea6bd
+--- /dev/null
++++ b/runner/common/preparation.go
+@@ -0,0 +1,335 @@
++// SPDX-License-Identifier: Apache-2.0
++
++package common
++
++import (
++	"bytes"
++	"context"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	commonParams "github.com/cloudbase/garm-provider-common/params"
++	"github.com/cloudbase/garm/params"
++	"io"
++	"math"
++	"os/exec"
++	"strings"
++	"time"
++	"unicode/utf8"
++)
++
++const PreparationVersion = "garm-capacity-preparation/v1"
++
++var ErrPreparationProtocol = errors.New("invalid preparation protocol")
++
++// PreparationRequest contains NONSECRET original source metadata only. The
++// controller, source scope and authenticated issuer are derived at the server.
++// No JIT configuration, JWT, bootstrap token or credentials belong here.
++type PreparationRequest struct {
++	Protocol          string `json:"protocol"`
++	Name              string `json:"name"`
++	PoolID            string `json:"pool_id"`
++	InstanceID        string `json:"instance_id"`
++	AgentID           int64  `json:"agent_id"`
++	Generation        uint64 `json:"generation"`
++	ProviderName      string `json:"provider_name"`
++	EntityType        string `json:"entity_type"`
++	EntityID          string `json:"entity_id"`
++	ForgeEndpointName string `json:"forge_endpoint_name"`
++	JITEnabled        bool   `json:"jit_enabled"`
++}
++
++// PreparationResponse is a durable metadata acknowledgement or lookup, NEVER a
++// physical dispatch/absence/release permit. Replay cannot change its identity.
++type PreparationResponse struct {
++	PreparationRequest
++	Outcome        string `json:"outcome"`
++	ReservationKey string `json:"reservation_key"`
++	RecordSequence int64  `json:"record_sequence"`
++	Replay         *bool  `json:"replay"`
++	Dispatched     *bool  `json:"dispatched"`
++}
++
++var preparationRequestKeys = []string{"protocol", "name", "pool_id", "instance_id", "agent_id", "generation", "provider_name", "entity_type", "entity_id", "forge_endpoint_name", "jit_enabled"}
++
++func canonicalPreparationUUID(value string, random bool) bool {
++	if len(value) != 36 || value == "00000000-0000-0000-0000-000000000000" {
++		return false
++	}
++	for i, r := range value {
++		if i == 8 || i == 13 || i == 18 || i == 23 {
++			if r != '-' {
++				return false
++			}
++		} else if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
++			return false
++		}
++	}
++	return !random || (value[14] == '4' && strings.ContainsRune("89ab", rune(value[19])))
++}
++func preparationIdentity(value string) bool {
++	return validAdmissionIdentity(value) && strings.TrimSpace(value) == value
++}
++func (r PreparationRequest) Validate() error {
++	if r.Protocol != PreparationVersion || !preparationIdentity(r.Name) || !preparationIdentity(r.PoolID) || !preparationIdentity(r.ProviderName) || len(r.ProviderName) > 128 || !canonicalPreparationUUID(r.InstanceID, true) || !canonicalPreparationUUID(r.EntityID, false) || (!preparationIdentity(r.ForgeEndpointName) || len(r.ForgeEndpointName) > 128) || r.Generation > math.MaxInt64 {
++		return ErrPreparationProtocol
++	}
++	if r.EntityType != "repository" && r.EntityType != "organization" && r.EntityType != "enterprise" {
++		return ErrPreparationProtocol
++	}
++	if (r.JITEnabled && r.AgentID <= 0) || (!r.JITEnabled && r.AgentID != 0) {
++		return ErrPreparationProtocol
++	}
++	return nil
++}
++func exactPreparationObject(data []byte, keys []string) bool {
++	if len(data) == 0 || len(data) > admissionMaximumResponseBytes || !utf8.Valid(data) {
++		return false
++	}
++	allowed := map[string]bool{}
++	for _, key := range keys {
++		allowed[key] = true
++	}
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	token, err := decoder.Token()
++	if err != nil || token != json.Delim('{') {
++		return false
++	}
++	seen := map[string]bool{}
++	for decoder.More() {
++		token, err := decoder.Token()
++		if err != nil {
++			return false
++		}
++		key, ok := token.(string)
++		if !ok || !allowed[key] || seen[key] {
++			return false
++		}
++		seen[key] = true
++		var raw json.RawMessage
++		if decoder.Decode(&raw) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++			return false
++		}
++	}
++	token, err = decoder.Token()
++	if err != nil || token != json.Delim('}') || len(seen) != len(allowed) {
++		return false
++	}
++	return decoder.Decode(new(any)) == io.EOF
++}
++func DecodePreparationRequest(data []byte) (PreparationRequest, error) {
++	if !exactPreparationObject(data, preparationRequestKeys) {
++		return PreparationRequest{}, ErrPreparationProtocol
++	}
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	var r PreparationRequest
++	if decoder.Decode(&r) != nil || decoder.Decode(new(any)) != io.EOF || r.Validate() != nil {
++		return PreparationRequest{}, ErrPreparationProtocol
++	}
++	return r, nil
++}
++func EncodePreparationRequest(r PreparationRequest) ([]byte, error) {
++	if r.Validate() != nil {
++		return nil, ErrPreparationProtocol
++	}
++	data, err := json.Marshal(r)
++	if err != nil {
++		return nil, ErrPreparationProtocol
++	}
++	if _, err := DecodePreparationRequest(data); err != nil {
++		return nil, err
++	}
++	return data, nil
++}
++func ParsePreparationResponse(exitCode int, data []byte, request PreparationRequest, outcome string) (PreparationResponse, error) {
++	keys := append(append([]string(nil), preparationRequestKeys...), "outcome", "reservation_key", "record_sequence", "replay", "dispatched")
++	if exitCode != 0 || (outcome != "recorded" && outcome != "validated") || request.Validate() != nil || !exactPreparationObject(data, keys) {
++		return PreparationResponse{}, ErrPreparationProtocol
++	}
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	var r PreparationResponse
++	if decoder.Decode(&r) != nil || decoder.Decode(new(any)) != io.EOF || r.PreparationRequest != request || r.Outcome != outcome || r.RecordSequence <= 0 || r.Replay == nil || r.Dispatched == nil || *r.Dispatched {
++		return PreparationResponse{}, ErrPreparationProtocol
++	}
++	key, err := hex.DecodeString(r.ReservationKey)
++	if err != nil || len(key) != 32 || hex.EncodeToString(key) != r.ReservationKey {
++		return PreparationResponse{}, ErrPreparationProtocol
++	}
++	if outcome == "validated" && !*r.Replay {
++		return PreparationResponse{}, ErrPreparationProtocol
++	}
++	return r, nil
++}
++func EncodePreparationResponse(r PreparationResponse, request PreparationRequest) ([]byte, error) {
++	data, err := json.Marshal(r)
++	if err != nil {
++		return nil, ErrPreparationProtocol
++	}
++	if _, err := ParsePreparationResponse(0, data, request, r.Outcome); err != nil {
++		return nil, err
++	}
++	return data, nil
++}
++
++// PreparationProvider is an explicitly enabled original-source metadata issuer.
++// Receipt validation is a lookup, not a physical create or release permit.
++type PreparationProvider interface {
++	PreparationEnabled() bool
++	RecordPreparation(context.Context, PreparationRequest) error
++	ValidatePreparation(context.Context, PreparationRequest) error
++}
++
++var ErrPreparationHold = errors.New("original preparation unconfirmed; retain allocation")
++
++func PreparationEnabled(provider Provider) bool {
++	p, ok := provider.(PreparationProvider)
++	return ok && p.PreparationEnabled()
++}
++
++// RunPreparationProvider transmits only bounded nonsecret metadata. Unknown
++// acknowledgement is NOT retried or interpreted as failure-before-commit.
++func RunPreparationProvider(ctx context.Context, binary string, environ []string, request PreparationRequest, outcome string) error {
++	input, err := EncodePreparationRequest(request)
++	if err != nil {
++		return ErrPreparationHold
++	}
++	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
++	defer cancel()
++	output := &admissionOutput{}
++	command := exec.CommandContext(ctx, binary)
++	command.WaitDelay = 250 * time.Millisecond
++	command.Env = environ
++	command.Stdin = bytes.NewReader(input)
++	command.Stdout = output
++	command.Stderr = io.Discard
++	if command.Run() != nil || ctx.Err() != nil || output.overflow {
++		return ErrPreparationHold
++	}
++	if _, err := ParsePreparationResponse(0, output.Bytes(), request, outcome); err != nil {
++		return ErrPreparationHold
++	}
++	return nil
++}
++
++// WithOriginalPreparation enables exact JIT source validation only for opted-in
++// receipt issuers. Legacy provider behavior is unchanged.
++type originalPreparationContextKey struct{}
++
++func WithOriginalPreparation(ctx context.Context) context.Context {
++	return context.WithValue(ctx, originalPreparationContextKey{}, true)
++}
++func OriginalPreparationRequired(ctx context.Context) bool {
++	value, _ := ctx.Value(originalPreparationContextKey{}).(bool)
++	return value
++}
++
++// ValidateOriginalJITIdentity binds both trusted API return and decoded runner metadata.
++// Private JIT bytes never enter a receipt, error or log.
++func ValidateOriginalJITIdentity(name string, agent int64, jit map[string]string) error {
++	if agent <= 0 || len(jit) == 0 {
++		return ErrPreparationHold
++	}
++	for key := range jit {
++		if strings.EqualFold(key, ".runner") && key != ".runner" {
++			return ErrPreparationHold
++		}
++	}
++	encoded, ok := jit[".runner"]
++	if !ok || len(encoded) > 128<<10 {
++		return ErrPreparationHold
++	}
++	raw, err := base64.StdEncoding.Strict().DecodeString(encoded)
++	if err != nil || len(raw) > 64<<10 {
++		return ErrPreparationHold
++	}
++	d := json.NewDecoder(bytes.NewReader(raw))
++	token, err := d.Token()
++	if err != nil || token != json.Delim('{') {
++		return ErrPreparationHold
++	}
++	seen := map[string]bool{}
++	var id int64
++	var runnerName string
++	for d.More() {
++		token, err = d.Token()
++		key, ok := token.(string)
++		if err != nil || !ok || seen[key] {
++			return ErrPreparationHold
++		}
++		seen[key] = true
++		var value json.RawMessage
++		if d.Decode(&value) != nil {
++			return ErrPreparationHold
++		}
++		if strings.EqualFold(key, "agentId") {
++			if key != "agentId" || bytes.Equal(bytes.TrimSpace(value), []byte("null")) || json.Unmarshal(value, &id) != nil {
++				return ErrPreparationHold
++			}
++		}
++		if strings.EqualFold(key, "agentName") {
++			if key != "agentName" || json.Unmarshal(value, &runnerName) != nil {
++				return ErrPreparationHold
++			}
++		}
++	}
++	token, err = d.Token()
++	if err != nil || token != json.Delim('}') || d.Decode(new(any)) != io.EOF || !seen["agentId"] || !seen["agentName"] || id != agent || runnerName != name {
++		return ErrPreparationHold
++	}
++	return nil
++}
++
++// DecodeOriginalJITMap rejects duplicate/case-ambiguous secret file keys without
++// including any secret bytes in diagnostics. The caller keeps this map internal.
++func DecodeOriginalJITMap(data []byte) (map[string]string, error) {
++	if len(data) == 0 || len(data) > 1<<20 {
++		return nil, ErrPreparationHold
++	}
++	d := json.NewDecoder(bytes.NewReader(data))
++	token, err := d.Token()
++	if err != nil || token != json.Delim('{') {
++		return nil, ErrPreparationHold
++	}
++	result := map[string]string{}
++	for d.More() {
++		token, err = d.Token()
++		key, ok := token.(string)
++		if err != nil || !ok {
++			return nil, ErrPreparationHold
++		}
++		if _, exists := result[key]; exists {
++			return nil, ErrPreparationHold
++		}
++		var value string
++		if d.Decode(&value) != nil {
++			return nil, ErrPreparationHold
++		}
++		result[key] = value
++	}
++	token, err = d.Token()
++	if err != nil || token != json.Delim('}') || d.Decode(new(any)) != io.EOF {
++		return nil, ErrPreparationHold
++	}
++	return result, nil
++}
++
++const CapacityBootstrapMode = "gateway-owned-default-cloudinit/v1"
++
++type CapacityBootstrapProvider interface{ CapacityBootstrapMode() string }
++
++func GatewayBootstrapEnabled(provider Provider) bool {
++	p, ok := provider.(CapacityBootstrapProvider)
++	return ok && PreparationEnabled(provider) && p.CapacityBootstrapMode() == CapacityBootstrapMode
++}
++
++// GatewayBootstrapPool is intentionally narrower than arbitrary Garm templates.
++// The explicit mode never discards a user-selected template or custom options.
++func GatewayBootstrapPool(pool params.Pool) error {
++	if pool.TemplateID != 0 || (len(pool.ExtraSpecs) > 0 && !bytes.Equal(bytes.TrimSpace(pool.ExtraSpecs), []byte("{}"))) || pool.EnableShell || pool.OSType != commonParams.Linux || (pool.OSArch != commonParams.Amd64 && pool.OSArch != commonParams.Arm64) {
++		return ErrPreparationHold
++	}
++	return nil
++}
+diff --git a/runner/common/preparation_test.go b/runner/common/preparation_test.go
+new file mode 100644
+index 0000000..3711ccb
+--- /dev/null
++++ b/runner/common/preparation_test.go
+@@ -0,0 +1,93 @@
++package common
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++	"testing"
++	"time"
++)
++
++func preparationFixture() PreparationRequest {
++	return PreparationRequest{Protocol: PreparationVersion, Name: "planned", PoolID: "pool", InstanceID: "11111111-1111-4111-8111-111111111111", AgentID: 42, Generation: 0, ProviderName: "capacity", EntityType: "repository", EntityID: "22222222-2222-4222-8222-222222222222", ForgeEndpointName: "fixture-forge", JITEnabled: true}
++}
++func runPreparationStub(mode string) {
++	raw, _ := io.ReadAll(os.Stdin)
++	request, err := DecodePreparationRequest(raw)
++	if err != nil {
++		os.Exit(2)
++	}
++	outcome := "recorded"
++	if os.Getenv("GARM_COMMAND") == "ValidatePreparation" {
++		outcome = "validated"
++	} else if os.Getenv("GARM_COMMAND") != "RecordPreparation" {
++		os.Exit(2)
++	}
++	if mode == "secret" {
++		fmt.Print("private-child-output")
++		fmt.Fprint(os.Stderr, "private-stderr")
++		os.Exit(1)
++	}
++	if mode == "oversized" {
++		fmt.Print(strings.Repeat("x", 4097))
++		os.Exit(0)
++	}
++	if mode == "wait" {
++		time.Sleep(time.Minute)
++		os.Exit(1)
++	}
++	replay, dispatched := outcome == "validated", false
++	response := PreparationResponse{PreparationRequest: request, Outcome: outcome, ReservationKey: strings.Repeat("a", 64), RecordSequence: 1, Replay: &replay, Dispatched: &dispatched}
++	switch mode {
++	case "changed-id":
++		response.AgentID++
++	case "dispatched":
++		dispatched = true
++	case "missing":
++		response.Replay = nil
++	case "wrong-outcome":
++		response.Outcome = "reserved"
++	}
++	_ = json.NewEncoder(os.Stdout).Encode(response)
++	if mode == "nonzero" {
++		os.Exit(75)
++	}
++	os.Exit(0)
++}
++func TestPreparationCommandRequiresExactBoundedDurableAcknowledgement(t *testing.T) {
++	for _, command := range []string{"RecordPreparation", "ValidatePreparation"} {
++		for _, mode := range []string{"valid", "changed-id", "dispatched", "missing", "wrong-outcome", "secret", "oversized", "nonzero"} {
++			t.Run(command+mode, func(t *testing.T) {
++				outcome := "recorded"
++				if command == "ValidatePreparation" {
++					outcome = "validated"
++				}
++				err := RunPreparationProvider(context.Background(), os.Args[0], []string{"GCC_PREPARATION_STUB=" + mode, "GARM_COMMAND=" + command}, preparationFixture(), outcome)
++				if (err == nil) != (mode == "valid") {
++					t.Fatal("incorrect receipt acceptance", err)
++				}
++				if err != nil && strings.Contains(err.Error(), "private") {
++					t.Fatal("private child output leaked")
++				}
++			})
++		}
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
++	defer cancel()
++	if RunPreparationProvider(ctx, os.Args[0], []string{"GCC_PREPARATION_STUB=wait", "GARM_COMMAND=RecordPreparation"}, preparationFixture(), "recorded") == nil {
++		t.Fatal("unknown receipt acknowledged")
++	}
++}
++func TestOriginalJITValidationRejectsMalformedPayloads(t *testing.T) {
++	for _, payload := range []string{`{"agentId":42,"agentName":"planned"}`, `{"agentId":42,"agentId":42,"agentName":"planned"}`, `{"agentId":null,"agentName":"planned"}`, `{"agentId":42,"AgentName":"planned"}`, `{"agentId":42,"agentName":"wrong"}`, `{"agentId":42.0,"agentName":"planned"}`} {
++		encoded := base64.StdEncoding.EncodeToString([]byte(payload))
++		err := ValidateOriginalJITIdentity("planned", 42, map[string]string{".runner": encoded})
++		if (err == nil) != (payload == `{"agentId":42,"agentName":"planned"}`) {
++			t.Fatal("wrong payload identity accepted")
++		}
++	}
++}
+diff --git a/runner/enterprises.go b/runner/enterprises.go
+index 871a02d..798936d 100644
+--- a/runner/enterprises.go
++++ b/runner/enterprises.go
+@@ -200,12 +200,12 @@ func (r *Runner) CreateEnterprisePool(ctx context.Context, enterpriseID string,
+ 		return params.Pool{}, fmt.Errorf("failed to get repo: %w", err)
+ 	}
+ 
+-	template, err := r.findTemplate(ctx, entity, param.OSType, param.TemplateID)
++	templateID, err := r.capacityCreateTemplate(ctx, entity, param)
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("failed to find suitable template: %w", err)
+ 	}
+ 
+-	createPoolParams.TemplateID = &template.ID
++	createPoolParams.TemplateID = templateID
+ 	pool, err := r.store.CreateEntityPool(ctx, entity, createPoolParams)
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("failed to create enterprise pool: %w", err)
+@@ -285,6 +285,16 @@ func (r *Runner) UpdateEnterprisePool(ctx context.Context, enterpriseID, poolID
+ 		return params.Pool{}, fmt.Errorf("failed to get repo: %w", err)
+ 	}
+ 
++	pool, err := r.store.GetEntityPool(ctx, entity, poolID)
++	if err != nil {
++		return params.Pool{}, fmt.Errorf("error fetching pool: %w", err)
++	}
++
++	param, err = r.capacityUpdateTemplate(pool, param)
++	if err != nil {
++		return params.Pool{}, err
++	}
++
+ 	if param.TemplateID != nil {
+ 		template, err := r.findTemplate(ctx, entity, param.OSType, param.TemplateID)
+ 		if err != nil {
+@@ -292,11 +302,6 @@ func (r *Runner) UpdateEnterprisePool(ctx context.Context, enterpriseID, poolID
+ 		}
+ 		param.TemplateID = &template.ID
+ 	}
+-	pool, err := r.store.GetEntityPool(ctx, entity, poolID)
+-	if err != nil {
+-		return params.Pool{}, fmt.Errorf("error fetching pool: %w", err)
+-	}
+-
+ 	maxRunners := pool.MaxRunners
+ 	minIdleRunners := pool.MinIdleRunners
+ 
+diff --git a/runner/organizations.go b/runner/organizations.go
+index eb3c35b..be8bfaf 100644
+--- a/runner/organizations.go
++++ b/runner/organizations.go
+@@ -224,11 +224,11 @@ func (r *Runner) CreateOrgPool(ctx context.Context, orgID string, param params.C
+ 		return params.Pool{}, fmt.Errorf("failed to get repo: %w", err)
+ 	}
+ 
+-	template, err := r.findTemplate(ctx, entity, param.OSType, param.TemplateID)
++	templateID, err := r.capacityCreateTemplate(ctx, entity, param)
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("failed to find suitable template: %w", err)
+ 	}
+-	createPoolParams.TemplateID = &template.ID
++	createPoolParams.TemplateID = templateID
+ 	pool, err := r.store.CreateEntityPool(ctx, entity, createPoolParams)
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("error creating pool: %w", err)
+@@ -313,6 +313,16 @@ func (r *Runner) UpdateOrgPool(ctx context.Context, orgID, poolID string, param
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("failed to get repo: %w", err)
+ 	}
++	pool, err := r.store.GetEntityPool(ctx, entity, poolID)
++	if err != nil {
++		return params.Pool{}, fmt.Errorf("error fetching pool: %w", err)
++	}
++
++	param, err = r.capacityUpdateTemplate(pool, param)
++	if err != nil {
++		return params.Pool{}, err
++	}
++
+ 	if param.TemplateID != nil {
+ 		template, err := r.findTemplate(ctx, entity, param.OSType, param.TemplateID)
+ 		if err != nil {
+@@ -321,11 +331,6 @@ func (r *Runner) UpdateOrgPool(ctx context.Context, orgID, poolID string, param
+ 		param.TemplateID = &template.ID
+ 	}
+ 
+-	pool, err := r.store.GetEntityPool(ctx, entity, poolID)
+-	if err != nil {
+-		return params.Pool{}, fmt.Errorf("error fetching pool: %w", err)
+-	}
+-
+ 	maxRunners := pool.MaxRunners
+ 	minIdleRunners := pool.MinIdleRunners
+ 
 diff --git a/runner/pool/admission_test.go b/runner/pool/admission_test.go
 new file mode 100644
 index 0000000..a38192a
@@ -862,13 +1783,20 @@ index 0000000..a38192a
 +	s.Len(gate.cancelled, 1)
 +}
 diff --git a/runner/pool/pool.go b/runner/pool/pool.go
-index 9f5fc19..7a56050 100644
+index 9f5fc19..69ac0fa 100644
 --- a/runner/pool/pool.go
 +++ b/runner/pool/pool.go
-@@ -945,6 +945,27 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
+@@ -944,21 +944,61 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
+ 		return fmt.Errorf("unknown provider %s for pool %s", pool.ProviderName, pool.ID)
  	}
  
++	if common.PreparationEnabled(provider) && (!common.GatewayBootstrapEnabled(provider) || common.GatewayBootstrapPool(pool) != nil) {
++		return common.ErrPreparationHold
++	}
++
  	name := strings.ToLower(fmt.Sprintf("%s-%s", pool.GetRunnerPrefix(), util.NewID()))
++	preparationAttempted := false
++	publicationAttempted := false
 +	// Admission precedes GitHub JIT allocation and durable runner creation.
 +	// A denial accepts no runner request; desired capacity remains unsatisfied.
 +	if admission, ok := provider.(common.AdmissionProvider); ok {
@@ -878,7 +1806,7 @@ index 9f5fc19..7a56050 100644
 +		}
 +		if cancellation, ok := provider.(common.AdmissionCancellationProvider); ok {
 +			defer func() {
-+				if err == nil {
++				if err == nil || preparationAttempted {
 +					return
 +				}
 +				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -893,6 +1821,520 @@ index 9f5fc19..7a56050 100644
  	labels := r.getLabelsForInstance(pool)
  
  	jitConfig := make(map[string]string)
+ 	var runner *github.Runner
+ 
+-	if !provider.DisableJITConfig() && r.entity.Credentials.ForgeType != params.GiteaEndpointType {
+-		jitConfig, runner, err = r.ghcli.GetEntityJITConfig(ctx, name, pool, labels)
++	jitEnabled := !provider.DisableJITConfig() && r.entity.Credentials.ForgeType != params.GiteaEndpointType
++	if jitEnabled {
++		jitContext := ctx
++		if common.PreparationEnabled(provider) {
++			jitContext = common.WithOriginalPreparation(ctx)
++		}
++		jitConfig, runner, err = r.ghcli.GetEntityJITConfig(jitContext, name, pool, labels)
+ 		if err != nil {
+ 			return fmt.Errorf("failed to generate JIT config: %w", err)
+ 		}
+ 	}
+ 
++	// Validate source identity before installing cleanup: a mismatched return must
++	// never authorize deleting an unrelated GitHub runner ID.
++	if common.PreparationEnabled(provider) && jitEnabled {
++		if runner == nil || runner.GetName() != name || common.ValidateOriginalJITIdentity(name, runner.GetID(), jitConfig) != nil {
++			return common.ErrPreparationHold
++		}
++	}
++
+ 	defer func() {
+-		if err != nil {
++		if err != nil && !publicationAttempted && !preparationAttempted {
+ 			if runner != nil {
+ 				runnerCleanupErr := r.ghcli.RemoveEntityRunner(r.ctx, runner.GetID())
+ 				if err != nil {
+@@ -989,6 +1029,26 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
+ 		createParams.AgentID = runner.GetID()
+ 	}
+ 
++	if common.PreparationEnabled(provider) {
++		id, idErr := uuid.NewRandom()
++		if idErr != nil {
++			return common.ErrPreparationHold
++		}
++		createParams.AdmissionInstanceID = id.String()
++		provisional := params.Instance{ID: id.String(), Name: name, PoolID: pool.ID, ProviderName: pool.ProviderName, AgentID: createParams.AgentID, Generation: pool.Generation, JitConfiguration: jitConfig, Status: commonParams.InstancePendingCreate, RunnerStatus: params.RunnerPending}
++		request, requestErr := r.preparationRequest(pool, provisional)
++		if requestErr != nil {
++			return common.ErrPreparationHold
++		}
++		// A lost acknowledgement may follow durable recording. Do not cancel the
++		// reservation, publish a row or infer release after this point.
++		preparationAttempted = true
++		if provider.(common.PreparationProvider).RecordPreparation(ctx, request) != nil {
++			return common.ErrPreparationHold
++		}
++	}
++
++	publicationAttempted = common.PreparationEnabled(provider)
+ 	if _, err := r.store.CreateInstance(r.ctx, poolID, createParams); err != nil {
+ 		return fmt.Errorf("error creating instance: %w", err)
+ 	}
+@@ -1052,13 +1112,17 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error
+ 		return fmt.Errorf("unknown provider %s for pool %s", pool.ProviderName, pool.ID)
+ 	}
+ 
++	if err := r.validatePreparation(instance, pool, provider); err != nil {
++		return err
++	}
++
+ 	jwtValidity := pool.RunnerTimeout()
+ 	jwtToken, err := r.instanceTokenGetter.NewInstanceJWTToken(instance, r.entity, jwtValidity)
+ 	if err != nil {
+ 		return fmt.Errorf("error fetching instance jwt token: %w", err)
+ 	}
+ 
+-	if pool.TemplateID == 0 {
++	if pool.TemplateID == 0 && !common.GatewayBootstrapEnabled(provider) {
+ 		cloudConfigSpecs, err := garmUtil.GetCloudConfigSpecFromExtraSpecs(pool.ExtraSpecs)
+ 		if err != nil {
+ 			return fmt.Errorf("pool has no template set and extra specs are invalid: %w", err)
+@@ -1095,7 +1159,9 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error
+ 	// We use the template management system unless:
+ 	//   * there is no template associated with the pool/scale set
+ 	//   * user explicitly overwrites the install template via extra specs
+-	bootstrapArgs = garmUtil.MaybeAddWrapperToExtraSpecs(r.ctx, bootstrapArgs)
++	if !common.GatewayBootstrapEnabled(provider) {
++		bootstrapArgs = garmUtil.MaybeAddWrapperToExtraSpecs(r.ctx, bootstrapArgs)
++	}
+ 
+ 	if !hasJITConfig {
+ 		// We still need the labels here for situations where we don't have a JIT config generated.
+@@ -1128,6 +1194,15 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error
+ 			ProviderBaseParams: r.getProviderBaseParams(pool),
+ 		},
+ 	}
++	// Re-read the exact row immediately before Create, never trust a cached poll.
++	if common.PreparationEnabled(provider) {
++		fresh, freshErr := r.store.GetInstance(r.ctx, instance.Name)
++		currentPool, poolErr := r.store.GetEntityPool(r.ctx, r.entity, instance.PoolID)
++		if freshErr != nil || poolErr != nil || fresh.ID != instance.ID || r.validatePreparation(fresh, currentPool, provider) != nil {
++			return common.ErrPreparationHold
++		}
++	}
++
+ 	providerInstance, err := provider.CreateInstance(r.ctx, bootstrapArgs, createInstanceParams)
+ 	if err != nil {
+ 		instanceIDToDelete = instance.Name
+@@ -1401,6 +1476,12 @@ func (r *basePoolManager) retryFailedInstancesForOnePool(ctx context.Context, po
+ 	if !pool.Enabled {
+ 		return nil
+ 	}
++	// Failed/unknown attempts cannot be cleaned up and reissued by this source
++	// hook. A separately qualified lifecycle workflow is required.
++	if provider, ok := r.providers[pool.ProviderName]; ok && common.PreparationEnabled(provider) {
++		return nil
++	}
++
+ 	slog.DebugContext(
+ 		ctx, "running retry failed instances for pool",
+ 		"pool_id", pool.ID)
+@@ -1724,6 +1805,15 @@ func (r *basePoolManager) addPendingInstances() error {
+ 			continue
+ 		}
+ 
++		pool, poolErr := r.store.GetEntityPool(r.ctx, r.entity, instance.PoolID)
++		if poolErr != nil {
++			continue
++		}
++		provider, known := r.providers[pool.ProviderName]
++		if !known || r.validatePreparation(instance, pool, provider) != nil {
++			continue
++		}
++
+ 		slog.DebugContext(
+ 			r.ctx, "attempting to acquire lock for instance",
+ 			"runner_name", instance.Name,
+@@ -1755,6 +1845,9 @@ func (r *basePoolManager) addPendingInstances() error {
+ 				"runner_name", instance.Name,
+ 				"pool_id", instance.PoolID)
+ 			if err := r.addInstanceToProvider(instance); err != nil {
++				if errors.Is(err, common.ErrPreparationHold) {
++					return
++				}
+ 				slog.With(slog.Any("error", err)).ErrorContext(
+ 					r.ctx, "failed to add instance to provider",
+ 					"runner_name", instance.Name)
+diff --git a/runner/pool/preparation.go b/runner/pool/preparation.go
+new file mode 100644
+index 0000000..86ba499
+--- /dev/null
++++ b/runner/pool/preparation.go
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: Apache-2.0
++package pool
++
++import (
++	commonParams "github.com/cloudbase/garm-provider-common/params"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++)
++
++func (r *basePoolManager) preparationRequest(pool params.Pool, instance params.Instance) (common.PreparationRequest, error) {
++	if !common.GatewayBootstrapEnabled(r.providers[pool.ProviderName]) || common.GatewayBootstrapPool(pool) != nil {
++		return common.PreparationRequest{}, common.ErrPreparationHold
++	}
++	request := common.PreparationRequest{Protocol: common.PreparationVersion, Name: instance.Name, PoolID: instance.PoolID, InstanceID: instance.ID, AgentID: instance.AgentID, Generation: instance.Generation, ProviderName: pool.ProviderName, EntityType: string(r.entity.EntityType), EntityID: r.entity.ID, ForgeEndpointName: r.entity.Credentials.Endpoint.Name, JITEnabled: len(instance.JitConfiguration) > 0}
++	entity, err := pool.GetEntity()
++	if err != nil || entity.ID != r.entity.ID || entity.EntityType != r.entity.EntityType || pool.Endpoint.Name != request.ForgeEndpointName || instance.ProviderName != pool.ProviderName || instance.Generation != pool.Generation || instance.ScaleSetID != 0 || instance.ProviderID != "" || instance.RunnerStatus != params.RunnerPending || instance.Job != nil || (instance.Status != commonParams.InstancePendingCreate && instance.Status != commonParams.InstanceCreating) || request.Validate() != nil {
++		return common.PreparationRequest{}, common.ErrPreparationHold
++	}
++	if request.JITEnabled && common.ValidateOriginalJITIdentity(instance.Name, instance.AgentID, instance.JitConfiguration) != nil {
++		return common.PreparationRequest{}, common.ErrPreparationHold
++	}
++	return request, nil
++}
++func (r *basePoolManager) validatePreparation(instance params.Instance, pool params.Pool, provider common.Provider) error {
++	if !common.PreparationEnabled(provider) {
++		return nil
++	}
++	request, err := r.preparationRequest(pool, instance)
++	if err != nil {
++		return common.ErrPreparationHold
++	}
++	if provider.(common.PreparationProvider).ValidatePreparation(r.ctx, request) != nil {
++		return common.ErrPreparationHold
++	}
++	return nil
++}
+diff --git a/runner/pool/preparation_test.go b/runner/pool/preparation_test.go
+new file mode 100644
+index 0000000..891849b
+--- /dev/null
++++ b/runner/pool/preparation_test.go
+@@ -0,0 +1,308 @@
++//go:build testing
++
++package pool
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	commonParams "github.com/cloudbase/garm-provider-common/params"
++	dbCommon "github.com/cloudbase/garm/database/common"
++	"github.com/cloudbase/garm/locking"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++	"github.com/google/go-github/v84/github"
++	"github.com/stretchr/testify/mock"
++)
++
++func init() {
++	locker, _ := locking.NewLocalLocker(context.Background(), nil)
++	_ = locking.RegisterLocker(locker)
++}
++
++type preparationTestProvider struct {
++	*admissionTestProvider
++	mu            sync.Mutex
++	original      common.PreparationRequest
++	recordEntered chan common.PreparationRequest
++	recordRelease chan struct{}
++	recordErr     error
++	validateErr   error
++	validations   int
++	rejectAt      int
++}
++
++func (p *preparationTestProvider) PreparationEnabled() bool      { return true }
++func (p *preparationTestProvider) CapacityBootstrapMode() string { return common.CapacityBootstrapMode }
++func (p *preparationTestProvider) RecordPreparation(_ context.Context, r common.PreparationRequest) error {
++	p.mu.Lock()
++	p.original = r
++	p.mu.Unlock()
++	if p.recordEntered != nil {
++		p.recordEntered <- r
++		<-p.recordRelease
++	}
++	return p.recordErr
++}
++func (p *preparationTestProvider) ValidatePreparation(_ context.Context, r common.PreparationRequest) error {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	p.validations++
++	if p.validateErr != nil || (p.rejectAt > 0 && p.validations >= p.rejectAt) || r != p.original {
++		return common.ErrPreparationHold
++	}
++	return nil
++}
++
++type preparationLostStore struct {
++	dbCommon.Store
++	entered chan params.Instance
++	release chan struct{}
++}
++
++func (p *preparationLostStore) CreateInstance(ctx context.Context, pool string, params params.CreateInstanceParams) (params.Instance, error) {
++	row, err := p.Store.CreateInstance(ctx, pool, params)
++	if err != nil {
++		return row, err
++	}
++	p.entered <- row
++	<-p.release
++	return row, errors.New("disposable-lost-commit-ack")
++}
++
++type preparationJWT struct{}
++
++func (preparationJWT) NewInstanceJWTToken(params.Instance, params.ForgeEntity, uint) (string, error) {
++	return "disposable-not-an-auth-token", nil
++}
++func (preparationJWT) NewAgentJWTToken(params.Instance, params.ForgeEntity) (string, error) {
++	return "disposable-not-an-auth-token", nil
++}
++func (s *PoolStressTestSuite) preparationSetup() (*preparationTestProvider, *atomic.Int32) {
++	gate := &preparationTestProvider{admissionTestProvider: &admissionTestProvider{Provider: s.providerMock}}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	_, err := s.store.UpdateEntityPool(s.adminCtx, s.entity, s.pool.ID, params.UpdatePoolParams{ExtraSpecs: json.RawMessage(`{}`)})
++	s.Require().NoError(err)
++	s.mgr.instanceTokenGetter = preparationJWT{}
++	s.providerMock.On("DisableJITConfig").Return(false).Once()
++	s.ghcliMock.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(func(_ context.Context, name string, _ params.Pool, _ []string) (map[string]string, *github.Runner, error) {
++		data, _ := json.Marshal(map[string]any{"agentId": int64(42), "agentName": name})
++		return map[string]string{".runner": base64.StdEncoding.EncodeToString(data)}, &github.Runner{ID: github.Int64(42), Name: github.String(name)}, nil
++	}).Once()
++	calls := &atomic.Int32{}
++	s.providerMock.On("CreateInstance", mock.Anything, mock.Anything, mock.Anything).Run(func(mock.Arguments) { calls.Add(1) }).Return(commonParams.ProviderInstance{ProviderID: "disposable-provider", Status: commonParams.InstanceRunning}, nil).Maybe()
++	return gate, calls
++}
++func (s *PoolStressTestSuite) waitPreparationRunning(name string) {
++	until := time.Now().Add(3 * time.Second)
++	for {
++		row, err := s.store.GetInstance(s.adminCtx, name)
++		s.Require().NoError(err)
++		if row.Status == commonParams.InstanceRunning {
++			return
++		}
++		if time.Now().After(until) {
++			s.FailNow("poll did not settle", row.Status)
++		}
++		time.Sleep(time.Millisecond)
++	}
++}
++func (s *PoolStressTestSuite) TestPreparationReceiptBeforeActualSQLVisibilityAndPolling() {
++	gate, calls := s.preparationSetup()
++	gate.recordEntered = make(chan common.PreparationRequest, 1)
++	gate.recordRelease = make(chan struct{})
++	done := make(chan error, 1)
++	go func() { done <- s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil) }()
++	original := <-gate.recordEntered
++	s.Require().NoError(original.Validate())
++	s.Equal(int64(42), original.AgentID)
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.Zero(calls.Load())
++	close(gate.recordRelease)
++	s.Require().NoError(<-done)
++	rows, err = s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	s.Equal(original.InstanceID, rows[0].ID)
++	s.Equal(original.AgentID, rows[0].AgentID)
++	s.Zero(rows[0].CreateAttempt)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.waitPreparationRunning(rows[0].Name)
++	s.Equal(int32(1), calls.Load())
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.Equal(int32(1), calls.Load())
++}
++func (s *PoolStressTestSuite) TestPreparationUnknownRecordAckDoesNotPublishOrCancel() {
++	gate, calls := s.preparationSetup()
++	gate.recordErr = common.ErrPreparationHold
++	s.ErrorIs(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil), common.ErrPreparationHold)
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++	s.Empty(gate.cancelled)
++	s.ghcliMock.AssertNotCalled(s.T(), "RemoveEntityRunner", mock.Anything, mock.Anything)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.Zero(calls.Load())
++}
++func (s *PoolStressTestSuite) TestPreparationLostSQLAckKeepsOriginalRegistrationAndReceipt() {
++	gate, calls := s.preparationSetup()
++	held := &preparationLostStore{Store: s.store, entered: make(chan params.Instance, 1), release: make(chan struct{})}
++	s.mgr.store = held
++	done := make(chan error, 1)
++	go func() { done <- s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil) }()
++	row := <-held.entered
++	s.Equal(gate.original.InstanceID, row.ID)
++	s.Equal(int64(42), row.AgentID)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.waitPreparationRunning(row.Name)
++	s.Equal(int32(1), calls.Load())
++	close(held.release)
++	s.Require().Error(<-done)
++	s.Empty(gate.cancelled)
++	s.ghcliMock.AssertNotCalled(s.T(), "RemoveEntityRunner", mock.Anything, mock.Anything)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.Equal(int32(1), calls.Load())
++}
++func (s *PoolStressTestSuite) TestPreparationValidationRefusalHoldsBeforeStatusMutation() {
++	gate, calls := s.preparationSetup()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	gate.mu.Lock()
++	gate.validateErr = common.ErrPreparationHold
++	gate.mu.Unlock()
++	s.Require().NoError(s.mgr.addPendingInstances())
++	fresh, err := s.store.GetInstance(s.adminCtx, rows[0].Name)
++	s.Require().NoError(err)
++	s.Equal(commonParams.InstancePendingCreate, fresh.Status)
++	s.ErrorIs(s.mgr.addInstanceToProvider(fresh), common.ErrPreparationHold)
++	s.Zero(calls.Load())
++	s.Require().NoError(s.mgr.retryFailedInstancesForOnePool(s.adminCtx, s.pool))
++	s.Zero(calls.Load())
++}
++func (s *PoolStressTestSuite) TestPreparationDifferentVisibleRowAndForcedRetryCannotReuseReceipt() {
++	gate, calls := s.preparationSetup()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	original := rows[0]
++	s.Require().NoError(s.store.DeleteInstanceByName(s.adminCtx, original.Name))
++	recreated, err := s.store.CreateInstance(s.adminCtx, s.pool.ID, params.CreateInstanceParams{Name: original.Name, AgentID: 42, Status: commonParams.InstancePendingCreate, RunnerStatus: params.RunnerPending, Generation: original.Generation, JitConfiguration: original.JitConfiguration})
++	s.Require().NoError(err)
++	s.NotEqual(gate.original.InstanceID, recreated.ID)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.Zero(calls.Load())
++	s.ErrorIs(s.mgr.addInstanceToProvider(recreated), common.ErrPreparationHold)
++}
++
++func (s *PoolStressTestSuite) TestPreparationLateValidationHoldNeverCallsCreateOrDelete() {
++	gate, calls := s.preparationSetup()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	gate.rejectAt = 2
++	s.ErrorIs(s.mgr.addInstanceToProvider(rows[0]), common.ErrPreparationHold)
++	s.Zero(calls.Load())
++	s.providerMock.AssertNotCalled(s.T(), "DeleteInstance", mock.Anything, mock.Anything, mock.Anything)
++}
++func (s *PoolStressTestSuite) TestPreparationMalformedOriginalMockJITCannotDeleteUnprovenRunner() {
++	gate := &preparationTestProvider{admissionTestProvider: &admissionTestProvider{Provider: s.providerMock}}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	s.providerMock.On("DisableJITConfig").Return(false).Once()
++	s.ghcliMock.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(map[string]string{".runner": "private-malformed"}, &github.Runner{ID: github.Int64(42), Name: github.String("unrelated")}, nil).Once()
++	s.ErrorIs(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil), common.ErrPreparationHold)
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++	s.Empty(gate.original.InstanceID)
++	s.ghcliMock.AssertNotCalled(s.T(), "RemoveEntityRunner", mock.Anything, mock.Anything)
++}
++
++func (s *PoolStressTestSuite) TestPreparationCounterIsNotOriginalSourceProvenance() {
++	gate, calls := s.preparationSetup()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	held, err := s.store.ForceUpdateInstance(s.adminCtx, rows[0].Name, params.UpdateInstanceParams{CreateAttempt: 9, Status: commonParams.InstancePendingCreate})
++	s.Require().NoError(err)
++	s.Equal(gate.original.InstanceID, held.ID)
++	s.Equal(9, held.CreateAttempt)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.waitPreparationRunning(held.Name)
++	s.Equal(int32(1), calls.Load())
++	s.providerMock.AssertNotCalled(s.T(), "DeleteInstance", mock.Anything, mock.Anything, mock.Anything)
++}
++
++func (s *PoolStressTestSuite) TestPreparationNonJITUsesExplicitZeroAgentReceipt() {
++	gate := &preparationTestProvider{admissionTestProvider: &admissionTestProvider{Provider: s.providerMock}}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	s.providerMock.On("DisableJITConfig").Return(true).Once()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	s.False(gate.original.JITEnabled)
++	s.Zero(gate.original.AgentID)
++	s.Equal(gate.original.InstanceID, rows[0].ID)
++	s.Empty(rows[0].JitConfiguration)
++	s.ghcliMock.AssertNotCalled(s.T(), "GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
++}
++
++func (s *PoolStressTestSuite) TestGatewayBootstrapRejectsCustomTemplateBeforeReservationAndJIT() {
++	gate := &preparationTestProvider{admissionTestProvider: &admissionTestProvider{Provider: s.providerMock}}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	tpl, err := s.store.CreateTemplate(s.adminCtx, params.CreateTemplateParams{Name: "unsupported-template", Data: []byte("not-executed"), OSType: "linux", ForgeType: params.GithubEndpointType, IsSystem: true})
++	s.Require().NoError(err)
++	_, err = s.store.UpdateEntityPool(s.adminCtx, s.entity, s.pool.ID, params.UpdatePoolParams{TemplateID: &tpl.ID})
++	s.Require().NoError(err)
++	s.ErrorIs(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil), common.ErrPreparationHold)
++	s.Empty(gate.requests)
++	s.Empty(gate.original.InstanceID)
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++	s.Empty(s.ghcliMock.Calls)
++	s.Empty(s.providerMock.Calls)
++}
++func (s *PoolStressTestSuite) TestGatewayBootstrapRejectsCustomExtrasBeforeReservationAndJIT() {
++	gate := &preparationTestProvider{admissionTestProvider: &admissionTestProvider{Provider: s.providerMock}}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	_, err := s.store.UpdateEntityPool(s.adminCtx, s.entity, s.pool.ID, params.UpdatePoolParams{ExtraSpecs: json.RawMessage(`{"runner_install_template":"not-allowed"}`)})
++	s.Require().NoError(err)
++	s.ErrorIs(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil), common.ErrPreparationHold)
++	s.Empty(gate.requests)
++	s.Empty(gate.original.InstanceID)
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++	s.Empty(s.ghcliMock.Calls)
++	s.Empty(s.providerMock.Calls)
++}
++func (s *PoolStressTestSuite) TestGatewayBootstrapActualNormalPoolPassesOnlyEmptyExtrasToProvider() {
++	_, calls := s.preparationSetup()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Require().Len(rows, 1)
++	s.Require().NoError(s.mgr.addPendingInstances())
++	s.waitPreparationRunning(rows[0].Name)
++	s.Equal(int32(1), calls.Load())
++	for _, call := range s.providerMock.Calls {
++		if call.Method == "CreateInstance" {
++			body := call.Arguments.Get(1).(commonParams.BootstrapInstance)
++			s.JSONEq(`{}`, string(body.ExtraSpecs))
++		}
++	}
++}
+diff --git a/runner/pools.go b/runner/pools.go
+index ffd3b9c..4d709a2 100644
+--- a/runner/pools.go
++++ b/runner/pools.go
+@@ -81,6 +81,11 @@ func (r *Runner) UpdatePoolByID(ctx context.Context, poolID string, param params
+ 		return params.Pool{}, fmt.Errorf("error fetching pool: %w", err)
+ 	}
+ 
++	param, err = r.capacityUpdateTemplate(pool, param)
++	if err != nil {
++		return params.Pool{}, err
++	}
++
+ 	maxRunners := pool.MaxRunners
+ 	minIdleRunners := pool.MinIdleRunners
+ 
 diff --git a/runner/providers/v0.1.1/admission_cancellation_test.go b/runner/providers/v0.1.1/admission_cancellation_test.go
 new file mode 100644
 index 0000000..b5be87f
@@ -951,10 +2393,10 @@ index 0000000..b5be87f
 +}
 diff --git a/runner/providers/v0.1.1/admission_test.go b/runner/providers/v0.1.1/admission_test.go
 new file mode 100644
-index 0000000..503d840
+index 0000000..56ad4ca
 --- /dev/null
 +++ b/runner/providers/v0.1.1/admission_test.go
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package v011
 +
@@ -1025,6 +2467,7 @@ index 0000000..503d840
 +		t.Fatalf("legacy behavior changed: %v", err)
 +	}
 +	cfg.External.AdmissionEnabled = true
++	cfg.External.CapacityBootstrapMode = common.CapacityBootstrapMode
 +	provider.execPath = os.Args[0]
 +	provider.environmentVariables = []string{"GCC_EXTERNAL_ADMISSION_STUB=deferred"}
 +	if err := provider.AdmitInstance(context.Background(), request); !common.IsAdmissionDeferred(err) {
@@ -1033,7 +2476,7 @@ index 0000000..503d840
 +}
 +
 +func TestOptInCreateErrorsDoNotEchoBootstrap(t *testing.T) {
-+	cfg := &config.Provider{External: config.External{AdmissionEnabled: true}}
++	cfg := &config.Provider{External: config.External{AdmissionEnabled: true, CapacityBootstrapMode: common.CapacityBootstrapMode}}
 +	provider := &external{cfg: cfg, execPath: os.Args[0], environmentVariables: []string{"GCC_EXTERNAL_ADMISSION_STUB=echo-failure"}}
 +	secret := "bootstrap-secret-must-not-echo"
 +	_, err := provider.CreateInstance(context.Background(), commonParams.BootstrapInstance{Name: "runner", PoolID: "pool", InstanceToken: secret}, common.CreateInstanceParams{})
@@ -1044,7 +2487,7 @@ index 0000000..503d840
 +
 +func TestOptInCreateValidationAndFaultsAreRedacted(t *testing.T) {
 +	for _, mode := range []string{"invalid-status", "provider-fault"} {
-+		cfg := &config.Provider{External: config.External{AdmissionEnabled: true}}
++		cfg := &config.Provider{External: config.External{AdmissionEnabled: true, CapacityBootstrapMode: common.CapacityBootstrapMode}}
 +		provider := &external{cfg: cfg, execPath: os.Args[0], environmentVariables: []string{"GCC_EXTERNAL_ADMISSION_STUB=" + mode}}
 +		result, err := provider.CreateInstance(context.Background(), commonParams.BootstrapInstance{Name: "runner", PoolID: "pool"}, common.CreateInstanceParams{})
 +		if err != nil && strings.Contains(err.Error(), "secret-must-not-echo") {
@@ -1060,7 +2503,7 @@ index 0000000..503d840
 +}
 +
 +func TestOptInInventorySuccessAndLookupNotFound(t *testing.T) {
-+	cfg := &config.Provider{External: config.External{AdmissionEnabled: true}}
++	cfg := &config.Provider{External: config.External{AdmissionEnabled: true, CapacityBootstrapMode: common.CapacityBootstrapMode}}
 +	provider := &external{cfg: cfg, execPath: os.Args[0], environmentVariables: []string{"GCC_EXTERNAL_ADMISSION_STUB=list"}}
 +	instances, err := provider.ListInstances(context.Background(), "pool", common.ListInstancesParams{})
 +	if err != nil || len(instances) != 1 || instances[0].Name != "runner" {
@@ -1076,7 +2519,7 @@ index 0000000..503d840
 +	}
 +}
 diff --git a/runner/providers/v0.1.1/external.go b/runner/providers/v0.1.1/external.go
-index 6e43dce..51c7452 100644
+index 6e43dce..7668e58 100644
 --- a/runner/providers/v0.1.1/external.go
 +++ b/runner/providers/v0.1.1/external.go
 @@ -35,6 +35,8 @@ import (
@@ -1088,7 +2531,7 @@ index 6e43dce..51c7452 100644
  
  func NewProvider(ctx context.Context, cfg *config.Provider, controllerID string) (common.Provider, error) {
  	if cfg.ProviderType != params.ExternalProvider {
-@@ -69,6 +71,33 @@ type external struct {
+@@ -69,6 +71,54 @@ type external struct {
  	environmentVariables []string
  }
  
@@ -1098,6 +2541,9 @@ index 6e43dce..51c7452 100644
 +func (e *external) AdmitInstance(ctx context.Context, request common.AdmissionRequest) error {
 +	if !e.cfg.External.AdmissionEnabled {
 +		return nil
++	}
++	if !common.GatewayBootstrapEnabled(e) {
++		return common.ErrPreparationHold
 +	}
 +	asEnv := []string{
 +		"GARM_COMMAND=AdmitInstance",
@@ -1119,10 +2565,28 @@ index 6e43dce..51c7452 100644
 +	return common.RunAdmissionCancellationProvider(ctx, e.execPath, asEnv, request)
 +}
 +
++// PreparationEnabled separates legacy providers from the explicit source receipt contract.
++func (e *external) PreparationEnabled() bool      { return e.cfg.External.AdmissionEnabled }
++func (e *external) CapacityBootstrapMode() string { return e.cfg.External.CapacityBootstrapMode }
++func (e *external) RecordPreparation(ctx context.Context, request common.PreparationRequest) error {
++	return e.preparationCommand(ctx, request, "RecordPreparation", "recorded")
++}
++func (e *external) ValidatePreparation(ctx context.Context, request common.PreparationRequest) error {
++	return e.preparationCommand(ctx, request, "ValidatePreparation", "validated")
++}
++func (e *external) preparationCommand(ctx context.Context, request common.PreparationRequest, command, outcome string) error {
++	if !e.PreparationEnabled() {
++		return nil
++	}
++	asEnv := []string{"GARM_COMMAND=" + command, fmt.Sprintf("GARM_CONTROLLER_ID=%s", e.controllerID), fmt.Sprintf("GARM_POOL_ID=%s", request.PoolID), fmt.Sprintf("GARM_PROVIDER_CONFIG_FILE=%s", e.cfg.External.ConfigFile)}
++	asEnv = append(asEnv, e.environmentVariables...)
++	return common.RunPreparationProvider(ctx, e.execPath, asEnv, request, outcome)
++}
++
  // CreateInstance creates a new compute instance in the provider.
  func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonParams.BootstrapInstance, _ common.CreateInstanceParams) (commonParams.ProviderInstance, error) {
  	extraspecs := bootstrapParams.ExtraSpecs
-@@ -97,7 +126,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -97,7 +147,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
  		e.cfg.Name,       // label: provider
  	).Inc()
  
@@ -1136,7 +2600,7 @@ index 6e43dce..51c7452 100644
  	if err != nil {
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"CreateInstance", // label: operation
-@@ -112,6 +146,9 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -112,6 +167,9 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
  			"CreateInstance", // label: operation
  			e.cfg.Name,       // label: provider
  		).Inc()
@@ -1146,7 +2610,7 @@ index 6e43dce..51c7452 100644
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
  	}
  
-@@ -120,13 +157,26 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -120,13 +178,26 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
  			"CreateInstance", // label: operation
  			e.cfg.Name,       // label: provider
  		).Inc()
@@ -1177,7 +2641,7 @@ index 6e43dce..51c7452 100644
  	return param, nil
  }
  
-@@ -193,8 +243,17 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+@@ -193,8 +264,17 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
  		"GetInstance", // label: operation
  		e.cfg.Name,    // label: provider
  	).Inc()
@@ -1196,7 +2660,7 @@ index 6e43dce..51c7452 100644
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"GetInstance", // label: operation
  			e.cfg.Name,    // label: provider
-@@ -208,6 +267,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+@@ -208,6 +288,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
  			"GetInstance", // label: operation
  			e.cfg.Name,    // label: provider
  		).Inc()
@@ -1206,7 +2670,7 @@ index 6e43dce..51c7452 100644
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
  	}
  
-@@ -216,6 +278,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+@@ -216,6 +299,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
  			"GetInstance", // label: operation
  			e.cfg.Name,    // label: provider
  		).Inc()
@@ -1216,7 +2680,7 @@ index 6e43dce..51c7452 100644
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
  	}
  
-@@ -245,8 +310,13 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+@@ -245,8 +331,13 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
  		e.cfg.Name,      // label: provider
  	).Inc()
  
@@ -1232,7 +2696,7 @@ index 6e43dce..51c7452 100644
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"ListInstances", // label: operation
  			e.cfg.Name,      // label: provider
-@@ -260,6 +330,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+@@ -260,6 +351,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
  			"ListInstances", // label: operation
  			e.cfg.Name,      // label: provider
  		).Inc()
@@ -1242,7 +2706,7 @@ index 6e43dce..51c7452 100644
  		return []commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
  	}
  
-@@ -270,6 +343,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+@@ -270,6 +364,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
  				"ListInstances", // label: operation
  				e.cfg.Name,      // label: provider
  			).Inc()
@@ -1252,6 +2716,247 @@ index 6e43dce..51c7452 100644
  			return []commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
  		}
  		ret[idx] = inst
+diff --git a/runner/repositories.go b/runner/repositories.go
+index 4241db5..6aaee43 100644
+--- a/runner/repositories.go
++++ b/runner/repositories.go
+@@ -262,12 +262,12 @@ func (r *Runner) CreateRepoPool(ctx context.Context, repoID string, param params
+ 		return params.Pool{}, fmt.Errorf("failed to get repo: %w", err)
+ 	}
+ 
+-	template, err := r.findTemplate(ctx, entity, param.OSType, param.TemplateID)
++	templateID, err := r.capacityCreateTemplate(ctx, entity, param)
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("failed to find suitable template: %w", err)
+ 	}
+ 
+-	createPoolParams.TemplateID = &template.ID
++	createPoolParams.TemplateID = templateID
+ 	pool, err := r.store.CreateEntityPool(ctx, entity, createPoolParams)
+ 	if err != nil {
+ 		return params.Pool{}, fmt.Errorf("error creating pool: %w", err)
+@@ -365,6 +365,11 @@ func (r *Runner) UpdateRepoPool(ctx context.Context, repoID, poolID string, para
+ 		return params.Pool{}, fmt.Errorf("error fetching pool: %w", err)
+ 	}
+ 
++	param, err = r.capacityUpdateTemplate(pool, param)
++	if err != nil {
++		return params.Pool{}, err
++	}
++
+ 	if param.TemplateID != nil {
+ 		osType := param.OSType
+ 		if osType == "" {
+diff --git a/util/github/client.go b/util/github/client.go
+index 1c1a1a3..76cacd1 100644
+--- a/util/github/client.go
++++ b/util/github/client.go
+@@ -533,8 +533,13 @@ func (g *githubClient) GetEntityJITConfig(ctx context.Context, instance string,
+ 		return nil, nil, fmt.Errorf("failed to get JIT config: %w", err)
+ 	}
+ 
++	strict := common.OriginalPreparationRequired(ctx)
++	if strict && (ret == nil || ret.Runner == nil || ret.Runner.GetID() <= 0 || ret.Runner.GetName() != instance || ret.EncodedJITConfig == nil || len(ret.GetEncodedJITConfig()) > 2<<20) {
++		return nil, nil, common.ErrPreparationHold
++	}
++	cleanupTrusted := !strict
+ 	defer func(run *github.Runner) {
+-		if err != nil && run != nil {
++		if err != nil && run != nil && cleanupTrusted {
+ 			innerErr := g.RemoveEntityRunner(ctx, run.GetID())
+ 			slog.With(slog.Any("error", innerErr)).ErrorContext(
+ 				ctx, "failed to remove runner",
+@@ -544,14 +549,31 @@ func (g *githubClient) GetEntityJITConfig(ctx context.Context, instance string,
+ 
+ 	decoded, err := base64.StdEncoding.DecodeString(*ret.EncodedJITConfig)
+ 	if err != nil {
++		if strict {
++			return nil, nil, common.ErrPreparationHold
++		}
+ 		return nil, nil, fmt.Errorf("failed to decode JIT config: %w", err)
+ 	}
+ 
+ 	var jitConfig map[string]string
+-	if err := json.Unmarshal(decoded, &jitConfig); err != nil {
++	if strict {
++		jitConfig, err = common.DecodeOriginalJITMap(decoded)
++		if err != nil {
++			return nil, nil, common.ErrPreparationHold
++		}
++	} else if err := json.Unmarshal(decoded, &jitConfig); err != nil {
++		if strict {
++			return nil, nil, common.ErrPreparationHold
++		}
+ 		return nil, nil, fmt.Errorf("failed to unmarshal JIT config: %w", err)
+ 	}
+ 
++	if strict {
++		if common.ValidateOriginalJITIdentity(instance, ret.Runner.GetID(), jitConfig) != nil {
++			return nil, nil, common.ErrPreparationHold
++		}
++		cleanupTrusted = true
++	}
+ 	return jitConfig, ret.Runner, nil
+ }
+ 
+diff --git a/util/github/preparation_test.go b/util/github/preparation_test.go
+new file mode 100644
+index 0000000..c9d15ef
+--- /dev/null
++++ b/util/github/preparation_test.go
+@@ -0,0 +1,90 @@
++package github
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"sync/atomic"
++	"testing"
++
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++	gh "github.com/google/go-github/v84/github"
++)
++
++func TestOriginalPreparationActualHTTPGetterRejectsUnprovenIdentityWithoutDelete(t *testing.T) {
++	for _, mode := range []string{"valid", "zero-id", "wrong-return-name", "wrong-payload-id", "wrong-payload-name", "bad-base64", "duplicate-file", "duplicate-agent", "wrong-case-agent", "nil-runner", "nil-config"} {
++		t.Run(mode, func(t *testing.T) {
++			var deletes atomic.Int32
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Method == http.MethodDelete {
++					deletes.Add(1)
++					w.WriteHeader(204)
++					return
++				}
++				if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/generate-jitconfig") {
++					t.Errorf("unexpected fixture request %s %s", r.Method, r.URL.Path)
++					w.WriteHeader(404)
++					return
++				}
++				runner := &gh.Runner{ID: gh.Int64(42), Name: gh.String("planned")}
++				file := `{"agentId":42,"agentName":"planned"}`
++				switch mode {
++				case "zero-id":
++					runner.ID = gh.Int64(0)
++				case "wrong-return-name":
++					runner.Name = gh.String("unrelated")
++				case "wrong-payload-id":
++					file = `{"agentId":99,"agentName":"planned"}`
++				case "wrong-payload-name":
++					file = `{"agentId":42,"agentName":"other"}`
++				case "duplicate-agent":
++					file = `{"agentId":42,"agentId":42,"agentName":"planned"}`
++				case "wrong-case-agent":
++					file = `{"AgentId":42,"agentName":"planned"}`
++				case "nil-runner":
++					runner = nil
++				}
++				encodedFile := base64.StdEncoding.EncodeToString([]byte(file))
++				outer, _ := json.Marshal(map[string]string{".runner": encodedFile})
++				if mode == "duplicate-file" {
++					outer = []byte(`{".runner":"` + encodedFile + `",".runner":"` + encodedFile + `"}`)
++				}
++				encoded := base64.StdEncoding.EncodeToString(outer)
++				if mode == "bad-base64" {
++					encoded = "private-malformed-secret"
++				}
++				response := gh.JITRunnerConfig{Runner: runner, EncodedJITConfig: &encoded}
++				if mode == "nil-config" {
++					response.EncodedJITConfig = nil
++				}
++				_ = json.NewEncoder(w).Encode(response)
++			}))
++			defer server.Close()
++			client := gh.NewClient(server.Client())
++			endpoint, _ := url.Parse(server.URL + "/")
++			client.BaseURL = endpoint
++			g := &githubClient{ActionsService: client.Actions, repo: client.Repositories, org: client.Organizations, enterprise: client.Enterprise, rateLimit: client.RateLimit, cli: client, entity: params.ForgeEntity{ID: "fixture", Owner: "owner", Name: "repo", EntityType: params.ForgeEntityTypeRepository}}
++			config, runner, err := g.GetEntityJITConfig(common.WithOriginalPreparation(context.Background()), "planned", params.Pool{}, nil)
++			if mode == "valid" {
++				if err != nil || runner.GetID() != 42 || len(config) != 1 {
++					t.Fatal("valid original identity rejected", err)
++				}
++			} else {
++				if err == nil || len(config) != 0 || runner != nil {
++					t.Fatal("unproven original identity escaped")
++				}
++				if strings.Contains(err.Error(), "secret") {
++					t.Fatal("private payload leaked")
++				}
++			}
++			if deletes.Load() != 0 {
++				t.Fatal("unproven registration was destructively cleaned up")
++			}
++		})
++	}
++}
+diff --git a/workers/provider/instance_manager.go b/workers/provider/instance_manager.go
+index 78465f5..4ebd32a 100644
+--- a/workers/provider/instance_manager.go
++++ b/workers/provider/instance_manager.go
+@@ -153,6 +153,10 @@ func (i *instanceManager) pseudoPoolID() string {
+ }
+ 
+ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instance) error {
++	if common.PreparationEnabled(i.provider) {
++		return common.ErrPreparationHold
++	}
++
+ 	entity, err := i.getEntity()
+ 	if err != nil {
+ 		return fmt.Errorf("getting entity: %w", err)
+@@ -310,6 +314,10 @@ func (i *instanceManager) consolidateState() error {
+ 
+ 	switch i.instance.Status {
+ 	case commonParams.InstancePendingCreate:
++		// Scale-set source receipts are not qualified; keep the original row held.
++		if common.PreparationEnabled(i.provider) {
++			return nil
++		}
+ 		// kick off the creation process
+ 		if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstanceCreating, nil, false); err != nil {
+ 			return fmt.Errorf("setting instance status to creating: %w", err)
+diff --git a/workers/provider/preparation_test.go b/workers/provider/preparation_test.go
+new file mode 100644
+index 0000000..f765e14
+--- /dev/null
++++ b/workers/provider/preparation_test.go
+@@ -0,0 +1,30 @@
++package provider
++
++import (
++	"context"
++	"errors"
++	commonParams "github.com/cloudbase/garm-provider-common/params"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++	"testing"
++)
++
++type preparationUnsupportedProvider struct{ common.Provider }
++
++func (*preparationUnsupportedProvider) PreparationEnabled() bool { return true }
++func (*preparationUnsupportedProvider) RecordPreparation(context.Context, common.PreparationRequest) error {
++	panic("unqualified scaleset receipt")
++}
++func (*preparationUnsupportedProvider) ValidatePreparation(context.Context, common.PreparationRequest) error {
++	panic("unqualified scaleset validation")
++}
++func TestPreparationEnabledScaleSetExistingRowsAndDirectCreateRemainHeld(t *testing.T) {
++	manager := &instanceManager{provider: &preparationUnsupportedProvider{}, instance: params.Instance{Status: commonParams.InstancePendingCreate}}
++	manager.running.Store(true)
++	if err := manager.consolidateState(); err != nil {
++		t.Fatal(err)
++	}
++	if !errors.Is(manager.handleCreateInstanceInProvider(manager.instance), common.ErrPreparationHold) {
++		t.Fatal("unqualified direct scaleset create allowed")
++	}
++}
 diff --git a/workers/scaleset/admission_test.go b/workers/scaleset/admission_test.go
 new file mode 100644
 index 0000000..06ae62c
@@ -1513,11 +3218,55 @@ index 0000000..06ae62c
 +	w.handleScaleUp()
 +	require.Len(t, gate.cancelled, 1)
 +}
+diff --git a/workers/scaleset/preparation_test.go b/workers/scaleset/preparation_test.go
+new file mode 100644
+index 0000000..39316f3
+--- /dev/null
++++ b/workers/scaleset/preparation_test.go
+@@ -0,0 +1,26 @@
++package scaleset
++
++import (
++	"context"
++	"github.com/cloudbase/garm/params"
++	"github.com/cloudbase/garm/runner/common"
++	"testing"
++)
++
++type preparationUnsupportedProvider struct{ *admissionTestProvider }
++
++func (*preparationUnsupportedProvider) PreparationEnabled() bool { return true }
++func (*preparationUnsupportedProvider) RecordPreparation(context.Context, common.PreparationRequest) error {
++	panic("unqualified scaleset receipt")
++}
++func (*preparationUnsupportedProvider) ValidatePreparation(context.Context, common.PreparationRequest) error {
++	panic("unqualified scaleset validation")
++}
++func TestPreparationEnabledScaleSetCannotReachJITOrDatabase(t *testing.T) {
++	gate := &preparationUnsupportedProvider{admissionTestProvider: &admissionTestProvider{}}
++	worker := &Worker{ctx: context.Background(), provider: gate, scaleSet: params.ScaleSet{Enabled: true, MinIdleRunners: 1, MaxRunners: 1}}
++	worker.handleScaleUp()
++	if len(gate.requests) != 0 {
++		t.Fatal("unqualified scaleset reached admission")
++	}
++}
 diff --git a/workers/scaleset/scaleset.go b/workers/scaleset/scaleset.go
-index abc2426..8c2bafc 100644
+index abc2426..2c5ad38 100644
 --- a/workers/scaleset/scaleset.go
 +++ b/workers/scaleset/scaleset.go
-@@ -806,28 +806,58 @@ func (w *Worker) handleScaleUp() {
+@@ -796,6 +796,11 @@ Loop:
+ }
+ 
+ func (w *Worker) handleScaleUp() {
++	if common.PreparationEnabled(w.provider) {
++		slog.ErrorContext(w.ctx, "scale-set original preparation receipts are not qualified; refusing scale-up")
++		return
++	}
++
+ 	if !w.scaleSet.Enabled {
+ 		slog.DebugContext(w.ctx, "scale set is disabled; not scaling up")
+ 		return
+@@ -806,28 +811,58 @@ func (w *Worker) handleScaleUp() {
  		return
  	}
  
@@ -1587,7 +3336,7 @@ index abc2426..8c2bafc 100644
  			continue
  		}
  		runnerParams := params.CreateInstanceParams{
-@@ -847,6 +877,7 @@ func (w *Worker) handleScaleUp() {
+@@ -847,6 +882,7 @@ func (w *Worker) handleScaleUp() {
  		dbInstance, err := w.store.CreateScaleSetInstance(w.ctx, w.scaleSet.ID, runnerParams)
  		if err != nil {
  			slog.ErrorContext(w.ctx, "error creating instance", "error", err)

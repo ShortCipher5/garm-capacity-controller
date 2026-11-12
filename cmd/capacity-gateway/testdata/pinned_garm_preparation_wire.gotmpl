@@ -1,0 +1,178 @@
+//go:build capacity_wire_qualification
+
+package controllers
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cloudbase/garm/config"
+	"github.com/cloudbase/garm/database"
+	"github.com/cloudbase/garm/database/watcher"
+	garmTesting "github.com/cloudbase/garm/internal/testing"
+	"github.com/cloudbase/garm/params"
+	"github.com/cloudbase/garm/runner"
+	"github.com/cloudbase/garm/runner/common"
+	"github.com/cloudbase/garm/runner/pool"
+	v011 "github.com/cloudbase/garm/runner/providers/v0.1.1"
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/require"
+)
+
+func sourceWireWait(t *testing.T, path string) {
+	t.Helper()
+	until := time.Now().Add(40 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(until) {
+			t.Fatal("fixture coordination timed out")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+func sourceWireWrite(t *testing.T, path string, data any) {
+	t.Helper()
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path+".new", raw, 0600))
+	require.NoError(t, os.Rename(path+".new", path))
+}
+func TestCapacityActualSourcePreparationWire(t *testing.T) {
+	directory := os.Getenv("GCC_SOURCE_WIRE_DIRECTORY")
+	require.True(t, filepath.IsAbs(directory))
+	mode := os.Getenv("GCC_SOURCE_WIRE_MODE")
+	watcher.SetWatcher(&garmTesting.MockWatcher{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	store, err := database.NewDatabase(ctx, garmTesting.GetTestSqliteDBConfig(t))
+	require.NoError(t, err)
+	admin := garmTesting.ImpersonateAdminContext(ctx, store, t)
+	info, err := store.InitController()
+	require.NoError(t, err)
+	cfg := config.Provider{Name: "capacity", ProviderType: params.ExternalProvider, External: config.External{InterfaceVersion: "v0.1.1", AdmissionEnabled: true, CapacityBootstrapMode: common.CapacityBootstrapMode, ProviderExecutable: os.Getenv("GCC_SOURCE_WIRE_BINARY"), ConfigFile: filepath.Join(directory, "provider.json")}}
+	// No entities exist yet, so NewRunner starts no managers or API traffic.
+	actual, err := runner.NewRunner(ctx, config.Config{Providers: []config.Provider{cfg}}, store, nil)
+	require.NoError(t, err)
+	endpoint := garmTesting.CreateDefaultGithubEndpoint(admin, store, t)
+	creds := garmTesting.CreateTestGithubCredentials(admin, "source-wire-creds", store, t, endpoint)
+	repo, err := store.CreateRepository(admin, "source-owner", "source-repo", creds, "source-webhook", params.PoolBalancerTypeRoundRobin, false)
+	require.NoError(t, err)
+	entity, err := repo.GetEntity()
+	require.NoError(t, err)
+	api, err := NewAPIController(actual, nil, nil, nil, nil, config.APIServer{})
+	require.NoError(t, err)
+	body := `{"provider_name":"capacity","enabled":true,"template_id":0,"max_runners":2,"min_idle_runners":0,"image":"linux","flavor":"small","os_type":"linux","os_arch":"amd64","tags":["linux"],"extra_specs":{}}`
+	request := httptest.NewRequest(http.MethodPost, "https://example.invalid/repositories/fixture/pools", strings.NewReader(body)).WithContext(admin)
+	request = mux.SetURLVars(request, map[string]string{"repoID": repo.ID})
+	response := httptest.NewRecorder()
+	api.CreateRepoPoolHandler(response, request)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var enrolled params.Pool
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &enrolled))
+	require.Zero(t, enrolled.TemplateID)
+	cert, err := tls.LoadX509KeyPair(os.Getenv("GCC_SOURCE_WIRE_CERT"), os.Getenv("GCC_SOURCE_WIRE_KEY"))
+	require.NoError(t, err)
+	ca, err := os.ReadFile(os.Getenv("GCC_SOURCE_WIRE_CA"))
+	require.NoError(t, err)
+	roots := x509.NewCertPool()
+	require.True(t, roots.AppendCertsFromPEM(ca))
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer disposable-source-inventory" {
+			w.WriteHeader(401)
+			return
+		}
+		r = r.WithContext(admin)
+		switch {
+		case r.URL.Path == "/api/v1/instances":
+			api.ListAllInstancesHandler(w, r)
+		case r.URL.Path == "/api/v1/pools/"+enrolled.ID:
+			r = mux.SetURLVars(r, map[string]string{"poolID": enrolled.ID})
+			api.GetPoolByIDHandler(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert, MinVersion: tls.VersionTLS13}
+	server.StartTLS()
+	defer server.Close()
+	sourceWireWrite(t, filepath.Join(directory, "manifest.json"), map[string]any{"endpoint": server.URL, "controller": info.ControllerID.String(), "pool": enrolled.ID, "entity": entity.ID, "forge": entity.Credentials.Endpoint.Name, "generation": enrolled.Generation})
+	sourceWireWait(t, filepath.Join(directory, "gateway-ready"))
+	provider, err := v011.NewProvider(ctx, &cfg, info.ControllerID.String())
+	require.NoError(t, err)
+	published := make(chan params.Instance, 1)
+	release := make(chan struct{})
+	manager := pool.NewCapacityWireManager(t, admin, store, entity, provider, info, func(row params.Instance) error {
+		published <- row
+		<-release
+		if mode == "lost-sql-ack" {
+			return errors.New("disposable-lost-sql-ack")
+		}
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- manager.Add(enrolled.ID) }()
+	if mode == "wrong-source-role" || mode == "known-generation-drift" || mode == "lost-record-ack" {
+		failed := <-done
+		require.Error(t, failed)
+		if mode == "known-generation-drift" {
+			require.True(t, common.IsAdmissionDeferred(failed))
+		} else {
+			require.ErrorIs(t, failed, common.ErrPreparationHold)
+		}
+		rows, err := store.ListPoolInstances(admin, enrolled.ID, false)
+		require.NoError(t, err)
+		require.Empty(t, rows)
+		manager.AssertNoRegistrationCleanup(t)
+		sourceWireWrite(t, filepath.Join(directory, "result.json"), map[string]any{"rejected": true, "deferred": common.IsAdmissionDeferred(failed), "jit_calls": manager.JITCalls()})
+		return
+	}
+	var row params.Instance
+	select {
+	case row = <-published:
+	case err := <-done:
+		t.Fatalf("source failed before actual SQL publication: %v", err)
+	case <-ctx.Done():
+		t.Fatal("source publication timed out")
+	}
+	sourceWireWrite(t, filepath.Join(directory, "published.json"), map[string]any{"id": row.ID, "name": row.Name, "agent": row.AgentID, "generation": row.Generation})
+	sourceWireWait(t, filepath.Join(directory, "allow-poll"))
+	require.NoError(t, manager.Poll())
+	until := time.Now().Add(30 * time.Second)
+	for {
+		fresh, err := store.GetInstance(admin, row.Name)
+		require.NoError(t, err)
+		if fresh.Status == "running" {
+			break
+		}
+		if fresh.Status == "error" {
+			t.Fatal("source native create failed after valid receipt")
+		}
+		if time.Now().After(until) {
+			t.Fatal("source poll did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	err = <-done
+	if mode == "lost-sql-ack" {
+		require.Error(t, err)
+	} else {
+		require.NoError(t, err)
+	}
+	manager.AssertNoRegistrationCleanup(t)
+	require.NoError(t, manager.Poll())
+	require.Equal(t, int32(1), manager.JITCalls())
+	sourceWireWrite(t, filepath.Join(directory, "result.json"), map[string]any{"id": row.ID, "name": row.Name, "jit_calls": manager.JITCalls(), "lost_sql_ack": mode == "lost-sql-ack"})
+}

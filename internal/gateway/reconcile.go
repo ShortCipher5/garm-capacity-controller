@@ -12,12 +12,25 @@ import (
 // creating, error, unknown and deleted-but-not-yet-retired rows. A partial API
 // response or authorization failure must be an error, never an empty success.
 type GarmInstance struct {
-	Name       string
-	ProviderID string
-	PoolID     string
-	State      string
-	Busy       bool
-	Idle       bool
+	RowID               string
+	ProviderName        string
+	AgentID             int64
+	Generation          uint64
+	IdentityFieldsKnown bool
+	ScaleSetID          uint64
+	// PreparationPending is set only by the pinned API parser for the exact
+	// pending_create/pending/zero-agent/no-provider/no-job shape. It alone grants
+	// nothing: immutable plan, no dispatch and complete physical proof are required.
+	PreparationPending bool
+	// SourcePreparationPending is only a canonical row-shape candidate; a durable
+	// original source receipt and full physical reconciliation remain mandatory.
+	SourcePreparationPending bool
+	Name                     string
+	ProviderID               string
+	PoolID                   string
+	State                    string
+	Busy                     bool
+	Idle                     bool
 }
 type GarmSource interface {
 	Instances(context.Context) ([]GarmInstance, error)
@@ -50,9 +63,10 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 		return ErrUnavailable
 	}
 	inventory := map[[2]string]admission.InventoryResource{}
+	preparations := map[[2]string]admission.GarmPreparation{}
 	seen := map[string]bool{}
 	for _, row := range rows {
-		req, _, err := f.request(row.Name, row.PoolID)
+		req, err := f.accountingRequest(state, row.Name, row.PoolID, "")
 		if err != nil || seen[row.Name] || (row.ProviderID != "" && row.ProviderID != row.Name) {
 			return ErrUnavailable
 		}
@@ -81,8 +95,17 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			}
 		}
 		inventory[[2]string{req.Host, row.Name}] = resource
+
+		preparation, eligible, err := f.garmPreparation(ctx, fence, state, row, req, observedAt)
+		if err != nil {
+			return ErrUnavailable
+		}
+		if eligible {
+			preparations[[2]string{req.Host, row.Name}] = preparation
+		}
 	}
 	snapshot := admission.InventorySnapshot{}
+	physicalNames := map[string]bool{}
 	for host, backend := range f.hosts {
 		instances, err := backend.Instances(ctx)
 		if err != nil {
@@ -90,15 +113,17 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 		}
 		hostNames := map[string]bool{}
 		for _, instance := range instances {
-			policy, known := f.pools[instance.PoolID]
-			if !known || policy.Host != host || instance.ControllerID != f.controller || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || hostNames[instance.Name] {
+			_, known := f.pools[instance.PoolID]
+			if !known || physicalNames[instance.Name] || instance.ControllerID != f.controller || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || hostNames[instance.Name] {
 				return ErrUnavailable
 			}
-			req, _, err := f.request(instance.Name, instance.PoolID)
+			req, err := f.accountingRequest(state, instance.Name, instance.PoolID, host)
 			if err != nil {
 				return ErrUnavailable
 			}
 			hostNames[instance.Name] = true
+			physicalNames[instance.Name] = true
+			delete(preparations, [2]string{host, instance.Name})
 			identity := [2]string{host, instance.Name}
 			resource, exists := inventory[identity]
 			if exists && resource.Pool != instance.PoolID {
@@ -151,6 +176,14 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			}
 		}
 		snapshot.Hosts = append(snapshot.Hosts, admission.HostObservation{Host: host, ObservedAt: observedAt, Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true})
+	}
+
+	for identity, preparation := range preparations {
+		// Only after ALL physical/operation collections succeeded may this exact
+		// nonphysical row be omitted. The reservation remains fully charged and the
+		// commit transaction rechecks every plan/binding/no-dispatch/history guard.
+		delete(inventory, identity)
+		snapshot.Preparations = append(snapshot.Preparations, preparation)
 	}
 	for _, resource := range inventory {
 		snapshot.Resources = append(snapshot.Resources, resource)
