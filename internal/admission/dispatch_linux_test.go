@@ -271,7 +271,7 @@ func TestDispatchMigrationPreservesOwnedVersionOneLedger(t *testing.T) {
 		t.Fatal("migration reset existing allocation")
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("migration version: %d %v", version, err)
 	}
 	if _, _, err := s.lookupDispatchForTest("existing"); !errors.Is(err, sql.ErrNoRows) {

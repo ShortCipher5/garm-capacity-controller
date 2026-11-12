@@ -27,7 +27,7 @@ The adapter must be an unavoidable synchronous boundary for every relevant provi
 
 A production SQLite transaction should reserve global/host/pool capacity and append an audit event together. Bind reservations to a stable provider request, target host, pool and resource profile. Use a unique request key and fencing/lease generation for provider operations, not a TTL that frees capacity. Reconcile reserved-but-not-issued, creating, idle, busy, deleting, failed and unknown states against both Garm and Incus. Resolve identity before merging, so a reservation and its instance are not counted twice. Pre-existing or orphaned instances consume capacity too; unbounded unknowns block new work.
 
-The current ledger is a conservative, monotonic allocation model: reservations can change state but cannot be released. It cannot establish a complete live inventory, and demo health is not measured host health. Retention and accounting release require separate designs.
+The original model is monotonic. The SQLite core also supports narrowly proven [never-dispatched cancellation](undispatched-cancellation.md), atomically removing only an exact still-creating reservation with a permanent tombstone. Dispatched or observed allocations cannot be released. It cannot establish a complete live inventory, and demo health is not measured host health. Retention and accounting release require separate designs.
 
 ## Storage limits
 

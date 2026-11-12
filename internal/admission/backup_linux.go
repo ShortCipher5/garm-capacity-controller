@@ -57,7 +57,7 @@ func RestoreSQLite(ctx context.Context, backup, destination string) error {
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 1 && version != 2 {
+	if version != 1 && version != 2 && version != 3 {
 		return errors.New("restore requires an owned versioned ledger")
 	}
 	return sqliteExport(ctx, db, destination, "backup_restored", func() error { return nil })
