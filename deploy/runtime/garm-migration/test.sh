@@ -63,6 +63,7 @@ python3 deploy/runtime/garm-migration/state.py prepare "$legacy"
 sudo chown -R 0:0 "$legacy/private" "$legacy/state"
 sudo chown -R 65532:65532 "$legacy/roles/gateway-private"
 base=(--network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 1 --memory 512m)
+launcher="umask 077; if /usr/local/bin/garm-migration-lab guard $root; then exec /usr/local/bin/garm -config $root/private/config.toml; else exit 42; fi"
 mounts() { private_source="$1/private"; state_source="$1/state"; }
 helper() {
   local source=$1 uid=$2 action=$3
@@ -79,7 +80,7 @@ start() {
   docker run -d --name "$name" "${base[@]}" --user "$uid:$uid" \
     --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=$uid,gid=$uid,mode=0700" \
     --mount "type=bind,src=$private_source,dst=$root/private,readonly" --mount "type=bind,src=$state_source,dst=$root/state" \
-    --entrypoint /bin/sh "$image" -ec "umask 077; /usr/local/bin/garm-migration-lab guard $root; exec /usr/local/bin/garm -config $root/private/config.toml" >/dev/null
+    --entrypoint /bin/sh "$image" -ec "$launcher" >/dev/null
 }
 probe() {
   local source=$1 uid=$2
@@ -144,17 +145,18 @@ boundary 65531
 stop
 helper "$target" 65531 guard
 # Guard negatives run the same guard+exec launcher. A false guard PASS launches
-# Garm, and the non-exited container is a failure, never timeout-based success.
+# Garm: a non-exited container OR Garm startup exit1 is a failure. Only the
+# guard-specific exit42 passes; timeout/daemon failure never masquerades as guard rejection.
 for kind in missing-main missing-blob mode owner symlink hardlink wrong-controller changed-config interrupted-copy wrong-passphrase wrong-jwt wrong-ca wrong-tls-key; do
   bad="$work/garm-synthetic-storage-negative-$kind"
   sudo python3 deploy/runtime/garm-migration/state.py negative "$target" "$bad" "$kind"
   docker run -d --name "$name-negative" "${base[@]}" --user 65531:65531 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65531,gid=65531,mode=0700 \
     --mount "type=bind,src=$bad/private,dst=$root/private,readonly" --mount "type=bind,src=$bad/state,dst=$root/state" \
-    --entrypoint /bin/sh "$image" -ec "umask 077; /usr/local/bin/garm-migration-lab guard $root; exec /usr/local/bin/garm -config $root/private/config.toml" >/dev/null
+    --entrypoint /bin/sh "$image" -ec "$launcher" >/dev/null
   for _ in {1..40}; do [[ $(docker inspect --format '{{.State.Running}}' "$name-negative") = false ]] && break; sleep .25; done
   [[ $(docker inspect --format '{{.State.Running}}' "$name-negative") = false ]]
-  [[ $(docker inspect --format '{{.State.ExitCode}}' "$name-negative") = 1 ]]
+  [[ $(docker inspect --format '{{.State.ExitCode}}' "$name-negative") = 42 ]]
   docker rm "$name-negative" >/dev/null
   if [[ $kind = missing-main ]]; then sudo test ! -e "$bad/state/controller.db"; fi
   if [[ $kind = missing-blob ]]; then sudo test ! -e "$bad/state/blob-controller.db"; fi

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import secrets
 import tomllib
 import sqlite3
@@ -185,6 +186,8 @@ def main():
                 elif kind in ('wrong-passphrase', 'wrong-jwt', 'wrong-ca', 'wrong-tls-key'): private_mismatch(target, kind)
                 result = subprocess.run([binary, 'guard', str(target)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 assert result.returncode == 1
+                launcher = f"if {shlex.quote(binary)} guard {shlex.quote(str(target))}; then exit 91; else exit 42; fi"
+                assert subprocess.run(['/bin/sh', '-ec', launcher], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 42
                 if kind == 'missing-main': assert not db.exists()
                 if kind == 'missing-blob': assert not (target / 'state' / 'blob-controller.db').exists()
             print('PASS thirteen native guard negatives with positive controls; missing databases stay absent')

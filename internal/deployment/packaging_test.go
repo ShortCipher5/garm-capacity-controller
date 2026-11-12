@@ -208,7 +208,7 @@ func TestUpstreamGarmLeastPrivilegeLabCannotImplyInstalledQualification(t *testi
 
 func TestPatchedGarmTransferIsGeneratedStoppedStateOnly(t *testing.T) {
 	script := repositoryFile(t, "deploy/runtime/garm-migration/test.sh")
-	for _, required := range []string{"RUNNER_ENVIRONMENT:-} = github-hosted", "87e0d61751d4b9ffa15322cff09557f0a1094fdd68464fe840a12ffe01bb0660", "--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", "--user 65531:65531", "helper \"$legacy\" 0 seed", "state.py transfer", "missing-main missing-blob mode owner symlink hardlink wrong-controller changed-config interrupted-copy wrong-passphrase wrong-jwt wrong-ca wrong-tls-key", "'installed_stack_qualified':False", "'provider_integration_qualified':False", "'availability_qualified':False"} {
+	for _, required := range []string{"RUNNER_ENVIRONMENT:-} = github-hosted", "87e0d61751d4b9ffa15322cff09557f0a1094fdd68464fe840a12ffe01bb0660", "--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", "--user 65531:65531", "helper \"$legacy\" 0 seed", "state.py transfer", "else exit 42; fi", "\"$name-negative\") = 42", "missing-main missing-blob mode owner symlink hardlink wrong-controller changed-config interrupted-copy wrong-passphrase wrong-jwt wrong-ca wrong-tls-key", "'installed_stack_qualified':False", "'provider_integration_qualified':False", "'availability_qualified':False"} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("missing synthetic migration contract: %s", required)
 		}

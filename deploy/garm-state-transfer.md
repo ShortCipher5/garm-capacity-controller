@@ -94,7 +94,9 @@ accepts no configuration, state, source, image or endpoint override. It performs
    key and truncated/interrupted copy. Private-material negatives retain the
    original expected manifest: they prove guard/validation rejection before daemon
    exec, not remote credential revocation, TLS protocol refusal or an issuer check.
-   A still-running negative container is failure, never timeout-based success.
+   The identical positive/negative launcher maps guard failure to distinct
+   exit42, while pinned Garm startup errors exit1. A still-running container or
+   later daemon failure is failure, never a guard-rejection or timeout success.
    Missing DBs must stay absent. No retry as root, mode widening or empty fallback.
 9. Stop new writer and verify original source bytes untouched before a LAB-only
    restart of that original. No external work occurred, so this is not proof of
