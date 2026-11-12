@@ -19,7 +19,7 @@ func main() {
 	flag.Parse()
 	budget := admission.Resources{CPU: 6000, RAM: 12288, Runners: 6}
 	config := admission.Config{
-		Global: budget,
+		Global:            budget,
 		MaxObservationAge: 5 * time.Minute,
 		Hosts: map[string]admission.Host{
 			"host-a": {Budget: admission.Resources{CPU: 4000, RAM: 8192, Runners: 4}, Mode: "enabled", Healthy: true, ObservedAt: time.Now()},

@@ -15,7 +15,7 @@ import (
 func fixture(now time.Time) Config {
 	budget := Resources{CPU: 4000, RAM: 8192, Runners: 4}
 	return Config{
-		Global: budget,
+		Global:            budget,
 		MaxObservationAge: time.Minute,
 		Hosts: map[string]Host{
 			"a": {Budget: budget, Mode: "enabled", Healthy: true, ObservedAt: now},
@@ -117,16 +117,16 @@ func TestStatesNeverReleaseCapacity(t *testing.T) {
 func TestFailClosedHostAndPolicy(t *testing.T) {
 	now := time.Now()
 	cases := map[string]func(*Config){
-		"draining": func(c *Config) { h := c.Hosts["a"]; h.Mode = "draining"; c.Hosts["a"] = h },
-		"disabled": func(c *Config) { h := c.Hosts["a"]; h.Mode = "disabled"; c.Hosts["a"] = h },
-		"unhealthy": func(c *Config) { h := c.Hosts["a"]; h.Healthy = false; c.Hosts["a"] = h },
-		"stale": func(c *Config) { h := c.Hosts["a"]; h.ObservedAt = now.Add(-2 * time.Minute); c.Hosts["a"] = h },
-		"future": func(c *Config) { h := c.Hosts["a"]; h.ObservedAt = now.Add(time.Minute); c.Hosts["a"] = h },
+		"draining":    func(c *Config) { h := c.Hosts["a"]; h.Mode = "draining"; c.Hosts["a"] = h },
+		"disabled":    func(c *Config) { h := c.Hosts["a"]; h.Mode = "disabled"; c.Hosts["a"] = h },
+		"unhealthy":   func(c *Config) { h := c.Hosts["a"]; h.Healthy = false; c.Hosts["a"] = h },
+		"stale":       func(c *Config) { h := c.Hosts["a"]; h.ObservedAt = now.Add(-2 * time.Minute); c.Hosts["a"] = h },
+		"future":      func(c *Config) { h := c.Hosts["a"]; h.ObservedAt = now.Add(time.Minute); c.Hosts["a"] = h },
 		"zero budget": func(c *Config) { c.Global.CPU = 0 },
-		"host cpu": func(c *Config) { h := c.Hosts["a"]; h.Budget.CPU = 999; c.Hosts["a"] = h },
-		"host ram": func(c *Config) { h := c.Hosts["a"]; h.Budget.RAM = 2047; c.Hosts["a"] = h },
-		"pool cap": func(c *Config) { p := c.Pools["app"]; p.Budget.Runners = 0; c.Pools["app"] = p },
-		"mapping": func(c *Config) { p := c.Pools["app"]; p.Hosts = []string{"b"}; c.Pools["app"] = p },
+		"host cpu":    func(c *Config) { h := c.Hosts["a"]; h.Budget.CPU = 999; c.Hosts["a"] = h },
+		"host ram":    func(c *Config) { h := c.Hosts["a"]; h.Budget.RAM = 2047; c.Hosts["a"] = h },
+		"pool cap":    func(c *Config) { p := c.Pools["app"]; p.Budget.Runners = 0; c.Pools["app"] = p },
+		"mapping":     func(c *Config) { p := c.Pools["app"]; p.Hosts = []string{"b"}; c.Pools["app"] = p },
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {

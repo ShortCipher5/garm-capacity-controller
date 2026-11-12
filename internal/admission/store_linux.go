@@ -15,69 +15,69 @@ import (
 )
 
 var (
-	ErrDenied = errors.New("admission denied")
-	ErrConflict = errors.New("request identity conflict")
+	ErrDenied    = errors.New("admission denied")
+	ErrConflict  = errors.New("request identity conflict")
 	ErrUncertain = errors.New("store unavailable after uncertain persistence")
 )
 
 // Resources uses integer millicores, MiB and runner counts. Budgets are finite.
 type Resources struct {
-	CPU int64 `json:"cpu_millis"`
-	RAM int64 `json:"ram_mib"`
+	CPU     int64 `json:"cpu_millis"`
+	RAM     int64 `json:"ram_mib"`
 	Runners int64 `json:"runners"`
 }
 
 type Host struct {
-	Budget Resources `json:"budget"`
-	Mode string `json:"mode"`
-	Healthy bool `json:"healthy"`
+	Budget     Resources `json:"budget"`
+	Mode       string    `json:"mode"`
+	Healthy    bool      `json:"healthy"`
 	ObservedAt time.Time `json:"observed_at"`
 }
 
 type Pool struct {
 	Budget Resources `json:"budget"`
-	Hosts []string `json:"hosts"`
+	Hosts  []string  `json:"hosts"`
 }
 
 type Config struct {
-	Global Resources `json:"global"`
-	Hosts map[string]Host `json:"hosts"`
-	Pools map[string]Pool `json:"pools"`
-	MaxObservationAge time.Duration `json:"max_observation_age_ns"`
+	Global            Resources       `json:"global"`
+	Hosts             map[string]Host `json:"hosts"`
+	Pools             map[string]Pool `json:"pools"`
+	MaxObservationAge time.Duration   `json:"max_observation_age_ns"`
 }
 
 type Request struct {
-	Key string `json:"key"`
-	Pool string `json:"pool"`
-	Host string `json:"host"`
+	Key       string    `json:"key"`
+	Pool      string    `json:"pool"`
+	Host      string    `json:"host"`
 	Resources Resources `json:"resources"`
 }
 
 type Reservation struct {
-	Request Request `json:"request"`
-	State string `json:"state"`
+	Request   Request   `json:"request"`
+	State     string    `json:"state"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
 type Decision struct {
-	Simulation bool `json:"simulation"`
-	Replay bool `json:"replay"`
+	Simulation  bool        `json:"simulation"`
+	Replay      bool        `json:"replay"`
 	Reservation Reservation `json:"reservation"`
 }
 
 type Ledger struct {
-	Version int `json:"version"`
-	Config Config `json:"config"`
+	Version      int                    `json:"version"`
+	Config       Config                 `json:"config"`
 	Reservations map[string]Reservation `json:"reservations"`
 }
 
 // Store uses a private local directory and a stable sibling flock file.
 // Never remove or replace the lock file while any caller might be using it.
 type Store struct {
-	mu sync.Mutex
-	path string
+	mu       sync.Mutex
+	path     string
 	poisoned bool
-	now func() time.Time
+	now      func() time.Time
 }
 
 // Open initializes an empty ledger only when it does not already exist.
