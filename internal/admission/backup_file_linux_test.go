@@ -93,7 +93,7 @@ func TestSQLiteBackupFilePreservesHistoricalSourceAndClearsFence(t *testing.T) {
 						if err := copy.db.QueryRow("SELECT count(*) FROM cancellation_history_exclusions WHERE request_key='legacy-creating'").Scan(&excluded); err != nil || excluded != 1 {
 							t.Fatalf("legacy provenance exclusion lost: %d %v", excluded, err)
 						}
-						if err := copy.db.QueryRow("PRAGMA user_version").Scan(&schema); err != nil || schema != 4 {
+						if err := copy.db.QueryRow("PRAGMA user_version").Scan(&schema); err != nil || schema != sqliteCurrentVersion {
 							t.Fatalf("artifact not current: %d %v", schema, err)
 						}
 						copiedState := sqliteSnapshot(t, copy)

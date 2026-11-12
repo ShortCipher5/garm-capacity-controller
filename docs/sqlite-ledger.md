@@ -8,7 +8,7 @@ This slice implements an **offline accounting core**, not live Garm/Incus enforc
 
 SQLite uses WAL, FULL synchronous durability, foreign keys, STRICT tables and a bounded busy timeout. Every operation runs in a `BEGIN IMMEDIATE` transaction: all global/host/pool budget reads, reservation writes and the corresponding audit event commit together. Cooperating handles and processes sharing the same local database serialize before reading capacity, so independent repository pools cannot write-skew the model's global budget. A busy, canceled, corrupt or unavailable database returns no new admission. An ambiguous commit outcome blocks the affected Store handle rather than retrying an external action.
 
-Only initial database creation accepts initial policy. Reopening does not reset budgets, readiness, reservations or observation age. A different initial config cannot silently replace existing policy. An application ID identifies owned databases. Schema version 2 adds the one-shot dispatch journal; current version 3 adds immutable never-dispatched cancellation tombstones and conservatively excludes all preexisting v1/v2 keys from cancellation; unknown versions and unrelated nonempty databases are rejected. Ownership is inspected read-only before enabling WAL, so refusing a foreign database does not first change its journal mode. There is no JSON migration, policy editor, retention job or physical-retirement API. A narrow trusted-library [never-dispatched cancellation](undispatched-cancellation.md) is available. See [the dispatch boundary](gateway-dispatch.md) for its precise at-most-once and recovery limits.
+Only initial database creation accepts initial policy. Reopening does not reset budgets, readiness, reservations or observation age. A different initial config cannot silently replace existing policy. An application ID identifies owned databases. Schema version 2 adds the one-shot dispatch journal; version 3 adds immutable never-dispatched cancellation tombstones and conservatively excludes all preexisting v1/v2 keys from cancellation. Version 4 adds immutable daemon bindings, per-dispatch binding provenance and charged-host legacy exclusions. Current version 5 adds immutable original-CREATE observation history without changing charges or dispatch outcomes. Unknown versions and unrelated nonempty databases are rejected. Ownership is inspected read-only before enabling WAL, so refusing a foreign database does not first change its journal mode. There is no JSON migration, policy editor, retention job or physical-retirement API. A narrow trusted-library [never-dispatched cancellation](undispatched-cancellation.md) is available. See [the dispatch boundary](gateway-dispatch.md) for its precise at-most-once and recovery limits.
 
 ## Reconciliation barrier
 
@@ -59,3 +59,8 @@ Schema four adds [immutable daemon bindings](durable-host-bindings.md), complete
 alias-set uniqueness under a reconciliation fence, explicit legacy charged-host
 exclusions and binding-audit provenance on physical dispatches. This narrows alias
 and remapping mistakes; it is not whole-host/external-writer or hardware proof.
+
+Schema five adds an immutable [original CREATE observation journal](create-observation-journal.md).
+It accepts only authenticated typed observations matching original dispatch and
+binding provenance, never releases allocation or promotes an unknown outcome.
+Owned older schemas migrate conservatively; unknown future versions are refused.
