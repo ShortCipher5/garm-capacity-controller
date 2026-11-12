@@ -69,7 +69,7 @@ func sqliteExportFile(ctx context.Context, input, destination, auditKind string)
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != 1 && version != 2 {
+	if version != 1 && version != 2 && version != 3 {
 		return errors.New("export requires an owned versioned ledger")
 	}
 	return sqliteExport(ctx, db, destination, auditKind, func() error { return nil })

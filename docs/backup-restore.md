@@ -89,10 +89,10 @@ fences, reservations, and audit history are not changed by taking a backup.
 Export uses a private temporary file in the destination directory. Before
 publication it checks application/schema ownership, SQLite integrity, foreign
 keys, stored policy, and allocation accounting. It preserves reservations,
-inventory, dispatch intents/outcomes, and prior audit history, then durably sets
+inventory, dispatch intents/outcomes, included cancellation tombstones, and prior audit history, then durably sets
 `ready=0` and clears the reconciliation nonce and barrier timestamp. An audit
 entry records `backup_created` or `backup_restored` on the copy. Owned version-one
-inputs receive the existing version-two dispatch migration on the copy only.
+and version-two inputs receive dispatch/cancellation migrations through current version three on the copy only. Included tombstones are preserved; later history absent from an older backup must be recovered or old identities quarantined before replay. See [cancellation history limits](undispatched-cancellation.md).
 
 The finished artifact is closed in DELETE journal mode with all committed data
 in its single private database file. File sync, an atomic same-filesystem
@@ -149,7 +149,7 @@ Before using a restored path:
    pre-barrier views leave the barrier closed. Previously charged resources
    missing from the new view become unknown and remain charged. Observed orphans
    are charged; absence from a historical backup or a single list is not release
-   evidence. There is still no allocation-release API.
+   evidence. There is still no physical-retirement release API. Narrow never-dispatched cancellation requires fresh ready baseline and authoritative history; a restored blocked snapshot alone cannot authorize it.
 7. Resume scheduling only after the complete new reconciliation succeeds and
    external credential isolation, bypass resistance, and host-budget boundaries
    have been independently established and qualified. This repository does not
@@ -184,6 +184,15 @@ acknowledgement, argument validation before database access, missing-source
 refusal, redacted errors and uncertainty handling, private standalone output,
 destination sidecar preservation, committed WAL contents, historical source
 preservation, and restored dispatch refusal until new complete reconciliation.
+Schema-three binary tests preserve unknown dispatch operation/resource correlation,
+105 permanent cancellation tombstones (including keys outside the 100-entry read
+view), migration exclusions, and exact idempotent cancellation replay while blocked.
+Both historical v1 and v2 ledgers are exported/restored through the compiled CLI;
+the source bytes stay unchanged, only the copy migrates, and legacy exclusions
+still prevent cancellation after a new complete baseline. A source collector fence
+survives backup but is rejected by both artifacts; incomplete and pre-barrier
+inventories cannot reopen either artifact. These tests do not simulate or prove
+external fencing, missing post-backup history recovery, or real host completeness.
 
 Not qualified: real Garm/Incus recovery, old-writer fencing, adapter inventory
 completeness, hard power-loss/process-kill fault injection, hardware durability,
