@@ -39,6 +39,9 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 	if err != nil {
 		return ErrUnavailable
 	}
+	// Freshness is measured from collection start, not the end of a slow last
+	// request. Earlier source views must not be relabelled freshly observed.
+	observedAt := time.Now()
 	rows, err := garm.Instances(ctx)
 	if err != nil {
 		return ErrUnavailable
@@ -144,7 +147,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 				}
 			}
 		}
-		snapshot.Hosts = append(snapshot.Hosts, admission.HostObservation{Host: host, ObservedAt: time.Now(), Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true})
+		snapshot.Hosts = append(snapshot.Hosts, admission.HostObservation{Host: host, ObservedAt: observedAt, Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true})
 	}
 	for _, resource := range inventory {
 		snapshot.Resources = append(snapshot.Resources, resource)

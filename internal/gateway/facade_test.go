@@ -83,9 +83,12 @@ func (r garmRows) Instances(context.Context) ([]GarmInstance, error) {
 }
 
 func facadeFixture(t *testing.T) (*Facade, *admission.SQLiteStore, *backendFixture, string) {
+	return facadeFixtureAge(t, time.Minute)
+}
+func facadeFixtureAge(t *testing.T, age time.Duration) (*Facade, *admission.SQLiteStore, *backendFixture, string) {
 	t.Helper()
 	budget := admission.Resources{CPU: 4000, RAM: 8192, Runners: 4}
-	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"host-a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"host-a"}}, "pool-b": {Budget: budget, Hosts: []string{"host-a"}}}, MaxObservationAge: time.Minute}
+	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"host-a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"host-a"}}, "pool-b": {Budget: budget, Hosts: []string{"host-a"}}}, MaxObservationAge: age}
 	path := filepath.Join(t.TempDir(), "ledger.db")
 	store, err := admission.OpenSQLite(path, config)
 	if err != nil {
@@ -296,5 +299,28 @@ func TestNilSourceAlsoClosesReconciliationBarrier(t *testing.T) {
 	state, _ := store.Snapshot(context.Background())
 	if state.Ready {
 		t.Fatal("nil source left readiness open")
+	}
+}
+
+type slowGarmSource struct{}
+
+func (slowGarmSource) Instances(ctx context.Context) ([]GarmInstance, error) {
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return []GarmInstance{}, nil
+	}
+}
+func TestSlowCollectionCannotRenewEarlierEvidenceFreshness(t *testing.T) {
+	f, store, _, _ := facadeFixtureAge(t, 100*time.Millisecond)
+	if err := f.Reconcile(context.Background(), slowGarmSource{}); err == nil {
+		t.Fatal("slow collection relabelled stale source evidence as fresh")
+	}
+	state, _ := store.Snapshot(context.Background())
+	if state.Ready {
+		t.Fatal("stale inventory reopened readiness")
 	}
 }
