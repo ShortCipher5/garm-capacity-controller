@@ -208,7 +208,7 @@ func TestLocalCoordinatorRemainsDisposableAndCannotBeRetirementAuthority(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(script), "for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs") != 2 || !strings.Contains(string(script), "Exactly sixteen compiled lifecycle contract tests") {
+	if strings.Count(string(script), "for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs IsolationPrerequisiteContracts.cs") != 2 || !strings.Contains(string(script), "Exactly twenty compiled lifecycle contract tests") {
 		t.Fatal("new tests must be copied, unchanged, and actually execute")
 	}
 	for _, production := range []string{"../../internal/gateway", "../../internal/retirement"} {
@@ -283,5 +283,23 @@ func TestActualSupervisorSourceWhenExplicitlySupplied(t *testing.T) {
 	}
 	if err := json.Unmarshal(output, &result); err != nil || len(result.Passed) != 8 || result.RealChildren != 0 || result.RealSignals != 0 || result.Qualified || result.Authority {
 		t.Fatal("incorrect supervisor experiment result", string(output), err)
+	}
+}
+
+func TestIsolationPrerequisitesNeverLaunchOrQualifyAContainer(t *testing.T) {
+	code, err := os.ReadFile("IsolationPrerequisiteContracts.cs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(code), "[Fact]") != 4 {
+		t.Fatal("four exact prerequisite tests required")
+	}
+	for _, forbidden := range []string{"Process.Start(", "ExecuteAsync(", "DockerCreate(", "StartContainerAsync(", "CreateSessionAsync("} {
+		if strings.Contains(string(code), forbidden) {
+			t.Fatal("prerequisite fixture gained runtime action", forbidden)
+		}
+	}
+	if !strings.Contains(string(code), "finally { Environment.SetEnvironmentVariable(Constants.Hooks.ContainerHooksPath, previous); }") || !strings.Contains(string(code), "/var/run/docker.sock") {
+		t.Fatal("missing safe test cleanup/default socket counterexample")
 	}
 }
