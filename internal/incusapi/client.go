@@ -5,6 +5,7 @@ package incusapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -157,9 +158,10 @@ func field[T any](fields map[string]json.RawMessage, key string) (T, error) {
 }
 
 type envelope struct {
-	kind      string
-	operation string
-	metadata  json.RawMessage
+	serverKeyFingerprint string
+	kind                 string
+	operation            string
+	metadata             json.RawMessage
 }
 
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, input any) (envelope, error) {
@@ -225,6 +227,10 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		return envelope{}, ErrResponse
 	}
 	result := envelope{kind: kind, metadata: metadata}
+	if response.TLS != nil && len(response.TLS.VerifiedChains) > 0 && len(response.TLS.PeerCertificates) > 0 {
+		key := sha256.Sum256(response.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
+		result.serverKeyFingerprint = fmt.Sprintf("%x", key)
+	}
 	if kind == "async" {
 		result.operation, err = field[string](fields, "operation")
 		if err != nil {
@@ -239,6 +245,10 @@ func (c *Client) trusted(ctx context.Context, requireCreate bool) error {
 	if err != nil {
 		return err
 	}
+	return validateTrustedRoot(response, requireCreate)
+}
+
+func validateTrustedRoot(response envelope, requireCreate bool) error {
 	if response.kind != "sync" {
 		return ErrResponse
 	}
