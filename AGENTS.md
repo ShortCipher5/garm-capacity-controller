@@ -12,3 +12,7 @@ This is an experimental control plane above Garm, not a replacement for it.
 - Keep simulation visibly separate from production integration. No live adapter is implemented yet.
 - Run `go test -race ./...`, `go vet ./...`, and `gofmt -l .` before publishing Go changes.
 - Keep pull requests focused and draft. Do not merge or deploy without authorization.
+- SQLite tests require Linux + CGO + a C compiler. Use the pinned module and checksums; do not silently disable database tests.
+- Keep all budget reads, reservation changes and audit writes in a single BEGIN IMMEDIATE transaction.
+- Collect a new complete bounded inventory only after BeginReconciliation returns its durable barrier/fence. Never reuse a fence or pre-barrier observations.
+- SQLite WAL backups must use SQLite's consistent backup/snapshot facilities or a clean closed/checkpointed database. Never advertise copying the main .db file alone as safe.

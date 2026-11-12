@@ -15,19 +15,19 @@ The target application manages:
 - Repository-specific Garm pools, labels, priority and desired idle capacity.
 - An atomic cross-pool provisioning boundary, durable reservations and reconciliation.
 - Historical allocated capacity, observed usage, decisions and audit events.
-- An authenticated, simple React UI backed by Go. SQLite is the planned transactional store for inventory, policy and history.
+- An authenticated, simple React UI backed by Go. SQLite is the transactional-store target for inventory, policy and history; its offline core is being implemented in the separate `feat/sqlite-ledger` slice.
 
 ## First slice: offline admission simulator
 
 The implementation is under review in [draft PR #1](https://github.com/ShortCipher5/garm-capacity-controller/pull/1). Before it is merged, check out `feat/durable-admission-foundation` to run the commands below. The default branch currently holds the project documentation.
 
-The dependency-free Go foundation serializes admission across pools and processes sharing one local ledger. It reserves capacity **before** returning success, persists through restart, and charges every reservation state, including creating, idle, running, failed and unknown. It fails closed for disabled/draining/unhealthy/stale hosts, missing pools, invalid resources and exhausted budgets. Failed or unknown creates do not release capacity. No release mechanism is implemented in this slice.
+The original JSON-backed Go foundation serializes admission across pools and processes sharing one local ledger. It reserves capacity **before** returning success, persists through restart, and charges every reservation state, including creating, idle, running, failed and unknown. It fails closed for disabled/draining/unhealthy/stale hosts, missing pools, invalid resources and exhausted budgets. Failed or unknown creates do not release capacity. No release mechanism is implemented in this slice.
 
 A JSON ledger is used deliberately for this small testable slice, not as the final history database. It uses a separate advisory file lock, atomic replacement, file and directory sync. It is Linux-only, single-machine, local-filesystem storage. It is **not** distributed consensus, a multi-host database or proof of live provisioning safety. All callers must cooperate with the same lock. Uncertain persistence blocks that Store instance until it is reopened.
 
 ### Try it locally
 
-Requires the Go compiler 1.23+ on Linux. No credentials or infrastructure are needed.
+Requires the Go compiler 1.23+ on Linux. The SQLite branch also requires CGO and a C compiler for its pinned SQLite driver. No credentials or infrastructure are needed.
 
 ```sh
 go test -race ./...
@@ -46,6 +46,8 @@ A budget is a bound on declared allocations, not actual CPU utilization or memor
 A real enforcement mode requires *every* provisioning route to use this admission boundary before the provider creates an instance. Periodic observation is insufficient. Reconciliation must merge Garm runners, Incus instances, in-flight operations and reservations without gaps or double counting. A lost provider response is an unknown resource, not a free slot. Unknown inventory blocks admission until bounded accounting is established.
 
 Stopping new creates does **not** stop existing idle runners receiving jobs. Draining must account for runner deregistration / dispatch eligibility, in-flight job assignment and confirmed resource deletion. Never interrupt a running job implicitly.
+
+The `feat/sqlite-ledger` branch adds transactional SQLite admission, audit and non-releasing reconciliation barriers; see [SQLite core design](docs/sqlite-ledger.md) on that branch. It is not a live adapter or production enforcement mode.
 
 See [architecture and invariants](docs/architecture.md), [integration gates](docs/integrations.md), [security](SECURITY.md), and the [roadmap](docs/roadmap.md).
 
