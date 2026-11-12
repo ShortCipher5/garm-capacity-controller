@@ -24,19 +24,19 @@ jobs:
         go-version: ['1.26.x']
     env:
       GOMAXPROCS: '2'
-      GOFLAGS: '-p=2'
+      GOFLAGS: '-p=1'
       GOTOOLCHAIN: local
     steps:
       # Immutable reviewed owner-authored source, never a fork/PR checkout or input ref.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 424e8d59c6b6a90ed9954e4c433f2d7566ccd85e
+          ref: 92202b77cda8521cb902c5aad147f654ab64384f
           persist-credentials: false
       - name: Verify trusted source and bounded guest resources
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 424e8d59c6b6a90ed9954e4c433f2d7566ccd85e
+          test "$(git rev-parse HEAD)" = 92202b77cda8521cb902c5aad147f654ab64384f
           python3 - <<'PY'
           from pathlib import Path
           base = Path('/sys/fs/cgroup')
@@ -76,7 +76,7 @@ jobs:
         run: |
           test -z "$(gofmt -l .)"
           go vet ./...
-          go test -race -count=1 ./...
+          go test -race -p=1 -parallel=1 -count=1 ./...
       - name: Actual pinned Garm/executable qualification
         run: integration/garm-v0.2.1/test.sh "$RUNNER_TEMP/gcc-pinned-canary"
       - name: Built UI and browser qualification
