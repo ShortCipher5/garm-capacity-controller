@@ -293,3 +293,46 @@ test("disconnect during preflight cannot restore a result or write credential", 
   await page.getByRole("button", { name: "Load preflight profiles", exact: true }).click();
   await expect(page.getByLabel("Preflight management token", { exact: true })).toHaveValue("");
 });
+
+test("audit filters stay snapshot-local across clear, refresh and disconnect", async ({ page }) => {
+  let refreshed = false;
+  const events = [
+    { sequence: 1, kind: "admitted", host: "host-a", request_key: "one", at: "2026-01-01T00:00:00Z" },
+    { sequence: 2, kind: "denied", host: "host-b", request_key: "two", at: "2026-01-01T00:00:00Z" },
+    { sequence: 3, kind: "denied", host: "", request_key: "three", at: "2026-01-01T00:00:00Z" },
+  ];
+  await page.route("**/admin/api/v1/overview", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, events: refreshed ? [] : events } });
+  });
+  const requests = [];
+  page.on("request", request => requests.push(request.url()));
+  await connect(page);
+  const audit = page.locator("#events");
+  await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
+  const initial = requests.length;
+  await page.getByLabel("Event kind", { exact: true }).selectOption("denied");
+  await page.getByLabel("Event host", { exact: true }).selectOption("host-a");
+  await expect(audit).toContainText("No audit events match these filters.");
+  await expect(audit).toContainText("Showing 0 of 3 events in this snapshot");
+  await page.getByLabel("Event host", { exact: true }).selectOption("host-b");
+  await expect(audit.locator(".event .pill")).toHaveText(["#2"]);
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
+  await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toBeDisabled();
+  expect(requests.length).toBe(initial);
+  await page.getByLabel("Event host", { exact: true }).selectOption("host-b");
+  refreshed = true;
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  await expect(audit).toContainText("Showing 0 of 0 events in this snapshot");
+  await expect(audit).toContainText("No audit events recorded.");
+  await expect(page.getByLabel("Event host", { exact: true })).toHaveValue("host-b");
+  await expect(audit).toContainText("host-b (not in snapshot)");
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  refreshed = false;
+  await page.getByLabel("Admin read token").fill(token);
+  await page.getByRole("button", { name: "Connect read-only", exact: true }).click();
+  await expect(page.getByLabel("Event host", { exact: true })).toHaveValue("");
+  await expect(audit.locator(".event")).toHaveCount(3);
+});
