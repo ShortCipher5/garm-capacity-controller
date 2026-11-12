@@ -245,15 +245,15 @@ func TestSQLiteFenceOverlapConsumptionAndNonce(t *testing.T) {
 
 func TestSQLiteRejectsIncompleteOrPreBarrierSnapshots(t *testing.T) {
 	cases := map[string]func(*InventorySnapshot){
-		"missing host": func(s *InventorySnapshot) { s.Hosts = s.Hosts[:1] },
-		"duplicate host": func(s *InventorySnapshot) { s.Hosts[1] = s.Hosts[0] },
-		"garm partial": func(s *InventorySnapshot) { s.Hosts[0].GarmComplete = false },
-		"incus partial": func(s *InventorySnapshot) { s.Hosts[0].IncusComplete = false },
+		"missing host":       func(s *InventorySnapshot) { s.Hosts = s.Hosts[:1] },
+		"duplicate host":     func(s *InventorySnapshot) { s.Hosts[1] = s.Hosts[0] },
+		"garm partial":       func(s *InventorySnapshot) { s.Hosts[0].GarmComplete = false },
+		"incus partial":      func(s *InventorySnapshot) { s.Hosts[0].IncusComplete = false },
 		"operations partial": func(s *InventorySnapshot) { s.Hosts[0].OperationsComplete = false },
-		"unbounded": func(s *InventorySnapshot) { s.Hosts[0].Bounded = false },
-		"old": func(s *InventorySnapshot) { s.Hosts[0].ObservedAt = time.Now().Add(-2 * time.Minute) },
-		"future": func(s *InventorySnapshot) { s.Hosts[0].ObservedAt = time.Now().Add(time.Minute) },
-		"pre-barrier": func(s *InventorySnapshot) { s.Hosts[0].ObservedAt = time.Now().Add(-time.Second) },
+		"unbounded":          func(s *InventorySnapshot) { s.Hosts[0].Bounded = false },
+		"old":                func(s *InventorySnapshot) { s.Hosts[0].ObservedAt = time.Now().Add(-2 * time.Minute) },
+		"future":             func(s *InventorySnapshot) { s.Hosts[0].ObservedAt = time.Now().Add(time.Minute) },
+		"pre-barrier":        func(s *InventorySnapshot) { s.Hosts[0].ObservedAt = time.Now().Add(-time.Second) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -374,8 +374,12 @@ func TestSQLiteAllReservationStatesRemainCharged(t *testing.T) {
 func TestSQLiteIdentityConflictsLeaveBarrierClosed(t *testing.T) {
 	cases := map[string]func([]InventoryResource) []InventoryResource{
 		"duplicate resource": func(r []InventoryResource) []InventoryResource { return append(r, r[0]) },
-		"duplicate link": func(r []InventoryResource) []InventoryResource { duplicate := r[0]; duplicate.ID = "project/other"; return append(r, duplicate) },
-		"unlink": func(r []InventoryResource) []InventoryResource { r[0].ReservationKey = ""; return r },
+		"duplicate link": func(r []InventoryResource) []InventoryResource {
+			duplicate := r[0]
+			duplicate.ID = "project/other"
+			return append(r, duplicate)
+		},
+		"unlink":       func(r []InventoryResource) []InventoryResource { r[0].ReservationKey = ""; return r },
 		"pool changed": func(r []InventoryResource) []InventoryResource { r[0].Pool = "api"; return r },
 		"unknown link": func(r []InventoryResource) []InventoryResource { r[0].ReservationKey = "missing"; return r },
 	}

@@ -23,9 +23,9 @@ var ErrFence = errors.New("stale or inactive reconciliation fence")
 // SQLiteStore is a local, single-controller-machine allocation ledger.
 // It is an offline core, not a provider adapter or production enforcement mode.
 type SQLiteStore struct {
-	db *sql.DB
+	db       *sql.DB
 	poisoned atomic.Bool
-	now func() time.Time
+	now      func() time.Time
 }
 
 const sqliteSchema = `
@@ -274,12 +274,12 @@ func sqliteReservations(tx *sql.Tx) (map[string]Reservation, error) {
 // ID must be a stable, project-qualified identity supplied by a trusted adapter.
 // No such live adapter exists in this slice.
 type InventoryResource struct {
-	ID string `json:"id"`
-	Host string `json:"host"`
-	Pool string `json:"pool"`
-	ReservationKey string `json:"reservation_key,omitempty"`
-	Resources Resources `json:"resources"`
-	State string `json:"state"`
+	ID             string    `json:"id"`
+	Host           string    `json:"host"`
+	Pool           string    `json:"pool"`
+	ReservationKey string    `json:"reservation_key,omitempty"`
+	Resources      Resources `json:"resources"`
+	State          string    `json:"state"`
 }
 
 func sqliteInventory(tx *sql.Tx) ([]InventoryResource, error) {
@@ -303,9 +303,9 @@ func sqliteInventory(tx *sql.Tx) ([]InventoryResource, error) {
 }
 
 type Allocations struct {
-	Global Resources `json:"global"`
-	Hosts map[string]Resources `json:"hosts"`
-	Pools map[string]Resources `json:"pools"`
+	Global Resources            `json:"global"`
+	Hosts  map[string]Resources `json:"hosts"`
+	Pools  map[string]Resources `json:"pools"`
 }
 
 func sqliteAllocations(config Config, reservations map[string]Reservation, inventory []InventoryResource) (Allocations, error) {
@@ -339,8 +339,8 @@ func sqliteAllocations(config Config, reservations map[string]Reservation, inven
 			}
 			linked[resource.ReservationKey] = true
 			charge = Resources{
-				CPU: max(0, resource.Resources.CPU-r.Request.Resources.CPU),
-				RAM: max(0, resource.Resources.RAM-r.Request.Resources.RAM),
+				CPU:     max(0, resource.Resources.CPU-r.Request.Resources.CPU),
+				RAM:     max(0, resource.Resources.RAM-r.Request.Resources.RAM),
 				Runners: 0,
 			}
 		}
@@ -482,17 +482,17 @@ func (s *SQLiteStore) BeginReconciliation(ctx context.Context) (Fence, error) {
 // Completeness assertions are an adapter contract, not independently verified
 // proof. There is no live adapter or enforcement mode in this repository.
 type HostObservation struct {
-	Host string
-	ObservedAt time.Time
-	Healthy bool
-	GarmComplete bool
-	IncusComplete bool
+	Host               string
+	ObservedAt         time.Time
+	Healthy            bool
+	GarmComplete       bool
+	IncusComplete      bool
 	OperationsComplete bool
-	Bounded bool
+	Bounded            bool
 }
 
 type InventorySnapshot struct {
-	Hosts []HostObservation
+	Hosts     []HostObservation
 	Resources []InventoryResource
 }
 
@@ -595,20 +595,20 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 }
 
 type AuditEvent struct {
-	Sequence int64
-	Kind string
+	Sequence   int64
+	Kind       string
 	RequestKey string
 	RecordedAt time.Time
 }
 
 type SQLiteSnapshot struct {
-	Ready bool
-	Epoch int64
-	Config Config
+	Ready        bool
+	Epoch        int64
+	Config       Config
 	Reservations map[string]Reservation
-	Inventory []InventoryResource
-	Allocated Allocations
-	Audit []AuditEvent
+	Inventory    []InventoryResource
+	Allocated    Allocations
+	Audit        []AuditEvent
 }
 
 // Snapshot returns one transactionally consistent view and the last 100 events.
