@@ -42,7 +42,7 @@ func sqlitePreparedDispatch(tx *sql.Tx, req Request, binding *HostBinding, plan 
 	a, errA := json.Marshal(stored)
 	b, errB := json.Marshal(prepared.Receipt)
 	digest, err := executionPlanDigest(*plan)
-	if errA != nil || errB != nil || string(a) != string(b) || err != nil || stored.Request != req || stored.HostBindingSequence != binding.Sequence || stored.PlanDigest != digest {
+	if errA != nil || errB != nil || string(a) != string(b) || err != nil || stored.Request != req || stored.HostBindingSequence != binding.Sequence || stored.PlanDigest != digest || stored.PoolRouteIdentitySequence != plan.PoolRouteIdentitySequence || stored.PoolRouteRevision != plan.PoolRouteRevision {
 		return ErrOriginalPreparation
 	}
 	row := prepared.Row

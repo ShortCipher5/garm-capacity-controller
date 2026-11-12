@@ -262,7 +262,7 @@ func (f *Facade) ValidatePreparation(ctx context.Context, request garmprotocol.P
 	if err := f.checkPreparationPool(ctx, request, a); err != nil {
 		return garmprotocol.PreparationResponse{}, err
 	}
-	receipt, err := f.store.ValidateOriginalPreparation(ctx, request, a)
+	receipt, err := f.store.ValidateCurrentOriginalPreparation(ctx, request, a)
 	if err != nil {
 		return garmprotocol.PreparationResponse{}, ErrUnavailable
 	}

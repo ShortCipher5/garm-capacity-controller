@@ -78,15 +78,17 @@ func (a PreparationAuthority) samePolicy(b PreparationAuthority) bool {
 }
 
 type OriginalPreparationReceipt struct {
-	Protocol            string                          `json:"protocol"`
-	Original            garmprotocol.PreparationRequest `json:"original"`
-	Request             Request                         `json:"request"`
-	PlanDigest          string                          `json:"plan_digest"`
-	HostBindingSequence int64                           `json:"host_binding_sequence"`
-	Source              PreparationAuthority            `json:"source"`
-	RecordSequence      int64                           `json:"record_sequence"`
-	RecordedAt          time.Time                       `json:"recorded_at"`
-	Replay              bool                            `json:"-"`
+	PoolRouteIdentitySequence int64                           `json:"pool_route_identity_sequence,omitempty"`
+	PoolRouteRevision         int64                           `json:"pool_route_revision,omitempty"`
+	Protocol                  string                          `json:"protocol"`
+	Original                  garmprotocol.PreparationRequest `json:"original"`
+	Request                   Request                         `json:"request"`
+	PlanDigest                string                          `json:"plan_digest"`
+	HostBindingSequence       int64                           `json:"host_binding_sequence"`
+	Source                    PreparationAuthority            `json:"source"`
+	RecordSequence            int64                           `json:"record_sequence"`
+	RecordedAt                time.Time                       `json:"recorded_at"`
+	Replay                    bool                            `json:"-"`
 }
 
 func executionPlanDigest(plan ExecutionPlan) (string, error) {
@@ -114,7 +116,7 @@ func originalPreparationRecord(tx *sql.Tx, key string) (OriginalPreparationRecei
 		return OriginalPreparationReceipt{}, ErrOriginalPreparation
 	}
 	var r OriginalPreparationReceipt
-	if json.Unmarshal([]byte(raw), &r) != nil || r.Protocol != garmprotocol.PreparationVersion || r.Original.Validate() != nil || !r.Source.matches(r.Original) || !validRequest(r.Request) || r.Request.Key != key || r.Request.Pool != r.Original.PoolID || r.Request.Key != executionKey(ExecutionImage{Controller: r.Source.Controller, Name: r.Original.Name}, r.Original.PoolID) || r.Original.InstanceID != id || r.Original.AgentID != agentID || originalAgentScope(r.Source) != agentScope || r.Source.SourceScopeFingerprint != scope || !bindingFingerprint(r.PlanDigest) || r.RecordSequence <= 0 || r.RecordSequence != sequence || r.HostBindingSequence <= 0 || r.HostBindingSequence != bindingSequence || r.RecordedAt.IsZero() {
+	if json.Unmarshal([]byte(raw), &r) != nil || r.Protocol != garmprotocol.PreparationVersion || r.Original.Validate() != nil || !r.Source.matches(r.Original) || !validRequest(r.Request) || r.Request.Key != key || r.Request.Pool != r.Original.PoolID || r.Request.Key != executionKey(ExecutionImage{Controller: r.Source.Controller, Name: r.Original.Name}, r.Original.PoolID) || r.Original.InstanceID != id || r.Original.AgentID != agentID || originalAgentScope(r.Source) != agentScope || r.Source.SourceScopeFingerprint != scope || !bindingFingerprint(r.PlanDigest) || r.RecordSequence <= 0 || r.RecordSequence != sequence || r.HostBindingSequence <= 0 || r.HostBindingSequence != bindingSequence || r.RecordedAt.IsZero() || !validPoolRouteProvenance(r.PoolRouteIdentitySequence, r.PoolRouteRevision) {
 		return OriginalPreparationReceipt{}, ErrOriginalPreparation
 	}
 	canonical, err := json.Marshal(r)
@@ -160,6 +162,10 @@ func originalPreparationPlan(tx *sql.Tx, r garmprotocol.PreparationRequest, a Pr
 	if err != nil || !validRequest(reserved) || !validState(state) || reserved != plan.Request {
 		return ExecutionPlan{}, "", ErrOriginalPreparation
 	}
+	var routeIdentity, routeRevision int64
+	if err := tx.QueryRow("SELECT pool_route_identity_sequence,pool_route_revision FROM reservations WHERE request_key=?", key).Scan(&routeIdentity, &routeRevision); err != nil || routeIdentity != plan.PoolRouteIdentitySequence || routeRevision != plan.PoolRouteRevision {
+		return ExecutionPlan{}, "", ErrPoolRoute
+	}
 	binding, err := scanHostBinding(tx.QueryRow("SELECT host,server_key,origin,scope,server_name,server_version,bound_sequence,bound_at FROM host_bindings WHERE host=?", plan.Request.Host).Scan)
 	if err != nil || binding.Sequence != plan.HostBindingSequence {
 		return ExecutionPlan{}, "", ErrOriginalPreparation
@@ -191,8 +197,11 @@ func (s *SQLiteStore) RecordOriginalPreparation(ctx context.Context, r garmproto
 				return ErrOriginalPreparation
 			}
 		}
+		if err := requirePoolRouteRevision(tx, plan.Request.Pool, plan.PoolRouteIdentitySequence, plan.PoolRouteRevision); err != nil {
+			return err
+		}
 		if old, err := originalPreparationRecord(tx, plan.Request.Key); err == nil {
-			if old.Original != r || old.Request != plan.Request || old.PlanDigest != digest || old.HostBindingSequence != plan.HostBindingSequence || !old.Source.samePolicy(authority) {
+			if old.PoolRouteIdentitySequence != plan.PoolRouteIdentitySequence || old.PoolRouteRevision != plan.PoolRouteRevision || old.Original != r || old.Request != plan.Request || old.PlanDigest != digest || old.HostBindingSequence != plan.HostBindingSequence || !old.Source.samePolicy(authority) {
 				return ErrConflict
 			}
 			old.Replay = true
@@ -223,7 +232,7 @@ func (s *SQLiteStore) RecordOriginalPreparation(ctx context.Context, r garmproto
 			}
 			return ErrOriginalPreparation
 		}
-		receipt = OriginalPreparationReceipt{Protocol: garmprotocol.PreparationVersion, Original: r, Request: plan.Request, PlanDigest: digest, HostBindingSequence: plan.HostBindingSequence, Source: authority, RecordSequence: sequence, RecordedAt: now}
+		receipt = OriginalPreparationReceipt{PoolRouteIdentitySequence: plan.PoolRouteIdentitySequence, PoolRouteRevision: plan.PoolRouteRevision, Protocol: garmprotocol.PreparationVersion, Original: r, Request: plan.Request, PlanDigest: digest, HostBindingSequence: plan.HostBindingSequence, Source: authority, RecordSequence: sequence, RecordedAt: now}
 		raw, err := json.Marshal(receipt)
 		if err != nil || len(raw) > 16384 {
 			return ErrOriginalPreparation
@@ -247,17 +256,32 @@ func (s *SQLiteStore) LookupOriginalPreparation(ctx context.Context, key string)
 // no-dispatch, permission to replay a physical create or a release proof. The
 // network gateway must additionally read/check the actual authenticated Garm row.
 func (s *SQLiteStore) ValidateOriginalPreparation(ctx context.Context, r garmprotocol.PreparationRequest, authority PreparationAuthority) (OriginalPreparationReceipt, error) {
+	return s.validateOriginalPreparation(ctx, r, authority, false)
+}
+
+// ValidateCurrentOriginalPreparation is a source-poll gate, not a dispatch token
+// or a promise that the route stays eligible after this read. Final claim must
+// still compare current state in its own writer transaction.
+func (s *SQLiteStore) ValidateCurrentOriginalPreparation(ctx context.Context, r garmprotocol.PreparationRequest, authority PreparationAuthority) (OriginalPreparationReceipt, error) {
+	return s.validateOriginalPreparation(ctx, r, authority, true)
+}
+func (s *SQLiteStore) validateOriginalPreparation(ctx context.Context, r garmprotocol.PreparationRequest, authority PreparationAuthority, currentRoute bool) (OriginalPreparationReceipt, error) {
 	var receipt OriginalPreparationReceipt
 	err := s.readTransaction(ctx, func(tx *sql.Tx) error {
 		plan, digest, err := originalPreparationPlan(tx, r, authority)
 		if err != nil {
 			return err
 		}
+		if currentRoute {
+			if err := requirePoolRouteRevision(tx, plan.Request.Pool, plan.PoolRouteIdentitySequence, plan.PoolRouteRevision); err != nil {
+				return err
+			}
+		}
 		receipt, err = originalPreparationRecord(tx, plan.Request.Key)
 		if err != nil {
 			return err
 		}
-		if receipt.Original != r || receipt.Request != plan.Request || receipt.PlanDigest != digest || receipt.HostBindingSequence != plan.HostBindingSequence || !receipt.Source.samePolicy(authority) {
+		if receipt.PoolRouteIdentitySequence != plan.PoolRouteIdentitySequence || receipt.PoolRouteRevision != plan.PoolRouteRevision || receipt.Original != r || receipt.Request != plan.Request || receipt.PlanDigest != digest || receipt.HostBindingSequence != plan.HostBindingSequence || !receipt.Source.samePolicy(authority) {
 			return ErrConflict
 		}
 		receipt.Replay = true
@@ -302,7 +326,7 @@ func sqliteCheckOriginalPreparations(ctx context.Context, s *SQLiteStore) error 
 				return err
 			}
 			digest, err := executionPlanDigest(p)
-			if err != nil || r.Request != p.Request || r.PlanDigest != digest || r.HostBindingSequence != p.HostBindingSequence {
+			if err != nil || r.Request != p.Request || r.PlanDigest != digest || r.HostBindingSequence != p.HostBindingSequence || r.PoolRouteIdentitySequence != p.PoolRouteIdentitySequence || r.PoolRouteRevision != p.PoolRouteRevision {
 				return ErrOriginalPreparation
 			}
 			var excluded bool

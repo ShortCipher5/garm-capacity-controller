@@ -45,20 +45,24 @@ type ExecutionImage struct {
 }
 
 type PlacementRequest struct {
-	Key       string
-	Pool      string
-	Resources Resources
-	Execution ExecutionImage
-	Hosts     []string
-	Strategy  string // first_fit or least_runners, not a fairness guarantee
+	PoolRouteIdentitySequence int64
+	PoolRouteRevision         int64
+	Key                       string
+	Pool                      string
+	Resources                 Resources
+	Execution                 ExecutionImage
+	Hosts                     []string
+	Strategy                  string // first_fit or least_runners, not a fairness guarantee
 }
 
 type ExecutionPlan struct {
-	Request             Request        `json:"request"`
-	Execution           ExecutionImage `json:"execution"`
-	HostBindingSequence int64          `json:"host_binding_sequence"`
-	CreatedAt           time.Time      `json:"created_at"`
-	Replay              bool           `json:"-"`
+	PoolRouteIdentitySequence int64          `json:"pool_route_identity_sequence,omitempty"`
+	PoolRouteRevision         int64          `json:"pool_route_revision,omitempty"`
+	Request                   Request        `json:"request"`
+	Execution                 ExecutionImage `json:"execution"`
+	HostBindingSequence       int64          `json:"host_binding_sequence"`
+	CreatedAt                 time.Time      `json:"created_at"`
+	Replay                    bool           `json:"-"`
 }
 
 func executionKey(image ExecutionImage, pool string) string {
@@ -82,12 +86,15 @@ func executionPlanRecord(tx *sql.Tx, key string) (ExecutionPlan, error) {
 		return ExecutionPlan{}, ErrExecutionPlan
 	}
 	var p ExecutionPlan
-	if json.Unmarshal([]byte(raw), &p) != nil || p.Request.Key != key || !validRequest(p.Request) || !validExecution(p.Execution, p.Request) || p.HostBindingSequence <= 0 || p.HostBindingSequence != seq || p.CreatedAt.IsZero() || p.CreatedAt.UTC().Format(time.RFC3339Nano) != at {
+	if json.Unmarshal([]byte(raw), &p) != nil || p.Request.Key != key || !validRequest(p.Request) || !validExecution(p.Execution, p.Request) || p.HostBindingSequence <= 0 || p.HostBindingSequence != seq || !validPoolRouteProvenance(p.PoolRouteIdentitySequence, p.PoolRouteRevision) || p.CreatedAt.IsZero() || p.CreatedAt.UTC().Format(time.RFC3339Nano) != at {
 		return ExecutionPlan{}, ErrExecutionPlan
 	}
 	canonical, err := json.Marshal(p)
 	if err != nil || string(canonical) != raw {
 		return ExecutionPlan{}, ErrExecutionPlan
+	}
+	if err := checkHistoricalRoutePlan(tx, p); err != nil {
+		return ExecutionPlan{}, err
 	}
 	return p, nil
 }
@@ -135,6 +142,12 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 			if !exists || r.Request != p.Request {
 				return deny("placement_denied_missing_charge", ErrExecutionPlan)
 			}
+			if p.PoolRouteIdentitySequence != request.PoolRouteIdentitySequence || p.PoolRouteRevision != request.PoolRouteRevision {
+				return deny("placement_denied_route_replay", ErrPoolRouteInactive)
+			}
+			if err := requirePoolRouteRevision(tx, request.Pool, p.PoolRouteIdentitySequence, p.PoolRouteRevision); err != nil {
+				return deny("placement_denied_pool_route", err)
+			}
 			p.Replay = true
 			result = p
 			return sqliteAudit(tx, "placement_replayed", request.Key, s.now())
@@ -143,6 +156,9 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 		}
 		if _, exists := reservations[request.Key]; exists {
 			return deny("placement_denied_legacy_plan", ErrExecutionPlan)
+		}
+		if err := checkPlacementRoutePolicy(tx, request); err != nil {
+			return deny("placement_denied_pool_route", err)
 		}
 		if len(request.Hosts) == 0 || len(request.Hosts) > 128 || (request.Strategy != "first_fit" && request.Strategy != "least_runners") {
 			return deny("placement_denied_policy", ErrExecutionPlan)
@@ -211,14 +227,14 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 		}
 		req := prototype
 		req.Host = selected
-		result = ExecutionPlan{Request: req, Execution: request.Execution, HostBindingSequence: bindings[selected].Sequence, CreatedAt: now.UTC()}
+		result = ExecutionPlan{PoolRouteIdentitySequence: request.PoolRouteIdentitySequence, PoolRouteRevision: request.PoolRouteRevision, Request: req, Execution: request.Execution, HostBindingSequence: bindings[selected].Sequence, CreatedAt: now.UTC()}
 		result.Execution.Profiles = append([]string(nil), request.Execution.Profiles...)
 		raw, err := json.Marshal(result)
 		if err != nil || len(raw) > 16384 {
 			return ErrExecutionPlan
 		}
 		sum := sha256.Sum256(raw)
-		if _, err := tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,runners,state,created_at) VALUES(?,?,?,?,?,?,? ,?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Runners, "creating", result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,runners,state,created_at,pool_route_identity_sequence,pool_route_revision) VALUES(?,?,?,?,?,?,?,?,?,?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Runners, "creating", result.CreatedAt.Format(time.RFC3339Nano), result.PoolRouteIdentitySequence, result.PoolRouteRevision); err != nil {
 			return err
 		}
 		if _, err := tx.Exec("INSERT INTO execution_plans(request_key,payload,payload_hash,host_binding_sequence,created_at) VALUES(?,?,?,?,?)", req.Key, string(raw), hex.EncodeToString(sum[:]), result.HostBindingSequence, result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
@@ -289,8 +305,17 @@ func sqliteCheckExecutionPlans(ctx context.Context, s *SQLiteStore) error {
 					return ErrExecutionPlan
 				}
 			}
+			if _, exists := reservations[key]; exists {
+				var identity, revision int64
+				if err := tx.QueryRow("SELECT pool_route_identity_sequence,pool_route_revision FROM reservations WHERE request_key=?", key).Scan(&identity, &revision); err != nil {
+					return err
+				}
+				if identity != p.PoolRouteIdentitySequence || revision != p.PoolRouteRevision {
+					return ErrPoolRoute
+				}
+			}
 			if d, _, err := dispatchRecord(tx, key); err == nil {
-				if d.HostBindingSequence != p.HostBindingSequence {
+				if d.HostBindingSequence != p.HostBindingSequence || d.PoolRouteIdentitySequence != p.PoolRouteIdentitySequence || d.PoolRouteRevision != p.PoolRouteRevision {
 					return ErrExecutionPlan
 				}
 			} else if !errors.Is(err, sql.ErrNoRows) {

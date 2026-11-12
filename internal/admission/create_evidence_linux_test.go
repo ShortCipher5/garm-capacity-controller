@@ -466,7 +466,7 @@ func TestCreateEvidenceBackupRestoreCLIAndHistoricalProvenance(t *testing.T) {
 		}
 	}
 	// Exact original observed history survives v4->v5 migration; it isn't invented.
-	if _, err = f.store.db.Exec("DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=4"); err != nil {
+	if _, err = f.store.db.Exec(sqliteTestRemovePoolRouteGuardSchema + "DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TABLE pool_routes; DROP INDEX pool_route_execution_history; DROP TRIGGER IF EXISTS inactive_pool_no_new_reservation; DROP TRIGGER IF EXISTS inactive_pool_no_new_dispatch; DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	path := f.store.path
@@ -546,7 +546,7 @@ func TestCreateEvidenceCorruptOrNoncanonicalHistoryFailsClosed(t *testing.T) {
 func TestCreateEvidenceMigrationNeverQualifiesUnboundV4Dispatch(t *testing.T) {
 	f := newCreateEvidenceFixture(t, "confirmed", false)
 	proof := f.observe(t)
-	if _, err := f.store.db.Exec("DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=4"); err != nil {
+	if _, err := f.store.db.Exec(sqliteTestRemovePoolRouteGuardSchema + "DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TABLE pool_routes; DROP INDEX pool_route_execution_history; DROP TRIGGER IF EXISTS inactive_pool_no_new_reservation; DROP TRIGGER IF EXISTS inactive_pool_no_new_dispatch; DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	path := f.store.path

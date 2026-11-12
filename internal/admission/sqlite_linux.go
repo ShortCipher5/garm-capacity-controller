@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 8
+const sqliteCurrentVersion = 10
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -243,6 +243,28 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 			if err := sqliteAudit(tx, "schema_migrated_v8", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 9 {
+			if _, err := tx.Exec(sqliteInactivePoolRouteSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v9", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 10 {
+			if _, err := tx.Exec(sqlitePoolRouteStateSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v10", "", s.now()); err != nil {
 				return err
 			}
 		}
@@ -508,6 +530,9 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 			}
 			result = Decision{Simulation: true, Replay: true, Reservation: existing}
 			return sqliteAudit(tx, "replayed", req.Key, s.now())
+		}
+		if err := requirePoolRouteRevision(tx, req.Pool, 0, 0); err != nil {
+			return deny("denied_pool_route", err)
 		}
 		if !ready || epoch == int64(1<<63-1) {
 			return deny("denied_reconciliation", ErrReconciliation)

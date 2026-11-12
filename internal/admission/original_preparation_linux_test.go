@@ -394,7 +394,7 @@ func TestOriginalPreparationV7MigrationNeverBlessesPreviouslyChargedHistory(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP TRIGGER active_dispatch_requires_preparation", "DROP TRIGGER dispatch_preparation_sequence_immutable", "DROP TRIGGER original_preparations_no_update", "DROP TRIGGER original_preparations_no_delete", "DROP TRIGGER original_preparation_exclusions_no_update", "DROP TRIGGER original_preparation_exclusions_no_delete", "ALTER TABLE dispatches DROP COLUMN original_preparation_sequence", "DROP TABLE original_preparations", "DROP TABLE original_preparation_history_exclusions", "PRAGMA user_version=7"} {
+	for _, statement := range []string{sqliteTestRemovePoolRouteGuardSchema, "DROP TABLE pool_routes", "DROP INDEX pool_route_execution_history", "DROP TRIGGER IF EXISTS inactive_pool_no_new_reservation", "DROP TRIGGER IF EXISTS inactive_pool_no_new_dispatch", "DROP TRIGGER active_dispatch_requires_preparation", "DROP TRIGGER dispatch_preparation_sequence_immutable", "DROP TRIGGER original_preparations_no_update", "DROP TRIGGER original_preparations_no_delete", "DROP TRIGGER original_preparation_exclusions_no_update", "DROP TRIGGER original_preparation_exclusions_no_delete", "ALTER TABLE dispatches DROP COLUMN original_preparation_sequence", "DROP TABLE original_preparations", "DROP TABLE original_preparation_history_exclusions", "PRAGMA user_version=7"} {
 		if _, err := s.db.Exec(statement); err != nil {
 			t.Fatal(statement, err)
 		}

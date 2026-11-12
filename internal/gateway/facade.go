@@ -163,7 +163,7 @@ func (f *Facade) Admit(ctx context.Context, request garmprotocol.Request) (int, 
 	if err == nil {
 		response.Outcome = "reserved"
 		response.ReservationKey = req.Key
-	} else if errors.Is(err, admission.ErrDenied) || errors.Is(err, admission.ErrReconciliation) {
+	} else if errors.Is(err, admission.ErrDenied) || errors.Is(err, admission.ErrReconciliation) || errors.Is(err, admission.ErrPoolRouteInactive) {
 		exit = garmprotocol.DeferredExitCode
 		response.Outcome = "deferred"
 		response.RetryAfterSeconds = 10

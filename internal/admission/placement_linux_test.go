@@ -440,7 +440,7 @@ func TestPlacementRuntimeMigratesQualifiedV6WithoutInventingOldPlans(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
+	if _, err := db.Exec(sqliteTestRemovePoolRouteGuardSchema + "DROP TABLE pool_routes; DROP INDEX pool_route_execution_history; DROP TRIGGER IF EXISTS inactive_pool_no_new_reservation; DROP TRIGGER IF EXISTS inactive_pool_no_new_dispatch; DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -468,7 +468,7 @@ func TestPlacementLegacyV6ChargeCannotAcquireNewPlanAfterMigration(t *testing.T)
 	if _, err := s.Admit(ctx, Request{Key: req.Key, Pool: req.Pool, Host: "a", Resources: req.Resources}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
+	if _, err := s.db.Exec(sqliteTestRemovePoolRouteGuardSchema + "DROP TABLE pool_routes; DROP INDEX pool_route_execution_history; DROP TRIGGER IF EXISTS inactive_pool_no_new_reservation; DROP TRIGGER IF EXISTS inactive_pool_no_new_dispatch; DROP TRIGGER active_dispatch_requires_preparation; DROP TRIGGER dispatch_preparation_sequence_immutable; DROP TABLE original_preparations; DROP TABLE original_preparation_history_exclusions; ALTER TABLE dispatches DROP COLUMN original_preparation_sequence; DROP TABLE execution_plans; PRAGMA user_version=6"); err != nil {
 		t.Fatal(err)
 	}
 	path := s.path

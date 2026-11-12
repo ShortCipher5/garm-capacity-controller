@@ -37,6 +37,8 @@ func (p DispatchPermit) ReservationKey() string { return p.key }
 func (p DispatchPermit) ID() string             { return p.id }
 
 type DispatchRecord struct {
+	PoolRouteIdentitySequence   int64
+	PoolRouteRevision           int64
 	HostBindingSequence         int64
 	OriginalPreparationSequence int64
 	ReservationKey              string
@@ -58,9 +60,12 @@ type DispatchReceipt struct {
 func dispatchRecord(tx *sql.Tx, key string) (DispatchRecord, string, error) {
 	var record DispatchRecord
 	var permit, created, updated string
-	err := tx.QueryRow("SELECT reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,COALESCE(host_binding_sequence,0),COALESCE(original_preparation_sequence,0) FROM dispatches WHERE reservation_key=?", key).Scan(&record.ReservationKey, &permit, &record.State, &record.OperationID, &record.ResourceID, &created, &updated, &record.HostBindingSequence, &record.OriginalPreparationSequence)
+	err := tx.QueryRow("SELECT reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,COALESCE(host_binding_sequence,0),COALESCE(original_preparation_sequence,0),pool_route_identity_sequence,pool_route_revision FROM dispatches WHERE reservation_key=?", key).Scan(&record.ReservationKey, &permit, &record.State, &record.OperationID, &record.ResourceID, &created, &updated, &record.HostBindingSequence, &record.OriginalPreparationSequence, &record.PoolRouteIdentitySequence, &record.PoolRouteRevision)
 	if err != nil {
 		return DispatchRecord{}, "", err
+	}
+	if !validPoolRouteProvenance(record.PoolRouteIdentitySequence, record.PoolRouteRevision) {
+		return DispatchRecord{}, "", ErrPoolRoute
 	}
 	record.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
 	if err != nil {
@@ -146,6 +151,20 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		var routeIdentity, routeRevision int64
+		if plan != nil {
+			routeIdentity, routeRevision = plan.PoolRouteIdentitySequence, plan.PoolRouteRevision
+		}
+		if err := requirePoolRouteRevision(tx, req.Pool, routeIdentity, routeRevision); err != nil {
+			return deny("dispatch_denied_pool_route", err)
+		}
+		var reservedIdentity, reservedRevision int64
+		if err := tx.QueryRow("SELECT pool_route_identity_sequence,pool_route_revision FROM reservations WHERE request_key=?", req.Key).Scan(&reservedIdentity, &reservedRevision); err != nil {
+			return err
+		}
+		if reservedIdentity != routeIdentity || reservedRevision != routeRevision {
+			return deny("dispatch_denied_route_provenance", ErrPoolRoute)
+		}
 		if prepared != nil && (!prepared.Row.CreationEligible || !prepared.Row.PreparationShape) {
 			return deny("dispatch_denied_source_row_state", ErrOriginalPreparation)
 		}
@@ -198,7 +217,7 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 		if binding != nil {
 			bindingSequence = binding.Sequence
 		}
-		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence,original_preparation_sequence) VALUES(?,?,'intent','','',?,?,?,?)", req.Key, id, at, at, bindingSequence, originalSequence); err != nil {
+		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence,original_preparation_sequence,pool_route_identity_sequence,pool_route_revision) VALUES(?,?,'intent','','',?,?,?,?,?,?)", req.Key, id, at, at, bindingSequence, originalSequence, routeIdentity, routeRevision); err != nil {
 			return err
 		}
 		if err := sqliteAudit(tx, "dispatch_claimed", req.Key, s.now()); err != nil {
