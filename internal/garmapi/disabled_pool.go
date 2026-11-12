@@ -105,13 +105,13 @@ func (m *ManagementClient) PostDisabledRepoPool(ctx context.Context, repo, expec
 		return DisabledPoolReceipt{}, ErrManagementOutcomeUnknown
 	}
 	receipt := DisabledPoolReceipt{client: m, id: id, repo: repo, fingerprint: DisabledPoolSpecFingerprint(canonical)}
-	if _, err = m.verifyDisabledPool(fields, receipt, canonical); err != nil {
+	if _, err = m.verifyDisabledPool(fields, receipt.id, receipt.repo, canonical); err != nil {
 		return receipt, ErrManagementOutcomeUnknown
 	}
 	receipt.postValidated = true
 	return receipt, nil
 }
-func (m *ManagementClient) verifyDisabledPool(fields map[string]json.RawMessage, receipt DisabledPoolReceipt, spec DisabledPoolSpec) (ManagedPool, error) {
+func (m *ManagementClient) verifyDisabledPool(fields map[string]json.RawMessage, poolID, repositoryID string, spec DisabledPoolSpec) (ManagedPool, error) {
 	for name := range fields {
 		for _, exact := range []string{"id", "provider_name", "repo_id", "org_id", "enterprise_id", "max_runners", "min_idle_runners", "enabled", "generation", "tags", "image", "flavor", "os_type", "os_arch", "template_id", "enable_shell", "extra_specs", "instances"} {
 			if strings.EqualFold(name, exact) && name != exact {
@@ -125,8 +125,8 @@ func (m *ManagementClient) verifyDisabledPool(fields map[string]json.RawMessage,
 			return ManagedPool{}, ErrManagementOutcomeUnknown
 		}
 	}
-	pool, err := m.decodePool(fields, receipt.id)
-	if err != nil || pool.RepositoryID != receipt.repo || pool.ProviderName != spec.ProviderName || pool.Enabled || pool.MinIdleRunners != 0 || pool.MaxRunners != spec.MaxRunners || len(pool.Tags) != len(spec.Tags) {
+	pool, err := m.decodePool(fields, poolID)
+	if err != nil || pool.RepositoryID != repositoryID || pool.ProviderName != spec.ProviderName || pool.Enabled || pool.MinIdleRunners != 0 || pool.MaxRunners != spec.MaxRunners || len(pool.Tags) != len(spec.Tags) {
 		return ManagedPool{}, ErrManagementOutcomeUnknown
 	}
 	for i, tag := range pool.Tags {
@@ -174,5 +174,5 @@ func (m *ManagementClient) VerifyDisabledRepoPool(ctx context.Context, receipt D
 	if err != nil {
 		return ManagedPool{}, ErrManagementOutcomeUnknown
 	}
-	return m.verifyDisabledPool(fields, receipt, canonical)
+	return m.verifyDisabledPool(fields, receipt.id, receipt.repo, canonical)
 }
