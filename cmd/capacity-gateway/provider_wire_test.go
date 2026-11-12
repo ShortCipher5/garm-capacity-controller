@@ -70,7 +70,9 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	defer cancel()
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "capacity-provider")
-	if output, err := exec.CommandContext(ctx, goBinary, "build", "-race", "-o", binary, "../capacity-provider").CombinedOutput(); err != nil {
+	// Disposable fixture binary metadata is not provenance. HEAD is verified
+	// separately; avoid an enclosing synthetic .git confusing linked worktrees.
+	if output, err := exec.CommandContext(ctx, goBinary, "build", "-race", "-buildvcs=false", "-o", binary, "../capacity-provider").CombinedOutput(); err != nil {
 		t.Fatalf("compile actual provider: %v %s", err, output)
 	}
 	keys := credentials(t)
@@ -86,7 +88,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		defer mu.Unlock()
 		switch {
 		case r.URL.Path == "/1.0":
-			syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}})
+			syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}})
 		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
 			creates.Add(1)
 			var body struct {
@@ -215,6 +217,14 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	receipt, err := store.LookupDispatch(ctx, hex.EncodeToString(requestKey[:]))
 	if err != nil || receipt.State != mode || receipt.OperationID != operation || receipt.ResourceID != "wire-1" {
 		t.Fatalf("lost durable dispatch correlation: %+v %v", receipt, err)
+	}
+	unusedKey := sha256.Sum256([]byte("controller-test\x00pool-a\x00wire-unused"))
+	cancelled, err := store.LookupCancellation(ctx, hex.EncodeToString(unusedKey[:]))
+	if err != nil || cancelled.Request.Key != hex.EncodeToString(unusedKey[:]) {
+		t.Fatalf("lost durable cancellation %+v %v", cancelled, err)
+	}
+	if _, err := store.LookupDispatch(ctx, hex.EncodeToString(unusedKey[:])); err == nil {
+		t.Fatal("cancelled identity dispatched")
 	}
 	if creates.Load() != 1 {
 		t.Fatalf("physical creates=%d; expected exactly one despite confirmed replay", creates.Load())

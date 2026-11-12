@@ -6,7 +6,7 @@ Status: implemented REST transport, tested against disposable mutual-TLS HTTP fi
 
 ## Concrete API boundary
 
-- `GET /1.0` verifies trusted API v1.0. Creating additionally requires the `instance_create_start` extension.
+- `GET /1.0` verifies trusted API v1.0 and requires explicit canonical `environment.server_clustered: false` before create or inventory reads. Clustered, missing, null or malformed topology fails closed. Creating additionally requires the `instance_create_start` extension.
 - `POST /1.0/instances` is issued once, with a pinned **locally cached image fingerprint**, fixed profiles and explicit instance-level `limits.cpu` and `limits.memory`. Containers additionally set hard memory enforcement. Whole positive vCPU counts are supported initially. Mutable profile names are not themselves used as resource accounting evidence.
 - Instance names, profiles, controller/pool labels, reservation hash and userdata are validated and bounded. No request-supplied arbitrary config/device maps, remote image servers, update, delete, quota mutation or general proxy are offered.
 - An asynchronous create returns only a validated operation UUID and instance name. Operation waits verify the operation's project and resource identity, then require the instance state to be running. Failed/lost responses retain known correlation IDs. The transport never retries a create or deletes to compensate for uncertainty.
@@ -24,3 +24,21 @@ Safe backup/restore, authenticated gateway RPC, policy-bound provider lifecycle 
 ## Pinned Garm read-path correction
 
 The accompanying v0.2.1 patch corrects the upstream external provider's inverted successful-list error check. Its opt-in Get/List paths use the same bounded, redacted subprocess boundary as Create. Exit 30 is preserved as Get-not-found without retaining child stderr. Disposable upstream executable regression tests cover successful lists, not-found mapping and list failures. This is still a small maintained compatibility patch, not an upstream release.
+
+## Standalone servers only
+
+The transport does NOT support Incus clusters or claim member-complete cluster
+inventory. In pinned [Incus v6.0.4](https://github.com/lxc/incus/tree/a99413afd0c742da3bba10eb4f75d639f9dbbd32),
+[ServerEnvironment.ServerClustered](https://github.com/lxc/incus/blob/a99413afd0c742da3bba10eb4f75d639f9dbbd32/shared/api/server.go#L85)
+is the public `server_clustered` boolean. The trusted root must explicitly report
+false. True returns ErrUnsupported; absent/null/wrong-type topology returns
+ErrResponse. The check is repeated, not cached as a lifetime guarantee. Exported `Wait` checks it on every operation-poll iteration and again before reading final instance state, even when called without Create.
+
+The pinned [cluster operations list](https://github.com/lxc/incus/blob/a99413afd0c742da3bba10eb4f75d639f9dbbd32/cmd/incusd/operations.go#L685-L718)
+can skip a failed remote-member query and still return HTTP 200. Therefore that
+response cannot certify complete absence of in-flight work. Future clustered
+support needs authoritative membership and complete direct-member coverage,
+including failure, join/leave and relocation races; it must not weaken this gate.
+An explicit standalone report is still not proof of physical-host exclusivity,
+project coverage or protection from an external administrator changing topology.
+Those remain separate qualification and fencing requirements.

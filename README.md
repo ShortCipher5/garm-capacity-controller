@@ -1,77 +1,94 @@
 # Garm Capacity Controller
 
-A lightweight, safety-first control plane **above [Garm](https://github.com/cloudbase/garm)** for GitHub Actions runners on multiple [Incus](https://linuxcontainers.org/incus/) hosts.
+A lightweight Go control plane **above [Garm](https://github.com/cloudbase/garm)** for GitHub Actions runners on multiple [Incus](https://linuxcontainers.org/incus/) hosts, with a React management view and durable SQLite capacity ledger.
 
-> **Experimental foundation, not a production controller.** This staged implementation contains the offline model, SQLite ledger, concrete verified API clients and an experimental local-only gateway/provider pair. Provisioning is off by default and requires explicit operator opt-in after deployment gates are addressed. It has not been deployed to an existing installation. There is no production web UI or complete retirement/drain lifecycle yet.
+> **Experimental, not production-qualified.** The real gateway and provider integration are implemented and tested against disposable authenticated API fixtures. Provisioning is off by default. The web application is read-only. Physical retirement, automatic job-safe drain and installed-infrastructure recovery qualification remain incomplete. Do not replace an existing provider just because CI passes.
 
-## Why this exists
+## Why this is needed
 
-Independent repository pools can each have a valid `max_runners` while their combined CPU, RAM and runner demand exceeds a shared host. Lowering pool maxima periodically is not an atomic admission mechanism. Two pools can provision concurrently between updates, and existing idle runners can accept jobs without new provisioning.
+Repository pools can each have a sensible `max_runners` while their combined demand exceeds the CPU, RAM or runner budget of a shared host. Updating maxima periodically is not atomic enforcement: two pools can provision between updates, and existing idle runners can accept jobs without provisioning anything new.
 
-The target application manages:
+Garm remains responsible for runner demand and GitHub integration. This controller adds:
 
-- Multiple Incus hosts, enabled / draining / disabled states and health.
-- Global and per-host CPU, RAM and runner budgets, with explicit system headroom.
-- Repository-specific Garm pools, labels, priority and desired idle capacity.
-- An atomic cross-pool provisioning boundary, durable reservations and reconciliation.
-- Historical allocated capacity, observed usage, decisions and audit events.
-- An authenticated, simple React UI backed by Go. SQLite is the transactional-store target for inventory, policy and history; its durable core is implemented in the `feat/sqlite-ledger` slice, with further qualification gates documented.
+- **One global admission transaction** covering global, per-host and pool CPU/RAM/runner budgets.
+- **Durable reservations and one-shot dispatch intents** before physical creation. A lost response remains charged, not retried as a new create.
+- **Barrier-first reconciliation** of Garm runners, Incus instances, operations and reservations, including orphans and unknown outcomes.
+- **Explicit host enable/pause primitives**, without pretending that pausing claims prevents idle runners accepting jobs.
+- **Credential isolation**: Garm receives gateway-only mTLS credentials, never Incus keys or database access.
+- **A real read-only React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. No mock fallback or fake mutation controls.
+- **Consistent SQLite backup/restore primitives**, with admission blocked and new authoritative reconciliation required after restore.
 
-## First slice: offline admission simulator
+The full goal also includes repository labels/priority/idle controls, safe lifecycle management and historical measured usage. These are not all implemented. Allocations are not measured utilization, and a priority field is not a fair scheduler.
 
-The implementation is under review in [draft PR #1](https://github.com/ShortCipher5/garm-capacity-controller/pull/1). Before it is merged, check out `feat/durable-admission-foundation` to run the commands below. The default branch currently holds the project documentation.
+## Current boundaries
 
-The original JSON-backed Go foundation serializes admission across pools and processes sharing one local ledger. It reserves capacity **before** returning success, persists through restart, and charges every reservation state, including creating, idle, running, failed and unknown. It fails closed for disabled/draining/unhealthy/stale hosts, missing pools, invalid resources and exhausted budgets. Failed or unknown creates do not release capacity. No release mechanism is implemented in this slice.
+| Component | Implemented | Remaining qualification |
+| --- | --- | --- |
+| Admission | SQLite WAL/FULL, `BEGIN IMMEDIATE`, atomic budget/reservation/audit and process-race tests | One authoritative local ledger, not distributed consensus |
+| Garm integration | Pinned v0.2.1 pre-JIT compatibility patch and actual compiled-provider protocol harness | Requires the documented patch; installed stack not qualified |
+| Provisioning | Verified Incus HTTPS/mTLS, explicit limits, durable at-most-once intent and readback | Experimental opt-in; full physical-host coverage must be proved |
+| Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
+| Administration | Separate TLS read-token API and responsive React ledger view | Read-only; no policy editor or retirement button |
+| Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
+| Cancellation | Atomic never-dispatched tombstones, authenticated provider command and optional Garm preparation-failure hook | No dispatched/unknown-create or physical retirement release |
 
-A JSON ledger is used deliberately for this small testable slice, not as the final history database. It uses a separate advisory file lock, atomic replacement, file and directory sync. It is Linux-only, single-machine, local-filesystem storage. It is **not** distributed consensus, a multi-host database or proof of live provisioning safety. All callers must cooperate with the same lock. Uncertain persistence blocks that Store instance until it is reopened.
+See [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).
 
-### Try it locally
+## Test without infrastructure
 
-This integrated facade branch requires the Go compiler 1.25+ (matching its pinned provider-common dependency) on Linux. The SQLite branch also requires CGO and a C compiler for its pinned SQLite driver. No credentials or infrastructure are needed.
+Requires Linux, the Go compiler **1.25+**, CGO and a C compiler for the pinned SQLite driver. Standard tests need no credentials or live infrastructure.
 
 ```sh
-go test -race ./...
+go test -race -count=1 ./...
 go vet ./...
-go run ./cmd/capacity-sim -ledger /tmp/demo.ledger.json -key request-1 -pool example/app -host host-a
-# Repeat the same request: idempotent replay, no second reservation.
+go build ./cmd/capacity-gateway ./cmd/capacity-provider
+```
+
+The required [pinned Garm qualification](docs/protocol-qualification.md) downloads exact public source into a **new disposable directory**, applies our patch, tests upstream demand paths and exercises the compiled provider against the actual gateway and disposable mTLS API fixtures:
+
+```sh
+integration/garm-v0.2.1/test.sh /tmp/garm-capacity-qualification-new
+```
+
+This additional gate needs Go 1.26.2+ to match upstream Garm. The standard Go suite deliberately skips it unless its explicit worktree is supplied. A unit-suite pass is not a pinned-integration pass.
+
+The actual UI is in `web/`. Use supported Node.js 22.12+ or newer:
+
+```sh
+cd web
+npm ci
+npm test
+npm run build
+npm run test:ui
+```
+
+Browser tests use a disposable real TLS Go admin handler and SQLite ledger, not a production mock mode. See [UI setup and test-only certificate trust](docs/admin-ui.md). Serve built assets through the separate configured admin listener. Its read credential stays in memory and clears on disconnect; never put secrets in build variables.
+
+The original JSON simulation remains for isolated experimentation:
+
+```sh
 go run ./cmd/capacity-sim -ledger /tmp/demo.ledger.json -key request-1 -pool example/app -host host-a
 ```
 
-The sample has two synthetic hosts and finite CPU/RAM/runner budgets. It reports a simulation decision as JSON. Host observations are synthetic and expire after five minutes. Delete **only your disposable demo ledger** to start a new scenario. The command never contacts an external API.
+It never contacts Garm or Incus and is not the live enforcement store.
 
-## Safety boundary
+## Safety is more than a pool maximum
 
-A budget is a bound on declared allocations, not actual CPU utilization or memory safety. CPU is in integer millicores; RAM is in MiB. Explicit headroom must be subtracted from available capacity. Shared vCPUs are not dedicated-core guarantees. Incus resource limits and job isolation remain separate requirements.
+CPU is integer millicores and RAM is MiB. Budgets bound **declared allocations**, not actual utilization or shared-vCPU performance. Subtract host/system headroom; enforce Incus limits and job isolation separately.
 
-A real enforcement mode requires *every* provisioning route to use this admission boundary before the provider creates an instance. Periodic observation is insufficient. Reconciliation must merge Garm runners, Incus instances, in-flight operations and reservations without gaps or double counting. A lost provider response is an unknown resource, not a free slot. Unknown inventory blocks admission until bounded accounting is established.
+Every physical provisioning path must pass the same authoritative ledger. Alternate credentials, other projects, queued work from an old writer and untracked host workloads can invalidate that boundary. A later mode change is not a remote fence for an already committed in-flight claim.
 
-Stopping new creates does **not** stop existing idle runners receiving jobs. Draining must account for runner deregistration / dispatch eligibility, in-flight job assignment and confirmed resource deletion. Never interrupt a running job implicitly.
+Creating, idle, running, failed, unknown and deleting resources stay charged. A timeout, missing list row, restart or provider failure does not prove safe release. [Never-dispatched cancellation](docs/undispatched-cancellation.md) requires an exact fresh creating reservation, no dispatch intent or linked resource, and a permanent no-recreate identity tombstone. Every dispatched or uncertain create remains charged.
 
-The `feat/sqlite-ledger` branch adds transactional SQLite admission, audit and non-releasing reconciliation barriers; see [SQLite core design](docs/sqlite-ledger.md) on that branch. It is not a live adapter or production enforcement mode.
+**Paused is not drained.** Existing idle runners can still receive jobs. Physical retirement needs an assignment/job-safety fence, verified deletion and authoritative recovery. These paths remain blocked rather than hidden behind unsafe controls. See [job-safe retirement](docs/job-safe-retirement.md).
 
-See [architecture and invariants](docs/architecture.md), [integration gates](docs/integrations.md), [security](SECURITY.md), and the [roadmap](docs/roadmap.md).
+Do not copy only an open WAL database file. Use the [consistent backup procedure](docs/backup-restore.md), fence old writers before historical restore, recover post-backup history and collect new complete authoritative inventory before scheduling.
 
-A pinned pre-JIT Garm compatibility hook and executable protocol harness are being developed on `feat/garm-admission-compat`; see [the integration tradeoffs](integration/garm-v0.2.1/README.md) on that branch. A credential-isolated real gateway is still required.
+## Next
 
-The `feat/gateway-dispatch` slice adds a durable one-shot backend execution boundary behind those receipts; see [gateway dispatch](docs/gateway-dispatch.md) on that branch. Concrete Incus transport, credential isolation and confirmed retirement still require qualification.
+Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then authenticated mutation controls and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
 
-## Status and verification
-
-Implemented across the stacked draft branches: conservative admission, SQLite reservations/audit, one-shot dispatch, verified Incus transport, WAL-consistent backup/restore, Garm inventory and barrier-first reconciliation, and experimental credential-isolated provider RPC. Not qualified: production deployment, complete physical-host coverage, admin authentication, retirement/release, historical telemetry, priority scheduling or job-safe drain. CI includes the model and actual pinned Garm compatibility harness. Passing CI is not installed-infrastructure or hardware-safety certification.
-
-No live infrastructure was accessed or changed during initial development. No production-ready claim is made.
-
-The `feat/incus-transport` slice adds a concrete, credential-verified Incus REST transport with explicit allocation limits and bounded project inventory; see [transport boundary and remaining gates](docs/incus-transport.md). Tests use disposable mutual-TLS fixtures, not live hosts. No gateway service or production mode is enabled.
-
-The `feat/provider-facade` slice binds trusted fixed pool placement, official Garm bootstrap rendering, one-shot dispatch/readback and barrier-first Garm/Incus/operation reconciliation. It is not exposed as a gateway service yet. See [provider facade](docs/provider-facade.md).
-
-The `feat/gateway-rpc` slice adds separate `capacity-gateway` and `capacity-provider` executables with verified mTLS, exact client-leaf allowlisting and read-only defaults. See [service trust, configuration and unfinished lifecycle gates](docs/gateway-service.md).
-
-The `feat/host-admission-controls` slice adds durable trusted host enable/pause controls with a fresh reconciliation barrier and unchanged resource charges. It does **not** deregister idle runners or complete a drain; see [host admission controls](docs/host-admission-controls.md). No provider/admin endpoint is added.
-
-The `feat/read-only-admin` slice adds a separate opt-in TLS read-only admin API backed by actual ledger state, with no synthetic fallback. It cannot modify policy or retire runners. The React client follows in a separate focused slice. See [admin setup and read isolation](docs/read-only-admin.md). Physical retirement/job-safe draining remains blocked, not hidden behind fake controls.
-
-The `feat/read-only-admin-ui` slice pairs that API with the actual React ledger view: memory-only read credentials, refresh/logout fencing, no fixture fallback and no mutation controls. See [the UI](docs/admin-ui.md). Browser qualification runs separately in CI; installed infrastructure and job-safe retirement are still not qualified.
+No live controller deployment is claimed. Tests must never access live runner infrastructure or commit credentials, private host addresses or user-specific configuration.
 
 Local operator backup/restore: build `./cmd/capacity-ledger` and follow the
 [fail-closed recovery procedure](docs/backup-restore.md). It produces new private,
