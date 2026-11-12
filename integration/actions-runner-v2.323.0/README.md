@@ -63,6 +63,22 @@ trusted native/descendant completion and no-restart supervisor are still absent.
 Even `LocallyQuiescent` is only an in-process experiment result, not a service,
 job, physical absence, old-writer or release fence. No production API accepts it.
 
+## Exact remote-control and no-restart interface experiments
+
+See [practical implementation options](../../docs/runner-fence-implementation-options.md).
+Four new tests invoke ACTUAL classic/broker listeners with mocked transports. They
+cover Busy status/control hints, late old-poll responses after local status-token
+cancellation, and classic session recovery versus SkipSessionRecover. They do NOT
+assert that the mocked transport represents an actual GitHub assignment policy.
+
+Eight tests run exact unmodified RunnerService.js in a Node VM with FAKE child
+process, signals and timers only. No real process is spawned or signaled. The
+existing Node version is recorded; no Node/toolchain installer or dependency is
+added. These tests show internal retry/update branches survive the unknown-failure
+limit and an outer Restart=no, and service stop sends interrupt then delayed kill.
+That is NOT a job-preserving stop or a qualified installed-image restart fence.
+New C# interface cases are uncompiled/unexecuted until their own hosted result.
+
 ## No SDK installation
 
 The local task workspace has no .NET compiler. Local Go/shell/source-hash checks
@@ -82,10 +98,10 @@ service tokens, proxy credentials and real home configuration are not passed. Al
 unchanged. A historical dependency/audit build failure must be reported, not
 silently suppressed to manufacture qualification.
 
-The source version-constant target is invoked directly, then only these twelve tests
+The source version-constant target is invoked directly, then only these sixteen C# tests
 are filtered and executed. Source HEAD and critical production-file SHA256 hashes
 are checked before AND after execution. The generated version metadata must name
-the exact source pin. TRX inspection requires exactly twelve named Passed results;
+the exact source pin. TRX inspection requires exactly sixteen named Passed results;
 an empty discovery/filter success cannot make this gate green.
 
 ## Explicit test-only security dependency baseline
