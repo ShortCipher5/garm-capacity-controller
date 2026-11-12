@@ -63,7 +63,7 @@ enable=true
  if change_owner:
   for name,uid in [('anchor',65530),('garm',65531),('state',65531),('bad-state',65531),('garm-canary',65531),('tools-canary',65533)]:
    parent=root/name
-   for p in [parent,*parent.iterdir()]:
+   for p in [*parent.iterdir(),parent]:
     need(p.is_relative_to(root) and not p.is_symlink())
     subprocess.run(['sudo','-n','chown',str(uid)+':'+str(uid),str(p)],env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'HOME':'/nonexistent'},check=True,capture_output=True,timeout=10)
  # Parent transit is needed for Docker's bind setup only; private role leaves stay

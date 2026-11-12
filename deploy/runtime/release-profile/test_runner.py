@@ -57,6 +57,32 @@ class RunnerTest(unittest.TestCase):
    self.assertEqual(len(nonce),32);self.assertNotEqual((root/'garm/server.key').read_bytes(),(root/'anchor/server.key').read_bytes())
    self.assertIn('enable=true',(root/'garm/config.toml').read_text());self.assertEqual(list((root/'state').iterdir()),[])
    with self.assertRaises(RuntimeError):fixture.prepare(root,b'',False)
+ def test_private_parent_chown_last_without_privileged_execution(self):
+  with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as t:
+   root=Path(t)/'generated';sealed=set();order=[];sentinel=Path(t)/'preexisting';sentinel.write_bytes(b'unchanged')
+   roles={'anchor':65530,'garm':65531,'state':65531,'bad-state':65531,'garm-canary':65531,'tools-canary':65533}
+   real_run=subprocess.run;real_symlink=Path.is_symlink
+   def guarded_metadata(path):
+    if path.parent in sealed:raise PermissionError('simulated private mapped owner')
+    return real_symlink(path)
+   def no_privilege(args,**kwargs):
+    if args[0]=='sudo':
+     self.assertEqual(args[1:3],['-n','chown'])
+     path=Path(args[-1]);relative=path.relative_to(root);role=relative.parts[0]
+     self.assertIn(role,roles);self.assertLessEqual(len(relative.parts),2);self.assertEqual(args[3],str(roles[role])+':'+str(roles[role]));order.append(path)
+     if path.is_dir():sealed.add(path)
+     return subprocess.CompletedProcess(args,0,b'',b'')
+    self.assertEqual(args[0],'openssl');return real_run(args,**kwargs)
+   with patch.object(Path,'is_symlink',guarded_metadata),patch.object(fixture.subprocess,'run',side_effect=no_privilege):
+    fixture.prepare(root,b'public fixture prefix',True)
+    before=list(order)
+    with self.assertRaises(RuntimeError):fixture.prepare(root,b'',True)
+    self.assertEqual(before,order)
+   self.assertEqual(sealed,{root/name for name in roles});self.assertEqual(sentinel.read_bytes(),b'unchanged')
+   expected={p for name in roles for p in [root/name,*(root/name).iterdir()]};self.assertEqual(set(order),expected);self.assertEqual(len(order),len(expected))
+   for name in roles:
+    parent=root/name;positions=[n for n,p in enumerate(order) if p==parent or p.parent==parent]
+    self.assertTrue(positions);self.assertEqual(order[max(positions)],parent)
  def test_monotonic_names_do_not_reuse_removed_container_suffix(self):
   with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as t:
    lab=run.Lab(Path(t));lab.images['image']='sha256:test';names=[]
