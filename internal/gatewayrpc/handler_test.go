@@ -295,3 +295,53 @@ func TestObservedTimeUsesCanonicalJSONRepresentation(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthenticatedCancellationIsIdempotentAndCannotRecreate(t *testing.T) {
+	ctx := context.Background()
+	client, b, _, _, _ := runningFixture(t, true)
+	req := garmprotocol.Request{Protocol: garmprotocol.Version, Name: "runner-1", PoolID: "pool-a"}
+	if exit, _, err := client.Admit(ctx, req); err != nil || exit != 0 {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		receipt, err := client.CancelAdmission(ctx, req)
+		if err != nil || receipt.Replay == nil || *receipt.Replay != (i == 1) {
+			t.Fatalf("cancel %+v %v", receipt, err)
+		}
+	}
+	if _, err := client.Create(ctx, bootstrap()); err == nil {
+		t.Fatal("cancelled create accepted")
+	}
+	if _, _, err := client.Admit(ctx, req); err == nil {
+		t.Fatal("cancelled admit accepted")
+	}
+	req.Name = "replacement"
+	if exit, _, err := client.Admit(ctx, req); err != nil || exit != 0 {
+		t.Fatal(err)
+	}
+	if b.creates.Load() != 0 {
+		t.Fatal("cancellation dispatched")
+	}
+	readonly, _, _, _, _ := runningFixture(t, false)
+	if _, err := readonly.CancelAdmission(ctx, req); err == nil {
+		t.Fatal("read-only cancellation accepted")
+	}
+}
+
+func TestCancellationRejectsUnverifiedAndUnlistedPeers(t *testing.T) {
+	_, b, handler, credentials, _ := runningFixture(t, true)
+	for _, state := range []*tls.ConnectionState{nil, {PeerCertificates: []*x509.Certificate{{Raw: credentials.Certificates[0].Certificate[0]}}}, {VerifiedChains: [][]*x509.Certificate{{{Raw: []byte("other")}}}, PeerCertificates: []*x509.Certificate{{Raw: []byte("other")}}}} {
+		r := httptest.NewRequest("POST", "https://example.invalid/v1/cancel-admission", strings.NewReader(`{"protocol":"garm-capacity/v1","name":"runner-1","pool_id":"pool-a"}`))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer read-token-is-not-provider-auth")
+		r.TLS = state
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, r)
+		if response.Code != http.StatusUnauthorized && response.Code != http.StatusForbidden {
+			t.Fatalf("wrong role accepted %d", response.Code)
+		}
+	}
+	if b.creates.Load() != 0 {
+		t.Fatal("invalid role made external call")
+	}
+}

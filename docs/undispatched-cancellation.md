@@ -1,8 +1,21 @@
 # Cancellation of a never-dispatched reservation
 
-This trusted SQLite library primitive is NOT runner retirement or provider
-DeleteInstance. It sends no Garm, GitHub or Incus request. No RPC, browser
-control, automatic timeout or live rollout is enabled by this core slice.
+This is a **trusted SQLite transaction** and authenticated experimental provider
+command, not runner retirement or provider DeleteInstance. It makes no GitHub or
+Incus request. No browser mutation, timeout-based release or live rollout is
+enabled. The optional pinned Garm preparation-failure hook is a separate dependent
+qualification; this command does not itself automatically clean up JIT failures.
+
+`CancelAdmission` uses the same verified provider mTLS identity and trusted fixed
+pool placement as admission. `/v1/cancel-admission` is unavailable in default
+read-only mode. Its exact bounded JSON receipt requires exit zero,
+`outcome: cancelled`, matching name/pool, `dispatched: false`, durable reservation
+key and explicit replay boolean. The caller cannot select arbitrary host/resource
+values. An unconfirmed cleanup is not proof of release: its reply may be lost
+after the tombstone commits. Retry only the exact identity to inspect that
+idempotent result. A refused transaction retains its charge. Cleanup errors must
+not replace a JIT or database error with benign defer. The separate admin read credential cannot call
+this route.
 
 `CancelUndispatched(ctx, exactOriginalRequest)` uses ONE BEGIN IMMEDIATE
 transaction to require current readiness, fresh complete baseline observations
