@@ -71,7 +71,7 @@ func writeSync(w http.ResponseWriter, metadata any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"type": "sync", "status_code": 200, "metadata": metadata})
 }
 func rootMetadata() any {
-	return map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}}
+	return map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}}
 }
 func validSpec() InstanceSpec {
 	return InstanceSpec{Name: "runner-1", Type: "container", Profiles: []string{"runner-base"}, ImageFingerprint: strings.Repeat("a", 64), CPUMillis: 2000, RAMMiB: 2048, UserData: "#cloud-config\nsecret-test-bootstrap", ControllerID: "controller-1", PoolID: "pool-1", ReservationKey: strings.Repeat("b", 64)}
@@ -178,7 +178,7 @@ func TestCapabilityDenialAndNoAutomaticCreateRetry(t *testing.T) {
 						http.Redirect(w, r, "https://other.invalid/", http.StatusTemporaryRedirect)
 						return
 					}
-					root := map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}}
+					root := map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}}
 					if mode == "missing-extension" {
 						root["api_extensions"] = []string{}
 					}
@@ -346,7 +346,7 @@ func TestReadsRequireTrustedIdentityAndExactInstance(t *testing.T) {
 			server, credentials := tlsFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/1.0" {
 					if mode == "untrusted" {
-						writeSync(w, map[string]any{"api_version": "1.0", "auth": "untrusted"})
+						writeSync(w, map[string]any{"api_version": "1.0", "auth": "untrusted", "environment": map[string]any{"server_clustered": false}})
 						return
 					}
 					writeSync(w, rootMetadata())
