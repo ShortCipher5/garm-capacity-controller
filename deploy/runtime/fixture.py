@@ -26,9 +26,9 @@ def prepare(root):
     work = root / 'fixture-private'
     def openssl(*args):
         subprocess.run(['openssl', *args], cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    openssl('req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=packaging-test-ca', '-keyout', 'ca.key', '-out', 'ca.pem')
+    openssl('req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=packaging-test-ca', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash', '-keyout', 'ca.key', '-out', 'ca.pem')
     for name, purpose in [('api', 'serverAuth'), ('server', 'serverAuth'), ('client', 'clientAuth'), ('provider', 'clientAuth'), ('wrong', 'clientAuth')]:
-        write(work / 'ext.cnf', f'extendedKeyUsage={purpose}\nsubjectAltName=IP:127.0.0.1\n')
+        write(work / 'ext.cnf', f'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage={purpose}\nsubjectAltName=IP:127.0.0.1\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
         openssl('req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-subj', f'/CN=packaging-{name}', '-keyout', f'{name}.key', '-out', f'{name}.csr')
         openssl('x509', '-req', '-in', f'{name}.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '1', '-extfile', 'ext.cnf', '-out', f'{name}.pem')
     openssl('req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=packaging-untrusted', '-addext', 'extendedKeyUsage=clientAuth', '-keyout', 'untrusted.key', '-out', 'untrusted.pem')
@@ -103,6 +103,7 @@ def fixture(name):
 def serve():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.verify_flags |= ssl.VERIFY_X509_STRICT
     context.load_cert_chain(str(fixture('api.pem')), str(fixture('api.key')))
     context.load_verify_locations(str(fixture('ca.pem')))
     context.verify_mode = ssl.CERT_REQUIRED
@@ -119,6 +120,7 @@ def serve():
 def request(port, path, method='GET', cert=None, token=None, body=None):
     context = ssl.create_default_context(cafile=str(fixture('ca.pem')))
     context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.verify_flags |= ssl.VERIFY_X509_STRICT
     if cert:
         context.load_cert_chain(str(fixture(f'{cert}.pem')), str(fixture(f'{cert}.key')))
     client = http.client.HTTPSConnection('127.0.0.1', port, context=context, timeout=2)
