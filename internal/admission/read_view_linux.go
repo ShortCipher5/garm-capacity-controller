@@ -93,6 +93,10 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context) (SQLiteSnapshot, error) 
 		if err != nil {
 			return err
 		}
+		result.ExecutionPlanCount, result.UnplannedReservationCount, err = sqliteExecutionPlanCounts(tx)
+		if err != nil {
+			return err
+		}
 		result.RecentCancellations, result.CancellationCount, err = sqliteRecentCancellations(tx)
 		if err != nil {
 			return err

@@ -52,7 +52,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 	inventory := map[[2]string]admission.InventoryResource{}
 	seen := map[string]bool{}
 	for _, row := range rows {
-		req, _, err := f.request(row.Name, row.PoolID)
+		req, err := f.accountingRequest(state, row.Name, row.PoolID, "")
 		if err != nil || seen[row.Name] || (row.ProviderID != "" && row.ProviderID != row.Name) {
 			return ErrUnavailable
 		}
@@ -83,6 +83,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 		inventory[[2]string{req.Host, row.Name}] = resource
 	}
 	snapshot := admission.InventorySnapshot{}
+	physicalNames := map[string]bool{}
 	for host, backend := range f.hosts {
 		instances, err := backend.Instances(ctx)
 		if err != nil {
@@ -90,15 +91,16 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 		}
 		hostNames := map[string]bool{}
 		for _, instance := range instances {
-			policy, known := f.pools[instance.PoolID]
-			if !known || policy.Host != host || instance.ControllerID != f.controller || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || hostNames[instance.Name] {
+			_, known := f.pools[instance.PoolID]
+			if !known || physicalNames[instance.Name] || instance.ControllerID != f.controller || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || hostNames[instance.Name] {
 				return ErrUnavailable
 			}
-			req, _, err := f.request(instance.Name, instance.PoolID)
+			req, err := f.accountingRequest(state, instance.Name, instance.PoolID, host)
 			if err != nil {
 				return ErrUnavailable
 			}
 			hostNames[instance.Name] = true
+			physicalNames[instance.Name] = true
 			identity := [2]string{host, instance.Name}
 			resource, exists := inventory[identity]
 			if exists && resource.Pool != instance.PoolID {

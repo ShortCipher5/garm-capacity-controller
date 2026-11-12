@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 6
+const sqliteCurrentVersion = 7
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -216,6 +216,17 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 			if err := sqliteAudit(tx, "schema_migrated_v6", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 7 {
+			if _, err := tx.Exec(sqlitePlacementSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v7", "", s.now()); err != nil {
 				return err
 			}
 		}
@@ -656,8 +667,9 @@ func (s *SQLiteStore) CompleteReconciliation(ctx context.Context, fence Fence, s
 		}
 		for _, resource := range snapshot.Resources {
 			identity := [2]string{resource.Host, resource.ID}
-			pool, poolOK := config.Pools[resource.Pool]
-			if !validInventory(resource) || !seenHosts[resource.Host] || !poolOK || !contains(pool.Hosts, resource.Host) || seen[identity] {
+			_, poolOK := config.Pools[resource.Pool]
+			// Eligibility limits NEW placement, never visibility of existing charge.
+			if !validInventory(resource) || !seenHosts[resource.Host] || !poolOK || seen[identity] {
 				return ErrReconciliation
 			}
 			seen[identity] = true
@@ -705,12 +717,14 @@ type AuditEvent struct {
 }
 
 type SQLiteSnapshot struct {
-	HostBindings       map[string]HostBinding
-	LegacyUnboundHosts []string
-	Ready              bool
-	Epoch              int64
-	Config             Config
-	Reservations       map[string]Reservation
+	ExecutionPlanCount        int64
+	UnplannedReservationCount int64
+	HostBindings              map[string]HostBinding
+	LegacyUnboundHosts        []string
+	Ready                     bool
+	Epoch                     int64
+	Config                    Config
+	Reservations              map[string]Reservation
 	// RecentCancellations is at most 100 entries, NEVER absence proof.
 	RecentCancellations map[string]Cancellation
 	CancellationCount   int64
@@ -740,6 +754,10 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 			result.Ready = false
 		}
 		result.Reservations, err = sqliteReservations(tx)
+		if err != nil {
+			return err
+		}
+		result.ExecutionPlanCount, result.UnplannedReservationCount, err = sqliteExecutionPlanCounts(tx)
 		if err != nil {
 			return err
 		}

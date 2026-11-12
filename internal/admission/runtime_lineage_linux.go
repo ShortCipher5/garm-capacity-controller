@@ -156,7 +156,7 @@ func sqliteRuntimePreflight(path, expected string) error {
 	}
 	defer db.Close()
 	var version, application int
-	if db.QueryRow("PRAGMA user_version").Scan(&version) != nil || db.QueryRow("PRAGMA application_id").Scan(&application) != nil || version != sqliteCurrentVersion || application != 0x47434331 {
+	if db.QueryRow("PRAGMA user_version").Scan(&version) != nil || db.QueryRow("PRAGMA application_id").Scan(&application) != nil || (version < 6 || version > sqliteCurrentVersion) || application != 0x47434331 {
 		return ErrRuntimeLineage
 	}
 	return sqliteRuntimeIdentity(db.QueryRow, expected)

@@ -329,6 +329,8 @@ func sqliteCheckArtifact(ctx context.Context, s *SQLiteStore) error {
 	if invalid {
 		return errors.New("backup foreign key check failed")
 	}
-	_, err = s.Snapshot(ctx)
-	return err
+	if _, err = s.Snapshot(ctx); err != nil {
+		return err
+	}
+	return sqliteCheckExecutionPlans(ctx, s)
 }

@@ -21,9 +21,13 @@ func providerView(instance incusapi.Instance, policy PoolPolicy) common.Provider
 // Get never converts a failed read or uncertain dispatch to provider-not-found.
 // Proof-based absence and retirement are deliberately not implemented yet.
 func (f *Facade) Get(ctx context.Context, name, pool string) (common.ProviderInstance, error) {
-	req, policy, err := f.request(name, pool)
+	plan, policy, err := f.planned(ctx, name, pool)
+	req := plan.Request
 	if err != nil {
 		return common.ProviderInstance{}, err
+	}
+	if _, err := f.boundBackend(ctx, req.Host); err != nil {
+		return common.ProviderInstance{}, ErrUnavailable
 	}
 	instance, err := f.hosts[req.Host].Instance(ctx, name)
 	if err != nil || instance.Name != name || instance.ControllerID != f.controller || instance.PoolID != pool || instance.ReservationKey != req.Key || instance.CPUMillis != req.Resources.CPU || instance.RAMMiB != req.Resources.RAM {
@@ -36,25 +40,40 @@ func (f *Facade) List(ctx context.Context, pool string) ([]common.ProviderInstan
 	if !ok {
 		return nil, ErrPolicy
 	}
-	instances, err := f.hosts[policy.Host].Instances(ctx)
+	result := []common.ProviderInstance{}
+	seen := map[string]bool{}
+	state, err := f.store.ReadSnapshot(ctx)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	result := []common.ProviderInstance{}
-	seen := map[string]bool{}
-	for _, instance := range instances {
-		if instance.ControllerID != f.controller || instance.PoolID != pool {
-			continue
-		}
-		req, _, err := f.request(instance.Name, pool)
-		if err != nil || seen[instance.Name] || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 {
+	// Include every enrolled host, not just currently eligible destinations.
+	// Removing an eligibility entry cannot hide a previously placed runner.
+	for host, backend := range f.hosts {
+		if _, err := f.boundBackend(ctx, host); err != nil {
 			return nil, ErrUnavailable
 		}
-		seen[instance.Name] = true
-		if instance.ReservationKey != "" && instance.ReservationKey != req.Key {
+		instances, err := backend.Instances(ctx)
+		if err != nil {
 			return nil, ErrUnavailable
 		}
-		result = append(result, providerView(instance, policy))
+		for _, instance := range instances {
+			if instance.ControllerID != f.controller || instance.PoolID != pool {
+				continue
+			}
+			req, err := f.accountingRequest(state, instance.Name, pool, host)
+			if err != nil || seen[instance.Name] || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || (instance.ReservationKey != "" && instance.ReservationKey != req.Key) {
+				return nil, ErrUnavailable
+			}
+			seen[instance.Name] = true
+			viewPolicy := policy
+			if plan, storedPolicy, err := f.planned(ctx, instance.Name, pool); err == nil {
+				if plan.Request.Host != host {
+					return nil, ErrUnavailable
+				}
+				viewPolicy = storedPolicy
+			}
+			result = append(result, providerView(instance, viewPolicy))
+		}
 	}
 	return result, nil
 }

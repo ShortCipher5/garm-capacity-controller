@@ -11,6 +11,7 @@ Repository pools can each have a sensible `max_runners` while their combined dem
 Garm remains responsible for runner demand and GitHub integration. This controller adds:
 
 - **One global admission transaction** covering global, per-host and pool CPU/RAM/runner budgets.
+- **Atomic configured multi-host placement** with [immutable execution settings](docs/durable-placement.md), conservative policy revocation and no ambiguous-create failover.
 - **Durable reservations and one-shot dispatch intents** before physical creation. A lost response remains charged, not retried as a new create.
 - **Barrier-first reconciliation** of Garm runners, Incus instances, operations and reservations, including orphans and unknown outcomes.
 - **Explicit host enable/pause primitives**, without pretending that pausing claims prevents idle runners accepting jobs.
