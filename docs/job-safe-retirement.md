@@ -108,3 +108,9 @@ assignment/backend-frontier requirements, and an authenticated project-observati
 API with explicit uncleared external gates. Its fixtures show why even matching
 empty lists can coexist with a late queued write or a permission-hidden target.
 It does not change the blocked retirement or charged-allocation behavior above.
+
+The [pinned official runner lifecycle source-contract gate](../integration/actions-runner-v2.323.0/README.md)
+executes actual Runner/JobDispatcher methods with mocked service/worker inputs.
+It verifies counterexamples and cleanup ordering, not a deployed runner fence or
+authority to retire resources. Its hosted compiled result is distinct from local
+source-hash checks; absent SDKs must not be installed as an unapproved fallback.
