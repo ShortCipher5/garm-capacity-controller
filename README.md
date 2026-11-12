@@ -51,6 +51,8 @@ The `feat/sqlite-ledger` branch adds transactional SQLite admission, audit and n
 
 See [architecture and invariants](docs/architecture.md), [integration gates](docs/integrations.md), [security](SECURITY.md), and the [roadmap](docs/roadmap.md).
 
+A pinned pre-JIT Garm compatibility hook and executable protocol harness are being developed on `feat/garm-admission-compat`; see [the integration tradeoffs](integration/garm-v0.2.1/README.md) on that branch. A credential-isolated real gateway is still required.
+
 ## Status and verification
 
 Implemented: conservative admission model, durable local reservations, idempotency, cross-process locking and concurrency/restart tests. Not implemented: production adapters, production admin authentication, credential storage, real reconciliation, release, historical telemetry, priority scheduling or production drain. CI tests the model only. Passing CI is not a certification of Garm/provider compatibility.
