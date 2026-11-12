@@ -4,6 +4,7 @@ import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
 import { OnboardingPreflight } from "./onboarding.jsx";
 import { GarmManagement } from "./garm-management.jsx";
+import { AuditEvents } from "./audit-events.jsx";
 import { Management } from "./management.jsx";
 
 const fmt = (n) => n.toLocaleString();
@@ -272,31 +273,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
               </p>
             </div>
           </section>
-          <section id="events">
-            <div className="section-heading">
-              <h2>Audit events</h2>
-              <span className="muted">Ledger records, newest first</span>
-            </div>
-            <div className="card decisions">
-              {data.events.length ? (
-                [...data.events]
-                  .sort((a, b) => b.sequence - a.sequence)
-                  .map((e) => (
-                    <article className="event" key={e.sequence}>
-                      <span className="pill">#{e.sequence}</span>
-                      <div>
-                        <strong>{e.kind}</strong>
-                        <time dateTime={e.at}>{date(e.at)}</time>
-                        {e.host && <p>Host: {e.host}</p>}
-                        {e.request_key && <p>{e.kind === "admin_policy_change" ? "Policy audit: " : e.kind.startsWith("onboarding_probe_") ? "Onboarding audit: " : "Request: "}{e.request_key}</p>}
-                      </div>
-                    </article>
-                  ))
-              ) : (
-                <p className="empty">No audit events recorded.</p>
-              )}
-            </div>
-          </section>
+          <AuditEvents events={data.events} />
         </div>
         <footer>
           No measured usage history is available. No Garm registration, dynamic placement, provisioning, drain, retirement or resource release is available here.

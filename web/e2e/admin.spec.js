@@ -156,7 +156,7 @@ test("review cancellation and separate write role persist actual policy with aud
   await page.getByLabel("Management write token").fill("c".repeat(64));
   await page.getByRole("button", { name: "Apply reviewed change" }).dblclick();
   await expect(page.getByText("Configured mode: disabled")).toBeVisible();
-  await expect(page.getByText("admin_policy_change", { exact: true })).toHaveCount(1);
+  await expect(page.locator("#events .event").getByText("admin_policy_change", { exact: true })).toHaveCount(1);
   await expect(page.getByText("Provisioning off · Admission barrier not ready")).toBeVisible();
   await page.getByLabel("Policy control").selectOption("pool_budget");
   await page.getByLabel("Budget runners").fill("0");
@@ -164,7 +164,7 @@ test("review cancellation and separate write role persist actual policy with aud
   await page.getByRole("button", { name: "Review change" }).click();
   await page.getByLabel("Management write token").fill("c".repeat(64));
   await page.getByRole("button", { name: "Apply reviewed change" }).click();
-  await expect(page.getByText("admin_policy_change", { exact: true })).toHaveCount(2);
+  await expect(page.locator("#events .event").getByText("admin_policy_change", { exact: true })).toHaveCount(2);
   await expect(page.locator("#pools tbody tr")).toContainText("pool-a");
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0,0]);
   await page.getByRole("button", { name: "Disconnect" }).click();
@@ -266,8 +266,8 @@ test("allowlisted Incus preflight is authenticated, audited, and never enrollmen
   await expect(page.locator(".preflight-result")).toContainText("No enrollment or activation occurred. Capacity remains unqualified.");
   await expect(page.locator("body")).not.toContainText("private-fixture-onboarding-daemon");
   await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
-  await expect(page.getByText("onboarding_probe_requested", { exact: true })).toHaveCount(1);
-  await expect(page.getByText("onboarding_probe_completed", { exact: true })).toHaveCount(1);
+  await expect(page.locator("#events .event").getByText("onboarding_probe_requested", { exact: true })).toHaveCount(1);
+  await expect(page.locator("#events .event").getByText("onboarding_probe_completed", { exact: true })).toHaveCount(1);
   await expect(page.locator("#hosts h3")).toHaveCount(1);
   await expect(page.locator("#onboarding-preflight").getByRole("button", { name: /Enroll|Activate|Reset|Clear legacy/ })).toHaveCount(0);
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0,0]);
@@ -292,4 +292,50 @@ test("disconnect during preflight cannot restore a result or write credential", 
   await connect(page);
   await page.getByRole("button", { name: "Load preflight profiles", exact: true }).click();
   await expect(page.getByLabel("Preflight management token", { exact: true })).toHaveValue("");
+});
+
+test("audit filters stay snapshot-local across clear, refresh and disconnect", async ({ page }) => {
+  let refreshed = false;
+  const events = [
+    { sequence: 1, kind: "admitted", host: "host-a", request_key: "one", at: "2026-01-01T00:00:00Z" },
+    { sequence: 2, kind: "denied", host: "host-b", request_key: "two", at: "2026-01-01T00:00:00Z" },
+    { sequence: 3, kind: "denied", host: "", request_key: "three", at: "2026-01-01T00:00:00Z" },
+  ];
+  // Obtain the baseline through the real browser TLS path (which trusts only
+  // this disposable fixture key), then replace events for this UI-only case.
+  const snapshotResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/admin/api/v1/overview");
+  await connect(page);
+  const body = await (await snapshotResponse).json();
+  await page.route("**/admin/api/v1/overview", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", json: { ...body, events: refreshed ? [] : events } });
+  });
+  const requests = [];
+  page.on("request", request => requests.push(request.url()));
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  const audit = page.locator("#events");
+  await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
+  const initial = requests.length;
+  await page.getByLabel("Event kind", { exact: true }).selectOption("denied");
+  await page.getByLabel("Event host", { exact: true }).selectOption("host-a");
+  await expect(audit).toContainText("No audit events match these filters.");
+  await expect(audit).toContainText("Showing 0 of 3 events in this snapshot");
+  await page.getByLabel("Event host", { exact: true }).selectOption("host-b");
+  await expect(audit.locator(".event .pill")).toHaveText(["#2"]);
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
+  await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toBeDisabled();
+  expect(requests.length).toBe(initial);
+  await page.getByLabel("Event host", { exact: true }).selectOption("host-b");
+  refreshed = true;
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  await expect(audit).toContainText("Showing 0 of 0 events in this snapshot");
+  await expect(audit).toContainText("No audit events recorded.");
+  await expect(page.getByLabel("Event host", { exact: true })).toHaveValue("host-b");
+  await expect(audit).toContainText("host-b (not in snapshot)");
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  refreshed = false;
+  await page.getByLabel("Admin read token").fill(token);
+  await page.getByRole("button", { name: "Connect read-only", exact: true }).click();
+  await expect(page.getByLabel("Event host", { exact: true })).toHaveValue("");
+  await expect(audit.locator(".event")).toHaveCount(3);
 });
