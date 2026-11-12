@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -213,6 +212,7 @@ func TestProcessWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	awaitProcessStart(t)
 	_, err = s.Admit(request(os.Getenv("CAPACITY_TEST_KEY")))
 	if err != nil && !errors.Is(err, ErrDenied) {
 		t.Fatal(err)
@@ -223,19 +223,9 @@ func TestCrossProcessAdmission(t *testing.T) {
 	c := fixture(time.Now())
 	c.Global.Runners = 2
 	s := newStore(t, c)
-	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			cmd := exec.Command(os.Args[0], "-test.run=^TestProcessWorker$")
-			cmd.Env = append(os.Environ(), "CAPACITY_TEST_LEDGER="+s.path, "CAPACITY_TEST_KEY="+fmt.Sprint(i))
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Errorf("worker: %v %s", err, out)
-			}
-		}(i)
-	}
-	wg.Wait()
+	runProcessContenders(t, 12, "^TestProcessWorker$", func(i int) []string {
+		return []string{"CAPACITY_TEST_LEDGER=" + s.path, "CAPACITY_TEST_KEY=" + fmt.Sprint(i)}
+	})
 	l, err := s.Snapshot()
 	if err != nil || len(l.Reservations) != 2 {
 		t.Fatalf("cross-process budget bypass: %d %v", len(l.Reservations), err)

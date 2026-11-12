@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -536,6 +535,7 @@ func TestSQLiteProcessWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	awaitProcessStart(t)
 	r := request(os.Getenv("CAPACITY_SQLITE_TEST_KEY"))
 	if os.Getenv("CAPACITY_SQLITE_TEST_OTHER") == "1" {
 		r.Host, r.Pool = "b", "api"
@@ -553,19 +553,9 @@ func TestSQLiteCrossProcessAdmission(t *testing.T) {
 	if err := s.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
 		t.Fatal(err)
 	}
-	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			cmd := exec.Command(os.Args[0], "-test.run=^TestSQLiteProcessWorker$")
-			cmd.Env = append(os.Environ(), "CAPACITY_SQLITE_TEST_PATH="+path, "CAPACITY_SQLITE_TEST_KEY="+fmt.Sprint(i), fmt.Sprintf("CAPACITY_SQLITE_TEST_OTHER=%d", i%2))
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Errorf("worker: %v %s", err, out)
-			}
-		}(i)
-	}
-	wg.Wait()
+	runProcessContenders(t, 12, "^TestSQLiteProcessWorker$", func(i int) []string {
+		return []string{"CAPACITY_SQLITE_TEST_PATH=" + path, "CAPACITY_SQLITE_TEST_KEY=" + fmt.Sprint(i), fmt.Sprintf("CAPACITY_SQLITE_TEST_OTHER=%d", i%2)}
+	})
 	state := sqliteSnapshot(t, s)
 	if len(state.Reservations) != 2 || state.Allocated.Global.Runners != 2 {
 		t.Fatalf("cross-process global cap bypass: %+v", state.Allocated)

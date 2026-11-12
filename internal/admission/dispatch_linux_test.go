@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -296,6 +295,7 @@ func TestDispatchProcessWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	awaitProcessStart(t)
 	_, err = s.ExecuteDispatch(context.Background(), request("process"), func(context.Context, DispatchPermit) (DispatchReceipt, error) {
 		f, err := os.OpenFile(os.Getenv("CAPACITY_DISPATCH_TEST_LOG"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
@@ -318,19 +318,12 @@ func TestDispatchSeparateProcessesInvokeBackendOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := filepath.Join(t.TempDir(), "backend.log")
-	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			cmd := exec.Command(os.Args[0], "-test.run=^TestDispatchProcessWorker$")
-			cmd.Env = append(os.Environ(), "CAPACITY_DISPATCH_TEST_PATH="+path, "CAPACITY_DISPATCH_TEST_LOG="+log)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Errorf("worker: %v %s", err, out)
-			}
-		}()
+	report := runProcessContenders(t, 12, "^TestDispatchProcessWorker$", func(i int) []string {
+		return []string{"CAPACITY_DISPATCH_TEST_PATH=" + path, "CAPACITY_DISPATCH_TEST_LOG=" + log}
+	})
+	if report.Processes != 12 || report.Waves != 3 || report.Peak != 4 {
+		t.Fatalf("contention coverage changed %+v", report)
 	}
-	wg.Wait()
 	data, err := os.ReadFile(log)
 	if err != nil || strings.Count(string(data), "backend called") != 1 {
 		t.Fatalf("backend invocation count: %q %v", data, err)
