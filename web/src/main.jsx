@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
+import { OnboardingPreflight } from "./onboarding.jsx";
+import { GarmManagement } from "./garm-management.jsx";
 import { Management } from "./management.jsx";
 
 const fmt = (n) => n.toLocaleString();
@@ -83,7 +85,7 @@ function Usage({ allocation, metric = false }) {
     );
   });
 }
-function Dashboard({ data, busy, refresh, disconnect }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding }) {
   return (
     <>
       <aside className="sidebar">
@@ -129,6 +131,8 @@ function Dashboard({ data, busy, refresh, disconnect }) {
           </button>
         </header>
         <Notice />
+        {data.legacy_source_preparations > 0 && <div className="notice" role="status"><strong>Original source preparation history unavailable</strong><span>{data.legacy_source_preparations} historical reservations remain charged but cannot be retroactively qualified for creation. Reconciliation, current runner metadata and this console cannot reset or import their original JIT history.</span></div>}
+        {data.legacy_unplanned_reservations > 0 && <div className="notice" role="status"><strong>Historical execution plans unavailable</strong><span>{data.legacy_unplanned_reservations} reservations remain charged but lack immutable execution plans. They cannot be created or automatically imported. This console cannot reset or clear their history.</span></div>}
         {data.hosts.some((host) => host.backend_binding_status === "legacy_scope_import_required") && <div className="notice" role="status"><strong>Legacy backend scope import required</strong><span>Previously charged hosts cannot auto-bind, including after later cancellation removes charges. A separate qualified scope-import workflow is required and is not implemented. Mode and budget edits do not clear this exclusion.</span></div>}
         <div className="snapshot-meta" role="status">
           <span>
@@ -143,6 +147,8 @@ function Dashboard({ data, busy, refresh, disconnect }) {
           </span>
         </div>
         <Management data={data} refresh={refresh} />
+        {data.garm_management_available && <GarmManagement read={readGarm} />}
+        {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}
         <div className="metrics">
           <Usage allocation={data.global} metric />
         </div>
@@ -282,7 +288,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
                         <strong>{e.kind}</strong>
                         <time dateTime={e.at}>{date(e.at)}</time>
                         {e.host && <p>Host: {e.host}</p>}
-                        {e.request_key && <p>{e.kind === "admin_policy_change" ? "Policy audit: " : "Request: "}{e.request_key}</p>}
+                        {e.request_key && <p>{e.kind === "admin_policy_change" ? "Policy audit: " : e.kind.startsWith("onboarding_probe_") ? "Onboarding audit: " : "Request: "}{e.request_key}</p>}
                       </div>
                     </article>
                   ))
@@ -299,7 +305,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
     </>
   );
 }
-function App() {
+export function App() {
   const session = useRef(new ReadSession());
   const generation = useRef(0);
   const input = useRef(null);
@@ -346,6 +352,14 @@ function App() {
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
+        readOnboarding={async () => {
+          try { return await session.current.onboardingSnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
+        readGarm={async () => {
+          try { return await session.current.garmSnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
       />
     );
   return (
@@ -403,4 +417,6 @@ function App() {
     </div>
   );
 }
-createRoot(document.getElementById("root")).render(<App />);
+if (typeof document !== "undefined") {
+  createRoot(document.getElementById("root")).render(<App />);
+}

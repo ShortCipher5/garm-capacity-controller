@@ -32,11 +32,13 @@ type Backend interface {
 	Operations(context.Context) ([]incusapi.Operation, error)
 }
 
-// PoolPolicy is trusted server configuration. Fixed placement intentionally
-// precedes a future transactional host chooser. Flavor/Image are the Garm-side
+// PoolPolicy is trusted server configuration. Host is the legacy single-host
+// shorthand; Hosts enables atomic durable selection. Flavor/Image are Garm-side
 // identifiers; neither can override the pinned image or explicit allocation.
 type PoolPolicy struct {
-	Host        string        `json:"host"`
+	Host        string        `json:"host,omitempty"`
+	Hosts       []string      `json:"hosts,omitempty"`
+	Strategy    string        `json:"strategy,omitempty"`
 	CPU         int64         `json:"cpu_millis"`
 	RAM         int64         `json:"ram_mib"`
 	Flavor      string        `json:"flavor"`
@@ -48,10 +50,12 @@ type PoolPolicy struct {
 }
 
 type Facade struct {
-	store      *admission.SQLiteStore
-	controller string
-	pools      map[string]PoolPolicy
-	hosts      map[string]Backend
+	store             *admission.SQLiteStore
+	controller        string
+	pools             map[string]PoolPolicy
+	hosts             map[string]Backend
+	preparationRoutes map[string]preparationRoute
+	preparationSource PreparationSource
 }
 
 func key(controller, pool, name string) string {
@@ -59,7 +63,7 @@ func key(controller, pool, name string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func New(ctx context.Context, store *admission.SQLiteStore, controller string, pools map[string]PoolPolicy, hosts map[string]Backend) (*Facade, error) {
+func New(ctx context.Context, store *admission.SQLiteStore, controller string, pools map[string]PoolPolicy, hosts map[string]Backend, preparations ...PreparationSettings) (*Facade, error) {
 	if store == nil || controller == "" || strings.ContainsRune(controller, 0) || len(pools) == 0 || len(hosts) == 0 {
 		return nil, ErrPolicy
 	}
@@ -82,21 +86,43 @@ func New(ctx context.Context, store *admission.SQLiteStore, controller string, p
 	}
 	for id, policy := range pools {
 		configured, ok := state.Config.Pools[id]
-		allowed := false
-		for _, host := range configured.Hosts {
-			if host == policy.Host {
-				allowed = true
-			}
-		}
-		if !ok || !allowed || f.hosts[policy.Host] == nil || policy.Flavor == "" || policy.Image == "" || (policy.Arch != common.Amd64 && policy.Arch != common.Arm64) || strings.ContainsRune(id, 0) {
+		ids, hostErr := placementHosts(policy)
+		if !ok || hostErr != nil || policy.Flavor == "" || policy.Image == "" || (policy.Arch != common.Amd64 && policy.Arch != common.Arm64) || strings.ContainsRune(id, 0) {
 			return nil, ErrPolicy
 		}
+		for _, host := range ids {
+			allowed := false
+			for _, configuredHost := range configured.Hosts {
+				if host == configuredHost {
+					allowed = true
+				}
+			}
+			if !allowed || f.hosts[host] == nil {
+				return nil, ErrPolicy
+			}
+		}
+		if policy.Strategy == "" {
+			policy.Strategy = "first_fit"
+		}
+		if policy.Strategy != "first_fit" && policy.Strategy != "least_runners" {
+			return nil, ErrPolicy
+		}
+		policy.Hosts = ids
+
 		spec := incusapi.InstanceSpec{Name: "policy-validation", Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: policy.CPU, RAMMiB: policy.RAM, UserData: "validation", ControllerID: controller, PoolID: id, ReservationKey: strings.Repeat("0", 64)}
 		if incusapi.ValidateSpec(spec) != nil {
 			return nil, ErrPolicy
 		}
 		policy.Profiles = append([]string(nil), policy.Profiles...)
 		f.pools[id] = policy
+	}
+	if len(preparations) > 1 {
+		return nil, ErrPolicy
+	}
+	if len(preparations) == 1 {
+		if err := f.configurePreparations(preparations[0]); err != nil {
+			return nil, err
+		}
 	}
 	return f, nil
 }
@@ -106,7 +132,7 @@ func (f *Facade) request(name, pool string) (admission.Request, PoolPolicy, erro
 	if !ok || name == "" || strings.ContainsRune(name, 0) {
 		return admission.Request{}, PoolPolicy{}, ErrPolicy
 	}
-	req := admission.Request{Key: key(f.controller, pool, name), Pool: pool, Host: policy.Host, Resources: admission.Resources{CPU: policy.CPU, RAM: policy.RAM, Runners: 1}}
+	req := admission.Request{Key: key(f.controller, pool, name), Pool: pool, Host: policy.Hosts[0], Resources: admission.Resources{CPU: policy.CPU, RAM: policy.RAM, Runners: 1}}
 	spec := incusapi.InstanceSpec{Name: name, Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: policy.CPU, RAMMiB: policy.RAM, UserData: "validation", ControllerID: f.controller, PoolID: pool, ReservationKey: req.Key}
 	if incusapi.ValidateSpec(spec) != nil {
 		return admission.Request{}, PoolPolicy{}, ErrPolicy
@@ -120,11 +146,17 @@ func (f *Facade) Admit(ctx context.Context, request garmprotocol.Request) (int, 
 	if request.Validate() != nil {
 		return 0, nil, ErrPolicy
 	}
-	req, _, err := f.request(request.Name, request.PoolID)
+	req, policy, err := f.request(request.Name, request.PoolID)
 	if err != nil {
 		return 0, nil, err
 	}
-	_, err = f.store.Admit(ctx, req)
+	if f.preparationAdmissionCheck(ctx, req.Pool) != nil {
+		// Known upstream/configuration drift is benign backpressure BEFORE a
+		// reservation or source JIT. Never adopt a newer generation silently.
+		err = admission.ErrReconciliation
+	} else {
+		_, err = f.store.AdmitPlacement(ctx, admission.PlacementRequest{Key: req.Key, Pool: req.Pool, Resources: req.Resources, Execution: executionImage(f.controller, request.Name, policy), Hosts: append([]string(nil), policy.Hosts...), Strategy: policy.Strategy})
+	}
 	no := false
 	response := garmprotocol.Response{Protocol: garmprotocol.Version, Name: request.Name, PoolID: request.PoolID, Dispatched: &no}
 	exit := 0
@@ -155,9 +187,22 @@ func (f *Facade) verified(ctx context.Context, req admission.Request, name strin
 // Official pinned provider-common cloud-init rendering performs no download.
 // The bootstrap and rendered userdata are neither journaled nor logged here.
 func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance) (common.ProviderInstance, error) {
-	req, policy, err := f.request(bootstrap.Name, bootstrap.PoolID)
+	plan, policy, err := f.planned(ctx, bootstrap.Name, bootstrap.PoolID)
+	req := plan.Request
+	if err == nil && !f.planAllowed(plan) {
+		return common.ProviderInstance{}, ErrUnavailable
+	}
 	if err != nil || bootstrap.Flavor != policy.Flavor || bootstrap.Image != policy.Image || bootstrap.OSType != common.Linux || bootstrap.OSArch != policy.Arch || (len(bootstrap.ExtraSpecs) != 0 && !bytes.Equal(bytes.TrimSpace(bootstrap.ExtraSpecs), []byte("{}"))) {
 		return common.ProviderInstance{}, ErrPolicy
+	}
+	requirePreparation := f.PreparationConfigured() || f.RuntimeOriginalPreparationRequired()
+	var sourceReceipt admission.OriginalPreparationReceipt
+	var sourceRow admission.GarmRowObservation
+	if requirePreparation {
+		sourceReceipt, sourceRow, err = f.preparedCreate(ctx, plan, bootstrap.JitConfigEnabled)
+		if err != nil {
+			return common.ProviderInstance{}, ErrUnavailable
+		}
 	}
 	// Restrict this slice to the official default cloud-init path, not custom scripts.
 	if bootstrap.UserDataOptions.EnableBootDebug || len(bootstrap.UserDataOptions.ExtraPackages) != 0 {
@@ -179,7 +224,7 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	if err != nil {
 		return common.ProviderInstance{}, ErrUnavailable
 	}
-	_, err = f.store.ExecuteDispatchBound(ctx, req, binding, func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
+	execute := func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
 		created, createErr := f.hosts[req.Host].Create(ctx, spec)
 		receipt := admission.DispatchReceipt{State: "unknown", OperationID: created.OperationID, ResourceID: created.ResourceID}
 		if createErr != nil {
@@ -209,14 +254,19 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 		}
 		receipt.State = "confirmed"
 		return receipt, nil
-	})
+	}
+	if requirePreparation {
+		_, err = f.store.ExecutePreparedDispatch(ctx, plan, binding, sourceReceipt, sourceRow, execute)
+	} else {
+		_, err = f.store.ExecutePlannedDispatch(ctx, plan, binding, execute)
+	}
 	if err != nil {
 		// A confirmed replay may return the same verified resource, but never create.
 		if !errors.Is(err, admission.ErrDispatchClaimed) {
 			return common.ProviderInstance{}, ErrUnavailable
 		}
 		record, lookupErr := f.store.LookupDispatch(ctx, req.Key)
-		if lookupErr != nil || record.State != "confirmed" || record.ResourceID != bootstrap.Name || record.HostBindingSequence != binding.Sequence {
+		if lookupErr != nil || record.State != "confirmed" || record.ResourceID != bootstrap.Name || record.HostBindingSequence != binding.Sequence || (requirePreparation && record.OriginalPreparationSequence != sourceReceipt.RecordSequence) {
 			return common.ProviderInstance{}, ErrUnavailable
 		}
 	}
@@ -233,7 +283,8 @@ func (f *Facade) CancelAdmission(ctx context.Context, request garmprotocol.Reque
 	if request.Validate() != nil {
 		return garmprotocol.CancellationResponse{}, ErrPolicy
 	}
-	req, _, err := f.request(request.Name, request.PoolID)
+	plan, _, err := f.planned(ctx, request.Name, request.PoolID)
+	req := plan.Request
 	if err != nil {
 		return garmprotocol.CancellationResponse{}, err
 	}
