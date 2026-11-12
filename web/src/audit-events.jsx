@@ -11,16 +11,16 @@ export function AuditEvents({ events }) {
     <div className="section-heading"><h2>Audit events</h2><span className="muted">Ledger records, newest first</span></div>
     <div className="card decisions">
       <div className="audit-filters">
-        <label>Event kind<select value={kind} onChange={(e) => setKind(e.target.value)}>
+        <div className="audit-filter"><label htmlFor="audit-event-kind">Event kind</label><select id="audit-event-kind" value={kind} onChange={(e) => setKind(e.target.value)}>
           <option value="">All kinds</option>
           {kind && !kinds.includes(kind) && <option value={kind}>{kind} (not in snapshot)</option>}
           {kinds.map((value) => <option key={value} value={value}>{value}</option>)}
-        </select></label>
-        <label>Event host<select value={host} onChange={(e) => setHost(e.target.value)}>
+        </select></div>
+        <div className="audit-filter"><label htmlFor="audit-event-host">Event host</label><select id="audit-event-host" value={host} onChange={(e) => setHost(e.target.value)}>
           <option value="">All hosts (including unassigned)</option>
           {host && !hosts.includes(host) && <option value={host}>{host} (not in snapshot)</option>}
           {hosts.map((value) => <option key={value} value={value}>{value}</option>)}
-        </select></label>
+        </select></div>
         <button className="quiet" disabled={!kind && !host} onClick={() => { setKind(""); setHost(""); }}>Clear filters</button>
       </div>
       <p role="status">Showing {matches.length} of {events.length} events in this snapshot</p>
