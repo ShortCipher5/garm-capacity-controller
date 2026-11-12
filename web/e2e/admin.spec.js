@@ -231,26 +231,9 @@ test("actual Garm settings use journalled typed writes and cancellation", async 
   await expect(page.getByLabel("Pool priority")).toHaveValue("2");
 });
 
-test("ambiguous committed Garm write remains blocked after refresh and reconnect", async ({ page }) => {
-  await connect(page);
-  await page.getByRole("button", { name: "Load Garm settings" }).click();
-  await page.getByLabel("Pool priority").fill("999");
-  await page.getByLabel("Garm audit reason").fill("test-only committed500 fault");
-  await page.getByRole("button", { name: "Review Garm change" }).click();
-  await page.getByLabel("Garm management write token").fill("c".repeat(64));
-  await page.getByRole("button", { name: "Apply reviewed Garm change" }).click();
-  await expect(page.locator("#garm-management")).toContainText("outcome unavailable");
-  await expect(page.getByRole("button", { name: "Review Garm change" })).toBeDisabled();
-  await page.getByRole("button", { name: "Refresh Garm settings" }).click();
-  await expect(page.getByLabel("Pool priority")).toHaveValue("999");
-  await expect(page.locator("#garm-management")).toContainText("durable pending or unknown operation blocks Garm writes");
-  await page.getByRole("button", { name: "Disconnect" }).click();
-  await connect(page);
-  await page.getByRole("button", { name: "Load Garm settings" }).click();
-  await expect(page.getByRole("button", { name: "Review Garm change" })).toBeDisabled();
-  await expect(page.locator(".garm-audit summary").first()).toContainText("unknown");
-});
-
+// The shared disposable server deliberately retains the later committed500
+// unknown forever. Exercise positive review withdrawal BEFORE that fault; never
+// reset/clear the real journal or pretend a discovery read unblocks it.
 test("discovery-only Garm snapshot shows summaries and removes a pending edit review", async ({ page }) => {
   const writes = [];
   page.on("request", (request) => {
@@ -260,8 +243,11 @@ test("discovery-only Garm snapshot shows summaries and removes a pending edit re
   const initialRead = page.waitForResponse((response) => new URL(response.url()).pathname === "/admin/api/v1/garm" && response.request().method() === "GET");
   await page.getByRole("button", { name: "Load Garm settings" }).click();
   const discovered = await (await initialRead).json();
-  await page.getByLabel("Pool priority").fill("2");
+  expect(discovered.write_blocked).toBe(false);
+  const currentPriority = discovered.settings.pools[0].priority;
+  await page.getByLabel("Pool priority").fill(String(currentPriority === 1000000 ? currentPriority - 1 : currentPriority + 1));
   await page.getByLabel("Garm audit reason").fill("review never applied in discovery mode");
+  await expect(page.getByRole("button", { name: "Review Garm change" })).toBeEnabled();
   await page.getByRole("button", { name: "Review Garm change" }).click();
   await page.getByLabel("Garm management write token").fill("c".repeat(64));
 
@@ -289,6 +275,28 @@ test("discovery-only Garm snapshot shows summaries and removes a pending edit re
   await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
   expect(writes).toHaveLength(0);
 });
+
+
+test("ambiguous committed Garm write remains blocked after refresh and reconnect", async ({ page }) => {
+  await connect(page);
+  await page.getByRole("button", { name: "Load Garm settings" }).click();
+  await page.getByLabel("Pool priority").fill("999");
+  await page.getByLabel("Garm audit reason").fill("test-only committed500 fault");
+  await page.getByRole("button", { name: "Review Garm change" }).click();
+  await page.getByLabel("Garm management write token").fill("c".repeat(64));
+  await page.getByRole("button", { name: "Apply reviewed Garm change" }).click();
+  await expect(page.locator("#garm-management")).toContainText("outcome unavailable");
+  await expect(page.getByRole("button", { name: "Review Garm change" })).toBeDisabled();
+  await page.getByRole("button", { name: "Refresh Garm settings" }).click();
+  await expect(page.getByLabel("Pool priority")).toHaveValue("999");
+  await expect(page.locator("#garm-management")).toContainText("durable pending or unknown operation blocks Garm writes");
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await connect(page);
+  await page.getByRole("button", { name: "Load Garm settings" }).click();
+  await expect(page.getByRole("button", { name: "Review Garm change" })).toBeDisabled();
+  await expect(page.locator(".garm-audit summary").first()).toContainText("unknown");
+});
+
 
 test("allowlisted Incus preflight is authenticated, audited, and never enrollment", async ({ page }) => {
   await connect(page);
