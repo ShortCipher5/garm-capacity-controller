@@ -466,7 +466,7 @@ func TestCreateEvidenceBackupRestoreCLIAndHistoricalProvenance(t *testing.T) {
 		}
 	}
 	// Exact original observed history survives v4->v5 migration; it isn't invented.
-	if _, err = f.store.db.Exec("DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TABLE ledger_lineage; PRAGMA user_version=4"); err != nil {
+	if _, err = f.store.db.Exec("DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	path := f.store.path
@@ -546,7 +546,7 @@ func TestCreateEvidenceCorruptOrNoncanonicalHistoryFailsClosed(t *testing.T) {
 func TestCreateEvidenceMigrationNeverQualifiesUnboundV4Dispatch(t *testing.T) {
 	f := newCreateEvidenceFixture(t, "confirmed", false)
 	proof := f.observe(t)
-	if _, err := f.store.db.Exec("DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TABLE ledger_lineage; PRAGMA user_version=4"); err != nil {
+	if _, err := f.store.db.Exec("DROP TRIGGER create_evidence_immutable_update; DROP TRIGGER create_evidence_immutable_delete; DROP TABLE create_evidence; DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	path := f.store.path

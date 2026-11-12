@@ -5,7 +5,7 @@ import { ReadSession, SessionEnded } from "./client.js";
 const read="a".repeat(64),write="c".repeat(64);
 const settings={settings_available:true,writes_enabled:true,write_blocked:false,history:[],history_truncated:false,settings:{pools:[{id:"00000000-0000-4000-8000-000000000001",provider_name:"capacity",fingerprint:"f".repeat(64),enabled:true,priority:0,max_runners:4,min_idle_runners:1,generation:1,tags:["linux"]}],repositories:[],writes_enabled:true}};
 const resources={cpu_millis:0,ram_mib:0,runners:0};
-const overview={mode:"experimental-ledger",management_enabled:true,policy_revision:"f".repeat(64),experimental_provisioning_enabled:false,admission_ready:false,epoch:0,observed_at:"2026-01-01T00:00:00Z",global:{budget:resources,allocated:resources},hosts:[],pools:[],events:[],states:{}};
+const overview={mode:"experimental-ledger",management_enabled:true,policy_revision:"f".repeat(64),experimental_provisioning_enabled:false,admission_ready:false,epoch:0,immutable_execution_plans:0,legacy_unplanned_reservations:0,observed_at:"2026-01-01T00:00:00Z",global:{budget:resources,allocated:resources},hosts:[],pools:[],events:[],states:{}};
 test("Garm settings reject malformed or misleading types",()=>{
  assert.equal(validateGarm(settings),settings);
  for(const mutate of [(v)=>v.write_blocked="false",(v)=>delete v.settings_available,(v)=>v.settings.pools[0].priority=Number.MAX_SAFE_INTEGER+1,(v)=>v.settings.pools[0].tags=[1],(v)=>v.history={}]){

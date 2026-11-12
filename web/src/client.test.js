@@ -16,6 +16,8 @@ const view = {
   experimental_provisioning_enabled: false,
   admission_ready: false,
   epoch: 0,
+  immutable_execution_plans: 0,
+  legacy_unplanned_reservations: 0,
   observed_at: "2026-01-01T00:00:00Z",
   global: { budget: resource, allocated: resource },
   hosts: [],
@@ -177,4 +179,8 @@ test("host binding classification must be explicit, never hardware qualification
 test("unbound or legacy status cannot advertise new claims allowed",()=>{
  const host={id:"host-a",mode:"enabled",last_observed_healthy:true,observation_fresh:true,new_claims_paused:false,observed_at:view.observed_at,budget:resource,allocated:resource};
  for(const backend_binding_status of ["unbound","legacy_scope_import_required"]){assert.throws(()=>validateOverview({...view,hosts:[{...host,backend_binding_status}]}),/unsupported overview/);}
+});
+
+test("immutable execution-plan counters are explicit and cannot invent migration", () => {
+ for(const field of ["immutable_execution_plans","legacy_unplanned_reservations"]){for(const invalid of [undefined,-1,NaN,"0"]){const candidate=structuredClone(view);candidate[field]=invalid;assert.throws(()=>validateOverview(candidate));}}
 });

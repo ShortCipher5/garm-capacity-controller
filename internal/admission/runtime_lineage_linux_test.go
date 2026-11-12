@@ -76,7 +76,7 @@ func TestRuntimeRejectsBeforeChangingDatabaseOrSidecars(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err = db.Exec("DROP TABLE ledger_lineage; PRAGMA user_version=5"); err != nil {
+				if _, err = db.Exec("DROP TABLE ledger_lineage; DROP TABLE execution_plans; PRAGMA user_version=5"); err != nil {
 					t.Fatal(err)
 				}
 				db.Close()

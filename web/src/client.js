@@ -23,6 +23,8 @@ export function validateOverview(value) {
     !bool(value.experimental_provisioning_enabled) ||
     !bool(value.admission_ready) ||
     !integer(value.epoch) ||
+    !integer(value.immutable_execution_plans) ||
+    !integer(value.legacy_unplanned_reservations) ||
     !time(value.observed_at) ||
     !allocation(value.global) ||
     !Array.isArray(value.hosts) ||
