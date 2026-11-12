@@ -744,3 +744,11 @@ td {
     letter-spacing: -1px;
   }
 }
+.management { margin: 1.5rem 0; }
+.management form { display: grid; gap: 1rem; max-width: 48rem; }
+.management label { display: grid; gap: .4rem; }
+.management select { width: 100%; padding: .7rem; border: 1px solid #cbd5e1; border-radius: .5rem; background: white; color: #172033; }
+.management input { width: 100%; min-width: 0; }
+.budget-fields { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .8rem; }
+.event p { overflow-wrap: anywhere; }
+@media (max-width: 640px) { .budget-fields { grid-template-columns: 1fr; } }

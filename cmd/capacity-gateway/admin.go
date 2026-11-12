@@ -14,10 +14,12 @@ import (
 )
 
 type adminConfiguration struct {
-	Listen    string               `json:"listen"`
-	TLS       securefiles.TLSFiles `json:"tls"`
-	TokenFile string               `json:"token_file"`
-	Assets    string               `json:"assets"`
+	EnableExperimentalManagement bool                 `json:"-"`
+	Listen                       string               `json:"listen"`
+	TLS                          securefiles.TLSFiles `json:"tls"`
+	ManagementTokenFile          string               `json:"management_token_file,omitempty"`
+	TokenFile                    string               `json:"token_file"`
+	Assets                       string               `json:"assets"`
 }
 
 func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, provision bool) (*http.Server, func(), error) {
@@ -51,6 +53,21 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	if err != nil {
 		cleanup()
 		return nil, noop, err
+	}
+	if config.EnableExperimentalManagement != (config.ManagementTokenFile != "") {
+		cleanup()
+		return nil, noop, adminview.ErrConfiguration
+	}
+	if config.EnableExperimentalManagement {
+		writeToken, err := securefiles.Read(config.ManagementTokenFile, 256)
+		if err != nil {
+			cleanup()
+			return nil, noop, err
+		}
+		if err := handler.EnableManagement(strings.TrimSpace(string(writeToken))); err != nil {
+			cleanup()
+			return nil, noop, err
+		}
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

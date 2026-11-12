@@ -137,3 +137,55 @@ test("mobile layout, no viewport overflow, actual data and empty credential form
     fullPage: true,
   });
 });
+
+test("review cancellation and separate write role persist actual policy with audit", async ({ page }) => {
+  await connect(page);
+  await page.getByLabel("New host mode").selectOption("disabled");
+  await page.getByLabel("Audit reason").fill("browser fixture maintenance");
+  await page.getByRole("button", { name: "Review change" }).click();
+  await page.getByLabel("Management write token").fill("c".repeat(64));
+  await page.getByRole("button", { name: "Cancel review" }).click();
+  await expect(page.getByText("Configured mode: enabled")).toBeVisible();
+  await page.getByLabel("Audit reason").fill("browser fixture maintenance");
+  await page.getByRole("button", { name: "Review change" }).click();
+  await expect(page.getByLabel("Management write token")).toHaveValue("");
+  await page.getByLabel("Management write token").fill(token);
+  await page.getByRole("button", { name: "Apply reviewed change" }).click();
+  await expect(page.getByText("Management token rejected. The read token cannot authorize changes.")).toBeVisible();
+  await expect(page.getByLabel("Management write token")).toHaveValue("");
+  await page.getByLabel("Management write token").fill("c".repeat(64));
+  await page.getByRole("button", { name: "Apply reviewed change" }).dblclick();
+  await expect(page.getByText("Configured mode: disabled")).toBeVisible();
+  await expect(page.getByText("admin_policy_change", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("Provisioning off · Admission barrier not ready")).toBeVisible();
+  await page.getByLabel("Policy control").selectOption("pool_budget");
+  await page.getByLabel("Budget runners").fill("0");
+  await page.getByLabel("Audit reason").fill("stop future pool admissions");
+  await page.getByRole("button", { name: "Review change" }).click();
+  await page.getByLabel("Management write token").fill("c".repeat(64));
+  await page.getByRole("button", { name: "Apply reviewed change" }).click();
+  await expect(page.getByText("admin_policy_change", { exact: true })).toHaveCount(2);
+  await expect(page.locator("#pools tbody tr")).toContainText("pool-a");
+  expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0,0]);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await connect(page);
+  await expect(page.getByText("Configured mode: disabled")).toBeVisible();
+  await expect(page.getByLabel("Management write token")).toHaveCount(0);
+});
+
+test("disconnect during an interrupted write never restores management state", async ({ page }) => {
+  await connect(page);
+  await page.getByLabel("Audit reason").fill("interrupted review");
+  await page.getByRole("button", { name: "Review change" }).click();
+  await page.getByLabel("Management write token").fill("c".repeat(64));
+  let release, entered;
+  const started = new Promise((resolve) => entered = resolve);
+  await page.route("**/admin/api/v1/policy", async (route) => { entered(); await new Promise((resolve) => release=resolve); try { await route.continue(); } catch {} });
+  await page.getByRole("button", { name: "Apply reviewed change" }).click();
+  await started;
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  release();
+  await expect(page.getByLabel("Admin read token")).toHaveValue("");
+  await expect(page.getByRole("heading", { name: "Ledger policy management" })).toHaveCount(0);
+  await page.unroute("**/admin/api/v1/policy");
+});
