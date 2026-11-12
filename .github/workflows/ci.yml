@@ -24,3 +24,7 @@ jobs:
       - run: test "$(go env CGO_ENABLED)" = 1
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      - name: Require actual Unix packet sender credentials and pidfd
+        env:
+          GCC_SENDER_PIDFD_TESTS: "1"
+        run: go test -race -count=1 -timeout=60s -run "^TestPacketSender" -v ./internal/supervisorsender

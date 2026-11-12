@@ -1,6 +1,6 @@
 # Ledger management UI
 
-The React client in `web/` is an experimental **real ledger view**, not a simulator and not a production qualification. It has no synthetic fallback. It reads the same-origin `GET /admin/api/v1/overview` API on the separate TLS admin listener. An explicitly enabled separate management role can edit bounded ledger policy. It cannot access the provider RPC surface or mutate Garm/Incus infrastructure.
+The React client in `web/` is an experimental **real ledger view**, not a simulator and not a production qualification. It has no synthetic fallback. It reads the same-origin `GET /admin/api/v1/overview` API on the separate TLS admin listener. An explicitly enabled separate management role can edit bounded ledger policy. It cannot access the provider RPC surface or perform Incus mutations. Separately configured experimental Garm settings controls can write bounded existing pool/repository settings under their own explicit opt-in; they do not register resources, change native placement or retire runners. See [existing Garm settings](#existing-garm-pool-and-repository-settings) below.
 
 ## Build
 
@@ -13,7 +13,7 @@ npm test
 npm run build
 ```
 
-Set the gateway's optional admin asset directory to the absolute path of `web/dist`. See the backend admin configuration documentation for listener, TLS and read-token setup. The built page uses self-hosted JavaScript and CSS only; it works with the admin handler's strict Content Security Policy. No external fonts, analytics, CDN scripts or inline scripts are required; no provider credentials are bundled. There is no standalone demo server or external backend URL setting. The Vite development server alone does not supply the admin API.
+Set the gateway's optional admin asset directory to the absolute path of `web/dist`. See [backend admin configuration](read-only-admin.md#optional-configuration) for listener, TLS and read-token setup. The built page uses self-hosted JavaScript and CSS only; it works with the admin handler's strict Content Security Policy. No external fonts, analytics, CDN scripts or inline scripts are required; no provider credentials are bundled. There is no standalone demo server or external backend URL setting. The Vite development server alone does not supply the admin API.
 
 ## Connect and disconnect
 

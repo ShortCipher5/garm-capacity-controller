@@ -1,0 +1,110 @@
+//go:build linux && cgo && !agent
+
+package db_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lxc/incus/v6/internal/server/db"
+)
+
+// This is a native test-cluster component test, not a transport fault test.
+// The first callback explicitly commits (or rolls back) through cowsql, THEN
+// returns a synthetic error. No driver, guard migration, or effect permit exists.
+func TestQualificationNativeCommittedRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		injected  error
+		committed bool
+		ignore    bool
+		calls     int
+		success   bool
+	}{
+		{"committed_deadline_unique_denies", context.DeadlineExceeded, true, false, 2, false},
+		{"committed_busy_unique_denies", sqlite3.ErrBusy, true, false, 2, false},
+		{"committed_canceled_does_not_retry", context.Canceled, true, false, 1, false},
+		{"rolled_back_deadline_retries", context.DeadlineExceeded, false, false, 2, true},
+		{"rolled_back_busy_retries", sqlite3.ErrBusy, false, false, 2, true},
+		{"committed_ignore_can_report_success", context.DeadlineExceeded, true, true, 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster, cleanup := db.NewTestCluster(t)
+			defer cleanup()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_, err := cluster.DB().ExecContext(ctx, `CREATE TABLE qualification_retry (identity TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)`)
+			require.NoError(t, err)
+			calls := 0
+			err = cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+				calls++
+				if calls > 3 {
+					return errors.New("unexpected retry count")
+				}
+				payload := "first"
+				if calls > 1 {
+					payload = "retry"
+				}
+				stmt := `INSERT INTO qualification_retry VALUES ('fixed-identity', ?)`
+				if tc.ignore {
+					stmt = `INSERT OR IGNORE INTO qualification_retry VALUES ('fixed-identity', ?)`
+				}
+				if _, err := tx.Tx().ExecContext(ctx, stmt, payload); err != nil {
+					return err
+				}
+				if calls == 1 {
+					// Inject AFTER a real native commit/rollback has returned successfully.
+					// We are NOT claiming a lost response on the native wire.
+					if tc.committed {
+						err = tx.Tx().Commit()
+					} else {
+						err = tx.Tx().Rollback()
+					}
+					if err != nil {
+						return err
+					}
+					return tc.injected
+				}
+				return nil
+			})
+			if tc.success {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			if errors.Is(tc.injected, context.Canceled) {
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			require.Equal(t, tc.calls, calls)
+			var count int
+			require.NoError(t, cluster.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM qualification_retry`).Scan(&count))
+			require.Equal(t, 1, count)
+			var payload string
+			require.NoError(t, cluster.DB().QueryRowContext(ctx, `SELECT payload FROM qualification_retry WHERE identity='fixed-identity'`).Scan(&payload))
+			if tc.committed {
+				require.Equal(t, "first", payload)
+			} else {
+				require.Equal(t, "retry", payload)
+			}
+
+			// A subsequent fresh wrapper cannot adopt the retained durable identity.
+			// This is not a process or database restart test.
+			replayCalls := 0
+			err = cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+				replayCalls++
+				_, err := tx.Tx().ExecContext(ctx, `INSERT INTO qualification_retry VALUES ('fixed-identity', 'adopted')`)
+				return err
+			})
+			require.Error(t, err)
+			require.Equal(t, 1, replayCalls)
+			var retained string
+			require.NoError(t, cluster.DB().QueryRowContext(ctx, `SELECT payload FROM qualification_retry WHERE identity='fixed-identity'`).Scan(&retained))
+			require.Equal(t, payload, retained)
+		})
+	}
+}
