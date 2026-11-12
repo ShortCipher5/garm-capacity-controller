@@ -12,16 +12,25 @@ import (
 // creating, error, unknown and deleted-but-not-yet-retired rows. A partial API
 // response or authorization failure must be an error, never an empty success.
 type GarmInstance struct {
+	RowID               string
+	ProviderName        string
+	AgentID             int64
+	Generation          uint64
+	IdentityFieldsKnown bool
+	ScaleSetID          uint64
 	// PreparationPending is set only by the pinned API parser for the exact
 	// pending_create/pending/zero-agent/no-provider/no-job shape. It alone grants
 	// nothing: immutable plan, no dispatch and complete physical proof are required.
 	PreparationPending bool
-	Name               string
-	ProviderID         string
-	PoolID             string
-	State              string
-	Busy               bool
-	Idle               bool
+	// SourcePreparationPending is only a canonical row-shape candidate; a durable
+	// original source receipt and full physical reconciliation remain mandatory.
+	SourcePreparationPending bool
+	Name                     string
+	ProviderID               string
+	PoolID                   string
+	State                    string
+	Busy                     bool
+	Idle                     bool
 }
 type GarmSource interface {
 	Instances(context.Context) ([]GarmInstance, error)

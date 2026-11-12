@@ -204,3 +204,7 @@ func sqliteRuntimePrivatePath(path string, exists bool) (string, error) {
 	}
 	return absolute, nil
 }
+
+// RuntimeLineageBound reports the already validated local runtime mode only. It
+// is not activation, external-writer fencing or rollback/physical-scope proof.
+func (s *SQLiteStore) RuntimeLineageBound() bool { return s.runtimeID != "" }

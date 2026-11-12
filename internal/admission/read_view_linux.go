@@ -97,6 +97,9 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context) (SQLiteSnapshot, error) 
 		if err != nil {
 			return err
 		}
+		if err := tx.QueryRow("SELECT count(*) FROM original_preparation_history_exclusions e JOIN reservations r ON r.request_key=e.request_key").Scan(&result.LegacySourcePreparationCount); err != nil {
+			return err
+		}
 		result.RecentCancellations, result.CancellationCount, err = sqliteRecentCancellations(tx)
 		if err != nil {
 			return err

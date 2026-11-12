@@ -6,7 +6,7 @@ const read = "a".repeat(64), write = "c".repeat(64);
 const discovery = { mode: "read-only-onboarding-preflight", profiles: [{ id: "candidate-b" }], probe_enabled: true, enrollment_supported: false, capacity_qualified: false };
 const result = { mode: "read-only-onboarding-preflight", request_id: "11111111-1111-4111-8111-111111111111", profile_id: "candidate-b", observed_at: "2026-01-01T00:00:00Z", observation_available: true, server_version: "6.0.4", stored_binding_class: "no_match_observed", enrollment_performed: false, activation_performed: false, capacity_qualified: false, blockers: ["enrollment_not_implemented", "physical_capacity_scope_unqualified"] };
 const resources = { cpu_millis: 0, ram_mib: 0, runners: 0 };
-const overview = { immutable_execution_plans: 0, legacy_unplanned_reservations: 0, mode: "experimental-ledger", management_enabled: true, policy_revision: "f".repeat(64), experimental_provisioning_enabled: false, admission_ready: false, epoch: 0, observed_at: result.observed_at, global: { budget: resources, allocated: resources }, hosts: [], pools: [], events: [], states: {} };
+const overview = { immutable_execution_plans: 0, legacy_unplanned_reservations: 0, legacy_source_preparations: 0, mode: "experimental-ledger", management_enabled: true, policy_revision: "f".repeat(64), experimental_provisioning_enabled: false, admission_ready: false, epoch: 0, observed_at: result.observed_at, global: { budget: resources, allocated: resources }, hosts: [], pools: [], events: [], states: {} };
 test("preflight validators refuse fabricated enrollment/capacity and arbitrary profiles", () => {
   assert.equal(validateOnboardingDiscovery(discovery), discovery);
   assert.equal(validateOnboardingResult(result), result);

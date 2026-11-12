@@ -48,3 +48,17 @@ separate qualification step; parser/Facade tests must not be called that proof.
 Scaleset qualification and installed routing/native isolation/external writer
 fencing remain open. No live infrastructure is accessed and no release route is
 added.
+
+## Schema8 active-runtime follow-on
+
+The narrow zero-agent proof above is retained for offline compatibility tests;
+it is not an active-runtime bypass. Active schema8 creates require an original
+source-issued receipt for non-JIT as well as JIT normal pools. See
+[source-bound receipt design](jit-preparation-receipts-design.md),
+[configuration contract](source-preparation-config.md) and
+[actual source-to-gateway fixtures](../integration/garm-v0.2.1/source-gateway-qualification.md).
+The full fixture exercises public HTTP enrollment, actual SQLite, AddRunner,
+positive original JIT identity, pending polling, compiled provider commands,
+gateway reconciliation and one-shot dispatch against local mTLS fixtures.
+It is not native guest execution, GitHub authentication or physical-host proof.
+Scalesets remain explicitly blocked, as do prior ambiguous/unknown attempts.

@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 7
+const sqliteCurrentVersion = 8
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -227,6 +227,22 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 			if err := sqliteAudit(tx, "schema_migrated_v7", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 8 {
+			if _, err := tx.Exec(sqliteOriginalPreparationSchema); err != nil {
+				return err
+			}
+			if version > 0 {
+				if _, err := tx.Exec("INSERT INTO original_preparation_history_exclusions SELECT request_key FROM reservations"); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v8", "", s.now()); err != nil {
 				return err
 			}
 		}
@@ -721,14 +737,15 @@ type AuditEvent struct {
 }
 
 type SQLiteSnapshot struct {
-	ExecutionPlanCount        int64
-	UnplannedReservationCount int64
-	HostBindings              map[string]HostBinding
-	LegacyUnboundHosts        []string
-	Ready                     bool
-	Epoch                     int64
-	Config                    Config
-	Reservations              map[string]Reservation
+	ExecutionPlanCount           int64
+	UnplannedReservationCount    int64
+	LegacySourcePreparationCount int64
+	HostBindings                 map[string]HostBinding
+	LegacyUnboundHosts           []string
+	Ready                        bool
+	Epoch                        int64
+	Config                       Config
+	Reservations                 map[string]Reservation
 	// RecentCancellations is at most 100 entries, NEVER absence proof.
 	RecentCancellations map[string]Cancellation
 	CancellationCount   int64
@@ -763,6 +780,9 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 		}
 		result.ExecutionPlanCount, result.UnplannedReservationCount, err = sqliteExecutionPlanCounts(tx)
 		if err != nil {
+			return err
+		}
+		if err := tx.QueryRow("SELECT count(*) FROM original_preparation_history_exclusions e JOIN reservations r ON r.request_key=e.request_key").Scan(&result.LegacySourcePreparationCount); err != nil {
 			return err
 		}
 		result.RecentCancellations, result.CancellationCount, err = sqliteRecentCancellations(tx)
