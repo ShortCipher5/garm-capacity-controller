@@ -207,6 +207,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			config = decoded
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
+			initializeRuntimeFixture(t, &config)
 			go func() { done <- serveOnListeners(ctx, config, provision, listener, adminListener) }()
 			defer cancel()
 			clientTLS := &tls.Config{RootCAs: keys.root, Certificates: []tls.Certificate{keys.provider}, MinVersion: tls.VersionTLS13}
