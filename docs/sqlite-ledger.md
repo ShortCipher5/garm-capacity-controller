@@ -44,7 +44,7 @@ Audit events contain bounded operation kinds and request identities, not raw pro
 
 ## Verification
 
-Run on Linux with Go 1.23+, CGO enabled and a C compiler:
+Run on Linux with Go 1.25+ on the integrated facade branch, CGO enabled and a C compiler:
 
 ```sh
 go test -race -count=1 ./internal/admission -run SQLite
