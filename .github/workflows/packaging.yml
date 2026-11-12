@@ -98,3 +98,30 @@ jobs:
           path: qualification-results/garm-state-transfer.json
           if-no-files-found: ignore
           retention-days: 7
+  paired-garm-artifacts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Bind exact public artifacts and exercise packaged read-only facade RPC
+        run: deploy/runtime/garm-pair/test.sh
+      - name: Summarize unsigned disposable qualification
+        if: success()
+        shell: bash
+        run: |
+          echo '## Disposable paired artifacts' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Public-source-only, runner-local reduced candidate images; generated role-separated keys/state and synthetic upstreams. Actual packaged facade/provider/gateway read-only path only. No real issuer/JIT/job, installed-stack qualification, signed release, image publication or deployment.' >> "$GITHUB_STEP_SUMMARY"
+          if test -f qualification-results/paired-runtime.json; then
+            cat qualification-results/paired-runtime.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success()
+        with:
+          name: paired-artifacts-public-status
+          path: |
+            qualification-results/paired-artifacts.json
+            qualification-results/paired-runtime.json
+          if-no-files-found: ignore
+          retention-days: 7
