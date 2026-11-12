@@ -51,7 +51,7 @@ func (s *SQLiteStore) readTransaction(ctx context.Context, read func(*sql.Tx) er
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if queryOnly != 1 || application != 0x47434331 || version != 4 {
+	if queryOnly != 1 || application != 0x47434331 || version != sqliteCurrentVersion {
 		return errors.New("read view requires an owned current ledger")
 	}
 	if err = read(tx); err != nil {
