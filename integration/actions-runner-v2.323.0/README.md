@@ -39,6 +39,30 @@ verify selected source-method semantics, not real job processing, post-job clean
 server lease/session guarantees or a deployed-image safety property. They create
 no reusable permission token and link to no ledger/facade retirement path.
 
+## Six test-only local coordination experiments, not a production drain
+
+`LocalIntakeFenceExperiment.cs` is copied ONLY into the disposable Test project.
+It is NOT imported into runner production or controller assemblies. It has no
+HTTP, registration, worker-cancellation, stop/delete, ledger or proof capability.
+The [concrete accepted-work protocol](../../docs/accepted-work-drain-protocol.md)
+defines the missing service/supervisor prerequisites and refuses production use.
+
+Three new tests use the ACTUAL Runner loop with mocked listener/dispatcher seams;
+three stress the test-only coordinator directly. They check late pre-seal poll
+responses remain obligations atomically, premature RunOnce cannot stand in for
+worker plus cleanup completion, cancelling an observation does not cancel work,
+ambiguous poll/cleanup errors remain unresolved, and unresolved history cannot
+be inherited by a fresh in-memory generation. A 100x/100-observation race checks
+that poll resolution never exposes a zero-poll/zero-accepted gap.
+
+Critically, a negative actual-Runner test shows that suppressing its shared message
+poll ALSO suppresses legitimate cancellation/control delivery. Therefore this
+experiment does NOT implement safe production drain. A qualified remote
+no-new-assignment frontier plus preserved cancellation/renewal/control channel,
+trusted native/descendant completion and no-restart supervisor are still absent.
+Even `LocallyQuiescent` is only an in-process experiment result, not a service,
+job, physical absence, old-writer or release fence. No production API accepts it.
+
 ## No SDK installation
 
 The local task workspace has no .NET compiler. Local Go/shell/source-hash checks
@@ -58,10 +82,10 @@ service tokens, proxy credentials and real home configuration are not passed. Al
 unchanged. A historical dependency/audit build failure must be reported, not
 silently suppressed to manufacture qualification.
 
-The source version-constant target is invoked directly, then only these six tests
+The source version-constant target is invoked directly, then only these twelve tests
 are filtered and executed. Source HEAD and critical production-file SHA256 hashes
 are checked before AND after execution. The generated version metadata must name
-the exact source pin. TRX inspection requires exactly six named Passed results;
+the exact source pin. TRX inspection requires exactly twelve named Passed results;
 an empty discovery/filter success cannot make this gate green.
 
 ## Explicit test-only security dependency baseline
@@ -90,7 +114,9 @@ Other package/audit failures must still stop the build and be reported.
 A resulting pass means selected historical method semantics were exercised under
 this security-updated TEST dependency graph. It does NOT qualify the original
 production graph, an original 2.323.0 binary or any installed runner/image. The
-six C# cases remain unexecuted until that actual hosted result is observed.
+six original C# cases passed in [hosted run43216537181](https://github.com/ShortCipher5/garm-capacity-controller/actions/runs/43216537181) under preinstalled SDK8.0.427.
+The six new local coordinator experiments remain uncompiled/unexecuted until their
+own actual hosted result is observed.
 
 ## Run in an environment with an existing compatible SDK
 

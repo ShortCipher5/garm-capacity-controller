@@ -183,3 +183,47 @@ func TestSecurityOverlayIsOnlyTheExplicitOfficialDependencyUpgrade(t *testing.T)
 		t.Fatal("resolved dependency/provenance verification missing")
 	}
 }
+
+func TestLocalCoordinatorRemainsDisposableAndCannotBeRetirementAuthority(t *testing.T) {
+	code, err := os.ReadFile("LocalIntakeFenceExperiment.cs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"HttpClient", "Process.Start", "Cancel()", "ShutdownAsync(", "DeleteRunner(", "SqliteConnection", "CancellationTokenSource"} {
+		if strings.Contains(string(code), forbidden) {
+			t.Fatal("local experiment gained side effects", forbidden)
+		}
+	}
+	contracts, err := os.ReadFile("LocalIntakeFenceContracts.cs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(contracts), "[Fact]") != 6 || !strings.Contains(string(contracts), "LocalPollSealAlsoSuppressesControlTrafficSoIsNotAQualifiedDrain") {
+		t.Fatal("missing explicit unqualified-control counterexample")
+	}
+	script, err := os.ReadFile("test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(script), "for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs") != 2 || !strings.Contains(string(script), "Exactly twelve compiled lifecycle contract tests") {
+		t.Fatal("new tests must be copied, unchanged, and actually execute")
+	}
+	for _, production := range []string{"../../internal/gateway", "../../internal/retirement"} {
+		files, err := os.ReadDir(production)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range files {
+			if file.IsDir() || strings.HasSuffix(file.Name(), "_test.go") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(production, file.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "LocalIntakeFenceExperiment") {
+				t.Fatal("experiment imported into production", production, file.Name())
+			}
+		}
+	}
+}

@@ -49,6 +49,10 @@ verify_source "$work"
 target="$work/src/Test/L0/Listener/RetirementSourceContracts.cs"
 [[ ! -e "$target" && ! -L "$target" ]]
 cp "$here/RetirementSourceContracts.cs" "$target"
+for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs; do
+  [[ ! -e "$work/src/Test/L0/Listener/$overlay" && ! -L "$work/src/Test/L0/Listener/$overlay" ]]
+  cp "$here/$overlay" "$work/src/Test/L0/Listener/$overlay"
+done
 # Root-authorized TEST-ONLY official security dependency upgrade. The original
 # Sdk.csproj and Runner/Dispatcher method source remain hash-verified unchanged.
 # This does NOT reproduce the exact production dependency graph or installed image.
@@ -74,6 +78,9 @@ clean_dotnet test Test/Test.csproj -c Release -p:PackageRuntime=linux-x64 -p:Run
   --logger 'trx;LogFileName=retirement-source-contracts.trx' --results-directory "$work.results"
 verify_source "$work"
 cmp "$target" "$here/RetirementSourceContracts.cs"
+for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs; do
+  cmp "$work/src/Test/L0/Listener/$overlay" "$here/$overlay"
+done
 cmp "$override" "$here/Directory.Build.targets"
 python3 - "$work/src/Test/obj/project.assets.json" "$work.results/dependency-baseline.json" <<'PYDEPS'
 import json, sys
@@ -99,10 +106,16 @@ expected = {
  'AlreadyRetrievedMessageCanDispatchAfterShutdownTokenWasCancelled',
  'EphemeralSkipsSecondDispatchButDoesNotProveNoSecondAssignment',
  'RunOnceSignalDoesNotSkipShutdownCleanupBeforeSessionDeletion',
+ 'LocalSealKeepsLatePreSealAssignmentAndCleanupAsObligations',
+ 'LocalObserverDoesNotPromoteRunOnceOrInterruptAcceptedWork',
+ 'LocalPollSealAlsoSuppressesControlTrafficSoIsNotAQualifiedDrain',
+ 'FailedOrCancelledAcquisitionCannotBecomeNoAssignmentProof',
+ 'AcceptedButNeverDispatchedOrFailedCleanupRemainsUnresolved',
+ 'PollResolutionAtomicallyTransfersObligationWithoutQuiescentGap',
 }
 results = root.findall('.//t:UnitTestResult', ns)
 actual = {r.attrib.get('testName', '').rsplit('.', 1)[-1] for r in results}
 if actual != expected or len(results) != len(expected) or any(r.attrib.get('outcome') != 'Passed' for r in results):
-    raise SystemExit('Exactly six compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
-print('Six ACTUAL pinned runner method tests passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
+    raise SystemExit('Exactly twelve compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
+print('Six ACTUAL pinned runner method tests and six test-only local intake experiments passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
 PY
