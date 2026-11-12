@@ -12,12 +12,16 @@ import (
 // creating, error, unknown and deleted-but-not-yet-retired rows. A partial API
 // response or authorization failure must be an error, never an empty success.
 type GarmInstance struct {
-	Name       string
-	ProviderID string
-	PoolID     string
-	State      string
-	Busy       bool
-	Idle       bool
+	// PreparationPending is set only by the pinned API parser for the exact
+	// pending_create/pending/zero-agent/no-provider/no-job shape. It alone grants
+	// nothing: immutable plan, no dispatch and complete physical proof are required.
+	PreparationPending bool
+	Name               string
+	ProviderID         string
+	PoolID             string
+	State              string
+	Busy               bool
+	Idle               bool
 }
 type GarmSource interface {
 	Instances(context.Context) ([]GarmInstance, error)
@@ -50,6 +54,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 		return ErrUnavailable
 	}
 	inventory := map[[2]string]admission.InventoryResource{}
+	preparations := map[[2]string]admission.GarmPreparation{}
 	seen := map[string]bool{}
 	for _, row := range rows {
 		req, err := f.accountingRequest(state, row.Name, row.PoolID, "")
@@ -81,6 +86,14 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			}
 		}
 		inventory[[2]string{req.Host, row.Name}] = resource
+
+		preparation, eligible, err := f.garmPreparation(ctx, fence, state, row, req, observedAt)
+		if err != nil {
+			return ErrUnavailable
+		}
+		if eligible {
+			preparations[[2]string{req.Host, row.Name}] = preparation
+		}
 	}
 	snapshot := admission.InventorySnapshot{}
 	physicalNames := map[string]bool{}
@@ -101,6 +114,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			}
 			hostNames[instance.Name] = true
 			physicalNames[instance.Name] = true
+			delete(preparations, [2]string{host, instance.Name})
 			identity := [2]string{host, instance.Name}
 			resource, exists := inventory[identity]
 			if exists && resource.Pool != instance.PoolID {
@@ -153,6 +167,14 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			}
 		}
 		snapshot.Hosts = append(snapshot.Hosts, admission.HostObservation{Host: host, ObservedAt: observedAt, Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true})
+	}
+
+	for identity, preparation := range preparations {
+		// Only after ALL physical/operation collections succeeded may this exact
+		// nonphysical row be omitted. The reservation remains fully charged and the
+		// commit transaction rechecks every plan/binding/no-dispatch/history guard.
+		delete(inventory, identity)
+		snapshot.Preparations = append(snapshot.Preparations, preparation)
 	}
 	for _, resource := range inventory {
 		snapshot.Resources = append(snapshot.Resources, resource)

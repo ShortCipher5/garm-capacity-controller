@@ -109,7 +109,7 @@ and [durable bindings](durable-host-bindings.md). No live deployment is implied.
 
 A Garm-only preparation row can race reconciliation before provider creation.
 It must not be treated as proven physical presence solely because of its state,
-or silently discarded. A separate typed preparation-provenance guard is being
-qualified: immutable original plan + no dispatch + exact source metadata + complete
+or silently discarded. The separate [zero-agent normal-pool preparation guard](garm-preparation-provenance.md)
+uses: immutable original plan + no dispatch + exact source metadata + complete
 fresh post-barrier physical/operation inventory. Existing ambiguous inventory is
 never laundered, removed or released by that proof.

@@ -186,12 +186,34 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 		if err != nil {
 			return nil, err
 		}
+
+		var agentID int64
+		if raw, ok := fields["agent_id"]; ok {
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &agentID) != nil || agentID < 0 {
+				return nil, ErrInventory
+			}
+		}
+		// Safety-relevant known fields may be omitted only with their canonical
+		// omitempty meaning; wrong-case alternatives are malformed, not zero proof.
+		for name := range fields {
+			for _, known := range []string{"agent_id", "provider_id", "runner_status", "job", "scale_set_id"} {
+				if strings.EqualFold(name, known) && name != known {
+					return nil, ErrInventory
+				}
+			}
+		}
 		instance.Busy = runner == "active" || runner == "busy"
 		instance.Idle = runner == "idle"
 		// A job object is conservatively treated as busy, without decoding its private details.
 		if job, ok := fields["job"]; ok && !bytes.Equal(bytes.TrimSpace(job), []byte("null")) {
 			instance.Busy = true
 		}
+
+		// Pinned v0.2.1 zero agent_id/provider_id/job are omitted or null job. No
+		// private job data is retained. "creating" and pending runner state alone
+		// never qualify. Default JIT normal-pool rows have nonzero agents and
+		// require source-bound JIT provenance; scalesets are excluded too.
+		instance.PreparationPending = instance.State == "pending_create" && runner == "pending" && instance.ProviderID == "" && agentID == 0 && !instance.Busy && !instance.Idle && scaleSet == 0
 		result = append(result, instance)
 	}
 	return result, nil
