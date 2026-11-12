@@ -1,0 +1,140 @@
+//go:build linux && cgo && !agent
+
+package db_test
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"time"
+)
+
+// Test-only framing for pinned go-cowsql v1.22.0. No production connection changes.
+type qualificationLoss struct {
+	mu               sync.Mutex
+	armed            bool
+	matched, dropped int
+	dials            int
+	failure          error
+	verifyCommitted  func() error
+}
+
+func (f *qualificationLoss) arm() { f.mu.Lock(); defer f.mu.Unlock(); f.armed = true }
+func (f *qualificationLoss) claim() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.armed {
+		return false
+	}
+	f.armed = false
+	f.matched++
+	return true
+}
+func (f *qualificationLoss) result(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil {
+		f.failure = err
+	} else {
+		f.dropped++
+	}
+}
+
+type qualificationLossConn struct {
+	net.Conn
+	fault     *qualificationLoss
+	mu        sync.Mutex
+	pending   []byte
+	handshake bool
+	drop      bool
+}
+
+func (c *qualificationLossConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.mu.Lock()
+		parseErr := c.observe(p[:n])
+		c.mu.Unlock()
+		if parseErr != nil {
+			c.fault.result(parseErr)
+			return n, parseErr
+		}
+	}
+	return n, err
+}
+func (c *qualificationLossConn) observe(p []byte) error {
+	if len(c.pending)+len(p) > 1<<20 {
+		return fmt.Errorf("request exceeds fixture bound")
+	}
+	c.pending = append(c.pending, p...)
+	if !c.handshake {
+		if len(c.pending) < 8 {
+			return nil
+		}
+		if binary.LittleEndian.Uint64(c.pending[:8]) != 1 {
+			return fmt.Errorf("unsupported protocol version")
+		}
+		c.pending = c.pending[8:]
+		c.handshake = true
+	}
+	for len(c.pending) >= 8 {
+		h := c.pending[:8]
+		words := binary.LittleEndian.Uint32(h[:4])
+		if words == 0 || words > 131071 || h[6] != 0 || h[7] != 0 {
+			return fmt.Errorf("invalid request frame")
+		}
+		size := 8 + int(words)*8
+		if len(c.pending) < size {
+			return nil
+		}
+		body := c.pending[8:size]
+		// ExecSQL v0, no bound params, exact NUL-padded COMMIT; never substring-match.
+		if h[4] == 8 && h[5] == 0 && len(body) == 16 && bytes.Equal(body[8:], []byte{'C', 'O', 'M', 'M', 'I', 'T', 0, 0}) {
+			if c.fault.claim() {
+				c.drop = true
+			}
+		}
+		c.pending = c.pending[size:]
+	}
+	return nil
+}
+func (c *qualificationLossConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	c.mu.Lock()
+	drop := c.drop
+	c.drop = false
+	c.mu.Unlock()
+	if !drop {
+		return c.Conn.Read(p)
+	}
+	// Read the successful server result ourselves, but expose NONE of its bytes
+	// to the driver's protocol decoder. A separate unwrapped observer verifies
+	// the committed row before this connection is closed and EOF is returned.
+	err := c.consumeResult()
+	if err == nil {
+		err = c.fault.verifyCommitted()
+	}
+	c.fault.result(err)
+	_ = c.Conn.Close()
+	return 0, io.EOF
+}
+func (c *qualificationLossConn) consumeResult() error {
+	if err := c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	var h [8]byte
+	if _, err := io.ReadFull(c.Conn, h[:]); err != nil {
+		return err
+	}
+	if binary.LittleEndian.Uint32(h[:4]) != 2 || h[4] != 6 || h[5] != 0 || h[6] != 0 || h[7] != 0 {
+		return fmt.Errorf("not canonical successful result")
+	}
+	var body [16]byte
+	_, err := io.ReadFull(c.Conn, body[:])
+	return err
+}

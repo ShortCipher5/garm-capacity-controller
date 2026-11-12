@@ -1,0 +1,119 @@
+//go:build linux && cgo && !agent
+
+package db_test
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/cowsql/go-cowsql/driver"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lxc/incus/v6/internal/server/db"
+	nativecluster "github.com/lxc/incus/v6/internal/server/db/cluster"
+)
+
+func TestQualificationNativeCommitResponseLoss(t *testing.T) {
+	for _, mode := range []string{"raw_commit", "strict_wrapper", "ignore_wrapper"} {
+		t.Run(mode, func(t *testing.T) {
+			dir, store, stop := db.NewTestDqliteServer(t)
+			defer stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			direct := func(ctx context.Context, address string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", address)
+			}
+			fault := &qualificationLoss{}
+			wrapped := func(ctx context.Context, address string) (net.Conn, error) {
+				conn, err := direct(ctx, address)
+				if err != nil {
+					return nil, err
+				}
+				fault.mu.Lock()
+				fault.dials++
+				fault.mu.Unlock()
+				return &qualificationLossConn{Conn: conn, fault: fault}, nil
+			}
+			c, err := db.OpenCluster(ctx, "wireloss.db", store, "1", dir, 5*time.Second, driver.WithDialFunc(wrapped))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, c.Close()) }()
+			observer, err := nativecluster.Open("wireloss.db", store, driver.WithDialFunc(direct))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, observer.Close()) }()
+			// Pre-open independent unwrapped transport; no shared sql.DB or wrapper.
+			require.NoError(t, observer.PingContext(ctx))
+			_, err = c.DB().ExecContext(ctx, `CREATE TABLE qualification_wireloss (identity TEXT PRIMARY KEY NOT NULL,payload TEXT NOT NULL)`)
+			require.NoError(t, err)
+			fault.verifyCommitted = func() error {
+				var value string
+				if err := observer.QueryRowContext(ctx, `SELECT payload FROM qualification_wireloss WHERE identity='fixed'`).Scan(&value); err != nil {
+					return err
+				}
+				if value != "original" {
+					return fmt.Errorf("independent committed value mismatch")
+				}
+				return nil
+			}
+			fault.mu.Lock()
+			dialsBefore := fault.dials
+			fault.mu.Unlock()
+			calls := 0
+			if mode == "raw_commit" {
+				tx, err := c.DB().BeginTx(ctx, nil)
+				require.NoError(t, err)
+				_, err = tx.ExecContext(ctx, `INSERT INTO qualification_wireloss VALUES ('fixed','original')`)
+				require.NoError(t, err)
+				fault.arm()
+				require.Error(t, tx.Commit()) // Real successful response is suppressed on Read.
+			} else {
+				err = c.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+					calls++
+					if calls > 3 {
+						return fmt.Errorf("unexpected callback count")
+					}
+					value := "original"
+					if calls > 1 {
+						value = "replayed"
+					}
+					stmt := `INSERT INTO qualification_wireloss VALUES ('fixed',?)`
+					if mode == "ignore_wrapper" {
+						stmt = `INSERT OR IGNORE INTO qualification_wireloss VALUES ('fixed',?)`
+					}
+					if _, err := tx.Tx().ExecContext(ctx, stmt, value); err != nil {
+						return err
+					}
+					if calls == 1 {
+						fault.arm()
+					}
+					return nil
+				})
+				if mode == "ignore_wrapper" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+				require.Equal(t, 2, calls)
+			}
+			fault.mu.Lock()
+			matched, dropped, failure, armed := fault.matched, fault.dropped, fault.failure, fault.armed
+			dialsAfter := fault.dials
+			fault.mu.Unlock()
+			require.NoError(t, failure)
+			require.Equal(t, 1, matched)
+			require.Equal(t, 1, dropped)
+			require.False(t, armed)
+			if mode != "raw_commit" {
+				require.Greater(t, dialsAfter, dialsBefore, "wrapper retry must reconnect after dropped response")
+			}
+			var count int
+			var value string
+			require.NoError(t, observer.QueryRowContext(ctx, `SELECT COUNT(*) FROM qualification_wireloss`).Scan(&count))
+			require.Equal(t, 1, count)
+			require.NoError(t, observer.QueryRowContext(ctx, `SELECT payload FROM qualification_wireloss WHERE identity='fixed'`).Scan(&value))
+			require.Equal(t, "original", value)
+		})
+	}
+}
