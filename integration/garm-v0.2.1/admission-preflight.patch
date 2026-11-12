@@ -24,10 +24,10 @@ index ca98bdf..938440c 100644
  			return fmt.Errorf("path to config file must be an absolute path")
 diff --git a/runner/common/admission.go b/runner/common/admission.go
 new file mode 100644
-index 0000000..991f206
+index 0000000..9976261
 --- /dev/null
 +++ b/runner/common/admission.go
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,253 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +package common
@@ -218,6 +218,7 @@ index 0000000..991f206
 +	}
 +	output := &admissionOutput{}
 +	command := exec.CommandContext(ctx, binary)
++	command.WaitDelay = 250 * time.Millisecond
 +	command.Env = environ
 +	command.Stdin = bytes.NewReader(input)
 +	command.Stdout = output
@@ -280,12 +281,310 @@ index 0000000..991f206
 +func (e *ProviderCommandError) Error() string {
 +	return fmt.Sprintf("provider command failed with exit code %d", e.Code)
 +}
+diff --git a/runner/common/admission_cancellation.go b/runner/common/admission_cancellation.go
+new file mode 100644
+index 0000000..e39c7f9
+--- /dev/null
++++ b/runner/common/admission_cancellation.go
+@@ -0,0 +1,109 @@
++// SPDX-License-Identifier: Apache-2.0
++package common
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os/exec"
++	"time"
++)
++
++// AdmissionCancellationProvider is optional best-effort cleanup after a successful
++// reservation's pre-create setup failed. Only the gateway ledger proves never-
++// dispatched status; a refusal/race/unknown create remains charged. NOT DeleteInstance.
++type AdmissionCancellationProvider interface {
++	CancelAdmission(context.Context, AdmissionRequest) error
++}
++
++type admissionCancellationResponse struct {
++	Protocol       string `json:"protocol"`
++	Outcome        string `json:"outcome"`
++	Name           string `json:"name"`
++	PoolID         string `json:"pool_id"`
++	Dispatched     *bool  `json:"dispatched"`
++	ReservationKey string `json:"reservation_key"`
++	Replay         *bool  `json:"replay"`
++}
++
++func parseAdmissionCancellationResponse(exitCode int, output []byte, request AdmissionRequest) error {
++	if exitCode != 0 || request.validate() != nil || len(output) > admissionMaximumResponseBytes {
++		return errAdmissionProtocol
++	}
++	allowed := map[string]bool{"protocol": true, "outcome": true, "name": true, "pool_id": true, "dispatched": true, "reservation_key": true, "replay": true}
++	decoder := json.NewDecoder(bytes.NewReader(output))
++	token, err := decoder.Token()
++	if err != nil || token != json.Delim('{') {
++		return errAdmissionProtocol
++	}
++	seen := map[string]bool{}
++	for decoder.More() {
++		token, err := decoder.Token()
++		key, ok := token.(string)
++		if err != nil || !ok || !allowed[key] || seen[key] {
++			return errAdmissionProtocol
++		}
++		seen[key] = true
++		var raw json.RawMessage
++		if decoder.Decode(&raw) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++			return errAdmissionProtocol
++		}
++	}
++	if _, err := decoder.Token(); err != nil || len(seen) != 7 || decoder.Decode(new(any)) != io.EOF {
++		return errAdmissionProtocol
++	}
++	decoder = json.NewDecoder(bytes.NewReader(output))
++	decoder.DisallowUnknownFields()
++	var response admissionCancellationResponse
++	if decoder.Decode(&response) != nil || decoder.Decode(new(any)) != io.EOF || response.Protocol != AdmissionProtocolVersion || response.Outcome != "cancelled" || response.Name != request.Name || response.PoolID != request.PoolID || response.Dispatched == nil || *response.Dispatched || response.Replay == nil || !validAdmissionIdentity(response.ReservationKey) {
++		return errAdmissionProtocol
++	}
++	return nil
++}
++
++// RunAdmissionCancellationProvider carries only protocol/name/pool identity.
++// Child execution is bounded to ten seconds or the earlier caller deadline, with
++// a maximum250ms inherited-pipe drain tail. Stdout/stderr never enter error text.
++// Failure is NOT cancellation proof and cannot release capacity locally.
++func RunAdmissionCancellationProvider(ctx context.Context, binary string, environ []string, request AdmissionRequest) error {
++	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
++	defer cancel()
++	if request.validate() != nil {
++		return errAdmissionProtocol
++	}
++	input, err := json.Marshal(struct {
++		Protocol string `json:"protocol"`
++		Name     string `json:"name"`
++		PoolID   string `json:"pool_id"`
++	}{AdmissionProtocolVersion, request.Name, request.PoolID})
++	if err != nil {
++		return errAdmissionProtocol
++	}
++	output := &admissionOutput{}
++	command := exec.CommandContext(ctx, binary)
++	// Bound inherited pipes even if a descendant outlives the direct child.
++	command.WaitDelay = 250 * time.Millisecond
++	command.Env = environ
++	command.Stdin = bytes.NewReader(input)
++	command.Stdout = output
++	command.Stderr = io.Discard
++	runErr := command.Run()
++	if ctx.Err() != nil {
++		return fmt.Errorf("admission reservation cancellation canceled: %w", ctx.Err())
++	}
++	if output.overflow {
++		return errAdmissionProtocol
++	}
++	exitCode := 0
++	if runErr != nil {
++		var exited *exec.ExitError
++		if !errors.As(runErr, &exited) {
++			return errors.New("admission cancellation executable unavailable")
++		}
++		exitCode = exited.ExitCode()
++	}
++	return parseAdmissionCancellationResponse(exitCode, output.Bytes(), request)
++}
+diff --git a/runner/common/admission_cancellation_test.go b/runner/common/admission_cancellation_test.go
+new file mode 100644
+index 0000000..1144b87
+--- /dev/null
++++ b/runner/common/admission_cancellation_test.go
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: Apache-2.0
++package common
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"os/exec"
++	"strings"
++	"testing"
++	"time"
++)
++
++func cancellationFields() map[string]any {
++	return map[string]any{"protocol": AdmissionProtocolVersion, "outcome": "cancelled", "name": "runner-1", "pool_id": "pool-1", "dispatched": false, "reservation_key": "reservation-1", "replay": false}
++}
++func runCancellationStub(mode string) {
++	if mode == "pipe-child" {
++		time.Sleep(3 * time.Second)
++		os.Exit(0)
++	}
++	input, _ := io.ReadAll(os.Stdin)
++	if mode == "secret" {
++		fmt.Printf("stdout:%s", input)
++		fmt.Fprint(os.Stderr, "secret-must-not-echo")
++		os.Exit(1)
++	}
++	var request map[string]any
++	if json.Unmarshal(input, &request) != nil || len(request) != 3 || request["protocol"] != AdmissionProtocolVersion || os.Getenv("GARM_COMMAND") != "CancelAdmission" {
++		os.Exit(9)
++	}
++	if mode == "wait" {
++		time.Sleep(time.Minute)
++		os.Exit(1)
++	}
++	if mode == "inherited-pipe" {
++		child := exec.Command(os.Args[0])
++		child.Env = []string{"GCC_CANCELLATION_STUB=pipe-child"}
++		child.Stdout = os.Stdout
++		child.Stderr = os.Stderr
++		if child.Start() != nil {
++			os.Exit(9)
++		}
++		time.Sleep(time.Minute)
++		os.Exit(1)
++	}
++	if mode == "oversize" {
++		fmt.Print(strings.Repeat("x", admissionMaximumResponseBytes+1))
++		os.Exit(0)
++	}
++	if mode == "malformed" {
++		fmt.Print("secret-must-not-echo")
++		os.Exit(0)
++	}
++	response := cancellationFields()
++	response["name"] = request["name"]
++	response["pool_id"] = request["pool_id"]
++	exit := 0
++	switch mode {
++	case "replay":
++		response["replay"] = true
++	case "wrong-exit":
++		exit = 75
++	case "dispatched":
++		response["dispatched"] = true
++	case "mismatch":
++		response["pool_id"] = "someone-else"
++	case "stderr":
++		fmt.Fprint(os.Stderr, "secret-must-not-echo")
++	}
++	_ = json.NewEncoder(os.Stdout).Encode(response)
++	os.Exit(exit)
++}
++
++func TestCancellationProtocolRequiresExactlySevenTypedNonNullKeys(t *testing.T) {
++	request := AdmissionRequest{Name: "runner-1", PoolID: "pool-1"}
++	for _, replay := range []bool{false, true} {
++		fields := cancellationFields()
++		fields["replay"] = replay
++		data, _ := json.Marshal(fields)
++		if err := parseAdmissionCancellationResponse(0, data, request); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for key := range cancellationFields() {
++		for _, mode := range []string{"missing", "null", "wrong-type", "duplicate", "case-fold"} {
++			fields := cancellationFields()
++			switch mode {
++			case "missing":
++				delete(fields, key)
++			case "null":
++				fields[key] = nil
++			case "wrong-type":
++				fields[key] = []any{}
++			case "case-fold":
++				fields[strings.ToUpper(key)] = fields[key]
++				delete(fields, key)
++			}
++			data, _ := json.Marshal(fields)
++			if mode == "duplicate" {
++				data = []byte(`{"` + key + `":null,` + string(data[1:]))
++			}
++			if err := parseAdmissionCancellationResponse(0, data, request); err == nil {
++				t.Fatalf("accepted %s %s", key, mode)
++			}
++		}
++	}
++	for _, mutate := range []func(map[string]any){func(f map[string]any) { f["extra"] = false }, func(f map[string]any) { f["dispatched"] = true }, func(f map[string]any) { f["name"] = "other" }, func(f map[string]any) { f["pool_id"] = "other" }, func(f map[string]any) { f["outcome"] = "reserved" }, func(f map[string]any) { f["reservation_key"] = "" }} {
++		fields := cancellationFields()
++		mutate(fields)
++		data, _ := json.Marshal(fields)
++		if err := parseAdmissionCancellationResponse(0, data, request); err == nil {
++			t.Fatal("invalid response accepted")
++		}
++	}
++	data, _ := json.Marshal(cancellationFields())
++	for _, exit := range []int{1, 75, -1} {
++		if err := parseAdmissionCancellationResponse(exit, data, request); err == nil {
++			t.Fatal("nonzero exit accepted")
++		}
++	}
++	for _, data := range [][]byte{append(data, []byte(` {}`)...), []byte(`null`), []byte(strings.Repeat("x", 4097))} {
++		if err := parseAdmissionCancellationResponse(0, data, request); err == nil {
++			t.Fatal("invalid framing accepted")
++		}
++	}
++}
++
++func TestCancellationExecutableBoundaryAndRedaction(t *testing.T) {
++	request := AdmissionRequest{Name: "runner-1", PoolID: "pool-1"}
++	for _, mode := range []string{"success", "replay", "stderr", "wrong-exit", "dispatched", "mismatch", "oversize", "malformed", "secret"} {
++		err := RunAdmissionCancellationProvider(context.Background(), os.Args[0], []string{"GARM_COMMAND=CancelAdmission", "GCC_CANCELLATION_STUB=" + mode}, request)
++		good := mode == "success" || mode == "replay" || mode == "stderr"
++		if (err == nil) != good || IsAdmissionDeferred(err) {
++			t.Fatalf("unsafe %s: %v", mode, err)
++		}
++		if err != nil && strings.Contains(err.Error(), "secret-must-not-echo") {
++			t.Fatal("child output disclosed")
++		}
++	}
++	if err := RunAdmissionCancellationProvider(context.Background(), "/secret-path-must-not-echo", nil, request); err == nil || strings.Contains(err.Error(), "secret-path") {
++		t.Fatal("executable error disclosed path")
++	}
++}
++
++func TestCancellationDeadlineAndInheritedPipesStayBounded(t *testing.T) {
++	request := AdmissionRequest{Name: "runner-1", PoolID: "pool-1"}
++	for _, admit := range []bool{false, true} {
++		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
++		start := time.Now()
++		run := RunAdmissionCancellationProvider
++		if admit {
++			run = RunAdmissionProvider
++		}
++		err := run(ctx, os.Args[0], []string{"GARM_COMMAND=CancelAdmission", "GCC_CANCELLATION_STUB=inherited-pipe"}, request)
++		cancel()
++		if !errors.Is(err, context.DeadlineExceeded) || IsAdmissionDeferred(err) || time.Since(start) > 2*time.Second {
++			t.Fatalf("inherited pipes escaped deadline: %v %s", err, time.Since(start))
++		}
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
++	defer cancel()
++	if err := RunAdmissionCancellationProvider(ctx, os.Args[0], []string{"GARM_COMMAND=CancelAdmission", "GCC_CANCELLATION_STUB=wait"}, request); !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatal("earlier deadline ignored")
++	}
++}
++
++func TestCancellationDefaultTenSecondDeadline(t *testing.T) {
++	start := time.Now()
++	err := RunAdmissionCancellationProvider(context.Background(), os.Args[0], []string{"GARM_COMMAND=CancelAdmission", "GCC_CANCELLATION_STUB=wait"}, AdmissionRequest{Name: "runner-1", PoolID: "pool-1"})
++	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 15*time.Second {
++		t.Fatalf("unbounded cancellation child: %v %s", err, time.Since(start))
++	}
++}
 diff --git a/runner/common/admission_test.go b/runner/common/admission_test.go
 new file mode 100644
-index 0000000..1daba50
+index 0000000..3fa52dc
 --- /dev/null
 +++ b/runner/common/admission_test.go
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,140 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package common
 +
@@ -304,6 +603,10 @@ index 0000000..1daba50
 +// TestMain is an executable provider stub when called by these tests. It never
 +// contacts a provider, a controller, GitHub or infrastructure.
 +func TestMain(m *testing.M) {
++	if mode := os.Getenv("GCC_CANCELLATION_STUB"); mode != "" {
++		runCancellationStub(mode)
++		return
++	}
 +	if mode := os.Getenv("GCC_ADMISSION_STUB"); mode != "" {
 +		input, _ := io.ReadAll(os.Stdin)
 +		if mode == "echo-secret-failure" {
@@ -424,10 +727,10 @@ index 0000000..1daba50
 +}
 diff --git a/runner/pool/admission_test.go b/runner/pool/admission_test.go
 new file mode 100644
-index 0000000..c02a5b9
+index 0000000..a38192a
 --- /dev/null
 +++ b/runner/pool/admission_test.go
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,130 @@
 +//go:build testing
 +
 +package pool
@@ -435,6 +738,8 @@ index 0000000..c02a5b9
 +import (
 +	"context"
 +	"errors"
++	dbCommon "github.com/cloudbase/garm/database/common"
++	"github.com/cloudbase/garm/params"
 +	"time"
 +
 +	"github.com/cloudbase/garm/runner/common"
@@ -444,13 +749,35 @@ index 0000000..c02a5b9
 +
 +type admissionTestProvider struct {
 +	common.Provider
-+	result   error
-+	requests []common.AdmissionRequest
++	result              error
++	requests            []common.AdmissionRequest
++	cancelled           []common.AdmissionRequest
++	cancelResult        error
++	cancelContextErrors []error
++	cancelDeadlines     []time.Duration
 +}
 +
 +func (p *admissionTestProvider) AdmitInstance(_ context.Context, request common.AdmissionRequest) error {
 +	p.requests = append(p.requests, request)
 +	return p.result
++}
++
++func (p *admissionTestProvider) CancelAdmission(ctx context.Context, request common.AdmissionRequest) error {
++	p.cancelled = append(p.cancelled, request)
++	p.cancelContextErrors = append(p.cancelContextErrors, ctx.Err())
++	if deadline, ok := ctx.Deadline(); ok {
++		p.cancelDeadlines = append(p.cancelDeadlines, time.Until(deadline))
++	}
++	return p.cancelResult
++}
++
++type admissionCreateFailureStore struct {
++	dbCommon.Store
++	failure error
++}
++
++func (s *admissionCreateFailureStore) CreateInstance(context.Context, string, params.CreateInstanceParams) (params.Instance, error) {
++	return params.Instance{}, s.failure
 +}
 +
 +func (s *PoolStressTestSuite) TestAdmissionBeforeJITAndPersistence() {
@@ -491,30 +818,143 @@ index 0000000..c02a5b9
 +	s.providerMock.AssertNotCalled(s.T(), "CreateInstance", mock.Anything, mock.Anything, mock.Anything)
 +	s.providerMock.AssertNotCalled(s.T(), "DeleteInstance", mock.Anything, mock.Anything, mock.Anything)
 +}
++
++func (s *PoolStressTestSuite) TestAdmissionJITFailureCancelsIndependentlyWithoutReplacingError() {
++	failure := errors.New("original JIT failure")
++	gate := &admissionTestProvider{Provider: s.providerMock, cancelResult: errors.New("secret-cancellation-error")}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	ctx, cancel := context.WithCancel(s.adminCtx)
++	defer cancel()
++	s.providerMock.On("DisableJITConfig").Return(false).Once()
++	s.ghcliMock.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(mock.Arguments) { cancel() }).Return(map[string]string(nil), (*github.Runner)(nil), failure).Once()
++	err := s.mgr.AddRunner(ctx, s.pool.ID, nil)
++	s.ErrorIs(err, failure)
++	s.NotContains(err.Error(), "secret-cancellation")
++	s.Require().Len(gate.requests, 1)
++	s.Equal(gate.requests, gate.cancelled)
++	s.Equal([]error{nil}, gate.cancelContextErrors)
++	s.Require().Len(gate.cancelDeadlines, 1)
++	s.Greater(gate.cancelDeadlines[0], time.Duration(0))
++	s.LessOrEqual(gate.cancelDeadlines[0], 10*time.Second)
++	rows, err := s.store.ListPoolInstances(s.adminCtx, s.pool.ID, false)
++	s.Require().NoError(err)
++	s.Empty(rows)
++}
++func (s *PoolStressTestSuite) TestAdmissionRowFailureCancelsButSuccessAndDeferDoNot() {
++	failure := errors.New("original row failure")
++	gate := &admissionTestProvider{Provider: s.providerMock}
++	s.mgr.providers[s.pool.ProviderName] = gate
++	s.mgr.store = &admissionCreateFailureStore{Store: s.store, failure: failure}
++	s.providerMock.On("DisableJITConfig").Return(false).Once()
++	s.ghcliMock.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(map[string]string{"test": "jit"}, &github.Runner{ID: github.Int64(42)}, nil).Once()
++	s.ghcliMock.On("RemoveEntityRunner", mock.Anything, int64(42)).Return(nil).Once()
++	s.ErrorIs(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil), failure)
++	s.Equal(gate.requests, gate.cancelled)
++	s.Len(gate.cancelled, 1)
++	s.mgr.store = s.store
++	s.providerMock.On("DisableJITConfig").Return(false).Once()
++	s.ghcliMock.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(map[string]string{"test": "jit2"}, &github.Runner{ID: github.Int64(43)}, nil).Once()
++	s.Require().NoError(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil))
++	s.Len(gate.requests, 2)
++	s.Len(gate.cancelled, 1)
++	gate.result = common.NewAdmissionDeferred(5 * time.Second)
++	s.True(common.IsAdmissionDeferred(s.mgr.AddRunner(s.adminCtx, s.pool.ID, nil)))
++	s.Len(gate.cancelled, 1)
++}
 diff --git a/runner/pool/pool.go b/runner/pool/pool.go
-index 9f5fc19..499ea27 100644
+index 9f5fc19..7a56050 100644
 --- a/runner/pool/pool.go
 +++ b/runner/pool/pool.go
-@@ -945,6 +945,13 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
+@@ -945,6 +945,27 @@ func (r *basePoolManager) AddRunner(ctx context.Context, poolID string, aditiona
  	}
  
  	name := strings.ToLower(fmt.Sprintf("%s-%s", pool.GetRunnerPrefix(), util.NewID()))
 +	// Admission precedes GitHub JIT allocation and durable runner creation.
 +	// A denial accepts no runner request; desired capacity remains unsatisfied.
 +	if admission, ok := provider.(common.AdmissionProvider); ok {
-+		if err := admission.AdmitInstance(ctx, common.AdmissionRequest{Name: name, PoolID: pool.ID}); err != nil {
++		request := common.AdmissionRequest{Name: name, PoolID: pool.ID}
++		if err := admission.AdmitInstance(ctx, request); err != nil {
 +			return fmt.Errorf("admitting runner before JIT allocation: %w", err)
++		}
++		if cancellation, ok := provider.(common.AdmissionCancellationProvider); ok {
++			defer func() {
++				if err == nil {
++					return
++				}
++				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
++				defer cancel()
++				if cancellation.CancelAdmission(cleanupCtx, request) != nil {
++					// Preserve the original error; no child/provider error text is logged.
++					slog.ErrorContext(cleanupCtx, "admission reservation cancellation unconfirmed; identity must not be reused")
++				}
++			}()
 +		}
 +	}
  	labels := r.getLabelsForInstance(pool)
  
  	jitConfig := make(map[string]string)
+diff --git a/runner/providers/v0.1.1/admission_cancellation_test.go b/runner/providers/v0.1.1/admission_cancellation_test.go
+new file mode 100644
+index 0000000..b5be87f
+--- /dev/null
++++ b/runner/providers/v0.1.1/admission_cancellation_test.go
+@@ -0,0 +1,50 @@
++// SPDX-License-Identifier: Apache-2.0
++package v011
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"github.com/cloudbase/garm/config"
++	"github.com/cloudbase/garm/runner/common"
++	"io"
++	"os"
++	"strings"
++	"testing"
++)
++
++func runExternalCancellationStub(mode string) {
++	input, _ := io.ReadAll(os.Stdin)
++	if mode == "secret" {
++		fmt.Printf("%s", input)
++		fmt.Fprint(os.Stderr, "external-secret-must-not-echo")
++		os.Exit(1)
++	}
++	var request map[string]any
++	if json.Unmarshal(input, &request) != nil || len(request) != 3 || request["protocol"] != common.AdmissionProtocolVersion || os.Getenv("GARM_COMMAND") != "CancelAdmission" || os.Getenv("GARM_CONTROLLER_ID") != "test-controller" || os.Getenv("GARM_POOL_ID") != "pool-1" || os.Getenv("GARM_PROVIDER_CONFIG_FILE") != "/fixture/provider.json" || os.Getenv("GARM_INTERFACE_VERSION") != "v0.1.1" {
++		os.Exit(9)
++	}
++	replay := mode == "replay"
++	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"protocol": common.AdmissionProtocolVersion, "outcome": "cancelled", "name": request["name"], "pool_id": request["pool_id"], "dispatched": false, "reservation_key": "reservation-1", "replay": replay})
++	os.Exit(0)
++}
++func TestOptionalCancellationUsesTrustedEnvironmentAndNoLegacyExecution(t *testing.T) {
++	cfg := &config.Provider{External: config.External{AdmissionEnabled: false, ConfigFile: "/fixture/provider.json"}}
++	provider := &external{cfg: cfg, controllerID: "test-controller", execPath: "/must-not-run"}
++	request := common.AdmissionRequest{Name: "runner-1", PoolID: "pool-1"}
++	if err := provider.CancelAdmission(context.Background(), request); err != nil {
++		t.Fatal("legacy behavior changed")
++	}
++	cfg.External.AdmissionEnabled = true
++	provider.execPath = os.Args[0]
++	for _, mode := range []string{"success", "replay", "secret"} {
++		provider.environmentVariables = []string{"GARM_INTERFACE_VERSION=v0.1.1", "GCC_EXTERNAL_CANCELLATION_STUB=" + mode}
++		err := provider.CancelAdmission(context.Background(), request)
++		if (err == nil) != (mode != "secret") || common.IsAdmissionDeferred(err) {
++			t.Fatalf("unsafe cancellation result: %v", err)
++		}
++		if err != nil && strings.Contains(err.Error(), "secret") {
++			t.Fatal("child output disclosed")
++		}
++	}
++}
 diff --git a/runner/providers/v0.1.1/admission_test.go b/runner/providers/v0.1.1/admission_test.go
 new file mode 100644
-index 0000000..af713b8
+index 0000000..503d840
 --- /dev/null
 +++ b/runner/providers/v0.1.1/admission_test.go
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,120 @@
 +// SPDX-License-Identifier: Apache-2.0
 +package v011
 +
@@ -535,6 +975,10 @@ index 0000000..af713b8
 +)
 +
 +func TestMain(m *testing.M) {
++	if mode := os.Getenv("GCC_EXTERNAL_CANCELLATION_STUB"); mode != "" {
++		runExternalCancellationStub(mode)
++		return
++	}
 +	if mode := os.Getenv("GCC_EXTERNAL_ADMISSION_STUB"); mode != "" {
 +		input, _ := io.ReadAll(os.Stdin)
 +		if mode == "list" {
@@ -632,18 +1076,19 @@ index 0000000..af713b8
 +	}
 +}
 diff --git a/runner/providers/v0.1.1/external.go b/runner/providers/v0.1.1/external.go
-index 6e43dce..327c3f0 100644
+index 6e43dce..51c7452 100644
 --- a/runner/providers/v0.1.1/external.go
 +++ b/runner/providers/v0.1.1/external.go
-@@ -35,6 +35,7 @@ import (
+@@ -35,6 +35,8 @@ import (
  )
  
  var _ common.Provider = (*external)(nil)
 +var _ common.AdmissionProvider = (*external)(nil)
++var _ common.AdmissionCancellationProvider = (*external)(nil)
  
  func NewProvider(ctx context.Context, cfg *config.Provider, controllerID string) (common.Provider, error) {
  	if cfg.ProviderType != params.ExternalProvider {
-@@ -69,6 +70,23 @@ type external struct {
+@@ -69,6 +71,33 @@ type external struct {
  	environmentVariables []string
  }
  
@@ -664,10 +1109,20 @@ index 6e43dce..327c3f0 100644
 +	return common.RunAdmissionProvider(ctx, e.execPath, asEnv, request)
 +}
 +
++// CancelAdmission is a no-op for legacy configuration; it never removes a guest.
++func (e *external) CancelAdmission(ctx context.Context, request common.AdmissionRequest) error {
++	if !e.cfg.External.AdmissionEnabled {
++		return nil
++	}
++	asEnv := []string{"GARM_COMMAND=CancelAdmission", fmt.Sprintf("GARM_CONTROLLER_ID=%s", e.controllerID), fmt.Sprintf("GARM_POOL_ID=%s", request.PoolID), fmt.Sprintf("GARM_PROVIDER_CONFIG_FILE=%s", e.cfg.External.ConfigFile)}
++	asEnv = append(asEnv, e.environmentVariables...)
++	return common.RunAdmissionCancellationProvider(ctx, e.execPath, asEnv, request)
++}
++
  // CreateInstance creates a new compute instance in the provider.
  func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonParams.BootstrapInstance, _ common.CreateInstanceParams) (commonParams.ProviderInstance, error) {
  	extraspecs := bootstrapParams.ExtraSpecs
-@@ -97,7 +115,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -97,7 +126,12 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
  		e.cfg.Name,       // label: provider
  	).Inc()
  
@@ -681,7 +1136,7 @@ index 6e43dce..327c3f0 100644
  	if err != nil {
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"CreateInstance", // label: operation
-@@ -112,6 +135,9 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -112,6 +146,9 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
  			"CreateInstance", // label: operation
  			e.cfg.Name,       // label: provider
  		).Inc()
@@ -691,7 +1146,7 @@ index 6e43dce..327c3f0 100644
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
  	}
  
-@@ -120,13 +146,26 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
+@@ -120,13 +157,26 @@ func (e *external) CreateInstance(ctx context.Context, bootstrapParams commonPar
  			"CreateInstance", // label: operation
  			e.cfg.Name,       // label: provider
  		).Inc()
@@ -722,7 +1177,7 @@ index 6e43dce..327c3f0 100644
  	return param, nil
  }
  
-@@ -193,8 +232,17 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+@@ -193,8 +243,17 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
  		"GetInstance", // label: operation
  		e.cfg.Name,    // label: provider
  	).Inc()
@@ -741,7 +1196,7 @@ index 6e43dce..327c3f0 100644
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"GetInstance", // label: operation
  			e.cfg.Name,    // label: provider
-@@ -208,6 +256,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+@@ -208,6 +267,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
  			"GetInstance", // label: operation
  			e.cfg.Name,    // label: provider
  		).Inc()
@@ -751,7 +1206,7 @@ index 6e43dce..327c3f0 100644
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
  	}
  
-@@ -216,6 +267,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
+@@ -216,6 +278,9 @@ func (e *external) GetInstance(ctx context.Context, instance string, getInstance
  			"GetInstance", // label: operation
  			e.cfg.Name,    // label: provider
  		).Inc()
@@ -761,7 +1216,7 @@ index 6e43dce..327c3f0 100644
  		return commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to validate result: %s", err)
  	}
  
-@@ -245,8 +299,13 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+@@ -245,8 +310,13 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
  		e.cfg.Name,      // label: provider
  	).Inc()
  
@@ -777,7 +1232,7 @@ index 6e43dce..327c3f0 100644
  		metrics.InstanceOperationFailedCount.WithLabelValues(
  			"ListInstances", // label: operation
  			e.cfg.Name,      // label: provider
-@@ -260,6 +319,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+@@ -260,6 +330,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
  			"ListInstances", // label: operation
  			e.cfg.Name,      // label: provider
  		).Inc()
@@ -787,7 +1242,7 @@ index 6e43dce..327c3f0 100644
  		return []commonParams.ProviderInstance{}, garmErrors.NewProviderError("failed to decode response from binary: %s", err)
  	}
  
-@@ -270,6 +332,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
+@@ -270,6 +343,9 @@ func (e *external) ListInstances(ctx context.Context, poolID string, listInstanc
  				"ListInstances", // label: operation
  				e.cfg.Name,      // label: provider
  			).Inc()
@@ -799,10 +1254,10 @@ index 6e43dce..327c3f0 100644
  		ret[idx] = inst
 diff --git a/workers/scaleset/admission_test.go b/workers/scaleset/admission_test.go
 new file mode 100644
-index 0000000..147af79
+index 0000000..06ae62c
 --- /dev/null
 +++ b/workers/scaleset/admission_test.go
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,255 @@
 +package scaleset
 +
 +import (
@@ -830,14 +1285,31 @@ index 0000000..147af79
 +)
 +
 +type admissionTestProvider struct {
-+	common.Provider // nil: any lifecycle call panics, rather than silently passing.
-+	result          error
-+	requests        []common.AdmissionRequest
++	common.Provider     // nil: any lifecycle call panics, rather than silently passing.
++	result              error
++	requests            []common.AdmissionRequest
++	cancelled           []common.AdmissionRequest
++	cancelResult        error
++	cancelContextErrors []error
++	cancelDeadlines     []time.Duration
++	afterAdmit          func()
 +}
 +
 +func (p *admissionTestProvider) AdmitInstance(_ context.Context, request common.AdmissionRequest) error {
 +	p.requests = append(p.requests, request)
++	if p.result == nil && p.afterAdmit != nil {
++		p.afterAdmit()
++	}
 +	return p.result
++}
++
++func (p *admissionTestProvider) CancelAdmission(ctx context.Context, request common.AdmissionRequest) error {
++	p.cancelled = append(p.cancelled, request)
++	p.cancelContextErrors = append(p.cancelContextErrors, ctx.Err())
++	if deadline, ok := ctx.Deadline(); ok {
++		p.cancelDeadlines = append(p.cancelDeadlines, time.Until(deadline))
++	}
++	return p.cancelResult
 +}
 +
 +type admissionStopStore struct {
@@ -881,13 +1353,18 @@ index 0000000..147af79
 +
 +type admissionRecordingStore struct {
 +	dbCommon.Store
-+	rows []params.Instance
++	rows            []params.Instance
++	createError     error
++	controllerError error
 +}
 +
 +func (s *admissionRecordingStore) ControllerInfo() (params.ControllerInfo, error) {
-+	return params.ControllerInfo{}, nil
++	return params.ControllerInfo{}, s.controllerError
 +}
 +func (s *admissionRecordingStore) CreateScaleSetInstance(_ context.Context, _ uint, p params.CreateInstanceParams) (params.Instance, error) {
++	if s.createError != nil {
++		return params.Instance{}, s.createError
++	}
 +	row := params.Instance{ID: p.Name, Name: p.Name, AgentID: p.AgentID, CreateAttempt: p.CreateAttempt}
 +	s.rows = append(s.rows, row)
 +	return row, nil
@@ -942,12 +1419,105 @@ index 0000000..147af79
 +	require.Equal(t, gate.requests[1].Name, store.rows[0].Name)
 +	require.NotEqual(t, gate.requests[0].Name, store.rows[0].Name)
 +	require.Equal(t, 1, store.rows[0].CreateAttempt)
++	require.Empty(t, gate.cancelled)
++}
++
++func TestScaleUpSetupFailuresCancelExactAdmittedRequest(t *testing.T) {
++	for _, stage := range []string{"controller", "client", "jit", "decode", "row"} {
++		t.Run(stage, func(t *testing.T) {
++			var jitCalls, removeCalls atomic.Int64
++			var server *httptest.Server
++			server = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
++				if r.URL.Path == "/actions/runner-registration" {
++					payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, time.Now().Add(time.Hour).Unix())))
++					_ = json.NewEncoder(rw).Encode(params.ActionsServiceAdminInfoResponse{URL: server.URL, Token: "eyJhbGciOiJIUzI1NiJ9." + payload + ".c2ln"})
++					return
++				}
++				if strings.HasSuffix(r.URL.Path, "/generatejitconfig") {
++					jitCalls.Add(1)
++					if stage == "jit" {
++						http.Error(rw, "fixture failure", http.StatusInternalServerError)
++						return
++					}
++					encoded := base64.StdEncoding.EncodeToString([]byte(`{"test":"fresh"}`))
++					if stage == "decode" {
++						encoded = "not-base64"
++					}
++					_ = json.NewEncoder(rw).Encode(params.RunnerScaleSetJitRunnerConfig{Runner: &params.RunnerReference{ID: 42}, EncodedJITConfig: encoded})
++					return
++				}
++				if r.Method == http.MethodDelete {
++					removeCalls.Add(1)
++					rw.WriteHeader(http.StatusNoContent)
++					return
++				}
++				http.Error(rw, "unexpected endpoint", http.StatusNotFound)
++			}))
++			defer server.Close()
++			entity := params.ForgeEntity{ID: "cancel-scale-" + stage, EntityType: params.ForgeEntityTypeRepository}
++			if stage != "controller" && stage != "client" {
++				gh := commonMocks.NewGithubClient(t)
++				base, err := url.Parse(server.URL)
++				require.NoError(t, err)
++				gh.On("GetEntity").Return(entity)
++				gh.On("GithubBaseURL").Return(base)
++				gh.On("CreateEntityRegistrationToken", mock.Anything).Return(&github.RegistrationToken{Token: github.String("fixture"), ExpiresAt: &github.Timestamp{Time: time.Now().Add(time.Hour)}}, nil, nil).Once()
++				cache.SetGithubClient(entity.ID, gh)
++				defer cache.DeleteGithubClient(entity.ID)
++			}
++			gate := &admissionTestProvider{cancelResult: errors.New("secret-cancellation-refused")}
++			store := &admissionRecordingStore{}
++			if stage == "controller" {
++				store.controllerError = errors.New("controller failed")
++			}
++			if stage == "row" {
++				store.createError = errors.New("row failed")
++			}
++			w := &Worker{ctx: context.Background(), provider: gate, store: store, scaleSet: params.ScaleSet{Name: "cancel-test", RepoID: entity.ID, Enabled: true, MinIdleRunners: 1, MaxRunners: 1}, runners: map[string]params.Instance{}}
++			w.handleScaleUp()
++			require.Len(t, gate.requests, 1)
++			require.Equal(t, gate.requests, gate.cancelled)
++			require.Equal(t, []error{nil}, gate.cancelContextErrors)
++			require.Len(t, gate.cancelDeadlines, 1)
++			require.Positive(t, gate.cancelDeadlines[0])
++			require.LessOrEqual(t, gate.cancelDeadlines[0], 10*time.Second)
++			require.Empty(t, store.rows)
++			require.Empty(t, w.runners)
++			if stage == "controller" || stage == "client" {
++				require.Zero(t, jitCalls.Load())
++			} else {
++				require.Positive(t, jitCalls.Load())
++			}
++			if stage == "row" {
++				require.Equal(t, int64(1), removeCalls.Load())
++			} else {
++				require.Zero(t, removeCalls.Load())
++			}
++		})
++	}
++}
++func TestScaleUpCancellationIndependentlyBoundedAndNeverRunsOnDeferOrSuccess(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	gate := &admissionTestProvider{afterAdmit: cancel}
++	store := &admissionStopStore{}
++	w := &Worker{ctx: ctx, provider: gate, store: store, scaleSet: params.ScaleSet{Name: "context", RepoID: "context", Enabled: true, MinIdleRunners: 1, MaxRunners: 1}, runners: map[string]params.Instance{}}
++	w.handleScaleUp()
++	require.ErrorIs(t, ctx.Err(), context.Canceled)
++	require.Equal(t, gate.requests, gate.cancelled)
++	require.Equal(t, []error{nil}, gate.cancelContextErrors)
++	require.Len(t, gate.cancelDeadlines, 1)
++	require.Positive(t, gate.cancelDeadlines[0])
++	require.LessOrEqual(t, gate.cancelDeadlines[0], 10*time.Second)
++	gate.result = common.NewAdmissionDeferred(5 * time.Second)
++	w.handleScaleUp()
++	require.Len(t, gate.cancelled, 1)
 +}
 diff --git a/workers/scaleset/scaleset.go b/workers/scaleset/scaleset.go
-index abc2426..430576c 100644
+index abc2426..8c2bafc 100644
 --- a/workers/scaleset/scaleset.go
 +++ b/workers/scaleset/scaleset.go
-@@ -806,19 +806,34 @@ func (w *Worker) handleScaleUp() {
+@@ -806,28 +806,58 @@ func (w *Worker) handleScaleUp() {
  		return
  	}
  
@@ -964,13 +1534,15 @@ index abc2426..430576c 100644
 -	}
  	for i := w.runnerCount(); i < w.targetRunners(); i++ {
  		newRunnerName := strings.ToLower(fmt.Sprintf("%s-%s", w.scaleSet.GetRunnerPrefix(), util.NewID()))
++		cancelAdmission := func() {}
 +		if admission, ok := w.provider.(common.AdmissionProvider); ok {
 +			poolID, err := w.pseudoPoolID()
 +			if err != nil {
 +				slog.ErrorContext(w.ctx, "getting admission pool identity", "error", err)
 +				return
 +			}
-+			if err := admission.AdmitInstance(w.ctx, common.AdmissionRequest{Name: newRunnerName, PoolID: poolID}); err != nil {
++			request := common.AdmissionRequest{Name: newRunnerName, PoolID: poolID}
++			if err := admission.AdmitInstance(w.ctx, request); err != nil {
 +				if common.IsAdmissionDeferred(err) {
 +					slog.DebugContext(w.ctx, "capacity admission deferred before JIT allocation")
 +				} else {
@@ -979,17 +1551,47 @@ index abc2426..430576c 100644
 +				// No JIT or runner record exists. The desired count drives a later attempt.
 +				return
 +			}
++			if cancellation, ok := w.provider.(common.AdmissionCancellationProvider); ok {
++				cancelAdmission = func() {
++					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(w.ctx), 10*time.Second)
++					defer cancel()
++					if cancellation.CancelAdmission(cleanupCtx, request) != nil {
++						slog.ErrorContext(cleanupCtx, "admission reservation cancellation unconfirmed; identity must not be reused")
++					}
++				}
++			}
 +		}
 +		controllerConfig, err := w.store.ControllerInfo()
 +		if err != nil {
 +			slog.ErrorContext(w.ctx, "error getting controller config", "error", err)
++			cancelAdmission()
 +			return
 +		}
 +		scaleSetCli, err := w.GetScaleSetClient()
 +		if err != nil {
 +			slog.ErrorContext(w.ctx, "error getting scale set client", "error", err)
++			cancelAdmission()
 +			return
 +		}
  		jitConfig, err := scaleSetCli.GenerateJitRunnerConfig(w.ctx, newRunnerName, w.scaleSet.ScaleSetID)
  		if err != nil {
  			slog.ErrorContext(w.ctx, "error generating jit config", "error", err)
++			cancelAdmission()
+ 			continue
+ 		}
+ 		slog.DebugContext(w.ctx, "creating new runner", "runner_name", newRunnerName)
+ 		decodedJit, err := jitConfig.DecodedJITConfig()
+ 		if err != nil {
+ 			slog.ErrorContext(w.ctx, "error decoding jit config", "error", err)
++			cancelAdmission()
+ 			continue
+ 		}
+ 		runnerParams := params.CreateInstanceParams{
+@@ -847,6 +877,7 @@ func (w *Worker) handleScaleUp() {
+ 		dbInstance, err := w.store.CreateScaleSetInstance(w.ctx, w.scaleSet.ID, runnerParams)
+ 		if err != nil {
+ 			slog.ErrorContext(w.ctx, "error creating instance", "error", err)
++			cancelAdmission()
+ 			if err := scaleSetCli.RemoveRunner(w.ctx, jitConfig.Runner.ID); err != nil {
+ 				slog.ErrorContext(w.ctx, "error deleting runner", "error", err)
+ 			}

@@ -17,6 +17,16 @@ The gateway also obtains its baseline through the actual read-only Garm API clie
 
 The test verifies the exact pinned source HEAD before creating a fixed-name temporary qualification test with exclusive no-overwrite creation. It refuses to overwrite an existing source file and removes its own generated test on completion. The source patch's canonical artifact remains separate from these test-only additions. The direct opt-in test checks HEAD, not every worktree byte; the mandatory fresh `test.sh` path establishes source-and-patch provenance by fetching the pinned public commit and applying the repository patch into a new directory. Do not treat an independently modified worktree with the same HEAD as equivalent qualification.
 
+## Never-dispatched preparation cleanup
+
+Both modes first reserve an unused identity through actual Garm, cancel it twice
+through the compiled provider, and reject re-admission/late Create. A new identity
+then obtains the same global slot. The parent test checks the permanent tombstone,
+absence of a dispatch entry for that cancelled key and still exactly one physical
+POST overall. Confirmed and unknown dispatched requests both refuse cancellation.
+The upstream pool/scaleset tests separately exercise JIT/row preparation failures;
+this subprocess gate tests the actual protocol, gateway and database boundary.
+
 ## Confirmed outcome
 
 Actual Garm calls pre-JIT admission, then Create twice, Get and List using its v0.1.1 parameter construction. The compiled facade uses the strict authenticated RPC and the actual service sends explicit CPU/RAM/local-image/correlation settings to the Incus fixture.

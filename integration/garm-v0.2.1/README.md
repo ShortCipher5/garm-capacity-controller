@@ -43,15 +43,39 @@ Never-dispatched capacity denial, exit 75:
 {"protocol":"garm-capacity/v1","outcome":"deferred","name":"runner-1","pool_id":"pool-1","dispatched":false,"retry_after_seconds":10}
 ```
 
-Exact version, matching name/pool, explicit `dispatched:false`, bounded 5–60 second hint and matching exit code are mandatory. Unknown, duplicate or case-folded keys, trailing JSON, mismatched identities and responses over 4096 bytes are rejected. Cancellation, transport failure, malformed output or any dispatched/uncertain outcome is not benign defer. Preflight execution is bounded to ten seconds (or the caller deadline, if earlier). Output is bounded and drained; stderr and raw malformed stdout are never embedded in admission errors.
+Exact version, matching name/pool, explicit `dispatched:false`, bounded 5–60 second hint and matching exit code are mandatory. Unknown, duplicate or case-folded keys, trailing JSON, mismatched identities and responses over 4096 bytes are rejected. Cancellation, transport failure, malformed output or any dispatched/uncertain outcome is not benign defer. Preflight execution is bounded to ten seconds (or the caller deadline, if earlier), plus at most a 250 ms descendant-held pipe drain tail. Output is bounded and drained; stderr and raw malformed stdout are never embedded in admission errors.
 
 For opt-in gateway configuration, Create execution also uses a bounded, redacted boundary and suppresses raw provider-response debug logging, redacts validation errors/provider faults and verifies the returned runner name. Ordinary Create errors retain their failure semantics and **are never turned into defer**. This does not retrofit redaction or safe cleanup into every legacy Garm provider command.
+
+## Preparation-failure cleanup
+
+After successful admission, opted-in ordinary pools and scale sets call optional
+`CancelAdmission` when later JIT/runner-row preparation fails. The command carries
+the same protocol/name/pool request, without bootstrap credentials. Its response
+requires exit zero and exactly these fields (replay may be true on retry):
+
+```json
+{"protocol":"garm-capacity/v1","outcome":"cancelled","name":"runner-1","pool_id":"pool-1","dispatched":false,"reservation_key":"reservation-1","replay":false}
+```
+
+Cleanup uses a separate bounded context even if the original request was cancelled.
+It preserves the original preparation error and logs only a constant unconfirmed
+outcome, never raw child output. A lost reply can follow a committed cancellation;
+only exact identity retry can inspect the idempotent result. Cleanup does not run
+after denied admission, a successfully persisted runner row, or a physical Create
+failure. Default/legacy providers retain their behavior.
+
+The gateway, not Garm, proves that no dispatch intent or linked resource exists.
+An ambiguous row/claim race serializes against the same transaction. Claim-first
+keeps the allocation charged; cancellation-first permanently rejects late Create.
+No TTL, provider-error-based release, physical delete or GitHub deregistration is
+introduced. See [cancellation constraints](../../docs/undispatched-cancellation.md).
 
 ## The preflight is NOT enforcement
 
 A real gateway must still persist dispatch intent and atomically claim the same reservation immediately before contacting Incus. Replayed reservations are not create permits. All lifecycle paths must use that gateway, and Garm/wrapper identities must not retain direct Incus write credentials or sockets. External Incus administrators remain outside that guarantee.
 
-A reservation followed by JIT or database setup failure can remain charged. No TTL or error-based release is introduced. Reconciliation and an explicit confirmed-retirement design are still required. Create uncertainty must remain charged, and a later cleanup request must not blindly destroy a potentially busy runner. Draining still requires handling already-idle runner dispatch, not just blocking this hook.
+A failed or unconfirmed preparation cleanup is not release proof; refused transactions remain charged, and an already committed tombstone remains permanent despite a lost reply. No TTL or Create-error-based release is introduced. Reconciliation and an explicit confirmed-retirement design are still required. Create uncertainty must remain charged, and a later cleanup request must not blindly destroy a potentially busy runner. Draining still requires handling already-idle runner dispatch, not just blocking this hook.
 
 ## Alternatives and maintenance tradeoff
 

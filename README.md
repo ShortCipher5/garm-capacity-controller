@@ -30,7 +30,7 @@ The full goal also includes repository labels/priority/idle controls, safe lifec
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
 | Administration | Separate TLS read-token API and responsive React ledger view | Read-only; no policy editor or retirement button |
 | Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
-| Cancellation | Atomic never-dispatched tombstones and authenticated provider command | Automatic Garm preparation-failure hook qualification follows |
+| Cancellation | Atomic never-dispatched tombstones, authenticated provider command and optional Garm preparation-failure hook | No dispatched/unknown-create or physical retirement release |
 
 See [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).
 
