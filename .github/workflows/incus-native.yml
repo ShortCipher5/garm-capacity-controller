@@ -1,0 +1,46 @@
+name: disposable-incus-native-compile
+on:
+  pull_request:
+    paths:
+      - .github/workflows/incus-native.yml
+      - deploy/runtime/incus-native/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: incus-native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compile-and-native-db-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Compile pinned Incus and exercise dormant native DB candidate
+        run: deploy/runtime/incus-native/test.sh
+      - name: State qualification boundary
+        if: always()
+        run: |
+          echo '## Incus compile-only and dormant native DB tests' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No daemon execution, live hosts, credentials, deployment or physical-release authority. SQLite DB tests are not cowsql runtime qualification.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success()
+        with:
+          name: incus-native-public-evidence
+          path: |
+            qualification-results/incus-native/upstream-revision.txt
+            qualification-results/incus-native/patched-tree.txt
+            qualification-results/incus-native/patch-sha256.txt
+            qualification-results/incus-native/base-image.txt
+            qualification-results/incus-native/recipe-revision.txt
+            qualification-results/incus-native/dockerfile-sha256.txt
+            qualification-results/incus-native/native-package-versions.tsv
+            qualification-results/incus-native/go-version.txt
+            qualification-results/incus-native/go-build-env.txt
+            qualification-results/incus-native/incusd-compile-only.sha256
+            qualification-results/incus-native/result.txt
+          if-no-files-found: error
+          retention-days: 7

@@ -87,11 +87,7 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 		return StagedPool{}, err
 	}
 	decodeRecorded := func(raw json.RawMessage) (StagedPool, error) {
-		var result StagedPool
-		if json.Unmarshal(raw, &result) != nil || result.Protocol != DisabledPoolProtocol || result.ManagementIdentity != m.remote.ManagementIdentity() || result.JournalLineage != m.journal.Lineage() || result.RequestID != requestID || result.RepositoryID != repositoryID || !validUUID(result.PoolID) || result.SpecFingerprint != garmapi.DisabledPoolSpecFingerprint(owned) || result.ProviderName != owned.ProviderName || !validJournalLineage(result.PoolFingerprint) || !result.DisabledReadback || !result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
-			return StagedPool{}, ErrJournal
-		}
-		return result, nil
+		return m.decodeRecordedStage(raw, requestID, repositoryID, owned)
 	}
 	if raw, exists, err := m.journal.replay(ctx, requestID, hash); err != nil {
 		return StagedPool{}, err
@@ -164,6 +160,14 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 	}
 	if remoteErr != nil {
 		return StagedPool{}, remoteErr
+	}
+	return result, nil
+}
+
+func (m *Manager) decodeRecordedStage(raw json.RawMessage, requestID, repositoryID string, owned garmapi.DisabledPoolSpec) (StagedPool, error) {
+	var result StagedPool
+	if json.Unmarshal(raw, &result) != nil || result.Protocol != DisabledPoolProtocol || result.ManagementIdentity != m.remote.ManagementIdentity() || result.JournalLineage != m.journal.Lineage() || result.RequestID != requestID || result.RepositoryID != repositoryID || !validUUID(result.PoolID) || result.SpecFingerprint != garmapi.DisabledPoolSpecFingerprint(owned) || result.ProviderName != owned.ProviderName || !validJournalLineage(result.PoolFingerprint) || !result.DisabledReadback || !result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
+		return StagedPool{}, ErrJournal
 	}
 	return result, nil
 }
