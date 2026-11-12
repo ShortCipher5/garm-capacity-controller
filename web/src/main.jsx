@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
+import { GarmManagement } from "./garm-management.jsx";
 import { Management } from "./management.jsx";
 
 const fmt = (n) => n.toLocaleString();
@@ -83,7 +84,7 @@ function Usage({ allocation, metric = false }) {
     );
   });
 }
-function Dashboard({ data, busy, refresh, disconnect }) {
+function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
   return (
     <>
       <aside className="sidebar">
@@ -144,6 +145,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
           </span>
         </div>
         <Management data={data} refresh={refresh} />
+        {data.garm_management_available && <GarmManagement read={readGarm} />}
         <div className="metrics">
           <Usage allocation={data.global} metric />
         </div>
@@ -347,6 +349,10 @@ function App() {
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
+        readGarm={async () => {
+          try { return await session.current.garmSnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
       />
     );
   return (
