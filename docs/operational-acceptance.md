@@ -4,7 +4,7 @@ These are tracked requirements. Implemented offline primitives are distinguished
 
 ## Consistent SQLite backup and fail-closed restore
 
-Current status: offline library primitives and local tests implemented; live recovery qualification remains open. See [supported APIs and procedure](backup-restore.md). WAL durability does not make copying only an open `.db` file safe. No backup/restore CLI is shipped.
+Current status: offline library primitives, local operator CLI and local tests implemented; live recovery qualification remains open. See [supported APIs and procedure](backup-restore.md). WAL durability does not make copying only an open `.db` file safe. The local `capacity-ledger` CLI is shipped; its fencing acknowledgement cannot verify or enforce external fencing.
 
 Required implementation and qualification:
 
@@ -16,7 +16,7 @@ Required implementation and qualification:
 - [ ] Do not resume live scheduling merely because SQLite integrity passes or the old snapshot used to be ready. Unknown or unbounded allocation remains blocked/charged.
 - [x] Test concurrent writes during backup, incomplete artifacts, interrupted restore, destination preservation, artifact readiness, stale-fence rejection, post-backup orphan/creating resources and dispatch refusal until complete reconciliation.
 
-Operator sequence using the offline APIs, before a live workflow is qualified:
+Operator sequence using the offline CLI/APIs, before a live workflow is qualified:
 
 1. Establish a maintenance window and stop/fence every old gateway writer. Keep external ambiguous operations visible and charged.
 2. Take a consistent private SQLite backup with the supported tool. Verify integrity, schema/application ownership and blocked readiness; retain the original database and the required external key/configuration versions separately.

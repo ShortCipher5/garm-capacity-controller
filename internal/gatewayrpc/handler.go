@@ -111,7 +111,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnsupportedMediaType)
 		return
 	}
-	if (r.URL.Path == "/v1/admit" || r.URL.Path == "/v1/create") && !h.provision {
+	if (r.URL.Path == "/v1/admit" || r.URL.Path == "/v1/create" || r.URL.Path == "/v1/cancel-admission") && !h.provision {
 		fail(http.StatusForbidden)
 		return
 	}
@@ -129,6 +129,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result = AdmissionResult{exit, json.RawMessage(data)}
+	case "/v1/cancel-admission":
+		var request garmprotocol.Request
+		if Decode(r.Body, &request) != nil {
+			fail(http.StatusBadRequest)
+			return
+		}
+		response, err := h.facade.CancelAdmission(r.Context(), request)
+		if err != nil {
+			fail(http.StatusServiceUnavailable)
+			return
+		}
+		result = response
 	case "/v1/create":
 		var request common.BootstrapInstance
 		if Decode(r.Body, &request) != nil {

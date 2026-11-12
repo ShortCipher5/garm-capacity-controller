@@ -112,10 +112,10 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 		if journal != "wal" || syncMode != 2 || foreignKeys != 1 {
 			return errors.New("required SQLite durability settings unavailable")
 		}
-		if version != 0 && version != 1 && version != 2 {
+		if version != 0 && version != 1 && version != 2 && version != 3 {
 			return errors.New("unsupported SQLite schema version")
 		}
-		if (version == 1 || version == 2) && application != 0x47434331 {
+		if (version == 1 || version == 2 || version == 3) && application != 0x47434331 {
 			return errors.New("database belongs to a different application")
 		}
 		if version == 0 {
@@ -141,6 +141,21 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 				return err
 			}
 			if err := sqliteAudit(tx, "schema_migrated_v2", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 3 {
+			if _, err := tx.Exec(sqliteCancellationSchema); err != nil {
+				return err
+			}
+			if version == 1 || version == 2 {
+				// Old schema version alone cannot prove dispatch provenance;
+				// version two may itself descend from a pre-journal ledger.
+				if _, err := tx.Exec("INSERT INTO cancellation_history_exclusions(request_key) SELECT request_key FROM reservations"); err != nil {
+					return err
+				}
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v3", "", s.now()); err != nil {
 				return err
 			}
 		}
@@ -179,7 +194,7 @@ func sqlitePreflight(location url.URL) error {
 		}
 		return nil
 	}
-	if (version != 1 && version != 2) || application != 0x47434331 {
+	if (version != 1 && version != 2 && version != 3) || application != 0x47434331 {
 		return errors.New("unsupported or foreign SQLite database")
 	}
 	return nil
@@ -383,6 +398,14 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		}
 		if !validRequest(req) {
 			return deny("denied_invalid_request", ErrDenied)
+		}
+		if cancelled, err := cancellationRecord(tx, req.Key); err == nil {
+			if cancelled.Request != req {
+				return deny("denied_cancelled_identity_conflict", ErrConflict)
+			}
+			return deny("denied_cancelled_request", ErrCancelled)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
 		}
 		if existing, ok := reservations[req.Key]; ok {
 			if existing.Request != req {
@@ -618,9 +641,12 @@ type SQLiteSnapshot struct {
 	Epoch        int64
 	Config       Config
 	Reservations map[string]Reservation
-	Inventory    []InventoryResource
-	Allocated    Allocations
-	Audit        []AuditEvent
+	// RecentCancellations is at most 100 entries, NEVER absence proof.
+	RecentCancellations map[string]Cancellation
+	CancellationCount   int64
+	Inventory           []InventoryResource
+	Allocated           Allocations
+	Audit               []AuditEvent
 }
 
 // Snapshot returns one transactionally consistent view and the last 100 events.
@@ -644,6 +670,10 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 			result.Ready = false
 		}
 		result.Reservations, err = sqliteReservations(tx)
+		if err != nil {
+			return err
+		}
+		result.RecentCancellations, result.CancellationCount, err = sqliteRecentCancellations(tx)
 		if err != nil {
 			return err
 		}

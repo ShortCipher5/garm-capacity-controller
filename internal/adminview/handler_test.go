@@ -62,7 +62,7 @@ func TestReadOnlyAuthenticationAndNoMutationOrURLTokens(t *testing.T) {
 			t.Fatalf("bad token accepted %d", response.Code)
 		}
 	}
-	for _, route := range []string{"/admin/api/v1/config", "/admin/api/v1/host-mode", "/v1/create", "/admin/api/v1/delete"} {
+	for _, route := range []string{"/admin/api/v1/config", "/admin/api/v1/host-mode", "/v1/create", "/v1/cancel-admission", "/admin/api/v1/cancel-admission", "/admin/api/v1/delete"} {
 		response := request(t, h, "POST", route, token)
 		if response.Code < 400 {
 			t.Fatal("admin token gained mutation path")

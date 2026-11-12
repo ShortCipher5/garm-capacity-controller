@@ -2,12 +2,13 @@
 package deployment
 
 import (
-	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func repositoryFile(t *testing.T, name string) string {
@@ -96,6 +97,8 @@ func TestContainerBuildContract(t *testing.T) {
 	for _, required := range []string{
 		"RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-gateway ./cmd/capacity-gateway",
 		"RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-provider ./cmd/capacity-provider",
+		"RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-ledger ./cmd/capacity-ledger",
+		"FROM runtime-base AS ledger-tool", `ENTRYPOINT ["/usr/local/bin/capacity-ledger"]`, `CMD ["--help"]`,
 		"RUN go mod download && go mod verify", "RUN npm ci --ignore-scripts", "RUN npm test && npm run build",
 		"FROM scratch AS provider-artifact", "USER 65532:65532", `CMD ["-config", "/run/capacity-private/gateway.local.json"]`,
 	} {
@@ -108,8 +111,8 @@ func TestContainerBuildContract(t *testing.T) {
 		if strings.HasPrefix(line, "COPY ") && (strings.Contains(line, " . ") || strings.Contains(line, "private") || strings.Contains(line, "deploy/")) {
 			t.Fatal("unrestricted/deployment copies may leak private inputs into layers")
 		}
-		if strings.HasPrefix(line, "EXPOSE ") || strings.Contains(line, "--mount=type=secret") || strings.Contains(line, "allow-experimental-provisioning") {
-			t.Fatal("generic image cannot expose listeners, ingest secrets or enable provisioning")
+		if strings.HasPrefix(line, "EXPOSE ") || strings.Contains(line, "--mount=type=secret") || strings.Contains(line, "allow-experimental-provisioning") || strings.Contains(line, "allow-experimental-management") {
+			t.Fatal("generic image cannot expose listeners, ingest secrets or enable provisioning/management")
 		}
 	}
 	ignore := repositoryFile(t, ".dockerignore")
@@ -127,6 +130,33 @@ func TestContainerBuildContract(t *testing.T) {
 	for _, denied := range []string{"**/*.local.json", "**/*.token", "**/*.pem", "**/*.key", "**/*.db", "**/*.db-*", "**/.env*"} {
 		if !strings.Contains(ignore, "\n"+denied+"\n") {
 			t.Fatalf("missing sensitive context exclusion: %s", denied)
+		}
+	}
+}
+
+func TestPreviewDocumentsCurrentOptInAndRecoveryBoundaries(t *testing.T) {
+	readme := repositoryFile(t, "deploy/README.md")
+	for _, required := range []string{"provisioning and ledger management OFF", "admin.management_token_file", "capacity-ledger", "not in the gateway image"} {
+		if !strings.Contains(readme, required) {
+			t.Fatalf("missing current preview boundary: %s", required)
+		}
+	}
+}
+
+func TestRecoveryToolIsSeparateAndQualificationIsNotDeployment(t *testing.T) {
+	dockerfile := repositoryFile(t, "Dockerfile")
+	_, ledger, ok := strings.Cut(dockerfile, "FROM runtime-base AS ledger-tool\n")
+	if !ok {
+		t.Fatal("missing separate recovery image")
+	}
+	ledger, gateway, ok := strings.Cut(ledger, "FROM runtime-base AS gateway\n")
+	if !ok || strings.Contains(gateway, "capacity-ledger") || strings.Contains(ledger, "capacity-gateway") || strings.Contains(ledger, "capacity-admin") {
+		t.Fatal("gateway and local recovery target must stay separate")
+	}
+	plan := repositoryFile(t, "deploy/qualification.md")
+	for _, required := range []string{"plan, not executed container qualification", "--network none --read-only --cap-drop ALL", "--user 65532:65532", "No path/secret", "whole source directory", "write-blocked", "no live deployment command"} {
+		if !strings.Contains(plan, required) {
+			t.Fatalf("missing disposable qualification boundary: %s", required)
 		}
 	}
 }

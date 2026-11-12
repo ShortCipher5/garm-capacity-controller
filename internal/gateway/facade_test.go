@@ -20,17 +20,22 @@ import (
 const operation = "12345678-1234-1234-1234-123456789abc"
 
 type backendFixture struct {
-	mu         sync.Mutex
-	instances  map[string]incusapi.Instance
-	operations []incusapi.Operation
-	calls      atomic.Int32
-	fail       bool
-	drift      bool
-	readFail   bool
-	userdata   string
+	mu            sync.Mutex
+	instances     map[string]incusapi.Instance
+	operations    []incusapi.Operation
+	calls         atomic.Int32
+	fail          bool
+	drift         bool
+	readFail      bool
+	userdata      string
+	createFail    bool
+	waits         atomic.Int32
+	waitHook      func(context.Context) error
+	afterCreate   func()
+	createReceipt *incusapi.Created
 }
 
-func (b *backendFixture) CreateAndWait(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
+func (b *backendFixture) Create(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
 	b.calls.Add(1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -41,10 +46,26 @@ func (b *backendFixture) CreateAndWait(_ context.Context, s incusapi.InstanceSpe
 	}
 	b.instances[s.Name] = instance
 	receipt := incusapi.Created{OperationID: operation, ResourceID: s.Name}
-	if b.fail {
-		return receipt, errors.New("private-bootstrap-fault")
+	if b.createReceipt != nil {
+		receipt = *b.createReceipt
+	}
+	if b.createFail {
+		return incusapi.Created{}, errors.New("private-lost-post-response")
+	}
+	if b.afterCreate != nil {
+		b.afterCreate()
 	}
 	return receipt, nil
+}
+func (b *backendFixture) Wait(ctx context.Context, _ incusapi.Created) error {
+	b.waits.Add(1)
+	if b.waitHook != nil {
+		return b.waitHook(ctx)
+	}
+	if b.fail {
+		return errors.New("private-bootstrap-fault")
+	}
+	return nil
 }
 func (b *backendFixture) Instance(_ context.Context, name string) (incusapi.Instance, error) {
 	b.mu.Lock()
@@ -322,5 +343,57 @@ func TestSlowCollectionCannotRenewEarlierEvidenceFreshness(t *testing.T) {
 	state, _ := store.Snapshot(context.Background())
 	if state.Ready {
 		t.Fatal("stale inventory reopened readiness")
+	}
+}
+
+func TestFacadeCancellationRestoresOnlyNeverDispatchedCapacity(t *testing.T) {
+	ctx := context.Background()
+	f, store, b, _ := facadeFixture(t)
+	for _, name := range []string{"one", "two", "three", "four"} {
+		preflight(t, f, name, "pool-a")
+	}
+	req := garmprotocol.Request{Protocol: garmprotocol.Version, Name: "one", PoolID: "pool-a"}
+	for i := 0; i < 2; i++ {
+		receipt, err := f.CancelAdmission(ctx, req)
+		if err != nil || receipt.Replay == nil || *receipt.Replay != (i == 1) {
+			t.Fatalf("cancel %+v %v", receipt, err)
+		}
+	}
+	preflight(t, f, "replacement", "pool-b")
+	if _, err := f.Create(ctx, bootstrap("one", "pool-a")); err == nil {
+		t.Fatal("cancelled identity recreated")
+	}
+	if _, _, err := f.Admit(ctx, req); err == nil {
+		t.Fatal("cancelled identity readmitted")
+	}
+	if b.calls.Load() != 0 {
+		t.Fatal("cancellation made external call")
+	}
+	snapshot, err := store.ReadSnapshot(ctx)
+	if err != nil || snapshot.CancellationCount != 1 {
+		t.Fatalf("history %+v %v", snapshot, err)
+	}
+	if _, err := f.Create(ctx, bootstrap("two", "pool-a")); err != nil {
+		t.Fatal(err)
+	}
+	req.Name = "two"
+	if _, err := f.CancelAdmission(ctx, req); err == nil {
+		t.Fatal("confirmed dispatch cancelled")
+	}
+	b.fail = true
+	if _, err := f.Create(ctx, bootstrap("three", "pool-a")); err == nil {
+		t.Fatal("expected unknown create")
+	}
+	req.Name = "three"
+	if _, err := f.CancelAdmission(ctx, req); err == nil {
+		t.Fatal("unknown dispatch cancelled")
+	}
+	req.Name = "missing"
+	if _, err := f.CancelAdmission(ctx, req); err == nil {
+		t.Fatal("missing reservation cancelled")
+	}
+	snapshot, err = store.ReadSnapshot(ctx)
+	if err != nil || snapshot.CancellationCount != 1 || b.calls.Load() != 2 {
+		t.Fatalf("unexpected release/call %v calls%d", err, b.calls.Load())
 	}
 }

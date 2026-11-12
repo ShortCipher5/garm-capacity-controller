@@ -40,7 +40,7 @@ func TestProviderNeverPrintsInvalidPrivateConfiguration(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"gateway":"https://example.invalid","controller":"controller-a","incus_private_key":"secret-must-not-print"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"AdmitInstance", "CreateInstance", "GetInstance", "ListInstances"} {
+	for _, command := range []string{"AdmitInstance", "CancelAdmission", "CreateInstance", "GetInstance", "ListInstances"} {
 		var output bytes.Buffer
 		exit := run(context.Background(), environment(map[string]string{"GARM_COMMAND": command, "GARM_INTERFACE_VERSION": "v0.1.1", "GARM_PROVIDER_CONFIG_FILE": path, "GARM_CONTROLLER_ID": "controller-a", "GARM_POOL_ID": "pool-a"}), strings.NewReader(`{"secret":"must-not-print"}`), &output)
 		if exit != 1 || output.Len() != 0 {
@@ -53,8 +53,12 @@ func TestExecutableWireEnvironmentAndAdmissionExitCode(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.Method != "POST" || r.URL.Path != "/v1/admit" {
+		if r.Method != "POST" || (r.URL.Path != "/v1/admit" && r.URL.Path != "/v1/cancel-admission") {
 			t.Error("wrong command route")
+		}
+		if r.URL.Path == "/v1/cancel-admission" {
+			_, _ = w.Write([]byte(`{"protocol":"garm-capacity/v1","outcome":"cancelled","name":"runner-1","pool_id":"pool-a","dispatched":false,"reservation_key":"key-1","replay":false}`))
+			return
 		}
 		_, _ = w.Write([]byte(`{"exit_code":75,"response":{"protocol":"garm-capacity/v1","outcome":"deferred","name":"runner-1","pool_id":"pool-a","dispatched":false,"retry_after_seconds":10}}`))
 	}))
@@ -85,8 +89,13 @@ func TestExecutableWireEnvironmentAndAdmissionExitCode(t *testing.T) {
 		t.Fatalf("wire defer %d %s requests%d", exit, &output, requests.Load())
 	}
 	output.Reset()
+	env["GARM_COMMAND"] = "CancelAdmission"
+	if exit = run(context.Background(), environment(env), strings.NewReader(`{"protocol":"garm-capacity/v1","name":"runner-1","pool_id":"pool-a"}`), &output); exit != 0 || !strings.Contains(output.String(), `"outcome":"cancelled"`) || requests.Load() != 2 {
+		t.Fatalf("wire cancellation %d %s", exit, &output)
+	}
+	output.Reset()
 	env["GARM_CONTROLLER_ID"] = "wrong-controller"
-	if exit = run(context.Background(), environment(env), strings.NewReader("{}"), &output); exit != 1 || output.Len() != 0 || requests.Load() != 1 {
+	if exit = run(context.Background(), environment(env), strings.NewReader("{}"), &output); exit != 1 || output.Len() != 0 || requests.Load() != 2 {
 		t.Fatal("controller mismatch reached gateway")
 	}
 }

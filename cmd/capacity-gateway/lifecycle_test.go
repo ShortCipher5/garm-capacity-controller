@@ -129,7 +129,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/1.0":
-					syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}})
+					syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}})
 				case "/1.0/instances":
 					syncJSON(w, []any{})
 				case "/1.0/operations":

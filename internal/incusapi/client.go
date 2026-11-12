@@ -5,6 +5,7 @@ package incusapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -157,9 +158,10 @@ func field[T any](fields map[string]json.RawMessage, key string) (T, error) {
 }
 
 type envelope struct {
-	kind      string
-	operation string
-	metadata  json.RawMessage
+	serverKeyFingerprint string
+	kind                 string
+	operation            string
+	metadata             json.RawMessage
 }
 
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, input any) (envelope, error) {
@@ -225,6 +227,10 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		return envelope{}, ErrResponse
 	}
 	result := envelope{kind: kind, metadata: metadata}
+	if response.TLS != nil && len(response.TLS.VerifiedChains) > 0 && len(response.TLS.PeerCertificates) > 0 {
+		key := sha256.Sum256(response.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
+		result.serverKeyFingerprint = fmt.Sprintf("%x", key)
+	}
 	if kind == "async" {
 		result.operation, err = field[string](fields, "operation")
 		if err != nil {
@@ -239,6 +245,10 @@ func (c *Client) trusted(ctx context.Context, requireCreate bool) error {
 	if err != nil {
 		return err
 	}
+	return validateTrustedRoot(response, requireCreate)
+}
+
+func validateTrustedRoot(response envelope, requireCreate bool) error {
 	if response.kind != "sync" {
 		return ErrResponse
 	}
@@ -253,6 +263,25 @@ func (c *Client) trusted(ctx context.Context, requireCreate bool) error {
 	auth, err := field[string](fields, "auth")
 	if err != nil || auth != "trusted" {
 		return ErrUnsupported
+	}
+	// Incus v6.0.4 cluster operation listing may omit unreachable members yet
+	// return HTTP 200. This transport has no membership-completeness proof, so
+	// only an explicitly reported standalone server is qualified for any read
+	// or create. Missing/null/type-confused topology is not standalone evidence.
+	environment, err := object(fields["environment"])
+	if err != nil {
+		return ErrResponse
+	}
+	clustered, exists := environment["server_clustered"]
+	if !exists {
+		return ErrResponse
+	}
+	switch string(bytes.TrimSpace(clustered)) {
+	case "false":
+	case "true":
+		return ErrUnsupported
+	default:
+		return ErrResponse
 	}
 	if !requireCreate {
 		return nil
@@ -427,6 +456,11 @@ func (c *Client) Wait(ctx context.Context, created Created) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	for {
+		// Wait is exported and may be called without Create or after topology
+		// changes. A previous poll's trusted standalone view is not a lease.
+		if err := c.trusted(ctx, false); err != nil {
+			return err
+		}
 		response, err := c.request(ctx, http.MethodGet, "/1.0/operations/"+created.OperationID+"/wait", url.Values{"timeout": {"10"}}, nil)
 		if err != nil {
 			return err
@@ -456,6 +490,9 @@ func (c *Client) Wait(ctx context.Context, created Created) error {
 		}
 		switch status {
 		case 200:
+			if err := c.trusted(ctx, false); err != nil {
+				return err
+			}
 			state, err := c.request(ctx, http.MethodGet, "/1.0/instances/"+created.ResourceID+"/state", nil, nil)
 			if err != nil {
 				return err
@@ -485,8 +522,10 @@ func (c *Client) Wait(ctx context.Context, created Created) error {
 	}
 }
 
-// CreateAndWait preserves a known operation receipt on later errors so the
-// dispatch journal can retain correlation without redispatching a create.
+// CreateAndWait is a transport convenience, not a durable execution boundary.
+// A gateway must use Create, persist submitted correlation through its one-shot
+// permit, then Wait. This helper cannot journal a receipt before waiting.
+// Returned errors still retain known correlation and never imply safe release.
 func (c *Client) CreateAndWait(ctx context.Context, spec InstanceSpec) (Created, error) {
 	created, err := c.Create(ctx, spec)
 	if err != nil {

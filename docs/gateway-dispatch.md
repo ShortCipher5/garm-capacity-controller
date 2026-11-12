@@ -26,7 +26,7 @@ Receipt identity is immutable after attachment, and a confirmed record cannot be
 
 ## Storage migration
 
-Owned schema version 1 migrates transactionally to version 2 by adding the dispatch table and a migration audit event. Existing policy, readiness, reservations, inventory, nonces and audit history are retained. The application-ID/private-file checks still apply; unrelated or future-version databases are rejected. The original JSON ledger is not imported. Migration occurs only when an application explicitly opens its local database; nothing here opens the user's live stack or database.
+Owned schema version 1 first receives the version-2 dispatch journal; current version 3 adds [never-dispatched cancellation](undispatched-cancellation.md), excluding all preexisting v1/v2 keys because schema version alone cannot establish their dispatch provenance. Migrations are transactional and audited. Existing policy, readiness, reservations, inventory, nonces and audit history are retained. The application-ID/private-file checks still apply; unrelated or future-version databases are rejected. The original JSON ledger is not imported. Migration occurs only when an application explicitly opens its local database; nothing here opens the user's live stack or database.
 
 ## Remaining real integration work
 

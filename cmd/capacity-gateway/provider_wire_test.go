@@ -70,12 +70,16 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	defer cancel()
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "capacity-provider")
-	if output, err := exec.CommandContext(ctx, goBinary, "build", "-race", "-o", binary, "../capacity-provider").CombinedOutput(); err != nil {
+	// Disposable fixture binary metadata is not provenance. HEAD is verified
+	// separately; avoid an enclosing synthetic .git confusing linked worktrees.
+	if output, err := exec.CommandContext(ctx, goBinary, "build", "-race", "-buildvcs=false", "-o", binary, "../capacity-provider").CombinedOutput(); err != nil {
 		t.Fatalf("compile actual provider: %v %s", err, output)
 	}
 	keys := credentials(t)
 	var mu sync.Mutex
 	var creates atomic.Int32
+	var submittedChecks atomic.Int32
+	databasePath := filepath.Join(directory, "ledger.db")
 	instances := map[string]map[string]string{}
 	const operation = "12345678-1234-1234-1234-123456789abc"
 	incus := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +90,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		defer mu.Unlock()
 		switch {
 		case r.URL.Path == "/1.0":
-			syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}})
+			syncJSON(w, map[string]any{"api_version": "1.0", "auth": "trusted", "environment": map[string]any{"server_clustered": false}, "api_extensions": []string{"instance_create_start"}})
 		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
 			creates.Add(1)
 			var body struct {
@@ -113,6 +117,24 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 		case r.URL.Path == "/1.0/operations":
 			syncJSON(w, map[string]any{})
 		case r.URL.Path == "/1.0/operations/"+operation+"/wait":
+			// This HTTP wait request must not be sent before the received
+			// operation receipt is durable in a separately opened ledger.
+			observed, err := admission.OpenSQLite(databasePath, admission.Config{})
+			if err != nil {
+				t.Error(err)
+				http.Error(w, "ledger unavailable", 500)
+				return
+			}
+			requestKey := sha256.Sum256([]byte("controller-test\x00pool-a\x00wire-1"))
+			receipt, err := observed.LookupDispatch(context.Background(), hex.EncodeToString(requestKey[:]))
+			observed.Close()
+			if err != nil || receipt.State != "submitted" || receipt.OperationID != operation || receipt.ResourceID != "wire-1" {
+				t.Errorf("wait preceded durable submission %+v %v", receipt, err)
+				http.Error(w, "submission unavailable", 500)
+				return
+			}
+			submittedChecks.Add(1)
+
 			if mode == "unknown" {
 				http.Error(w, "private-unknown-fault", http.StatusServiceUnavailable)
 				return
@@ -148,7 +170,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	address := listener.Addr().String()
 	fingerprint := sha256.Sum256(keys.provider.Certificate[0])
 	budget := admission.Resources{CPU: 1000, RAM: 1024, Runners: 1}
-	config := configuration{Listen: address, Controller: "controller-test", Database: filepath.Join(directory, "ledger.db"), InitialPolicy: admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}, Pools: map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, Hosts: map[string]hostConfiguration{"a": {Endpoint: incus.URL, Project: "runners", TLS: keys.otherFiles}}, Garm: garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}}, ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(fingerprint[:])}}
+	config := configuration{Listen: address, Controller: "controller-test", Database: databasePath, InitialPolicy: admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}, Pools: map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, Hosts: map[string]hostConfiguration{"a": {Endpoint: incus.URL, Project: "runners", TLS: keys.otherFiles}}, Garm: garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}}, ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(fingerprint[:])}}
 	running, cancelService := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- serveOnListener(running, config, true, listener) }()
@@ -215,6 +237,18 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	receipt, err := store.LookupDispatch(ctx, hex.EncodeToString(requestKey[:]))
 	if err != nil || receipt.State != mode || receipt.OperationID != operation || receipt.ResourceID != "wire-1" {
 		t.Fatalf("lost durable dispatch correlation: %+v %v", receipt, err)
+	}
+	if submittedChecks.Load() != 1 {
+		t.Fatalf("submission-before-wait checks=%d", submittedChecks.Load())
+	}
+	unusedKey := sha256.Sum256([]byte("controller-test\x00pool-a\x00wire-unused"))
+	cancelled, err := store.LookupCancellation(ctx, hex.EncodeToString(unusedKey[:]))
+	if err != nil || cancelled.Request.Key != hex.EncodeToString(unusedKey[:]) {
+		t.Fatalf("lost durable cancellation %+v %v", cancelled, err)
+	}
+	if _, err := store.LookupDispatch(ctx, hex.EncodeToString(unusedKey[:])); err == nil {
+		t.Fatal("cancelled identity dispatched")
+
 	}
 	if creates.Load() != 1 {
 		t.Fatalf("physical creates=%d; expected exactly one despite confirmed replay", creates.Load())

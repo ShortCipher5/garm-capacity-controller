@@ -44,7 +44,7 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	}
 	// Refuse unsupported commands before loading any credentials or networking.
 	switch command {
-	case "AdmitInstance", "CreateInstance", "GetInstance", "ListInstances":
+	case "AdmitInstance", "CancelAdmission", "CreateInstance", "GetInstance", "ListInstances":
 	default:
 		return 1
 	}
@@ -83,6 +83,23 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 			return 1
 		}
 		return exit
+	case "CancelAdmission":
+		var request garmprotocol.Request
+		if gatewayrpc.Decode(input, &request) != nil || request.PoolID != pool {
+			return 1
+		}
+		response, err := client.CancelAdmission(ctx, request)
+		if err != nil {
+			return 1
+		}
+		data, err := garmprotocol.EncodeCancellation(response, request)
+		if err != nil {
+			return 1
+		}
+		if _, err = output.Write(data); err != nil {
+			return 1
+		}
+		return 0
 	case "CreateInstance":
 		var request common.BootstrapInstance
 		if gatewayrpc.Decode(input, &request) != nil || request.PoolID != pool {

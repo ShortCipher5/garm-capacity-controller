@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
+import { Management } from "./management.jsx";
 
 const fmt = (n) => n.toLocaleString();
 const date = (value) => new Date(value).toLocaleString();
@@ -20,7 +21,7 @@ function Brand() {
 function Notice() {
   return (
     <div className="notice">
-      <strong>Experimental · Read-only · Not production qualified</strong>
+      <strong>Experimental · Not production qualified</strong>
       <span>
         Ledger allocations, not measured CPU or memory utilization. Pausing new
         claims does not stop existing idle runners accepting jobs. No complete
@@ -82,7 +83,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
     <>
       <aside className="sidebar">
         <Brand />
-        <div className="nav-label">READ-ONLY MANAGEMENT</div>
+        <div className="nav-label">LEDGER MANAGEMENT</div>
         {[
           ["overview", "Overview"],
           ["hosts", "Hosts"],
@@ -96,9 +97,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
         <div className="sidebar-bottom">
           <span className="pill amber">Experimental ledger</span>
           <p>
-            Observation only.
-            <br />
-            No infrastructure changes.
+            Policy edits require a separate management credential.
           </p>
         </div>
       </aside>
@@ -137,6 +136,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
             · Admission barrier {data.admission_ready ? "ready" : "not ready"}
           </span>
         </div>
+        <Management data={data} refresh={refresh} />
         <div className="metrics">
           <Usage allocation={data.global} metric />
         </div>
@@ -275,7 +275,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
                         <strong>{e.kind}</strong>
                         <time dateTime={e.at}>{date(e.at)}</time>
                         {e.host && <p>Host: {e.host}</p>}
-                        {e.request_key && <p>Request: {e.request_key}</p>}
+                        {e.request_key && <p>{e.kind === "admin_policy_change" ? "Policy audit: " : "Request: "}{e.request_key}</p>}
                       </div>
                     </article>
                   ))
@@ -286,8 +286,7 @@ function Dashboard({ data, busy, refresh, disconnect }) {
           </section>
         </div>
         <footer>
-          No measured usage history is available. This view cannot change
-          budgets, enable hosts, provision, drain, retire or release resources.
+          No measured usage history is available. No Garm registration, dynamic placement, provisioning, drain, retirement or resource release is available here.
         </footer>
       </main>
     </>

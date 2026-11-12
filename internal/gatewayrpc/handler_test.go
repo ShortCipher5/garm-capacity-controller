@@ -79,13 +79,14 @@ type backend struct {
 	creates   atomic.Int32
 }
 
-func (b *backend) CreateAndWait(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
+func (b *backend) Create(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.creates.Add(1)
 	b.instances[s.Name] = incusapi.Instance{Name: s.Name, Status: 103, CPUMillis: s.CPUMillis, RAMMiB: s.RAMMiB, ControllerID: s.ControllerID, PoolID: s.PoolID, ReservationKey: s.ReservationKey}
 	return incusapi.Created{OperationID: "12345678-1234-1234-1234-123456789abc", ResourceID: s.Name}, nil
 }
+func (b *backend) Wait(context.Context, incusapi.Created) error { return nil }
 func (b *backend) Instance(_ context.Context, name string) (incusapi.Instance, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -293,5 +294,55 @@ func TestObservedTimeUsesCanonicalJSONRepresentation(t *testing.T) {
 		if Decode(strings.NewReader(body), &output) == nil {
 			t.Fatal("invalid timestamp accepted")
 		}
+	}
+}
+
+func TestAuthenticatedCancellationIsIdempotentAndCannotRecreate(t *testing.T) {
+	ctx := context.Background()
+	client, b, _, _, _ := runningFixture(t, true)
+	req := garmprotocol.Request{Protocol: garmprotocol.Version, Name: "runner-1", PoolID: "pool-a"}
+	if exit, _, err := client.Admit(ctx, req); err != nil || exit != 0 {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		receipt, err := client.CancelAdmission(ctx, req)
+		if err != nil || receipt.Replay == nil || *receipt.Replay != (i == 1) {
+			t.Fatalf("cancel %+v %v", receipt, err)
+		}
+	}
+	if _, err := client.Create(ctx, bootstrap()); err == nil {
+		t.Fatal("cancelled create accepted")
+	}
+	if _, _, err := client.Admit(ctx, req); err == nil {
+		t.Fatal("cancelled admit accepted")
+	}
+	req.Name = "replacement"
+	if exit, _, err := client.Admit(ctx, req); err != nil || exit != 0 {
+		t.Fatal(err)
+	}
+	if b.creates.Load() != 0 {
+		t.Fatal("cancellation dispatched")
+	}
+	readonly, _, _, _, _ := runningFixture(t, false)
+	if _, err := readonly.CancelAdmission(ctx, req); err == nil {
+		t.Fatal("read-only cancellation accepted")
+	}
+}
+
+func TestCancellationRejectsUnverifiedAndUnlistedPeers(t *testing.T) {
+	_, b, handler, credentials, _ := runningFixture(t, true)
+	for _, state := range []*tls.ConnectionState{nil, {PeerCertificates: []*x509.Certificate{{Raw: credentials.Certificates[0].Certificate[0]}}}, {VerifiedChains: [][]*x509.Certificate{{{Raw: []byte("other")}}}, PeerCertificates: []*x509.Certificate{{Raw: []byte("other")}}}} {
+		r := httptest.NewRequest("POST", "https://example.invalid/v1/cancel-admission", strings.NewReader(`{"protocol":"garm-capacity/v1","name":"runner-1","pool_id":"pool-a"}`))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer read-token-is-not-provider-auth")
+		r.TLS = state
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, r)
+		if response.Code != http.StatusUnauthorized && response.Code != http.StatusForbidden {
+			t.Fatalf("wrong role accepted %d", response.Code)
+		}
+	}
+	if b.creates.Load() != 0 {
+		t.Fatal("invalid role made external call")
 	}
 }

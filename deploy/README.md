@@ -3,7 +3,9 @@
 This directory supplies an **opt-in packaging candidate**, not a live deployment,
 provider migration or production-ready controller. It does not change any stack,
 install credentials, create a policy, turn on admission, or retire resources.
-The Compose overlay starts with provisioning OFF. The admin UI remains read-only.
+The Compose overlay starts with provisioning and ledger management OFF. The admin
+UI is read-only in this preview; the source supports a separately credentialed,
+explicitly opted-in policy editor, but this overlay does not enable it.
 Do not replace a working Garm provider: physical retirement and job-safe drain
 are still missing. Packaging cannot make those missing lifecycle features safe.
 
@@ -53,12 +55,14 @@ and CGO are required for the gateway. The Dockerfile builds the actual SQLite
 implementation with CGO enabled, and the React production assets from the pinned
 npm lockfile. It does not contain a demo backend or fixture data. The provider-only
 artifact also requires CGO because of transitive package dependencies; it contains
-no deployment configuration or credentials. Both binaries are dynamically linked
+no deployment configuration or credentials. All three Go binaries are dynamically linked
 against the builder's Debian libc. Never set CGO to zero to bypass SQLite.
 
 ```sh
 # Local-only image build, not a publish or deploy command.
 docker build --target gateway -t capacity-gateway:review .
+# Separate local-only recovery tool image; it does not start a gateway.
+docker build --target ledger-tool -t capacity-ledger:review .
 # BuildKit exports the provider binary, not an image that can run Garm.
 docker build --target provider-artifact --output type=local,dest=./provider-export .
 ```
@@ -143,9 +147,12 @@ The overlay requires `CAPACITY_GATEWAY_IMAGE`, `CAPACITY_PRIVATE_DIR`, and
 `CAPACITY_STATE_DIR`, and is inactive unless profile `capacity-preview` is selected.
 
 A reviewed, authorized first run must leave the supplied command unchanged:
-there is no `-allow-experimental-provisioning`. There is deliberately no automatic
-health check: a listening process or ledger-read success does not establish complete
-physical scope, fresh authoritative reconciliation or admission qualification.
+there is no `-allow-experimental-provisioning` or `-allow-experimental-management`.
+Do not supply `admin.management_token_file` in the preview configuration. The
+source policy editor is a separate reviewed change, not a packaging default.
+There is deliberately no automatic health check: a listening process or ledger-read
+success does not establish complete physical scope, fresh authoritative reconciliation
+or admission qualification.
 Do not report the stack production-ready from an HTTP 200 or container "running".
 The preview performs authenticated external inventory **reads**, writes local
 reconciliation/audit state and may automatically migrate an owned SQLite schema.
@@ -177,9 +184,13 @@ Publishing a generic packaging PR is not permission to touch a live stack.
 Preserve the entire private state directory and stop/fence every old writer before
 restoring or changing versions. Never copy only an open `.db`, delete `-wal`/`-shm`,
 run `docker compose down -v`, or clear a ledger to fix a failed preview. Use the
-[consistent backup/restore API and procedure](../docs/backup-restore.md); there is
-no production backup CLI. Keep credentials separately. A historical ledger cannot
-prove later external work vanished. New images can migrate owned schema forward;
+[consistent backup/restore API, local `capacity-ledger` CLI and
+procedure](../docs/backup-restore.md). The CLI is available in the separate
+`ledger-tool` image target, not in the gateway image or as a Compose service. Its
+default command only prints help. It is an offline recovery primitive, not a
+production backup service or proof that old writers are fenced. Keep credentials
+separately. A historical ledger cannot prove later external work vanished.
+New images can migrate owned schema forward;
 rolling back the image may then refuse the database. Do not downgrade/hand-edit
 schema or substitute an older ledger to force startup. Preserve evidence, fence
 old credentials, restore into a new path and complete authoritative reconciliation
@@ -191,3 +202,35 @@ credential/role review, tested container build/runtime and filesystem durability
 operator-approved networking/admin access, owned-schema backup/rollback procedure,
 and the missing proof-based physical retirement/job-safe drain lifecycle. This
 packaging does not authorize production scheduling or change those gates.
+
+
+## Separate local recovery-tool image
+
+Use only an immutable reviewed `ledger-tool` image built from the same source
+revision/schema as the gateway. Its Debian runtime and CGO build match the
+gateway; do not export the binary into an unqualified Alpine or older-glibc host.
+It runs as UID/GID 65532 and has no gateway credentials, network client, server,
+automatic schedule, service-start or admission-enable capability. The gateway
+overlay deliberately does not mount backups or start this tool.
+
+For an independently authorized local backup/restore, run it with network disabled,
+a read-only root filesystem, all capabilities dropped, no-new-privileges, bounded
+CPU/memory/PIDs and no restart policy. Mount only the existing source directory
+read-only and a separate precreated private destination directory writable. Both
+must have trusted ownership matching the container's effective UID, including
+user-namespace mapping. Keep the complete source WAL/SHM directory visible; never
+copy the main open database alone. Do not mount Docker/Incus sockets, gateway
+credentials, the entire host filesystem or a shared job workspace. Do not grant
+root/capabilities or relax file modes to resolve an ownership failure.
+
+The backup and restore subcommands and explicit restore-fencing acknowledgement
+are documented in [backup/restore](../docs/backup-restore.md). Destinations must be
+new. Do not automatically retry uncertain results, restore over an active ledger,
+resume scheduling, or interpret the acknowledgement as a fence. This image covers
+only the admission ledger; a separately introduced Garm-mutation journal requires
+its own qualified backup/restore primitive and persistent directory. Do not use
+`capacity-ledger` on an unrelated database.
+
+See the [disposable qualification plan](qualification.md) before treating any image
+or merged private stack as usable. No container build or runtime qualification is
+claimed from source-level tests alone.
