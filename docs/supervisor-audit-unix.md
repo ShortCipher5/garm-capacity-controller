@@ -41,10 +41,11 @@ No raw input, SQLite error or peer-supplied diagnostic is sent on rejection.
 
 ## What this intentionally does not authenticate
 
-This is only a server-side accepted-connection history acknowledgment. There is
-no production client, client-side server authentication or mutual endpoint
-authentication. The acknowledgment is not an externally verified receipt and
-must never be promoted into action authority.
+The server adapter alone supplies only a server-side accepted-connection history
+acknowledgment. The disconnected client described below adds a reciprocal kernel
+connect-time UID check, not enrolled/mutual service identity authentication.
+There is still no production application client, externally verified commit
+receipt or action authority.
 
 * SO_PEERCRED identifies connect-time credentials, not the current FD holder,
   process birth, installed code, generation, per-message sender or control role.
@@ -83,3 +84,47 @@ child credential check and the pathname counterexample. Without the flag those
 two cases visibly skip: local socketpair success is not named-endpoint or host
 isolation qualification. No sudo, install, daemon/host socket, bind mount, policy
 change or privileged runtime is required or permitted by these tests.
+
+## Disconnected client and immutable observed-history receipt
+
+`ObserveUnixClaim(ctx, connectedUnixStream, allowedServerUID, history, scope,
+attempt)` owns/closes the supplied connection. It does not dial or select paths.
+It validates canonical input and actual server `SO_PEERCRED`/stream type before
+sending any claim. The recorder independently checks the client UID. These are
+reciprocal configured-UID checks, **not** mutual enrollment, code attestation or
+proof of current descriptor ownership.
+
+The client sends once, half-closes its write side, and requires a bounded complete
+response followed by EOF. All ten response keys must be present exactly once,
+with exact case and types, no nulls/unknowns/trailing/pipelined frames. Protocol,
+outcome, original history/scope/attempt, positive bounded sequence and fixed
+boundary must match. Replay must be an explicit boolean; activation must be
+explicitly false and execution authority exactly `none`. Ancillary rights are
+refused/closed using the same stream reader. Deadlines/cancellation remain bounded
+for I/O; malformed/partial/lost replies return a **zero** receipt, even if the
+server's real journal committed. No automatic retry/reconnect exists.
+
+A successful `UnixHistoryReceipt` has private fields, value-copy accessors and no
+raw-JSON constructor. It records an **observed matching acknowledgment**, not a
+proof of commit or a measured job identity. `ObservedHistory()` is not eligibility.
+`Fact()` returns a copy. Zero, first observation and historical replay all return
+`ActivationAuthorized()==false`, `ExecutionAuthority()=="none"` and the permanent
+M1 boundary. Server connection UID/PID accessors describe connect-time kernel
+observations, not process birth, current holder or an attested service.
+
+Real negative tests deliberately return a perfectly matching acknowledgment from
+a same-UID socket peer with **zero journal rows**, and from an own child holding a
+delegated server FD whose peer PID still identifies the parent. Both can yield an
+observed receipt while proving **nothing** about commit/current server code.
+Immutability and JSON opacity do not turn these claims into truth or defeat a
+hostile same-UID/root actor. There is no signature, external monotonic anchor,
+remote job consumption, native fence, activation, retirement or release authority.
+
+Client tests exercise UID denial-before-send, strict missing/null/type/mismatch
+cases, no-action opaque copies, real journal replay, committed-but-lost/unknown
+responses, cancellation, response EOF and ancillary-FD refusal. An additional
+required named-endpoint test has an independently listening own Go-test child:
+the actual client checks that child's kernel server PID and records through its
+real M1 journal. It runs in the existing hosted flag-enabled Unix step; locally
+that named-bind case remains explicitly unexecuted rather than bypassing EPERM.
+No new workflow, installation, privilege, service or native job action is added.
