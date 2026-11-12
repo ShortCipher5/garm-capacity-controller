@@ -20,17 +20,22 @@ import (
 const operation = "12345678-1234-1234-1234-123456789abc"
 
 type backendFixture struct {
-	mu         sync.Mutex
-	instances  map[string]incusapi.Instance
-	operations []incusapi.Operation
-	calls      atomic.Int32
-	fail       bool
-	drift      bool
-	readFail   bool
-	userdata   string
+	mu            sync.Mutex
+	instances     map[string]incusapi.Instance
+	operations    []incusapi.Operation
+	calls         atomic.Int32
+	fail          bool
+	drift         bool
+	readFail      bool
+	userdata      string
+	createFail    bool
+	waits         atomic.Int32
+	waitHook      func(context.Context) error
+	afterCreate   func()
+	createReceipt *incusapi.Created
 }
 
-func (b *backendFixture) CreateAndWait(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
+func (b *backendFixture) Create(_ context.Context, s incusapi.InstanceSpec) (incusapi.Created, error) {
 	b.calls.Add(1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -41,10 +46,26 @@ func (b *backendFixture) CreateAndWait(_ context.Context, s incusapi.InstanceSpe
 	}
 	b.instances[s.Name] = instance
 	receipt := incusapi.Created{OperationID: operation, ResourceID: s.Name}
-	if b.fail {
-		return receipt, errors.New("private-bootstrap-fault")
+	if b.createReceipt != nil {
+		receipt = *b.createReceipt
+	}
+	if b.createFail {
+		return incusapi.Created{}, errors.New("private-lost-post-response")
+	}
+	if b.afterCreate != nil {
+		b.afterCreate()
 	}
 	return receipt, nil
+}
+func (b *backendFixture) Wait(ctx context.Context, _ incusapi.Created) error {
+	b.waits.Add(1)
+	if b.waitHook != nil {
+		return b.waitHook(ctx)
+	}
+	if b.fail {
+		return errors.New("private-bootstrap-fault")
+	}
+	return nil
 }
 func (b *backendFixture) Instance(_ context.Context, name string) (incusapi.Instance, error) {
 	b.mu.Lock()

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
@@ -24,7 +25,8 @@ var ErrUnavailable = errors.New("provider state unavailable; allocation remains 
 // Backend is implemented by the concrete mTLS incusapi.Client. Only the gateway
 // owner supplies implementations; a repository or browser cannot register one.
 type Backend interface {
-	CreateAndWait(context.Context, incusapi.InstanceSpec) (incusapi.Created, error)
+	Create(context.Context, incusapi.InstanceSpec) (incusapi.Created, error)
+	Wait(context.Context, incusapi.Created) error
 	Instance(context.Context, string) (incusapi.Instance, error)
 	Instances(context.Context) ([]incusapi.Instance, error)
 	Operations(context.Context) ([]incusapi.Operation, error)
@@ -173,13 +175,26 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	if incusapi.ValidateSpec(spec) != nil {
 		return common.ProviderInstance{}, ErrPolicy
 	}
-	_, err = f.store.ExecuteDispatch(ctx, req, func(ctx context.Context, _ admission.DispatchPermit) (admission.DispatchReceipt, error) {
-		created, createErr := f.hosts[req.Host].CreateAndWait(ctx, spec)
+	_, err = f.store.ExecuteDispatch(ctx, req, func(ctx context.Context, permit admission.DispatchPermit) (admission.DispatchReceipt, error) {
+		created, createErr := f.hosts[req.Host].Create(ctx, spec)
 		receipt := admission.DispatchReceipt{State: "unknown", OperationID: created.OperationID, ResourceID: created.ResourceID}
 		if createErr != nil {
 			return receipt, ErrUnavailable
 		}
 		if created.ResourceID != bootstrap.Name {
+			return receipt, ErrUnavailable
+		}
+		// The physical POST has happened. Persist its validated correlation
+		// BEFORE waiting so a crash during wait cannot erase a received UUID.
+		// This is not terminal-operation proof, a redispatch or release permit.
+		persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		submitted := admission.DispatchReceipt{State: "submitted", OperationID: created.OperationID, ResourceID: created.ResourceID}
+		persistErr := f.store.RecordDispatchOutcome(persist, permit, submitted)
+		cancel()
+		if persistErr != nil {
+			return receipt, ErrUnavailable
+		}
+		if err := f.hosts[req.Host].Wait(ctx, created); err != nil {
 			return receipt, ErrUnavailable
 		}
 		if _, verifyErr := f.verified(ctx, req, bootstrap.Name); verifyErr != nil {

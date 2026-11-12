@@ -512,8 +512,10 @@ func (c *Client) Wait(ctx context.Context, created Created) error {
 	}
 }
 
-// CreateAndWait preserves a known operation receipt on later errors so the
-// dispatch journal can retain correlation without redispatching a create.
+// CreateAndWait is a transport convenience, not a durable execution boundary.
+// A gateway must use Create, persist submitted correlation through its one-shot
+// permit, then Wait. This helper cannot journal a receipt before waiting.
+// Returned errors still retain known correlation and never imply safe release.
 func (c *Client) CreateAndWait(ctx context.Context, spec InstanceSpec) (Created, error) {
 	created, err := c.Create(ctx, spec)
 	if err != nil {
