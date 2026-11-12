@@ -51,7 +51,7 @@ timeout 10s env -i PATH="$PATH" node "$here/supervisor_contracts.cjs" "$work" > 
 target="$work/src/Test/L0/Listener/RetirementSourceContracts.cs"
 [[ ! -e "$target" && ! -L "$target" ]]
 cp "$here/RetirementSourceContracts.cs" "$target"
-for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs; do
+for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs IsolationPrerequisiteContracts.cs; do
   [[ ! -e "$work/src/Test/L0/Listener/$overlay" && ! -L "$work/src/Test/L0/Listener/$overlay" ]]
   cp "$here/$overlay" "$work/src/Test/L0/Listener/$overlay"
 done
@@ -80,7 +80,7 @@ clean_dotnet test Test/Test.csproj -c Release -p:PackageRuntime=linux-x64 -p:Run
   --logger 'trx;LogFileName=retirement-source-contracts.trx' --results-directory "$work.results"
 verify_source "$work"
 cmp "$target" "$here/RetirementSourceContracts.cs"
-for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs; do
+for overlay in LocalIntakeFenceExperiment.cs LocalIntakeFenceContracts.cs RemoteControlInterfaceContracts.cs IsolationPrerequisiteContracts.cs; do
   cmp "$work/src/Test/L0/Listener/$overlay" "$here/$overlay"
 done
 cmp "$override" "$here/Directory.Build.targets"
@@ -118,10 +118,14 @@ expected = {
  'ClassicStatusCancellationCanStillReturnTheOldPollJobResponse',
  'ClassicSessionExpiryRecreatesUnlessSkipSessionRecoverIsSet',
  'BrokerBusyHintAlsoReturnsJobAndControlWithoutSealAcknowledgment',
+ 'DefaultLinuxJobContainerIncludesHostDockerSocket',
+ 'JobContainerHookInputRetainsPrivilegedOptionsAndHostMounts',
+ 'HookPathAloneDoesNotEnableHooksWithoutServiceFeatureFlag',
+ 'JavaScriptHookSelectsAbsoluteBundledNodeNotJobPrependPath',
 }
 results = root.findall('.//t:UnitTestResult', ns)
 actual = {r.attrib.get('testName', '').rsplit('.', 1)[-1] for r in results}
 if actual != expected or len(results) != len(expected) or any(r.attrib.get('outcome') != 'Passed' for r in results):
-    raise SystemExit('Exactly sixteen compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
-print('Six ACTUAL pinned runner method tests, six local intake experiments and four actual listener interface tests passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
+    raise SystemExit('Exactly twenty compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
+print('Six ACTUAL pinned runner method tests, six local intake experiments four actual listener interface tests and four isolation-prerequisite tests passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
 PY

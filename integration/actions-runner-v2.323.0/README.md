@@ -79,6 +79,21 @@ limit and an outer Restart=no, and service stop sends interrupt then delayed kil
 That is NOT a job-preserving stop or a qualified installed-image restart fence.
 New C# interface cases are uncompiled/unexecuted until their own hosted result.
 
+## Supervisor threat model and actual isolation prerequisites
+
+The [one-use supervisor plan](../../docs/one-use-supervisor-threat-model.md) defines
+attacker capabilities, an initially narrow NEW Linux image profile, privilege/
+credential/network split, complete entry-path enforcement, native handles and
+external prerequisites. No file guard, default container flag or hook path proves
+isolation. No supervisor or enrollment is implemented.
+
+Four additional exact-source tests construct default ContainerInfo/HookContainer,
+exercise hook feature gating and inspect JS interpreter selection, WITHOUT Docker,
+container/namespace creation or privileged execution. They show the default Docker
+socket and privileged options/host mounts survive, a hook path alone does not
+enable hooks, and absolute bundled JS Node selection is only one prerequisite.
+These new C# cases remain unexecuted until their actual hosted result is observed.
+
 ## No SDK installation
 
 The local task workspace has no .NET compiler. Local Go/shell/source-hash checks
@@ -98,10 +113,10 @@ service tokens, proxy credentials and real home configuration are not passed. Al
 unchanged. A historical dependency/audit build failure must be reported, not
 silently suppressed to manufacture qualification.
 
-The source version-constant target is invoked directly, then only these sixteen C# tests
+The source version-constant target is invoked directly, then only these twenty C# tests
 are filtered and executed. Source HEAD and critical production-file SHA256 hashes
 are checked before AND after execution. The generated version metadata must name
-the exact source pin. TRX inspection requires exactly sixteen named Passed results;
+the exact source pin. TRX inspection requires exactly twenty named Passed results;
 an empty discovery/filter success cannot make this gate green.
 
 ## Explicit test-only security dependency baseline
