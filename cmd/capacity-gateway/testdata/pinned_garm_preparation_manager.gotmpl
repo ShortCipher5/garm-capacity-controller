@@ -1,0 +1,76 @@
+//go:build capacity_wire_qualification
+
+// Test-only injected factory; never part of the deployable source patch.
+package pool
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"sync/atomic"
+	"testing"
+
+	commonParams "github.com/cloudbase/garm-provider-common/params"
+	dbCommon "github.com/cloudbase/garm/database/common"
+	"github.com/cloudbase/garm/locking"
+	"github.com/cloudbase/garm/params"
+	"github.com/cloudbase/garm/runner/common"
+	commonMocks "github.com/cloudbase/garm/runner/common/mocks"
+	"github.com/google/go-github/v84/github"
+	"github.com/stretchr/testify/mock"
+)
+
+type CapacityWireManager struct {
+	manager  *basePoolManager
+	client   *commonMocks.GithubClient
+	jitCalls atomic.Int32
+}
+type capacityWireStore struct {
+	dbCommon.Store
+	published func(params.Instance) error
+}
+
+func (s *capacityWireStore) CreateInstance(ctx context.Context, pool string, p params.CreateInstanceParams) (params.Instance, error) {
+	row, err := s.Store.CreateInstance(ctx, pool, p)
+	if err != nil {
+		return row, err
+	}
+	if err = s.published(row); err != nil {
+		return params.Instance{}, err
+	}
+	return row, nil
+}
+
+type capacityWireToken struct{}
+
+func (capacityWireToken) NewInstanceJWTToken(params.Instance, params.ForgeEntity, uint) (string, error) {
+	return "disposable-source-bootstrap-token", nil
+}
+func (capacityWireToken) NewAgentJWTToken(params.Instance, params.ForgeEntity) (string, error) {
+	return "disposable-source-bootstrap-token", nil
+}
+func NewCapacityWireManager(t *testing.T, ctx context.Context, store dbCommon.Store, entity params.ForgeEntity, provider common.Provider, info params.ControllerInfo, published func(params.Instance) error) *CapacityWireManager {
+	locker, _ := locking.NewLocalLocker(ctx, nil)
+	_ = locking.RegisterLocker(locker)
+	result := &CapacityWireManager{client: commonMocks.NewGithubClient(t)}
+	result.client.On("GetEntityJITConfig", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(func(_ context.Context, name string, _ params.Pool, _ []string) (map[string]string, *github.Runner, error) {
+		result.jitCalls.Add(1)
+		raw, _ := json.Marshal(map[string]any{"agentId": 42, "agentName": name})
+		return map[string]string{".runner": base64.StdEncoding.EncodeToString(raw)}, &github.Runner{ID: github.Int64(42), Name: github.String(name)}, nil
+	}).Maybe()
+	// Only a validated registration before ANY SQL attempt may be cleaned up.
+	result.client.On("RemoveEntityRunner", mock.Anything, int64(42)).Return(nil).Maybe()
+	info.CallbackURL = "https://example.invalid/callback"
+	info.MetadataURL = "https://example.invalid/metadata"
+	osType, arch, download, filename := "linux", "x64", "https://example.invalid/runner.tar.gz", "runner.tar.gz"
+	result.manager = &basePoolManager{ctx: ctx, consumerID: "source-wire-fixture", entity: entity, store: &capacityWireStore{Store: store, published: published}, providers: map[string]common.Provider{"capacity": provider}, controllerInfo: info, ghcli: result.client, instanceTokenGetter: capacityWireToken{}, tools: []commonParams.RunnerApplicationDownload{{OS: &osType, Architecture: &arch, DownloadURL: &download, Filename: &filename}}}
+	return result
+}
+func (m *CapacityWireManager) Add(pool string) error {
+	return m.manager.AddRunner(m.manager.ctx, pool, nil)
+}
+func (m *CapacityWireManager) Poll() error { return m.manager.addPendingInstances() }
+func (m *CapacityWireManager) AssertNoRegistrationCleanup(t *testing.T) {
+	m.client.AssertNotCalled(t, "RemoveEntityRunner", mock.Anything, mock.Anything)
+}
+func (m *CapacityWireManager) JITCalls() int32 { return m.jitCalls.Load() }

@@ -30,7 +30,7 @@ Refresh obtains another snapshot without changing the ledger. The displayed time
 - Conservative accounted resource-state counts and ledger audit events, newest first.
 - Explicit empty states when the real ledger has no hosts, pools, resources or audit records.
 
-Allocations are not measured CPU/RAM utilization. Unallocated capacity is not a guarantee of availability. Unknown and failed resources remain charged. Paused admission does not stop existing idle runners receiving jobs, and a draining mode is not drain completion. Historical usage telemetry, pool priority/label controls and safe retirement/release are not supplied by this UI.
+Allocations are not measured CPU/RAM utilization. Unallocated capacity is not a guarantee of availability. Unknown and failed resources remain charged. Paused admission does not stop existing idle runners receiving jobs, and a draining mode is not drain completion. Historical usage telemetry and safe retirement/release are not supplied by this UI. Separately configured experimental Garm settings controls are documented below.
 
 ## Verification
 
@@ -48,7 +48,7 @@ These tests are local evidence, not live deployment or infrastructure qualificat
 
 ## Experimental ledger policy editor
 
-Management is **off by default**. Supply a separate owner-only `admin.management_token_file` containing an independently generated 32-byte random lowercase-hex token, and start the gateway with `--allow-experimental-management`. Both are required; a file without the flag, a flag without the file, or reuse of the read token fails startup. Provider mTLS identities and the read token never authorize these writes. The management token does not implicitly grant the read role. No Garm/Incus credential belongs in either browser field.
+Management is **off by default**. Supply a separate owner-only `admin.management_token_file` containing an independently generated 32-byte random lowercase-hex token, and start the gateway with `--allow-experimental-management`. Both are required; a file without an enabled management capability, a flag without the file, or reuse of the read token fails startup. The optional read-only onboarding probe has its own independent flag and credential validation; enabling it does not enable policy writes. Provider mTLS identities and the read token never authorize these writes. The management token does not implicitly grant the read role. No Garm/Incus credential belongs in either browser field.
 
 After connecting with the read token, the policy section offers host enabled/disabled mode, global budget, host budget and existing ledger-pool budget. Review a concrete change and an audit reason, then enter the separate management token to apply it. The token input clears on submission; each action requires it again. Cancel clears the review without submitting. Disconnect/page exit removes the form, clears credentials and fences late responses. An interrupted request may already have committed: reconnect and inspect policy/audit rather than assuming cancellation undoes it.
 
@@ -59,6 +59,27 @@ The revision hashes managed policy, excluding changing health observations. Comp
 **Disabled is not drained.** Existing idle runners may still receive jobs, and a later mode change does not fence an already committed in-flight claim. Enabling is not immediate admission: it requires fresh reconciliation. These controls do not register hosts/repositories/pools, edit Garm tags/idle/max/priority, alter actual runner placement, stop jobs or retire resources. Pool host eligibility is deliberately not editable because the gateway pins placement at startup. Unknown write outcomes are reported explicitly, never automatically retried.
 
 The disposable browser suite also covers review/cancel, read-token write rejection, actual persisted mode and budget changes, audit/readiness effects, repeated apply and disconnect during an interrupted write. Passing it does not qualify production management, individual operator attribution, rotation or audit retention.
+
+## Existing Garm pool and repository settings
+
+When separately configured, **Load Garm settings** reads exact allowlisted real
+Garm objects using a server-held dedicated upstream token. These are not ledger
+pool IDs or dynamic-placement controls. The existing read token discovers settings;
+the separate browser management token authorizes each reviewed write. Remote
+writes require their own additional explicit startup flag. Review only changed
+settings, then enter the write token for that one action. Cancel clears the review
+without sending it. No secrets are stored in browser storage or build variables.
+
+The console supports future-runner tags, pool priority, maximum and non-decreasing
+minimum idle, pool enabled state, and repository round-robin/pack balancing. It
+cannot register pools/repositories, choose an unrestricted provider, change actual
+runner placement, drain jobs or retire runners. Garm's lack of external atomic
+conditional updates is shown prominently. Every mutation traverses the separate
+durable intent journal. Pending/unknown writes block new changes even after a
+restart; the console has no blind clear/retry or recovery button. Status and the
+up to25 recent scoped sanitized operation records remain visible when the upstream service is
+unavailable, provided the journal itself can be read. See the full
+[configuration, concurrency and recovery boundaries](garm-management.md).
 
 ## Backend binding status (schema4 prerequisite)
 
@@ -74,3 +95,11 @@ scope import is a separate workflow and is not implemented. Mode/budget controls
 remain distinct; there is no clear/reset/import button. Enabling host mode cannot
 erase historical exclusions or qualify backend capacity. See the
 [dynamic management design gaps](dynamic-management-design.md).
+
+## Optional read-only onboarding preflight
+
+[Incus onboarding preflight](incus-onboarding-preflight.md) checks only static
+private transport references. Discovery uses the read role; an explicit audited
+read additionally requires the independent management role and probe opt-in.
+The UI never accepts a URL, key or certificate and cannot enroll/activate a
+backend or qualify physical capacity. Admission state is unchanged; audit grows.
