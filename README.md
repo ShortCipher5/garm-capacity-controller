@@ -2,7 +2,7 @@
 
 A lightweight, safety-first control plane **above [Garm](https://github.com/cloudbase/garm)** for GitHub Actions runners on multiple [Incus](https://linuxcontainers.org/incus/) hosts.
 
-> **Experimental foundation, not a production controller.** This repository currently contains an offline admission simulator and a durable reservation ledger. It does not connect to Garm or Incus, provision runners, stop jobs, or enforce limits in an existing installation. There is no production web UI yet.
+> **Experimental foundation, not a production controller.** This staged implementation contains the offline model, SQLite ledger, concrete verified API clients and an experimental local-only gateway/provider pair. Provisioning is off by default and requires explicit operator opt-in after deployment gates are addressed. It has not been deployed to an existing installation. There is no production web UI or complete retirement/drain lifecycle yet.
 
 ## Why this exists
 
@@ -15,7 +15,7 @@ The target application manages:
 - Repository-specific Garm pools, labels, priority and desired idle capacity.
 - An atomic cross-pool provisioning boundary, durable reservations and reconciliation.
 - Historical allocated capacity, observed usage, decisions and audit events.
-- An authenticated, simple React UI backed by Go. SQLite is the transactional-store target for inventory, policy and history; its offline core is being implemented in the separate `feat/sqlite-ledger` slice.
+- An authenticated, simple React UI backed by Go. SQLite is the transactional-store target for inventory, policy and history; its durable core is implemented in the `feat/sqlite-ledger` slice, with further qualification gates documented.
 
 ## First slice: offline admission simulator
 
@@ -57,10 +57,12 @@ The `feat/gateway-dispatch` slice adds a durable one-shot backend execution boun
 
 ## Status and verification
 
-Implemented: conservative admission model, durable local reservations, idempotency, cross-process locking and concurrency/restart tests. Not implemented: production adapters, production admin authentication, credential storage, real reconciliation, release, historical telemetry, priority scheduling or production drain. CI tests the model only. Passing CI is not a certification of Garm/provider compatibility.
+Implemented across the stacked draft branches: conservative admission, SQLite reservations/audit, one-shot dispatch, verified Incus transport, WAL-consistent backup/restore, Garm inventory and barrier-first reconciliation, and experimental credential-isolated provider RPC. Not qualified: production deployment, complete physical-host coverage, admin authentication, retirement/release, historical telemetry, priority scheduling or job-safe drain. CI includes the model and actual pinned Garm compatibility harness. Passing CI is not installed-infrastructure or hardware-safety certification.
 
 No live infrastructure was accessed or changed during initial development. No production-ready claim is made.
 
 The `feat/incus-transport` slice adds a concrete, credential-verified Incus REST transport with explicit allocation limits and bounded project inventory; see [transport boundary and remaining gates](docs/incus-transport.md). Tests use disposable mutual-TLS fixtures, not live hosts. No gateway service or production mode is enabled.
 
 The `feat/provider-facade` slice binds trusted fixed pool placement, official Garm bootstrap rendering, one-shot dispatch/readback and barrier-first Garm/Incus/operation reconciliation. It is not exposed as a gateway service yet. See [provider facade](docs/provider-facade.md).
+
+The `feat/gateway-rpc` slice adds separate `capacity-gateway` and `capacity-provider` executables with verified mTLS, exact client-leaf allowlisting and read-only defaults. See [service trust, configuration and unfinished lifecycle gates](docs/gateway-service.md).

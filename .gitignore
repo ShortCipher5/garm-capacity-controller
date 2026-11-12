@@ -11,3 +11,9 @@ node_modules/
 web/dist/
 coverage.out
 /capacity-sim
+
+/capacity-provider
+/capacity-gateway
+/private/
+*.local.json
+*.token
