@@ -205,3 +205,29 @@ func TestUpstreamGarmLeastPrivilegeLabCannotImplyInstalledQualification(t *testi
 		}
 	}
 }
+
+func TestPatchedGarmTransferIsGeneratedStoppedStateOnly(t *testing.T) {
+	script := repositoryFile(t, "deploy/runtime/garm-migration/test.sh")
+	for _, required := range []string{"RUNNER_ENVIRONMENT:-} = github-hosted", "87e0d61751d4b9ffa15322cff09557f0a1094fdd68464fe840a12ffe01bb0660", "--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", "--user 65531:65531", "helper \"$legacy\" 0 seed", "state.py transfer", "missing-main missing-blob mode owner symlink hardlink wrong-controller changed-config interrupted-copy wrong-passphrase wrong-jwt wrong-ca wrong-tls-key", "'installed_stack_qualified':False", "'provider_integration_qualified':False", "'availability_qualified':False"} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("missing synthetic migration contract: %s", required)
+		}
+	}
+	for _, denied := range []string{"docker push", "docker login", "docker logs", "--privileged", "--network host", "compose up", "chmod 777", "/var/run/docker.sock"} {
+		if strings.Contains(script, denied) {
+			t.Fatalf("disposable migration must not add live/secret/privilege action: %s", denied)
+		}
+	}
+	workflow := repositoryFile(t, ".github/workflows/packaging.yml")
+	for _, required := range []string{"patched-garm-state-transfer-lab:", "run: deploy/runtime/garm-migration/test.sh", "path: qualification-results/garm-state-transfer.json"} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("missing hosted-only transfer gate: %s", required)
+		}
+	}
+	source := repositoryFile(t, "deploy/runtime/garm-migration/store.go.txt")
+	for _, required := range []string{"mode=ro&_query_only=1", "blob-controller.db", "st.Nlink == 1", "action == \"seed\"", "require(action == \"guard\")", "commonutil.Unseal", "jwt.WithValidMethods"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("missing fail-closed synthetic guard: %s", required)
+		}
+	}
+}

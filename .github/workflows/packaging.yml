@@ -10,6 +10,7 @@ on:
       - internal/**
       - go.mod
       - go.sum
+      - integration/garm-v0.2.1/**
       - web/**
   workflow_dispatch:
 permissions:
@@ -70,5 +71,30 @@ jobs:
         with:
           name: garm-nonroot-lab-public-status
           path: qualification-results/garm-nonroot-lab.json
+          if-no-files-found: ignore
+          retention-days: 7
+  patched-garm-state-transfer-lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build public patched test image and transfer generated stopped state
+        run: deploy/runtime/garm-migration/test.sh
+      - name: Summarize non-deployment and maintenance boundary
+        if: always()
+        shell: bash
+        run: |
+          echo '## Disposable patched Garm state transfer' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Generated fake credentials and populated databases only. Old test writers are fully stopped before copying both DB/WAL/SHM directories. No provider integration, real jobs, installed mapping, availability or deployment qualification. This is a maintenance proof, not HA or a live migration command.' >> "$GITHUB_STEP_SUMMARY"
+          if test -f qualification-results/garm-state-transfer.json; then
+            cat qualification-results/garm-state-transfer.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: garm-state-transfer-public-status
+          path: qualification-results/garm-state-transfer.json
           if-no-files-found: ignore
           retention-days: 7
