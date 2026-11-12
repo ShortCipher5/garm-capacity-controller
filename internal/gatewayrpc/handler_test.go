@@ -190,7 +190,7 @@ func TestReadOnlyByDefaultAndNoMutationRoutes(t *testing.T) {
 		t.Fatal("read-only create succeeded")
 	}
 	var result any
-	for _, path := range []string{"/v1/delete", "/v1/reconcile", "/v1/config", "/v1/admin"} {
+	for _, path := range []string{"/v1/delete", "/v1/reconcile", "/v1/config", "/v1/admin", "/v1/host-mode"} {
 		if err := client.call(context.Background(), path, Identity{PoolID: "pool-a"}, &result); err == nil {
 			t.Fatal("unimplemented route succeeded")
 		}
