@@ -1,6 +1,6 @@
 # Ledger management UI
 
-The React client in `web/` is an experimental **real ledger view**, not a simulator and not a production qualification. It has no synthetic fallback. It reads the same-origin `GET /admin/api/v1/overview` API on the separate TLS admin listener. An explicitly enabled separate management role can edit bounded ledger policy. It cannot access the provider RPC surface or mutate Garm/Incus infrastructure.
+The React client in `web/` is an experimental **real ledger view**, not a simulator and not a production qualification. It has no synthetic fallback. It reads the same-origin `GET /admin/api/v1/overview` API on the separate TLS admin listener. An explicitly enabled separate management role can edit bounded ledger policy. It cannot access the provider RPC surface or perform Incus mutations. Separately configured experimental Garm settings controls can write bounded existing pool/repository settings under their own explicit opt-in; they do not register resources, change native placement or retire runners. See [existing Garm settings](#existing-garm-pool-and-repository-settings) below.
 
 ## Build
 
