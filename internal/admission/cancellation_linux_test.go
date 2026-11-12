@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -303,6 +302,7 @@ func TestCancellationProcessWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	awaitProcessStart(t)
 	if os.Getenv("CAPACITY_CANCELLATION_TEST_MODE") == "cancel" {
 		_, err = s.CancelUndispatched(context.Background(), request("process-cancel"))
 		if err != nil && !errors.Is(err, ErrDispatchClaimed) {
@@ -318,23 +318,13 @@ func TestCancellationProcessWorker(t *testing.T) {
 func TestCancellationClaimRaceAcrossProcesses(t *testing.T) {
 	s := sqliteFixtureStore(t, fixture(time.Now()), true)
 	r := reserveDispatch(t, s, "process-cancel")
-	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			mode := "claim"
-			if i%2 == 0 {
-				mode = "cancel"
-			}
-			cmd := exec.Command(os.Args[0], "-test.run=^TestCancellationProcessWorker$")
-			cmd.Env = append(os.Environ(), "CAPACITY_CANCELLATION_TEST_PATH="+s.path, "CAPACITY_CANCELLATION_TEST_MODE="+mode)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Errorf("worker %s: %v %s", mode, err, out)
-			}
-		}(i)
-	}
-	wg.Wait()
+	runProcessContenders(t, 12, "^TestCancellationProcessWorker$", func(i int) []string {
+		mode := "claim"
+		if i%2 == 0 {
+			mode = "cancel"
+		}
+		return []string{"CAPACITY_CANCELLATION_TEST_PATH=" + s.path, "CAPACITY_CANCELLATION_TEST_MODE=" + mode}
+	})
 	_, cancelErr := s.LookupCancellation(context.Background(), r.Key)
 	_, claimErr := s.LookupDispatch(context.Background(), r.Key)
 	if (cancelErr == nil) == (claimErr == nil) {
