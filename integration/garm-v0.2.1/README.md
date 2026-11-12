@@ -72,3 +72,7 @@ integration/garm-v0.2.1/test.sh /tmp/new-garm-compat-check
 ```
 
 Tests exercise the executable admission boundary, strict/redacted protocol handling, cancellation and oversized output, normal-pool denial followed by fresh JIT plus one row, and scale-set denial followed by loopback JIT generation plus one row. No live Garm/Incus process is contacted or deployed. CI retains the formatted patch as an artifact for source review. These tests are not installed-stack qualification, end-to-end job execution, physical Incus enforcement, restart recovery or production readiness proof.
+
+## Compiled facade/service qualification
+
+The harness additionally runs the actual pinned external-provider code against the compiled `capacity-provider` binary and actual gateway service, with disposable mutual-TLS Garm/Incus API fixtures. Confirmed and ambiguous create paths verify one physical POST despite replay, valid Get/List, genuine pre-JIT defer, retained unknown operation correlation and no timeout-based capacity release. See [qualification scope and assertions](../../docs/protocol-qualification.md). This is required by the pinned-source CI job; the fast unit suite alone skips the source-dependent gate. It is not installed-daemon or production qualification.

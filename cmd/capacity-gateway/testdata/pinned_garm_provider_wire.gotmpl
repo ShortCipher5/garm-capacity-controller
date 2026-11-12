@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copied only into the pinned disposable public-source worktree by qualification.
+package v011
+
+import (
+ "context"
+"errors"
+ garmErrors "github.com/cloudbase/garm-provider-common/errors"
+ "os"
+ "testing"
+"strings"
+
+ commonParams "github.com/cloudbase/garm-provider-common/params"
+ "github.com/cloudbase/garm/config"
+ "github.com/cloudbase/garm/params"
+ "github.com/cloudbase/garm/runner/common"
+)
+func TestCapacityGatewayCompiledProviderWire(t *testing.T){
+ binary:=os.Getenv("GCC_WIRE_PROVIDER_BINARY");configuration:=os.Getenv("GCC_WIRE_PROVIDER_CONFIG")
+ if binary==""||configuration==""{t.Fatal("qualification requires disposable fixture environment")}
+ cfg:=&config.Provider{Name:"capacity",ProviderType:params.ExternalProvider,External:config.External{AdmissionEnabled:true,InterfaceVersion:"v0.1.1",ProviderExecutable:binary,ConfigFile:configuration}}
+ provider,err:=NewProvider(context.Background(),cfg,"controller-test");if err!=nil{t.Fatal(err)}
+ admission,ok:=provider.(common.AdmissionProvider);if !ok{t.Fatal("missing actual pre-JIT interface")}
+ request:=common.AdmissionRequest{Name:"wire-1",PoolID:"pool-a"}
+ if err:=admission.AdmitInstance(context.Background(),request);err!=nil{t.Fatalf("actual Garm preflight: %v",err)}
+ osType:="linux";arch:="x64";download:="https://example.invalid/disposable-runner.tar.gz";filename:="runner.tar.gz"
+ bootstrap:=commonParams.BootstrapInstance{Name:request.Name,PoolID:request.PoolID,OSType:commonParams.Linux,OSArch:commonParams.Amd64,Flavor:"small",Image:"linux",RepoURL:"https://github.com/example/disposable",CallbackURL:"https://example.invalid/callback",MetadataURL:"https://example.invalid/metadata",InstanceToken:"disposable-wire-bootstrap-token",ExtraSpecs:[]byte("{}"),JitConfigEnabled:true,Tools:[]commonParams.RunnerApplicationDownload{{OS:&osType,Architecture:&arch,DownloadURL:&download,Filename:&filename}}}
+ if os.Getenv("GCC_WIRE_OUTCOME")=="unknown"{
+  for i:=0;i<2;i++{_,err:=provider.CreateInstance(context.Background(),bootstrap,common.CreateInstanceParams{});if err==nil||common.IsAdmissionDeferred(err)||errors.Is(err,garmErrors.ErrNotFound)||strings.Contains(err.Error(),"disposable-wire-bootstrap-token")||strings.Contains(err.Error(),"private-unknown-fault"){t.Fatalf("ambiguous create was retried/deferred/leaked: %v",err)}}
+  if err:=admission.AdmitInstance(context.Background(),common.AdmissionRequest{Name:"wire-2",PoolID:request.PoolID});!common.IsAdmissionDeferred(err){t.Fatalf("unknown allocation released capacity: %v",err)}
+  return
+ }
+ for i:=0;i<2;i++{instance,err:=provider.CreateInstance(context.Background(),bootstrap,common.CreateInstanceParams{});if err!=nil||instance.Name!=request.Name||instance.ProviderID!=request.Name||instance.Status!=commonParams.InstanceRunning{t.Fatalf("actual Garm create/replay %+v %v",instance,err)}}
+ var get common.GetInstanceParams;get.GetInstanceV011.PoolInfo.ID=request.PoolID
+ instance,err:=provider.GetInstance(context.Background(),request.Name,get);if err!=nil||instance.Name!=request.Name{t.Fatalf("actual Garm get %+v %v",instance,err)}
+ instances,err:=provider.ListInstances(context.Background(),request.PoolID,common.ListInstancesParams{});if err!=nil||len(instances)!=1||instances[0].Name!=request.Name{t.Fatalf("actual Garm list %+v %v",instances,err)}
+ // The only slot is durably reserved. This is genuine pre-JIT backpressure,
+ // not a Create failure masquerading as an undispatched deferral.
+ if err:=admission.AdmitInstance(context.Background(),common.AdmissionRequest{Name:"wire-2",PoolID:request.PoolID});!common.IsAdmissionDeferred(err){t.Fatalf("actual Garm defer was not recognized: %v",err)}
+}
