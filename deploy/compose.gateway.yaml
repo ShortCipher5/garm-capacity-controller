@@ -1,0 +1,35 @@
+# OPTIONAL OVERLAY, not a complete stack. See deploy/README.md before using.
+# Merge with a reviewed stack whose existing Garm service is named "garm".
+services:
+  capacity-gateway:
+    image: ${CAPACITY_GATEWAY_IMAGE:?set a reviewed immutable gateway image digest}
+    profiles: [capacity-preview]
+    user: "65532:65532"
+    # Both listeners must remain loopback-only. No published ports or host net.
+    network_mode: "service:garm"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 512m
+    restart: "no"
+    stop_grace_period: 45s
+    command: ["-config", "/run/capacity-private/gateway.local.json"]
+    volumes:
+      - type: bind
+        source: ${CAPACITY_PRIVATE_DIR:?set a precreated private gateway directory}
+        target: /run/capacity-private
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAPACITY_STATE_DIR:?set a precreated private local ledger directory}
+        target: /var/lib/capacity-gateway
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
