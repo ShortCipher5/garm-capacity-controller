@@ -34,15 +34,15 @@ type Backend interface {
 // precedes a future transactional host chooser. Flavor/Image are the Garm-side
 // identifiers; neither can override the pinned image or explicit allocation.
 type PoolPolicy struct {
-	Host        string
-	CPU         int64
-	RAM         int64
-	Flavor      string
-	Image       string
-	Fingerprint string
-	Profiles    []string
-	Type        string
-	Arch        common.OSArch
+	Host        string        `json:"host"`
+	CPU         int64         `json:"cpu_millis"`
+	RAM         int64         `json:"ram_mib"`
+	Flavor      string        `json:"flavor"`
+	Image       string        `json:"image"`
+	Fingerprint string        `json:"image_fingerprint"`
+	Profiles    []string      `json:"profiles"`
+	Type        string        `json:"type"`
+	Arch        common.OSArch `json:"arch"`
 }
 
 type Facade struct {

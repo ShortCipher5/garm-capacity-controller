@@ -13,6 +13,8 @@ This repository is experimental. Do not expose a simulator or future admin API p
 - Append attributable policy/admission/drain/reconciliation audit events with retention, access control and redaction. Historical usage is not a safe place for raw job payloads.
 - Backup/restore tests and fail-closed recovery after ambiguous commits, stale inventory and split-brain attempts.
 
-The foundation ledger contains synthetic identifiers and reservation history only. File locking assumes a trusted local filesystem and a private parent directory. It is not designed to resist another local user who can replace the ledger or lock file. Run under a dedicated account with restrictive directory permissions.
+The ledger contains allocation identifiers and reservation/audit history, not bootstrap payloads, Incus keys or Garm bearer tokens. Treat real allocation identities as private operational data. File locking assumes a trusted local filesystem and a private parent directory. It is not designed to resist another local user who can replace the ledger or lock file. Run under a dedicated account with restrictive directory permissions.
 
 Do not post sensitive vulnerability details, credentials, or private infrastructure in public issues. Use GitHub private vulnerability reporting if enabled; otherwise ask the maintainer for a private reporting route first.
+
+The experimental provider-only RPC boundary uses TLS 1.3, verified client chains plus an exact leaf allowlist, private owner-only credential files, bounded strict decoding and constant redacted error events. See [process/credential separation](docs/gateway-service.md). These controls do not supply the unfinished browser admin authentication, certificate rotation/revocation, complete audit-retention policy or production qualification.

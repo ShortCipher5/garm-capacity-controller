@@ -11,7 +11,7 @@ Status: server-side implementation, **not an exposed provider executable or qual
 3. Durable `ExecuteDispatch` owns a single concrete `CreateAndWait` call. Afterwards an exact Incus instance read verifies name, controller/pool/reservation labels, CPU/RAM and running state before confirming the outcome. Failed or changed readback is unknown, retains valid operation IDs and never redispatches.
 4. Confirmed replay can read back and return the same verified instance. It is never a new create permit. Unknown or intent replay returns a generic unavailable error. Bootstrap userdata, callback tokens and provider fault bodies are not stored in SQLite or returned in errors.
 
-The Garm caller is a **trusted authenticated controller**, not repository workflow code or the browser. Bootstrap contains privileged guest provisioning information. The future service must authenticate and scope it, bound request bodies, keep Incus/Garm credentials out of the facade process, use separate OS identities and protect gateway secrets. The library does not implement that missing network boundary by itself.
+The Garm caller is a **trusted authenticated controller**, not repository workflow code or the browser. Bootstrap contains privileged guest provisioning information. The [experimental gateway service](gateway-service.md) wraps this library with scoped mTLS, bounded requests and separate credential ownership. Separate OS identities and protected private files remain operator requirements. The library alone is not that network boundary.
 
 ## Reconciliation
 
@@ -30,4 +30,4 @@ A project-scoped collection alone is not proof of a complete physical-host inven
 
 The consistent backup/restore APIs in [the recovery slice](backup-restore.md) keep restored copies blocked. Old gateway writers must be stopped/fenced and fresh authoritative physical inventory collected before a restored ledger is used. This library does not revoke external credentials or stop a process still using an old database.
 
-Next slices: credential-isolated authenticated gateway and executable facade; installed-provider/Incus qualification; authoritative operation recovery and proof-based retirement; job-safe drain; authenticated admin API/UI. Garm v0.2.1's small maintained pre-JIT compatibility patch is still required for benign defer semantics. No production-ready claim or live deployment is made.
+The experimental credential-isolated gateway/executable is implemented in the next stacked slice. Remaining gates: installed-provider/Incus qualification; authoritative operation recovery and proof-based retirement; job-safe drain; authenticated admin API/UI. Garm v0.2.1's small maintained pre-JIT compatibility patch is still required for benign defer semantics. No production-ready claim or live deployment is made.
