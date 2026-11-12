@@ -268,7 +268,9 @@ func automaticFixture(t *testing.T, mode string, cancel context.CancelFunc) *aut
 	if err = f.facade.Reconcile(context.Background(), garmRows{}); err != nil {
 		t.Fatal(err)
 	}
+	source, actor := configureSourceFixture(t, f.facade)
 	preflight(t, f.facade, "runner-1", "pool-a")
+	publishOriginalFixture(t, f.facade, source, actor, "runner-1")
 	return f
 }
 
