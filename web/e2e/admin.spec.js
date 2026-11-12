@@ -339,3 +339,54 @@ test("audit filters stay snapshot-local across clear, refresh and disconnect", a
   await expect(page.getByLabel("Event host", { exact: true })).toHaveValue("");
   await expect(audit.locator(".event")).toHaveCount(3);
 });
+
+test("host attention filters use recorded flags without requests or changing budgets", async ({ page }) => {
+  const response = page.waitForResponse(r => new URL(r.url()).pathname === "/admin/api/v1/overview");
+  await connect(page);
+  const body = await (await response).json();
+  const original = body.hosts[0];
+  let empty = false;
+  let freshOnly = false;
+  const hosts = [
+    { ...original, id: "paused-fresh", new_claims_paused: true, observation_fresh: true, last_observed_healthy: true },
+    { ...original, id: "allowed-stale", backend_binding_status: "bound_observation", new_claims_paused: false, observation_fresh: false, last_observed_healthy: true },
+    { ...original, id: "paused-unhealthy", new_claims_paused: true, observation_fresh: true, last_observed_healthy: false },
+  ];
+  // UI-only varied snapshot. The other browser cases exercise unmodified data.
+  await page.route("**/admin/api/v1/overview", route => route.fulfill({ status: 200, contentType: "application/json", json: { ...body, hosts: empty ? [] : freshOnly ? [hosts[0]] : hosts } }));
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  const section = page.locator("#hosts");
+  await expect(section.locator("h3")).toHaveText(["paused-fresh", "allowed-stale", "paused-unhealthy"]);
+  const budgets = await page.locator(".metrics").innerText();
+  const pools = await page.locator("#pools").innerText();
+  const requests = [];
+  page.on("request", request => requests.push(request.url()));
+  await page.getByLabel("Show hosts", { exact: true }).selectOption("paused");
+  await expect(section.locator("h3")).toHaveText(["paused-fresh", "paused-unhealthy"]);
+  await expect(section).toContainText("Showing 2 of 3 hosts in this snapshot");
+  await page.getByLabel("Show hosts", { exact: true }).selectOption("stale");
+  await expect(section.locator("h3")).toHaveText(["allowed-stale"]);
+  await page.getByLabel("Show hosts", { exact: true }).selectOption("unhealthy");
+  await expect(section.locator("h3")).toHaveText(["paused-unhealthy"]);
+  expect(await page.locator(".metrics").innerText()).toBe(budgets);
+  expect(await page.locator("#pools").innerText()).toBe(pools);
+  await page.getByRole("button", { name: "Show all hosts", exact: true }).click();
+  await expect(section.locator("h3")).toHaveCount(3);
+  expect(requests).toHaveLength(0);
+  await page.getByLabel("Show hosts", { exact: true }).selectOption("stale");
+  freshOnly = true;
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  await expect(section).toContainText("No hosts match this filter.");
+  await expect(section).toContainText("Showing 0 of 1 hosts in this snapshot");
+  empty = true;
+  await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
+  await expect(section).toContainText("No hosts configured in this ledger.");
+  await expect(page.getByLabel("Show hosts", { exact: true })).toHaveValue("stale");
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  empty = false;
+  freshOnly = false;
+  await page.getByLabel("Admin read token").fill(token);
+  await page.getByRole("button", { name: "Connect read-only", exact: true }).click();
+  await expect(page.getByLabel("Show hosts", { exact: true })).toHaveValue("all");
+  await expect(section.locator("h3")).toHaveCount(3);
+});

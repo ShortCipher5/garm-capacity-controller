@@ -4,6 +4,7 @@ import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
 import { OnboardingPreflight } from "./onboarding.jsx";
 import { GarmManagement } from "./garm-management.jsx";
+import { filterHosts } from "./host-filter.js";
 import { AuditEvents } from "./audit-events.jsx";
 import { Management } from "./management.jsx";
 
@@ -87,6 +88,8 @@ function Usage({ allocation, metric = false }) {
   });
 }
 export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding }) {
+  const [hostFilter, setHostFilter] = useState("all");
+  const visibleHosts = filterHosts(data.hosts, hostFilter);
   return (
     <>
       <aside className="sidebar">
@@ -162,11 +165,24 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
               Health is the last recorded observation.
             </span>
           </div>
+          <div className="host-filter">
+            <label htmlFor="host-attention">Show hosts</label>
+            <select id="host-attention" value={hostFilter} onChange={(event) => setHostFilter(event.target.value)}>
+              <option value="all">All hosts</option>
+              <option value="paused">New claims paused</option>
+              <option value="stale">Stale or unavailable observation</option>
+              <option value="unhealthy">Last observed unhealthy</option>
+            </select>
+            <button className="quiet" disabled={hostFilter === "all"} onClick={() => setHostFilter("all")}>Show all hosts</button>
+          </div>
+          <p className="muted" role="status">Showing {visibleHosts.length} of {data.hosts.length} hosts in this snapshot. Filters do not change budgets or pool placement.</p>
           {data.hosts.length === 0 ? (
             <p className="empty">No hosts configured in this ledger.</p>
+          ) : visibleHosts.length === 0 ? (
+            <p className="empty">No hosts match this filter.</p>
           ) : (
             <div className="hosts">
-              {data.hosts.map((h) => (
+              {visibleHosts.map((h) => (
                 <article className="card host" key={h.id}>
                   <div className="host-heading">
                     <div className="host-icon" aria-hidden="true">
