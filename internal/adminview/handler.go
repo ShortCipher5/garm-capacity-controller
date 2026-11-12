@@ -52,28 +52,32 @@ type Event struct {
 	At         time.Time `json:"at"`
 }
 type Overview struct {
-	PolicyRevision    string         `json:"policy_revision"`
-	ManagementEnabled bool           `json:"management_enabled"`
-	Mode              string         `json:"mode"`
-	Provisioning      bool           `json:"experimental_provisioning_enabled"`
-	Ready             bool           `json:"admission_ready"`
-	Epoch             int64          `json:"epoch"`
-	At                time.Time      `json:"observed_at"`
-	Global            Allocation     `json:"global"`
-	Hosts             []Host         `json:"hosts"`
-	Pools             []Pool         `json:"pools"`
-	States            map[string]int `json:"states"`
-	Events            []Event        `json:"events"`
+	GarmManagementAvailable bool           `json:"garm_management_available"`
+	PolicyRevision          string         `json:"policy_revision"`
+	ManagementEnabled       bool           `json:"management_enabled"`
+	Mode                    string         `json:"mode"`
+	Provisioning            bool           `json:"experimental_provisioning_enabled"`
+	Ready                   bool           `json:"admission_ready"`
+	Epoch                   int64          `json:"epoch"`
+	At                      time.Time      `json:"observed_at"`
+	Global                  Allocation     `json:"global"`
+	Hosts                   []Host         `json:"hosts"`
+	Pools                   []Pool         `json:"pools"`
+	States                  map[string]int `json:"states"`
+	Events                  []Event        `json:"events"`
 }
 type Handler struct {
-	store      *admission.SQLiteStore
-	tokenHash  [32]byte
-	writeHash  [32]byte
-	management bool
-	assets     *os.Root
-	provision  bool
-	inFlight   chan struct{}
-	Audit      func(string)
+	store        *admission.SQLiteStore
+	tokenHash    [32]byte
+	writeHash    [32]byte
+	management   bool
+	garm         GarmManager
+	garmWrites   bool
+	remoteFlight chan struct{}
+	assets       *os.Root
+	provision    bool
+	inFlight     chan struct{}
+	Audit        func(string)
 }
 
 // Token is 32 random bytes encoded as 64 lowercase hexadecimal characters and
@@ -121,6 +125,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/garm" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/garm/") {
+		h.serveGarm(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/policy" {
 		h.servePolicy(w, r)
 		return
@@ -157,6 +165,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view.ManagementEnabled = h.management
+		view.GarmManagementAvailable = h.garm != nil
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {
 			fail(http.StatusServiceUnavailable)

@@ -19,7 +19,7 @@ Garm remains responsible for runner demand and GitHub integration. This controll
 - **A real React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. Separately authorized, reviewed host-mode and budget changes; no mock fallback.
 - **Consistent SQLite backup/restore primitives**, with admission blocked and new authoritative reconciliation required after restore.
 
-The full goal also includes repository labels/priority/idle controls, safe lifecycle management and historical measured usage. These are not all implemented. Allocations are not measured utilization, and a priority field is not a fair scheduler.
+The full goal also includes safe lifecycle management and historical measured usage. Scoped existing-pool labels/priority/idle settings and repository balancing have an experimental authenticated editor, but registration, deletion, native placement changes and job-safe retirement remain unavailable. Allocations are not measured utilization, and a priority field is not a fair scheduler.
 
 ## Current boundaries
 
@@ -29,12 +29,12 @@ The full goal also includes repository labels/priority/idle controls, safe lifec
 | Garm integration | Pinned v0.2.1 pre-JIT compatibility patch and actual compiled-provider protocol harness | Requires the documented patch; installed stack not qualified |
 | Provisioning | Verified Incus HTTPS/mTLS, explicit limits, durable at-most-once intent and readback | Experimental opt-in; full physical-host coverage must be proved |
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
-| Administration | Separate TLS read/write roles and responsive React ledger view | Opt-in separate write role for ledger host modes and budgets; no Garm pool editor or retirement button |
+| Administration | Separate TLS read/write roles and responsive React ledger view | Opt-in separate write role for ledger host modes and budgets; scoped journalled Garm settings editor; no registration or retirement button |
 | Backend identity | [Immutable daemon bindings](docs/durable-host-bindings.md), transactional dispatch provenance and alias/TLS rotation tests | Legacy charged hosts need unimplemented scope import; hidden projects, multiple daemons per host and admission-ledger runtime lineage remain gated |
 | Recovery | Consistent online SQLite backup/restore APIs | External writer fencing and live recovery drills required |
 | Cancellation | Atomic never-dispatched tombstones, authenticated provider command and optional Garm preparation-failure hook | No dispatched/unknown-create or physical retirement release |
 
-See [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).
+See [Garm settings management](docs/garm-management.md), [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).
 
 ## Test without infrastructure
 
@@ -90,7 +90,7 @@ Do not copy only an open WAL database file. Use the [consistent backup procedure
 
 ## Next
 
-Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then broader authenticated Garm administration and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
+Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then qualified recovery, registration/retirement workflows and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
 
 No live controller deployment is claimed. Tests must never access live runner infrastructure or commit credentials, private host addresses or user-specific configuration.
 

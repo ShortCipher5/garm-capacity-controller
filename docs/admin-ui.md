@@ -30,7 +30,7 @@ Refresh obtains another snapshot without changing the ledger. The displayed time
 - Conservative accounted resource-state counts and ledger audit events, newest first.
 - Explicit empty states when the real ledger has no hosts, pools, resources or audit records.
 
-Allocations are not measured CPU/RAM utilization. Unallocated capacity is not a guarantee of availability. Unknown and failed resources remain charged. Paused admission does not stop existing idle runners receiving jobs, and a draining mode is not drain completion. Historical usage telemetry, pool priority/label controls and safe retirement/release are not supplied by this UI.
+Allocations are not measured CPU/RAM utilization. Unallocated capacity is not a guarantee of availability. Unknown and failed resources remain charged. Paused admission does not stop existing idle runners receiving jobs, and a draining mode is not drain completion. Historical usage telemetry and safe retirement/release are not supplied by this UI. Separately configured experimental Garm settings controls are documented below.
 
 ## Verification
 
@@ -59,6 +59,27 @@ The revision hashes managed policy, excluding changing health observations. Comp
 **Disabled is not drained.** Existing idle runners may still receive jobs, and a later mode change does not fence an already committed in-flight claim. Enabling is not immediate admission: it requires fresh reconciliation. These controls do not register hosts/repositories/pools, edit Garm tags/idle/max/priority, alter actual runner placement, stop jobs or retire resources. Pool host eligibility is deliberately not editable because the gateway pins placement at startup. Unknown write outcomes are reported explicitly, never automatically retried.
 
 The disposable browser suite also covers review/cancel, read-token write rejection, actual persisted mode and budget changes, audit/readiness effects, repeated apply and disconnect during an interrupted write. Passing it does not qualify production management, individual operator attribution, rotation or audit retention.
+
+## Existing Garm pool and repository settings
+
+When separately configured, **Load Garm settings** reads exact allowlisted real
+Garm objects using a server-held dedicated upstream token. These are not ledger
+pool IDs or dynamic-placement controls. The existing read token discovers settings;
+the separate browser management token authorizes each reviewed write. Remote
+writes require their own additional explicit startup flag. Review only changed
+settings, then enter the write token for that one action. Cancel clears the review
+without sending it. No secrets are stored in browser storage or build variables.
+
+The console supports future-runner tags, pool priority, maximum and non-decreasing
+minimum idle, pool enabled state, and repository round-robin/pack balancing. It
+cannot register pools/repositories, choose an unrestricted provider, change actual
+runner placement, drain jobs or retire runners. Garm's lack of external atomic
+conditional updates is shown prominently. Every mutation traverses the separate
+durable intent journal. Pending/unknown writes block new changes even after a
+restart; the console has no blind clear/retry or recovery button. Status and the
+up to25 recent scoped sanitized operation records remain visible when the upstream service is
+unavailable, provided the journal itself can be read. See the full
+[configuration, concurrency and recovery boundaries](garm-management.md).
 
 ## Backend binding status (schema4 prerequisite)
 
