@@ -10,6 +10,6 @@
 
 Priority in pool policy is not priority scheduling. Fairness, starvation bounds and queued demand need their own tested scheduler. Resource accounting and historical observed usage must remain separate.
 
-Operational backup/restore acceptance is tracked explicitly in [operational-acceptance.md](operational-acceptance.md), including consistent WAL snapshots and mandatory fail-closed post-restore inventory reconciliation. Offline library APIs are implemented; there is no backup CLI or qualified live recovery service.
+Operational backup/restore acceptance is tracked explicitly in [operational-acceptance.md](operational-acceptance.md), including consistent WAL snapshots and mandatory fail-closed post-restore inventory reconciliation. Offline library APIs and a local operator CLI are implemented; there is no qualified live recovery service.
 
 The integrated experimental gateway/provider pair is documented in [gateway-service.md](gateway-service.md). It defaults to authenticated reads, and its incomplete destructive lifecycle prevents calling it a production replacement for the installed provider.

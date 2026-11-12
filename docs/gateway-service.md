@@ -69,7 +69,7 @@ Use secret storage/OS credential delivery appropriate for the deployment. These 
 
 ## Restore and remaining acceptance gates
 
-[The backup/restore library](backup-restore.md) uses SQLite's consistent online backup and produces admission-blocked standalone artifacts; it is **not a backup CLI or live recovery service**. Restore into a new path only after stopping/fencing all old external writers. A fresh complete authoritative Garm/Incus/operation inventory, including post-backup resources and operations, is mandatory before opt-in scheduling. The service cannot revoke a different process's credentials or make an old database harmless.
+[The backup/restore library](backup-restore.md) uses SQLite's consistent online backup and produces admission-blocked standalone artifacts; it is **not a live recovery service**; the local `capacity-ledger` CLI wraps its offline primitives. Restore into a new path only after stopping/fencing all old external writers. A fresh complete authoritative Garm/Incus/operation inventory, including post-backup resources and operations, is mandatory before opt-in scheduling. The service cannot revoke a different process's credentials or make an old database harmless.
 
 Remaining gates: installed-version/physical-scope qualification; executable compatibility against the exact Garm deployment; authoritative recovery and proof-based retirement; job-safe deregistration/drain; admin mutation controls; security-event retention and credential rotation procedures. No merge, deployment or production-ready claim is made by this slice.
 

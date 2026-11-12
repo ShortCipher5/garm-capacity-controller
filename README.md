@@ -89,3 +89,8 @@ Do not copy only an open WAL database file. Use the [consistent backup procedure
 Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then authenticated mutation controls and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
 
 No live controller deployment is claimed. Tests must never access live runner infrastructure or commit credentials, private host addresses or user-specific configuration.
+
+Local operator backup/restore: build `./cmd/capacity-ledger` and follow the
+[fail-closed recovery procedure](docs/backup-restore.md). It produces new private,
+WAL-consistent, admission-blocked artifacts only. External old-writer fencing and
+a NEW complete authoritative reconciliation are still mandatory before use.
