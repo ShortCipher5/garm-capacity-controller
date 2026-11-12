@@ -70,3 +70,5 @@ The `feat/gateway-rpc` slice adds separate `capacity-gateway` and `capacity-prov
 The `feat/host-admission-controls` slice adds durable trusted host enable/pause controls with a fresh reconciliation barrier and unchanged resource charges. It does **not** deregister idle runners or complete a drain; see [host admission controls](docs/host-admission-controls.md). No provider/admin endpoint is added.
 
 The `feat/read-only-admin` slice adds a separate opt-in TLS read-only admin API backed by actual ledger state, with no synthetic fallback. It cannot modify policy or retire runners. The React client follows in a separate focused slice. See [admin setup and read isolation](docs/read-only-admin.md). Physical retirement/job-safe draining remains blocked, not hidden behind fake controls.
+
+The `feat/read-only-admin-ui` slice pairs that API with the actual React ledger view: memory-only read credentials, refresh/logout fencing, no fixture fallback and no mutation controls. See [the UI](docs/admin-ui.md). Browser qualification runs separately in CI; installed infrastructure and job-safe retirement are still not qualified.

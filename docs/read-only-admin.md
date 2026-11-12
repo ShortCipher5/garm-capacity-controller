@@ -25,7 +25,7 @@ This is a fragment, not a complete deployable configuration. Endpoints and paths
 
 The token file contains 32 cryptographically random bytes encoded as **64 lowercase hexadecimal characters**, optionally followed by a newline. Generate it with a trusted cryptographic tool into a new owner-only file, never into a repository, URL or command-line argument. Every config/CA/certificate/key/token file must satisfy the owner-only regular-file rules. Use separate OS identities for gateway and Garm, and keep the trusted static build directory unwritable by repository jobs or unrelated users. Empty `assets` gives an API-only listener; no fixture UI is supplied as a fallback.
 
-The UI sends the read token only in an Authorization header and retains it only in tab memory. It is a scoped read credential, not a browser-safe public value. There is no cookie/session auto-login, permissive CORS, URL-token acceptance or provider credential in the UI bundle. File replacement/token rotation takes effect after restart; full OIDC/session management and a reviewed credential-rotation service remain future work. The paired React client is delivered in a separate follow-on slice and does not expand this read-only credential role.
+The UI sends the read token only in an Authorization header and retains it only in tab memory. It is a scoped read credential, not a browser-safe public value. There is no cookie/session auto-login, permissive CORS, URL-token acceptance or provider credential in the UI bundle. File replacement/token rotation takes effect after restart; full OIDC/session management and a reviewed credential-rotation service remain future work. The paired [React client](admin-ui.md) does not expand this read-only credential role.
 
 ## API and data boundary
 
