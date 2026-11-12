@@ -62,7 +62,9 @@ export class ReadSession {
   #generation = 0;
   #request;
   constructor(fetcher = globalThis.fetch) {
-    this.fetcher = fetcher;
+    // Native browser fetch requires the Window/global receiver, not this
+    // ReadSession instance. Preserve it even when invoked as this.fetcher().
+    this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
     this.#generation++;

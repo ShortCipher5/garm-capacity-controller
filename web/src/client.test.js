@@ -126,3 +126,21 @@ test("repeated refresh supersedes the earlier read without losing current sessio
   await assert.rejects(old, SessionEnded);
   assert.deepEqual(await session.refresh(), view);
 });
+test("default native-style fetch retains its global receiver", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async function (url, options) {
+    // Browsers reject native fetch called with a ReadSession as its receiver.
+    // Arrow-based Node/jsdom adapters do not reveal this integration failure.
+    if (this !== globalThis) throw new TypeError("Illegal invocation");
+    calls++;
+    assert.equal(url, endpoint);
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    return response();
+  });
+  const session = new ReadSession();
+  assert.deepEqual(await session.connect(token), view);
+  assert.deepEqual(await session.refresh(), view);
+  assert.equal(calls, 2);
+  session.disconnect();
+});
