@@ -76,3 +76,10 @@ Remaining gates: installed-version/physical-scope qualification; executable comp
 The [pinned source-to-executable qualification suite](protocol-qualification.md) exercises actual upstream Garm calls through the compiled facade and this service, including ambiguous create correlation and no redispatch. It remains local fixture qualification, not permission to enable production scheduling.
 
 The optional admin listener supports a separately credentialed, CLI-opted-in ledger policy editor. See [management UI](admin-ui.md) for `management_token_file`, `--allow-experimental-management`, atomic conflict/audit semantics and the explicit no-drain/no-placement boundary.
+
+Scoped existing Garm pool/repository settings can be configured under
+`admin.garm_management`, with a separate upstream token, exact provider/object
+allowlists, owner-only durable journal, independent remote-write CLI opt-in and
+operator external-writer acknowledgement. See [Garm management](garm-management.md).
+The provider inventory credential is not reused. No registration, native-placement,
+job-safe retirement or production recovery gate is supplied by this editor.

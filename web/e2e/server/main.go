@@ -85,6 +85,14 @@ func main() {
 	if err := handler.EnableManagement(strings.Repeat("c", 64)); err != nil {
 		log.Fatal(err)
 	}
+	garmManager, closeGarm, err := browserGarm(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer closeGarm()
+	if err := handler.SetGarmManager(garmManager, true); err != nil {
+		log.Fatal(err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:4173")
 	if err != nil {
 		log.Fatal(err)

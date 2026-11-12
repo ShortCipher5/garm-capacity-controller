@@ -1,0 +1,55 @@
+package runner
+
+import (
+ "context"
+ "encoding/json"
+
+ commonParams "github.com/cloudbase/garm-provider-common/params"
+ "github.com/cloudbase/garm/params"
+)
+
+// Uses the pinned upstream Runner and SQLite Store, not a reimplementation of
+// UpdatePoolParams. No providers, GitHub requests or pool worker loops are run.
+func (s *PoolTestSuite) TestCapacityManagementAllowlist() {
+ before:=s.Fixtures.Pools[0]
+ instance,err:=s.Fixtures.Store.CreateInstance(s.adminCtx,before.ID,params.CreateInstanceParams{Name:"fixture-active-runner",OSType:commonParams.Linux,Status:commonParams.InstanceRunning,RunnerStatus:params.RunnerActive,Generation:before.Generation})
+ s.Require().NoError(err)
+ var update params.UpdatePoolParams
+ s.Require().NoError(json.Unmarshal([]byte(`{"tags":["linux","self-hosted"],"priority":12,"max_runners":8,"min_idle_runners":3,"enabled":false}`),&update))
+ after,err:=s.Runner.UpdatePoolByID(s.adminCtx,before.ID,update)
+ s.Require().NoError(err)
+ s.Require().Equal(before.Generation,after.Generation)
+ s.Require().Equal(before.Image,after.Image)
+ s.Require().Equal(before.Flavor,after.Flavor)
+ s.Require().Equal(before.ExtraSpecs,after.ExtraSpecs)
+ s.Require().Equal(before.EnableShell,after.EnableShell)
+ s.Require().Equal(uint(8),after.MaxRunners)
+ s.Require().Equal(uint(3),after.MinIdleRunners)
+ s.Require().Equal(uint(12),after.Priority)
+ s.Require().False(after.Enabled)
+ s.Require().Len(after.Tags,2)
+ current,err:=s.Fixtures.Store.GetInstance(s.adminCtx,instance.Name)
+ s.Require().NoError(err)
+ s.Require().Equal(instance.Generation,current.Generation)
+ s.Require().Equal(commonParams.InstanceRunning,current.Status)
+ s.Require().Equal(params.RunnerActive,current.RunnerStatus)
+ // The actual upstream validation rejects an inconsistent pair.
+ max:=uint(2)
+ _,err=s.Runner.UpdatePoolByID(s.adminCtx,before.ID,params.UpdatePoolParams{MaxRunners:&max})
+ s.Require().Error(err)
+}
+
+// A canceled HTTP/request context is not proof that an already accepted settings
+// transaction cannot commit. The pinned Runner/Store do not prevent the transaction here.
+func (s *PoolTestSuite) TestCapacityManagementCanceledRequestIsNotFence() {
+ before:=s.Fixtures.Pools[0]
+ ctx,cancel:=context.WithCancel(s.adminCtx)
+ cancel()
+ priority:=uint(44)
+ after,err:=s.Runner.UpdatePoolByID(ctx,before.ID,params.UpdatePoolParams{Priority:&priority})
+ s.Require().NoError(err)
+ s.Require().Equal(priority,after.Priority)
+ observed,err:=s.Fixtures.Store.GetPoolByID(s.adminCtx,before.ID)
+ s.Require().NoError(err)
+ s.Require().Equal(priority,observed.Priority)
+}

@@ -1,3 +1,5 @@
+import { validateGarm } from "./garm-client.js";
+
 // This client has no persistence and no configurable remote endpoint.
 export const endpoint = "/admin/api/v1/overview";
 export class SessionEnded extends Error {}
@@ -64,6 +66,8 @@ export class ReadSession {
   #token = "";
   #generation = 0;
   #request;
+  #remoteRequest;
+  #remoteGeneration = 0;
   constructor(fetcher = globalThis.fetch) {
     // Native browser fetch requires the Window/global receiver, not this
     // ReadSession instance. Preserve it even when invoked as this.fetcher().
@@ -71,6 +75,9 @@ export class ReadSession {
   }
   disconnect() {
     this.#generation++;
+    this.#remoteGeneration++;
+    this.#remoteRequest?.abort();
+    this.#remoteRequest = undefined;
     this.#token = "";
     this.#request?.abort();
     this.#request = undefined;
@@ -83,6 +90,26 @@ export class ReadSession {
       );
     this.#token = token;
     return this.refresh();
+  }
+  async garmSnapshot() {
+    if (!this.#token) throw new SessionEnded();
+    this.#remoteRequest?.abort();
+    const generation = ++this.#remoteGeneration;
+    const controller = new AbortController(); this.#remoteRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await this.fetcher("/admin/api/v1/garm", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (generation !== this.#remoteGeneration) throw new SessionEnded();
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error("Garm settings are unavailable. No settings were changed by this read.");
+      const result = validateGarm(await response.json());
+      if (generation !== this.#remoteGeneration) throw new SessionEnded();
+      return result;
+    } catch (error) {
+      if (generation !== this.#remoteGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
+      if (error instanceof SessionEnded || error.message?.includes("Garm")) throw error;
+      throw new Error("Garm settings could not be read. Refresh before editing.");
+    } finally { clearTimeout(timeout); }
   }
   async refresh() {
     if (!this.#token) throw new SessionEnded();
