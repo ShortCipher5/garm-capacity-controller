@@ -9,3 +9,5 @@
 7. **Admin and operations:** authentication/authorization, external secret keys, audit retention, telemetry, policy changes, failure drills, backup/restore and an independently reviewed production readiness gate.
 
 Priority in pool policy is not priority scheduling. Fairness, starvation bounds and queued demand need their own tested scheduler. Resource accounting and historical observed usage must remain separate.
+
+Operational backup/restore acceptance is tracked explicitly in [operational-acceptance.md](operational-acceptance.md), including consistent WAL snapshots and mandatory fail-closed post-restore inventory reconciliation. Tooling is not shipped yet.

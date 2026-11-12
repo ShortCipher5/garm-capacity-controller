@@ -109,10 +109,10 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 		if journal != "wal" || syncMode != 2 || foreignKeys != 1 {
 			return errors.New("required SQLite durability settings unavailable")
 		}
-		if version != 0 && version != 1 {
+		if version != 0 && version != 1 && version != 2 {
 			return errors.New("unsupported SQLite schema version")
 		}
-		if version == 1 && application != 0x47434331 {
+		if (version == 1 || version == 2) && application != 0x47434331 {
 			return errors.New("database belongs to a different application")
 		}
 		if version == 0 {
@@ -130,6 +130,14 @@ func OpenSQLite(path string, initial Config) (*SQLiteStore, error) {
 				return err
 			}
 			if _, err := tx.Exec("INSERT INTO metadata(id,config,ready,epoch,nonce,began_at) VALUES(1,?,0,0,'','')", encoded); err != nil {
+				return err
+			}
+		}
+		if version < 2 {
+			if _, err := tx.Exec(sqliteDispatchSchema); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v2", "", s.now()); err != nil {
 				return err
 			}
 		}
@@ -168,7 +176,7 @@ func sqlitePreflight(location url.URL) error {
 		}
 		return nil
 	}
-	if version != 1 || application != 0x47434331 {
+	if (version != 1 && version != 2) || application != 0x47434331 {
 		return errors.New("unsupported or foreign SQLite database")
 	}
 	return nil
