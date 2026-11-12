@@ -84,7 +84,7 @@ function Usage({ allocation, metric = false }) {
     );
   });
 }
-function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
   return (
     <>
       <aside className="sidebar">
@@ -302,7 +302,7 @@ function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
     </>
   );
 }
-function App() {
+export function App() {
   const session = useRef(new ReadSession());
   const generation = useRef(0);
   const input = useRef(null);
@@ -366,7 +366,6 @@ function App() {
           Incus credentials belong here.
         </p>
         <Notice />
-        {data.legacy_unplanned_reservations > 0 && <div className="notice" role="status"><strong>Historical execution plans unavailable</strong><span>{data.legacy_unplanned_reservations} reservations remain charged but lack immutable execution plans. They cannot be created or automatically imported. This console cannot reset or clear their history.</span></div>}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -411,4 +410,6 @@ function App() {
     </div>
   );
 }
-createRoot(document.getElementById("root")).render(<App />);
+if (typeof document !== "undefined") {
+  createRoot(document.getElementById("root")).render(<App />);
+}
