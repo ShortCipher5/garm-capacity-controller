@@ -1,0 +1,39 @@
+# Disposable-only historical qualification, never a deployment workflow.
+name: Disposable historical Garm image profile
+on:
+  pull_request:
+    paths:
+      - 'deploy/runtime/release-profile/**'
+      - '.github/workflows/disposable-release-profile.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Native synthetic unit tests only
+        run: |
+          python3 -B -m unittest discover -s deploy/runtime/release-profile -v
+          cd deploy/runtime/release-profile/testsrc
+          go test -race ./...
+          go vet ./...
+      - name: Fresh hosted disposable images only
+        run: python3 -B deploy/runtime/release-profile/run.py
+      - name: Upload only completed public evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: disposable-historical-image-profile
+          path: qualification-results-release-profile/result.json
+          if-no-files-found: error
+          retention-days: 7

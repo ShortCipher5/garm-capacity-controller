@@ -1,0 +1,40 @@
+{
+  "deployment_authorized": false,
+  "images": {
+    "frontend": {
+      "index_digest": "sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e",
+      "input_tag": "1",
+      "linux_amd64_digest": "sha256:7b32114e84ca21aeb2d6f871a0b62b3a0762193f75d9afd048ee4cbe889f3148",
+      "metadata_origin": "https://hub.docker.com/v2/repositories/docker/dockerfile/tags/1",
+      "repository": "docker/dockerfile"
+    },
+    "go": {
+      "index_digest": "sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473",
+      "input_tag": "1.26.10-bookworm",
+      "linux_amd64_digest": "sha256:2dcb1e14f35e4cc1db2186947cba2d19a9fce4d48a27c50658bd203c90fcc183",
+      "metadata_origin": "https://hub.docker.com/v2/repositories/library/golang/tags/1.26.10-bookworm",
+      "repository": "golang"
+    },
+    "node": {
+      "index_digest": "sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d",
+      "input_tag": "22.23.4-bookworm-slim",
+      "linux_amd64_digest": "sha256:aaa4b5baf1ecff3b283486bb1f90405cdda225a3e6f79660d2c559fa510a7292",
+      "metadata_origin": "https://hub.docker.com/v2/repositories/library/node/tags/22.23.4-bookworm-slim",
+      "repository": "node"
+    },
+    "runtime": {
+      "index_digest": "sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc",
+      "input_tag": "bookworm-slim",
+      "linux_amd64_digest": "sha256:c67e92c8099ba22853ab4cfda7cfb494d253d6012ca82dee98ba8976772af018",
+      "metadata_origin": "https://hub.docker.com/v2/repositories/library/debian/tags/bookworm-slim",
+      "repository": "debian"
+    }
+  },
+  "images_built": false,
+  "images_pulled": false,
+  "platform": "linux/amd64",
+  "release_authorized": false,
+  "resolved_at": "2026-11-12T18:56:14.523414+00:00",
+  "runtime_qualified": false,
+  "schema": "unexecuted-public-image-lock-candidate/v1"
+}
