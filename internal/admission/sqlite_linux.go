@@ -605,8 +605,9 @@ type HostObservation struct {
 }
 
 type InventorySnapshot struct {
-	Hosts     []HostObservation
-	Resources []InventoryResource
+	Preparations []GarmPreparation
+	Hosts        []HostObservation
+	Resources    []InventoryResource
 }
 
 func validInventory(r InventoryResource) bool {
@@ -655,6 +656,9 @@ func (s *SQLiteStore) CompleteReconciliation(ctx context.Context, fence Fence, s
 		}
 		previous, err := sqliteInventory(tx)
 		if err != nil {
+			return err
+		}
+		if err := sqliteGarmPreparations(tx, config, fence, snapshot, reservations, previous, began, now); err != nil {
 			return err
 		}
 		existing := map[[2]string]InventoryResource{}
