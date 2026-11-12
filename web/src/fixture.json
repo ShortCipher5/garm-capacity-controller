@@ -1,0 +1,22 @@
+{
+  "mode": "simulation", "enforcement": false, "observed_at": "2026-01-01T12:00:00Z",
+  "global": { "budget": { "cpu_millis": 8000, "ram_mib": 16384, "runners": 8 }, "allocated": { "cpu_millis": 6000, "ram_mib": 12288, "runners": 6 } },
+  "hosts": [
+    { "id": "host-a", "name": "Compute A", "mode": "enabled", "health": "synthetic", "budget": { "cpu_millis": 4000, "ram_mib": 8192, "runners": 4 }, "allocated": { "cpu_millis": 3000, "ram_mib": 6144, "runners": 3 } },
+    { "id": "host-b", "name": "Compute B", "mode": "draining", "health": "synthetic", "budget": { "cpu_millis": 4000, "ram_mib": 8192, "runners": 4 }, "allocated": { "cpu_millis": 3000, "ram_mib": 6144, "runners": 3 } }
+  ],
+  "pools": [
+    { "repository": "example/app", "labels": ["linux", "incus", "app"], "priority": 20, "max_runners": 6, "allocated": 4, "idle": 1, "running": 2, "unknown": 1 },
+    { "repository": "example/api", "labels": ["linux", "incus", "api"], "priority": 10, "max_runners": 6, "allocated": 2, "idle": 1, "running": 1, "unknown": 0 }
+  ],
+  "events": [
+    { "time": "12:00:00", "decision": "denied", "pool": "example/api", "reason": "Host B is draining. New creates are blocked." },
+    { "time": "11:59:42", "decision": "held", "pool": "example/app", "reason": "Provider outcome unknown. Reservation remains charged." },
+    { "time": "11:59:10", "decision": "reserved", "pool": "example/app", "reason": "1 CPU · 2 GiB · 1 runner reserved before simulated create." }
+  ],
+  "history": [
+    { "time": "11:00", "runners": 2 }, { "time": "11:10", "runners": 3 },
+    { "time": "11:20", "runners": 5 }, { "time": "11:30", "runners": 4 },
+    { "time": "11:40", "runners": 6 }, { "time": "11:50", "runners": 6 }, { "time": "12:00", "runners": 6 }
+  ]
+}

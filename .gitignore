@@ -11,3 +11,7 @@ node_modules/
 web/dist/
 coverage.out
 /capacity-sim
+
+web/test-results/
+web/playwright-report/
+/capacity-demo
