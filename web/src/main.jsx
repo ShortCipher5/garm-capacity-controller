@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
+import { OnboardingPreflight } from "./onboarding.jsx";
 import { GarmManagement } from "./garm-management.jsx";
 import { Management } from "./management.jsx";
 
@@ -84,7 +85,7 @@ function Usage({ allocation, metric = false }) {
     );
   });
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding }) {
   return (
     <>
       <aside className="sidebar">
@@ -146,6 +147,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
         </div>
         <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} />}
+        {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}
         <div className="metrics">
           <Usage allocation={data.global} metric />
         </div>
@@ -285,7 +287,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm }) {
                         <strong>{e.kind}</strong>
                         <time dateTime={e.at}>{date(e.at)}</time>
                         {e.host && <p>Host: {e.host}</p>}
-                        {e.request_key && <p>{e.kind === "admin_policy_change" ? "Policy audit: " : "Request: "}{e.request_key}</p>}
+                        {e.request_key && <p>{e.kind === "admin_policy_change" ? "Policy audit: " : e.kind.startsWith("onboarding_probe_") ? "Onboarding audit: " : "Request: "}{e.request_key}</p>}
                       </div>
                     </article>
                   ))
@@ -349,6 +351,10 @@ export function App() {
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
+        readOnboarding={async () => {
+          try { return await session.current.onboardingSnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
         readGarm={async () => {
           try { return await session.current.garmSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }

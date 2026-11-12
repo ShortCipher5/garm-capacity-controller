@@ -99,3 +99,7 @@ Local operator backup/restore: build `./cmd/capacity-ledger` and follow the
 [fail-closed recovery procedure](docs/backup-restore.md). It produces new private,
 WAL-consistent, admission-blocked artifacts only. External old-writer fencing and
 a NEW complete authoritative reconciliation are still mandatory before use.
+
+Optional [Incus onboarding preflight](docs/incus-onboarding-preflight.md) performs
+an authenticated, audited read against operator-allowlisted transport references.
+It is not server registration, activation or physical-capacity qualification.
