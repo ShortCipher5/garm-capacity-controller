@@ -1,0 +1,122 @@
+//go:build linux && cgo && !agent
+
+package db_test
+
+import (
+	"bytes"
+	"encoding/binary"
+	"io"
+	"net"
+	"testing"
+	"time"
+)
+
+type qualificationMemoryConn struct {
+	net.Conn
+	writes bytes.Buffer
+	reads  *bytes.Reader
+	closed bool
+}
+
+func (c *qualificationMemoryConn) Write(p []byte) (int, error)     { return c.writes.Write(p) }
+func (c *qualificationMemoryConn) Read(p []byte) (int, error)      { return c.reads.Read(p) }
+func (c *qualificationMemoryConn) Close() error                    { c.closed = true; return nil }
+func (c *qualificationMemoryConn) SetReadDeadline(time.Time) error { return nil }
+func qualificationFrame(kind byte, body []byte) []byte {
+	h := make([]byte, 8)
+	binary.LittleEndian.PutUint32(h, uint32(len(body)/8))
+	h[4] = kind
+	return append(h, body...)
+}
+func TestQualificationLossParser(t *testing.T) {
+	version := []byte{1, 0, 0, 0, 0, 0, 0, 0}
+	body := make([]byte, 16)
+	copy(body[8:], "COMMIT")
+	request := append(append([]byte{}, version...), qualificationFrame(8, body)...)
+	response := qualificationFrame(6, make([]byte, 16))
+	t.Run("fragmented_exact_commit_zero_response_bytes", func(t *testing.T) {
+		verified := 0
+		f := &qualificationLoss{verifyCommitted: func() error { verified++; return nil }}
+		f.arm()
+		m := &qualificationMemoryConn{reads: bytes.NewReader(response)}
+		c := &qualificationLossConn{Conn: m, fault: f}
+		for _, b := range request {
+			if _, err := c.Write([]byte{b}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !bytes.Equal(m.writes.Bytes(), request) {
+			t.Fatal("request altered")
+		}
+		out := bytes.Repeat([]byte{0xa5}, 8)
+		n, err := c.Read(out)
+		if n != 0 || err != io.EOF || !bytes.Equal(out, bytes.Repeat([]byte{0xa5}, 8)) {
+			t.Fatal("response leaked")
+		}
+		if verified != 1 || f.matched != 1 || f.dropped != 1 || f.failure != nil || !m.closed || m.reads.Len() != 0 {
+			t.Fatal("not exactly one validated drop")
+		}
+	})
+	for _, bad := range []string{"substring", "extra_parameters", "wrong_opcode", "wrong_schema"} {
+		t.Run(bad, func(t *testing.T) {
+			b := append([]byte{}, body...)
+			kind := byte(8)
+			switch bad {
+			case "substring":
+				copy(b[8:], "COMMITX")
+			case "extra_parameters":
+				b = append(b, make([]byte, 8)...)
+			case "wrong_opcode":
+				kind = 9
+			}
+			frame := qualificationFrame(kind, b)
+			if bad == "wrong_schema" {
+				frame[5] = 1
+			}
+			f := &qualificationLoss{}
+			f.arm()
+			m := &qualificationMemoryConn{reads: bytes.NewReader([]byte("pass"))}
+			c := &qualificationLossConn{Conn: m, fault: f}
+			if _, err := c.Write(append(append([]byte{}, version...), frame...)); err != nil {
+				t.Fatal(err)
+			}
+			p := make([]byte, 4)
+			n, err := c.Read(p)
+			if n != 4 || err != nil || string(p) != "pass" || f.matched != 0 || !f.armed {
+				t.Fatal("wrong frame armed drop")
+			}
+		})
+	}
+	t.Run("invalid_version_and_size_refused", func(t *testing.T) {
+		for _, input := range [][]byte{make([]byte, 8), append(append([]byte{}, version...), []byte{255, 255, 255, 255, 8, 0, 0, 0}...)} {
+			f := &qualificationLoss{}
+			m := &qualificationMemoryConn{}
+			c := &qualificationLossConn{Conn: m, fault: f}
+			if _, err := c.Write(input); err == nil {
+				t.Fatal("invalid frame accepted")
+			}
+		}
+	})
+	for _, bad := range []string{"failure_frame", "truncated_result"} {
+		t.Run(bad, func(t *testing.T) {
+			r := append([]byte{}, response...)
+			if bad == "failure_frame" {
+				r[4] = 0
+			} else {
+				r = r[:10]
+			}
+			verified := false
+			f := &qualificationLoss{verifyCommitted: func() error { verified = true; return nil }}
+			f.arm()
+			m := &qualificationMemoryConn{reads: bytes.NewReader(r)}
+			c := &qualificationLossConn{Conn: m, fault: f}
+			if _, err := c.Write(request); err != nil {
+				t.Fatal(err)
+			}
+			n, err := c.Read(make([]byte, 8))
+			if n != 0 || err != io.EOF || verified || f.dropped != 0 || f.failure == nil {
+				t.Fatal("invalid response counted as evidence")
+			}
+		})
+	}
+}
