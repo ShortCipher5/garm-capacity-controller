@@ -21,5 +21,6 @@ jobs:
           cache: false
       - run: gofmt -d .
       - run: test -z "$(gofmt -l .)"
+      - run: test "$(go env CGO_ENABLED)" = 1
       - run: go vet ./...
       - run: go test -race -count=1 ./...
