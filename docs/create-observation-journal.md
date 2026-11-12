@@ -20,8 +20,10 @@ entry, err := store.StoreCreateObservation(ctx, exactRequest, observation)
 Every error must be checked before proceeding. The original dispatch operation
 must already be durably recorded from the original create response. A controller
 must capture while the terminal record is available: Incus 6.0.4 removes it after
-about five seconds. This slice does not arm an automatic collector or reconstruct
-expired operations. Failed, missing, lost or unrecorded evidence stays unknown.
+about five seconds. The [automatic post-submitted collector](automatic-create-evidence.md)
+now attempts this once inside the original verified successful create callback.
+It cannot reconstruct expired operations. Failed, missing, lost or unrecorded
+evidence stays unknown.
 
 Only the opaque `incusapi.TerminalOperationObservation` minted by real verified
 transport reads is accepted. Serialized records, pasted operator receipts, a
