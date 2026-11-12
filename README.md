@@ -2,7 +2,7 @@
 
 A lightweight, safety-first control plane **above [Garm](https://github.com/cloudbase/garm)** for GitHub Actions runners on multiple [Incus](https://linuxcontainers.org/incus/) hosts.
 
-> **Experimental foundation, not a production controller.** This repository currently contains an offline admission simulator and a durable reservation ledger. It does not connect to Garm or Incus, provision runners, stop jobs, or enforce limits in an existing installation. There is no production web UI yet.
+> **Experimental foundation, not a production controller.** This repository currently contains an offline admission simulator and a durable reservation ledger. It does not connect to Garm or Incus, provision runners, stop jobs, or enforce limits in an existing installation. There is no production web UI yet. A separate read-only React/Go fixture demo is being developed in the `feat/read-only-web-demo` branch; see [demo instructions](docs/web-demo.md) in that branch.
 
 ## Why this exists
 
