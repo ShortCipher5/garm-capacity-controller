@@ -1,7 +1,9 @@
 package runnercontracts
 
 import (
+	"encoding/xml"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,5 +134,52 @@ func TestPreexistingOrSymlinkedOutputsRefusedBeforeAnySideEffect(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestSecurityOverlayIsOnlyTheExplicitOfficialDependencyUpgrade(t *testing.T) {
+	data, err := os.ReadFile("Directory.Build.targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	starts := []string{}
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			starts = append(starts, node.Name.Local)
+			if node.Name.Local == "PackageReference" {
+				attrs := map[string]string{}
+				for _, a := range node.Attr {
+					attrs[a.Name.Local] = a.Value
+				}
+				if len(attrs) != 2 || attrs["Update"] != "System.Security.Cryptography.Pkcs" || attrs["Version"] != "8.0.2" {
+					t.Fatal("unexpected dependency override", attrs)
+				}
+			} else if len(node.Attr) != 0 {
+				t.Fatal("unexpected MSBuild attributes")
+			}
+		case xml.CharData:
+			if strings.TrimSpace(string(node)) != "" {
+				t.Fatal("unexpected MSBuild content")
+			}
+		}
+	}
+	if strings.Join(starts, ",") != "Project,ItemGroup,PackageReference" {
+		t.Fatal("security overlay may not alter build/audit policy", starts)
+	}
+	script, err := os.ReadFile("test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), "assets['libraries']") || !strings.Contains(string(script), "exact_production_dependency_graph': False") || !strings.Contains(string(script), "cmp \"$override\" \"$here/Directory.Build.targets\"") {
+		t.Fatal("resolved dependency/provenance verification missing")
 	}
 }

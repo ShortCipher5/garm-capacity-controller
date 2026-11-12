@@ -37,7 +37,7 @@ fi
 clean_dotnet() {
   env -i PATH="$PATH" HOME="$work.home" TMPDIR="$work.tmp" DOTNET_CLI_HOME="$work.home" \
     NUGET_PACKAGES="$work.packages" DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
-    DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=true \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=true DOTNET_GENERATE_ASPNET_CERTIFICATE=false \
     dotnet "$@"
 }
 clean_dotnet --list-sdks | grep -Eq '^8\.0\.4[0-9][0-9] ' || { echo 'Preinstalled compatible .NET 8.0.4xx SDK unavailable; no installation attempted.' >&2; exit 2; }
@@ -49,6 +49,12 @@ verify_source "$work"
 target="$work/src/Test/L0/Listener/RetirementSourceContracts.cs"
 [[ ! -e "$target" && ! -L "$target" ]]
 cp "$here/RetirementSourceContracts.cs" "$target"
+# Root-authorized TEST-ONLY official security dependency upgrade. The original
+# Sdk.csproj and Runner/Dispatcher method source remain hash-verified unchanged.
+# This does NOT reproduce the exact production dependency graph or installed image.
+override="$work/src/Directory.Build.targets"
+[[ ! -e "$override" && ! -L "$override" ]]
+cp "$here/Directory.Build.targets" "$override"
 mkdir -- "$work/src/Test/TestLogs"
 cd "$work/src"
 selected=$(clean_dotnet --version)
@@ -60,13 +66,27 @@ selected=$(clean_dotnet --version)
 # Generate only version metadata, not upstream Build/Layout (which downloads
 # SDK/externals). Preserve all upstream audit/analyzer/warning policies.
 clean_dotnet msbuild dir.proj -t:GenerateConstant -p:PackageRuntime=linux-x64 -p:RunnerVersion=2.323.0
-# NuGet dependencies are the upstream project's pinned public registry packages.
-# There are no real service tokens, credentials, jobs, listeners or host writes.
+# Public NuGet dependencies use the documented test-only Pkcs 8.0.2 security
+# overlay, with ALL audit/analyzer/warnings policies still enabled.
+# No real service credentials, registrations, jobs or deployment are involved.
 clean_dotnet test Test/Test.csproj -c Release -p:PackageRuntime=linux-x64 -p:RuntimeIdentifier=linux-x64 -p:RuntimeIdentifiers=linux-x64 \
   --filter 'FullyQualifiedName~RetirementSourceContracts' \
   --logger 'trx;LogFileName=retirement-source-contracts.trx' --results-directory "$work.results"
 verify_source "$work"
 cmp "$target" "$here/RetirementSourceContracts.cs"
+cmp "$override" "$here/Directory.Build.targets"
+python3 - "$work/src/Test/obj/project.assets.json" "$work.results/dependency-baseline.json" <<'PYDEPS'
+import json, sys
+assets = json.load(open(sys.argv[1]))
+package = 'System.Security.Cryptography.Pkcs/'
+resolved = {k: v.get('sha512') for k, v in assets['libraries'].items() if k.startswith(package)}
+if set(resolved) != {package + '8.0.2'} or not all(resolved.values()):
+    raise SystemExit('Only the explicitly reviewed official Pkcs 8.0.2 security baseline may qualify these tests.')
+json.dump({'test_only_dependency_override': True, 'exact_production_dependency_graph': False,
+           'source_commit': 'd8b82f44a9ec0258904d5869ae683c31d5aac299', 'resolved': resolved,
+           'fixed_advisories': ['GHSA-2fmv-rv2c-59x7', 'GHSA-846f-f764-76mx']},
+          open(sys.argv[2], 'w'), indent=2)
+PYDEPS
 python3 - "$work.results/retirement-source-contracts.trx" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
@@ -84,5 +104,5 @@ results = root.findall('.//t:UnitTestResult', ns)
 actual = {r.attrib.get('testName', '').rsplit('.', 1)[-1] for r in results}
 if actual != expected or len(results) != len(expected) or any(r.attrib.get('outcome') != 'Passed' for r in results):
     raise SystemExit('Exactly six compiled lifecycle contract tests must execute and pass; discovery/no-test success is insufficient.')
-print('Six ACTUAL pinned runner method tests passed. No job fence, installed-image qualification or release authority granted.')
+print('Six ACTUAL pinned runner method tests passed under the documented security-patched TEST dependency graph. No job fence, exact production graph, installed-image qualification or release authority granted.')
 PY

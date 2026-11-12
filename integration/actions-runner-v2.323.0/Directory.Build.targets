@@ -1,0 +1,7 @@
+<Project>
+  <!-- TEST-ONLY dependency graph: official advisory fix, never a production
+       runner/image qualification. No audit/warning policy is changed. -->
+  <ItemGroup>
+    <PackageReference Update="System.Security.Cryptography.Pkcs" Version="8.0.2" />
+  </ItemGroup>
+</Project>

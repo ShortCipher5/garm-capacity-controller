@@ -3,7 +3,8 @@
 This gate executes the **actual official Runner/JobDispatcher methods** from
 [actions/runner v2.323.0, commit d8b82f44](https://github.com/actions/runner/tree/d8b82f44a9ec0258904d5869ae683c31d5aac299)
 under mocked listener/service/worker boundaries. It changes no production runner
-source. It does not install/register a runner, contact GitHub Actions services,
+method source. One explicitly documented test-only dependency upgrade below means
+this is NOT the exact production dependency graph. It does not install/register a runner, contact GitHub Actions services,
 run a real job, implement a fence or authorize stopping/deleting anything.
 
 This historical source pin is a counterexample/research fixture, NOT the installed
@@ -50,8 +51,8 @@ listed 8.0.427 when this gate was prepared. Upstream `src/global.json` requests
 
 There is no setup-dotnet, apt, SDK installer, upstream `dev.sh`, layout/external
 binary download or fallback installation. Do not add one without authorization.
-Only upstream public-registry NuGet project dependencies are restored by the
-ordinary build. Build/tests run with a clean allowlisted environment and new
+Only public-registry NuGet project dependencies are restored by the ordinary
+build, with the narrowly scoped official security patch documented below. Build/tests run with a clean allowlisted environment and new
 private HOME/temp/package directories; inherited runner JIT/input variables,
 service tokens, proxy credentials and real home configuration are not passed. All upstream audit/analyzer/warnings-as-errors policies remain
 unchanged. A historical dependency/audit build failure must be reported, not
@@ -62,6 +63,34 @@ are filtered and executed. Source HEAD and critical production-file SHA256 hashe
 are checked before AND after execution. The generated version metadata must name
 the exact source pin. TRX inspection requires exactly six named Passed results;
 an empty discovery/filter success cannot make this gate green.
+
+## Explicit test-only security dependency baseline
+
+The first hosted attempt selected preinstalled SDK 8.0.427, verified original
+source hashes and generated version metadata, then FAILED before compilation or
+test execution. Unchanged upstream auditing correctly rejected its original
+`System.Security.Cryptography.Pkcs` 8.0.0 dependency for both advisories:
+
+- [GHSA-2fmv-rv2c-59x7 / CVE-2026-70162](https://github.com/advisories/GHSA-2fmv-rv2c-59x7), moderate: affected 8.0.0–8.0.1; first patched 8.0.2.
+- [GHSA-846f-f764-76mx / CVE-2026-84008](https://github.com/advisories/GHSA-846f-f764-76mx), high: affected 8.0.0–8.0.1; first patched 8.0.2.
+
+Both official GitHub advisory records were checked, and the official NuGet
+[nuspec](https://api.nuget.org/v3-flatcontainer/system.security.cryptography.pkcs/8.0.2/system.security.cryptography.pkcs.nuspec)
+identifies version 8.0.2, author Microsoft, project dot.net and the dotnet/runtime
+repository. No advisory, audit, analyzer or warnings-as-errors policy is suppressed.
+
+Only for this disposable test build, `Directory.Build.targets` updates that one
+PackageReference to 8.0.2. Original `Sdk.csproj`, Runner and JobDispatcher method
+source stay unchanged and hash-verified. The resolved Test `project.assets.json`
+must contain exactly the approved Pkcs version and record its nonempty resolved
+hash (not a preapproved hash); a separate dependency-baseline
+artifact explicitly records this TEST override and the two fixed advisories.
+Other package/audit failures must still stop the build and be reported.
+
+A resulting pass means selected historical method semantics were exercised under
+this security-updated TEST dependency graph. It does NOT qualify the original
+production graph, an original 2.323.0 binary or any installed runner/image. The
+six C# cases remain unexecuted until that actual hosted result is observed.
 
 ## Run in an environment with an existing compatible SDK
 
