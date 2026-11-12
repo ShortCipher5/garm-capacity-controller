@@ -101,3 +101,11 @@ These are required future tests, not green/skipped placeholders claiming a featu
 
 Current negative API tests assert that enrollment, dynamic placement and legacy
 scope-import routes are unavailable and leave ledger policy/audit unchanged.
+
+## Configured placement implementation boundary
+
+The separate [durable placement slice](durable-placement.md) adds an atomic host
+chooser for explicitly enrolled startup candidates and immutable new-request
+execution plans. It does not implement the dynamic enrollment, policy activation,
+legacy import or browser placement APIs described above. Existing negative-route
+tests remain intentional. Do not expose a host allowlist editor as enrollment.

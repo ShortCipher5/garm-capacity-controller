@@ -145,12 +145,18 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 				}
 			}))
 			garm := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/v1/instances" || r.Header.Get("Authorization") != "Bearer disposable-lifecycle-token" {
+				if r.Method != http.MethodGet || (r.URL.Path != "/api/v1/instances" && r.URL.Path != "/api/v1/pools/pool-a") || r.Header.Get("Authorization") != "Bearer disposable-lifecycle-token" {
 					t.Error("wrong Garm route/auth")
+					w.WriteHeader(http.StatusForbidden)
+					return
 				}
 				if garmFailure.Load() {
 					w.WriteHeader(503)
 					_, _ = w.Write([]byte("private-fault-must-not-log"))
+					return
+				}
+				if r.URL.Path == "/api/v1/pools/pool-a" {
+					_ = json.NewEncoder(w).Encode(sourcePoolMetadataFixture("pool-a"))
 					return
 				}
 				_, _ = w.Write([]byte(`[]`))
@@ -168,6 +174,16 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			hash := sha256.Sum256(keys.provider.Certificate[0])
 			budget := admission.Resources{CPU: 2000, RAM: 4096, Runners: 2}
 			config := configuration{Listen: address, Controller: "controller-test", Database: filepath.Join(directory, "ledger.db"), InitialPolicy: admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: 3 * time.Second}, Pools: map[string]gateway.PoolPolicy{"pool-a": {Host: "a", CPU: 1000, RAM: 1024, Flavor: "small", Image: "linux", Fingerprint: strings.Repeat("a", 64), Profiles: []string{"base"}, Type: "container", Arch: common.Amd64}}, Hosts: map[string]hostConfiguration{"a": {Endpoint: incus.URL, Project: "runners", TLS: keys.otherFiles}}, Garm: garmConfiguration{Endpoint: garm.URL, TokenFile: token, TLS: keys.otherFiles, Providers: []string{"capacity"}}, ServerTLS: keys.serverFiles, ProviderFingerprints: []string{hex.EncodeToString(hash[:])}}
+
+			if provision {
+				sourceHash := sha256.Sum256(keys.other.Certificate[0])
+				sourceFingerprint := hex.EncodeToString(sourceHash[:])
+				generation := uint64(0)
+				jit := true
+				config.SourceFingerprints = []string{sourceFingerprint}
+				config.BootstrapMode = "gateway-owned-default-cloudinit/v1"
+				config.PreparationPools = map[string]gateway.PreparationPoolPolicy{"pool-a": {ProviderName: "capacity", EntityType: "repository", EntityID: "22222222-2222-4222-8222-222222222222", ForgeEndpointName: "github-fixture", Generation: &generation, JITEnabled: &jit, SourceFingerprints: []string{sourceFingerprint}}}
+			}
 
 			adminListener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
@@ -356,4 +372,9 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An actual Garm response shape, not a caller-supplied source eligibility flag.
+func sourcePoolMetadataFixture(id string) map[string]any {
+	return map[string]any{"id": id, "provider_name": "capacity", "generation": 0, "repo_id": "22222222-2222-4222-8222-222222222222", "endpoint": map[string]any{"name": "github-fixture"}, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "enable_shell": false, "enabled": true}
 }
