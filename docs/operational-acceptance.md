@@ -16,12 +16,12 @@ Required implementation and qualification:
 - [ ] Do not resume live scheduling merely because SQLite integrity passes or the old snapshot used to be ready. Unknown or unbounded allocation remains blocked/charged.
 - [x] Test concurrent writes during backup, incomplete artifacts, interrupted restore, destination preservation, artifact readiness, stale-fence rejection, post-backup orphan/creating resources and dispatch refusal until complete reconciliation.
 
-Operator sequence using the offline CLI/APIs, before a live workflow is qualified:
+Future live-recovery acceptance sequence, **not an executable recovery procedure for the shipped runtime**. The current CLI/APIs can create offline artifacts, but supported archives/restores are permanently runtime-disabled. No reconciliation generation or operator acknowledgement can activate them:
 
 1. Establish a maintenance window and stop/fence every old gateway writer. Keep external ambiguous operations visible and charged.
 2. Take a consistent private SQLite backup with the supported tool. Verify integrity, schema/application ownership and blocked readiness; retain the original database and the required external key/configuration versions separately.
 3. Restore to a new private path without overwriting the original. Verify that old collector fences and admission readiness cannot be reused.
 4. Start a new reconciliation generation and collect authoritative complete bounded inventory from all three sources. Resolve unknown placement/operations conservatively, never by a timeout-based release.
-5. Resume scheduling only after the new generation succeeds and the credential-isolation/host-budget boundaries are re-established.
+5. A future, separately implemented and qualified recovery service would also have to re-establish credential isolation and host-budget boundaries before any scheduling. The current runtime has no supported resume path for these artifacts, even after successful reconciliation.
 
 The current repository cannot yet carry out that full sequence against infrastructure. The offline copy/restore boundary is implemented and locally tested. Proving a complete live recovery workflow with old-writer fencing, physical allocation coverage and fresh three-source inventory remains an explicit acceptance gate.
