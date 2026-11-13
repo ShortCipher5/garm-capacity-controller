@@ -1,0 +1,51 @@
+# syntax={{frontend}}
+FROM {{node}} AS web-build
+WORKDIR /build/webapp
+RUN test "$(node --version)" = v22.23.4 && test "$(npm --version)" = 10.9.9
+COPY garm/webapp/package.json garm/webapp/package-lock.json ./
+RUN env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/build-home CI=true npm ci --ignore-scripts --no-audit --no-fund
+COPY garm/webapp/ ./
+RUN env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/build-home CI=true NODE_ENV=production npm run build
+ARG PROFILE_VARIANT=baseline
+COPY inventory.mjs /tools/inventory.mjs
+RUN node /tools/inventory.mjs
+FROM {{go}} AS go-build
+ENV GOTOOLCHAIN=local
+RUN test "$(go version)" = "go version go1.26.10 linux/amd64"
+COPY garm/ /build/garm/
+COPY --from=web-build /build/webapp/build/ /build/garm/webapp/assets/
+WORKDIR /build/garm
+RUN CGO_ENABLED=1 go build -mod=vendor -trimpath -buildvcs=false -ldflags '-X github.com/cloudbase/garm/util/appdefaults.Version=v0.2.1+capacity.87e0d61751d4' -o /out/garm ./cmd/garm
+RUN CGO_ENABLED=1 go build -mod=vendor -trimpath -buildvcs=false -ldflags '-X github.com/cloudbase/garm/util/appdefaults.Version=v0.2.1+capacity.87e0d61751d4' -o /out/garm-cli ./cmd/garm-cli
+COPY controller/ /build/controller/
+WORKDIR /build/controller
+RUN go mod download && go mod verify && CGO_ENABLED=1 go build -mod=readonly -trimpath -buildvcs=false -o /out/capacity-provider ./cmd/capacity-provider
+COPY testsrc/ /build/testsrc/
+WORKDIR /build/testsrc
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/profile-probe ./probe && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/tls-anchor ./anchor
+FROM scratch AS probes
+COPY --from=go-build /out/ /
+COPY --from=web-build /out/public-assets.json /public-assets.json
+COPY --from=web-build /out/omitted.json /omitted.json
+FROM {{runtime}} AS daemon
+COPY --from=go-build --chmod=0555 /out/garm /usr/local/bin/garm
+COPY --from=go-build --chmod=0555 /out/capacity-provider /usr/local/bin/capacity-provider
+COPY --chmod=0444 public-ca.pem /etc/ssl/certs/ca-certificates.crt
+USER 65531:65531
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/garm"]
+CMD ["--version"]
+FROM {{runtime}} AS tools
+COPY --from=go-build --chmod=0555 /out/garm-cli /usr/local/bin/garm-cli
+COPY --chmod=0444 public-ca.pem /etc/ssl/certs/ca-certificates.crt
+USER 65533:65533
+ENV HOME=/run/garm-cli-home
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/garm-cli"]
+CMD ["--help"]
+FROM scratch AS missing-loader
+COPY --from=go-build --chmod=0555 /out/garm /usr/local/bin/garm
+USER 65531:65531
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/garm"]
+CMD ["--version"]
