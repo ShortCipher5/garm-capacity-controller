@@ -12,5 +12,7 @@ work=${1:?Usage: test.sh NEW-DISPOSABLE-DIRECTORY}
 # Qualify the actual pinned external provider against our compiled executable and
 # actual gateway service, using only disposable local mTLS Garm/Incus fixtures.
 cd "$here/../.."
+# Read-only source contracts preserve create-only/finite-batch limitations.
+GCC_PINNED_GARM_WORKTREE="$work" go test -race -count=1 ./integration/garm-operating-limits
 GCC_PINNED_GARM_WORKTREE="$work" go test -race -count=1 -timeout=8m \
   -run '^TestPinnedGarm(CompiledProviderWire|ActualSourcePreparationWire)$' ./cmd/capacity-gateway
