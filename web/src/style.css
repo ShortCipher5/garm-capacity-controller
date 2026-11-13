@@ -755,5 +755,14 @@ td {
 .garm-audit { margin-top: 1.5rem; }
 .garm-audit details { padding: .8rem 0; border-top: 1px solid #cbd5e1; }
 .garm-audit p { overflow-wrap: anywhere; }
+.garm-discovery { overflow-wrap: anywhere; }
+.garm-discovery article { padding: .8rem 0; border-top: 1px solid #cbd5e1; }
 .management textarea { min-height: 6rem; padding: .7rem; width: 100%; border: 1px solid #cbd5e1; border-radius: .5rem; resize: vertical; }
 .preflight-result { margin-top: 1.2rem; border-top: 1px solid #cbd5e1; padding-top: 1rem; overflow-wrap: anywhere; }
+
+.audit-filters { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
+.audit-filters .audit-filter { display: grid; gap: 0.35rem; flex: 1 1 12rem; min-width: 0; }
+.audit-filters select { width: 100%; max-width: 100%; }
+
+.host-filter { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.host-filter select { max-width: 100%; }

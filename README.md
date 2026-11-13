@@ -19,7 +19,7 @@ Garm remains responsible for runner demand and GitHub integration. This controll
 - **Durable daemon bindings** and fresh TLS pinning to reject known duplicate aliases and backend drift before dispatch. This is not whole-physical-host proof.
 - **Credential isolation**: Garm receives gateway-only mTLS credentials, never Incus keys or capacity-ledger access.
 - **A real React UI** for allocations, hosts, pools, recorded health, conservative drain blockers and audit events. Separately authorized, reviewed host-mode and budget changes; no mock fallback.
-- **Consistent SQLite backup/restore primitives**, with admission blocked and new authoritative reconciliation required after restore.
+- **Consistent SQLite backup/restore primitives** for offline artifacts. Archives/restores remain permanently runtime-disabled; reconciliation does not activate them.
 
 The full goal also includes safe lifecycle management and historical measured usage. Scoped existing-pool labels/priority/idle settings and repository balancing have an experimental authenticated editor, but registration, deletion, native placement changes and job-safe retirement remain unavailable. Allocations are not measured utilization, and a priority field is not a fair scheduler.
 
@@ -48,6 +48,19 @@ go vet ./...
 go build ./cmd/capacity-gateway ./cmd/capacity-provider
 ```
 
+The multi-package build above checks compilation; it does not install runnable
+binaries. To build named local artifacts, including the initialization tool:
+
+```sh
+mkdir -p ./private/bin
+go build -o ./private/bin/capacity-gateway ./cmd/capacity-gateway
+go build -o ./private/bin/capacity-provider ./cmd/capacity-provider
+go build -o ./private/bin/capacity-ledger ./cmd/capacity-ledger
+```
+
+The `private/` directory is ignored by Git. Building these artifacts does not
+initialize state or start a service.
+
 The required [pinned Garm qualification](docs/protocol-qualification.md) downloads exact public source into a **new disposable directory**, applies our patch, tests upstream demand paths and exercises the compiled provider against the actual gateway and disposable mTLS API fixtures:
 
 ```sh
@@ -66,7 +79,7 @@ npm run build
 npm run test:ui
 ```
 
-Browser tests use a disposable real TLS Go admin handler and SQLite ledger, not a production mock mode. See [UI setup and test-only certificate trust](docs/admin-ui.md). Serve built assets through the separate configured admin listener. Its read credential stays in memory and clears on disconnect; never put secrets in build variables.
+Before `npm run test:ui`, install Playwright Chromium using its official installer or set `CHROMIUM_PATH` to an existing Chromium executable. Browser tests use a disposable real TLS Go admin handler and SQLite ledger, not a production mock mode. See [UI setup and test-only certificate trust](docs/admin-ui.md). Serve built assets through the separate configured admin listener. Its read credential stays in memory and clears on disconnect; never put secrets in build variables.
 
 The original JSON simulation remains for isolated experimentation:
 

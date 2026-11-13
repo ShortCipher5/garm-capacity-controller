@@ -21,6 +21,7 @@ func nativeStageSpec() garmapi.DisabledPoolSpec {
 }
 
 type stageFixture struct {
+	observationEdit       func(map[string]any)
 	delayPost             <-chan struct{}
 	entered               chan<- struct{}
 	finished              chan<- struct{}
@@ -89,7 +90,10 @@ func stageSetup(t *testing.T, enabled ...bool) (*Manager, *Journal, *garmapi.Man
 			w.WriteHeader(404)
 			return
 		}
-		pool := map[string]any{"id": poolID, "repo_id": repoID, "provider_name": "capacity", "max_runners": 2, "generation": 1, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "enable_shell": false, "extra_specs": map[string]any{}, "tags": []any{map[string]any{"name": "linux"}}}
+		pool := map[string]any{"id": poolID, "repo_id": repoID, "provider_name": "capacity", "max_runners": 2, "generation": 1, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "enable_shell": false, "extra_specs": map[string]any{}, "tags": []any{map[string]any{"name": "linux"}}, "endpoint": map[string]any{"name": "disposable-forge"}}
+		if f.observationEdit != nil && r.Method == "GET" {
+			f.observationEdit(pool)
+		}
 		if f.badPost && r.Method == "POST" {
 			pool["enabled"] = true
 		}

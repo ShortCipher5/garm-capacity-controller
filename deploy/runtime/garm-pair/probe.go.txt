@@ -1,0 +1,118 @@
+// Qualification-only executable exported separately, NEVER in paired image.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/cloudbase/garm/config"
+	dbsql "github.com/cloudbase/garm/database/sql"
+	"github.com/cloudbase/garm/database/watcher"
+	"github.com/cloudbase/garm/runner/common"
+	"github.com/cloudbase/garm/runner/providers"
+)
+
+func must(err error) {
+	if err != nil {
+		panic("pair fixture failed")
+	}
+}
+func require(ok bool) {
+	if !ok {
+		panic("pair invariant failed")
+	}
+}
+func main() {
+	defer func() {
+		if recover() != nil {
+			fmt.Fprintln(os.Stderr, "Synthetic pair probe rejected operation")
+			os.Exit(1)
+		}
+	}()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syscall.Umask(0077)
+	if len(os.Args) == 2 && os.Args[1] == "version" {
+		fmt.Println(runtime.Version())
+		return
+	}
+	require(len(os.Args) == 3)
+	action, root := os.Args[1], os.Args[2]
+	require(strings.HasPrefix(filepath.Base(root), "garm-pair-"))
+	marker, err := os.ReadFile(filepath.Join(root, "private", ".synthetic-only"))
+	must(err)
+	require(string(marker) == "NEW GENERATED FIXTURE ONLY\n")
+	cfg, err := config.NewConfig(filepath.Join(root, "private", "config.toml"))
+	must(err)
+	require(cfg.Database.SQLite.DBFile == filepath.Join(root, "state", "controller.db"))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	idPath := filepath.Join(root, "private", "controller.id")
+	if action == "seed" {
+		require(len(cfg.Providers) == 0)
+		for _, p := range []string{idPath, cfg.Database.SQLite.DBFile, filepath.Join(root, "state", "blob-controller.db")} {
+			_, err = os.Lstat(p)
+			require(os.IsNotExist(err))
+		}
+		watcher.InitWatcher(ctx)
+		defer watcher.CloseWatcher()
+		store, err := dbsql.NewSQLDatabase(ctx, cfg.Database)
+		must(err)
+		controller, err := store.InitController()
+		must(err)
+		must(os.WriteFile(idPath, []byte(controller.ControllerID.String()), 0600))
+		fmt.Println("PASS explicit NEW synthetic Garm pair state seeded")
+		return
+	}
+	require(len(cfg.Providers) == 1)
+	p := cfg.Providers[0]
+	require(p.Name == "capacity" && p.External.AdmissionEnabled && p.External.InterfaceVersion == "v0.1.1" && p.External.CapacityBootstrapMode == "gateway-owned-default-cloudinit/v1" && len(p.External.EnvironmentVariables) == 0)
+	require(p.External.ProviderExecutable == "/usr/local/bin/capacity-provider")
+	id, err := os.ReadFile(idPath)
+	must(err)
+	if action == "source-role" {
+		ca, err := os.ReadFile(filepath.Join(root, "private", "provider-ca.pem"))
+		must(err)
+		roots := x509.NewCertPool()
+		require(roots.AppendCertsFromPEM(ca))
+		leaf, err := tls.LoadX509KeyPair(filepath.Join(root, "private", "source.pem"), filepath.Join(root, "private", "source.key"))
+		must(err)
+		transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS13}}
+		defer transport.CloseIdleConnections()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://127.0.0.1:9443/v1/list", bytes.NewBufferString(`{"name":"","pool_id":"testpool"}`))
+		must(err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := (&http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		must(err)
+		defer resp.Body.Close()
+		require(resp.StatusCode == http.StatusForbidden)
+		fmt.Println("PASS distinct source leaf cannot obtain ordinary provider list role")
+		return
+	}
+	require(action == "list" || action == "bad-ca")
+	if action == "bad-ca" {
+		cfg.Providers[0].External.ConfigFile = filepath.Join(root, "private", "bad-ca.json")
+	}
+	loaded, err := providers.LoadProvidersFromConfig(ctx, *cfg, string(id))
+	must(err)
+	result, err := loaded["capacity"].ListInstances(ctx, "testpool", common.ListInstancesParams{})
+	if action == "bad-ca" {
+		require(err != nil)
+		fmt.Println("PASS packaged facade/provider rejects unrelated server CA")
+		return
+	}
+	must(err)
+	require(len(result) == 0)
+	fmt.Println("PASS actual pinned Garm facade executes packaged CGO provider through real gateway mTLS")
+}
