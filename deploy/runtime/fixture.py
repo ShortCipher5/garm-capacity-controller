@@ -27,7 +27,7 @@ def prepare(root):
     def openssl(*args):
         subprocess.run(['openssl', *args], cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     openssl('req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=packaging-test-ca', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash', '-keyout', 'ca.key', '-out', 'ca.pem')
-    for name, purpose in [('api', 'serverAuth'), ('server', 'serverAuth'), ('client', 'clientAuth'), ('provider', 'clientAuth'), ('wrong', 'clientAuth')]:
+    for name, purpose in [('api', 'serverAuth'), ('server', 'serverAuth'), ('client', 'clientAuth'), ('provider', 'clientAuth'), ('wrong', 'clientAuth'), ('control', 'clientAuth')]:
         write(work / 'ext.cnf', f'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage={purpose}\nsubjectAltName=IP:127.0.0.1\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
         openssl('req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-subj', f'/CN=packaging-{name}', '-keyout', f'{name}.key', '-out', f'{name}.csr')
         openssl('x509', '-req', '-in', f'{name}.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '1', '-extfile', 'ext.cnf', '-out', f'{name}.pem')
@@ -139,7 +139,7 @@ def ready():
     # Fixture-only CA-auth liveness; not evidence of real upstream role authority.
     for attempt in range(60):
         try:
-            status, data = request(9553, '/1.0', cert='provider')
+            status, data = request(9553, '/1.0', cert='control')
             if status == 200 and json.loads(data)['metadata']['auth'] == 'trusted':
                 print('PASS synthetic authenticated API readiness')
                 return
