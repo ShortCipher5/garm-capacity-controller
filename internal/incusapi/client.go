@@ -205,7 +205,22 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		return envelope{}, fmt.Errorf("%w: HTTP %d", ErrTransport, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBody+1))
-	if err != nil || len(body) > maxBody {
+	// A deadline can interrupt the body after successful response headers, or
+	// race with EOF. Never mint evidence after the request context is done.
+	// Retain only bounded context causes, not content or raw reader errors.
+	if ctx.Err() != nil {
+		return envelope{}, errors.Join(ErrResponse, ctx.Err())
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return envelope{}, errors.Join(ErrResponse, context.DeadlineExceeded)
+		}
+		if errors.Is(err, context.Canceled) {
+			return envelope{}, errors.Join(ErrResponse, context.Canceled)
+		}
+		return envelope{}, ErrResponse
+	}
+	if len(body) > maxBody {
 		return envelope{}, ErrResponse
 	}
 	fields, err := object(body)
