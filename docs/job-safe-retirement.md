@@ -99,3 +99,12 @@ An existing idle runner can accept a job without a new provisioning claim.
 Until these gates are met, the correct behavior is an explicit blocked drain
 with visible charged allocations, not an apparently successful destructive
 lifecycle.
+
+## Read-only project observations and concrete fence requirements
+
+The [physical retirement proof boundary](physical-retirement-proof-boundary.md)
+adds a source-pinned runner-shutdown counterexample, concrete missing supervisor/
+assignment/backend-frontier requirements, and an authenticated project-observation
+API with explicit uncleared external gates. Its fixtures show why even matching
+empty lists can coexist with a late queued write or a permission-hidden target.
+It does not change the blocked retirement or charged-allocation behavior above.
