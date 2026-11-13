@@ -1,0 +1,33 @@
+Garm Capacity Controller
+https://github.com/ShortCipher5/garm-capacity-controller
+
+This project includes integration patches and source adaptations for Garm:
+https://github.com/cloudbase/garm
+Pinned upstream: 154638445c3949c1958b01812f69d9a1e4d82684 (v0.2.1)
+Copyright 2022 Cloudbase Solutions SRL
+Copyright 2024 Cloudbase Solutions SRL
+Copyright 2025 Cloudbase Solutions SRL
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+The Garm integration patch changes upstream configuration, database validation,
+runner/provider preparation, cancellation and worker behavior and adds related
+helpers/tests. It is a project modification, not an unmodified upstream release.
+Upstream file notices remain applicable; no ownership is claimed over them.
+
+This project uses garm-provider-common:
+https://github.com/cloudbase/garm-provider-common
+Copyright 2023 Cloudbase Solutions SRL
+Licensed under the Apache License, Version 2.0.
+
+This project also includes a patch and qualification adaptations for Incus:
+https://github.com/lxc/incus
+Pinned upstream: a99413afd0c742da3bba10eb4f75d639f9dbbd32 (6.0.4)
+Upstream authors and contributors are identified in its file headers and Git
+history, as described in its AUTHORS file. Its COPYING specifies Apache 2.0;
+individual file exceptions and third-party notices must still be retained.
+
+The Mozilla/curl public CA bundle is separately licensed under MPL 2.0, not
+Apache 2.0. See THIRD_PARTY_NOTICES.md and LICENSES/MPL-2.0.txt.
+
+This file is informational and does not modify any license, transfer ownership,
+grant trademark rights, or imply endorsement by upstream projects.
