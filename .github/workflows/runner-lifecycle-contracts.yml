@@ -1,0 +1,26 @@
+name: pinned-runner-lifecycle-contracts
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  runner-v2323-source-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Require preinstalled compatible SDK, do not install
+        run: |
+          command -v dotnet
+      - name: Actual official runner source lifecycle contracts, mocked service and worker boundaries
+        id: lifecycle_contracts
+        run: timeout 15m integration/actions-runner-v2.323.0/test.sh "$RUNNER_TEMP/actions-runner-lifecycle"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() && steps.lifecycle_contracts.outputs.results_created == 'true' }}
+        with:
+          name: runner-lifecycle-contract-results
+          path: ${{ runner.temp }}/actions-runner-lifecycle.results
+          if-no-files-found: ignore
