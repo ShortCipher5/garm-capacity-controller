@@ -28,3 +28,9 @@ jobs:
         env:
           GCC_SENDER_PIDFD_TESTS: "1"
         run: go test -race -count=1 -timeout=60s -run "^TestPacketSender" -v ./internal/supervisorsender
+      - name: Require fixed unprivileged post-entry witness (not sandbox qualification)
+        env:
+          GCC_M2_ENTRY_WITNESS_TESTS: "1"
+        run: |
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64
+          go test -race -count=1 -timeout=60s -run "^TestM2Entry" -v ./qualification/m2entry
