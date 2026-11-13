@@ -117,3 +117,12 @@ a NEW complete authoritative reconciliation are still mandatory before use.
 Optional [Incus onboarding preflight](docs/incus-onboarding-preflight.md) performs
 an authenticated, audited read against operator-allowlisted transport references.
 It is not server registration, activation or physical-capacity qualification.
+
+## License
+
+The project's original material, including existing source in this tree, is
+licensed under [Apache 2.0](LICENSE), subject to existing file notices and
+[third-party exceptions and attribution](THIRD_PARTY_NOTICES.md). In particular,
+the Mozilla/curl CA bundle remains MPL 2.0. See [NOTICE](NOTICE) for upstream
+Garm and Incus attribution. No ownership of upstream work or relicensing of
+third-party material is claimed.
