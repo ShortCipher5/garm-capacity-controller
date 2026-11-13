@@ -231,3 +231,31 @@ func TestPatchedGarmTransferIsGeneratedStoppedStateOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestPairedArtifactsAreReadOnlyDisposableAndContentVersioned(t *testing.T) {
+	script := repositoryFile(t, "deploy/runtime/garm-pair/test.sh")
+	for _, required := range []string{"RUNNER_ENVIRONMENT:-} = github-hosted", "git diff --quiet", "87e0d61751d4b9ffa15322cff09557f0a1094fdd68464fe840a12ffe01bb0660", "manifest.py assemble", "mkdir \"$results\"", "--network none", "--network \"container:$name-garm\"", "/pair-probe list", "/pair-probe source-role", "/pair-probe bad-ca", "[[ $ready = true ]]", "'source_issuer_qualified':False", "'deployment_authorized':False"} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("missing paired gate: %s", required)
+		}
+	}
+	for _, denied := range []string{"docker push", "docker login", "docker logs", "--privileged", "--network host", "allow-experimental-provisioning", "allow-experimental-management"} {
+		if strings.Contains(script, denied) {
+			t.Fatalf("disposable pair must not add %s", denied)
+		}
+	}
+	dockerfile := repositoryFile(t, "deploy/runtime/garm-pair/Dockerfile")
+	if strings.Contains(dockerfile, "COPY --from=build /out/pair-probe /usr/local") || !strings.Contains(dockerfile, "FROM scratch AS pair-probe-artifact") || !strings.Contains(dockerfile, "USER 65531:65531") {
+		t.Fatal("test probe must be separate from nonroot paired image")
+	}
+	_, paired, ok := strings.Cut(repositoryFile(t, ".github/workflows/packaging.yml"), "  paired-garm-artifacts:")
+	if !ok || strings.Contains(paired, "if: always()") || strings.Count(paired, "if: success()") != 2 {
+		t.Fatal("paired summaries/artifacts must never publish stale outputs after failure")
+	}
+	manifest := repositoryFile(t, "deploy/runtime/garm-pair/manifest.py")
+	for _, required := range []string{"'images': images", "'controller_tree'", "'garm_patch_sha256'", "'build_frontend'", "'dependency_files'", "'signed_release': False", "def validate(record)"} {
+		if !strings.Contains(manifest, required) {
+			t.Fatalf("missing provenance gate: %s", required)
+		}
+	}
+}
