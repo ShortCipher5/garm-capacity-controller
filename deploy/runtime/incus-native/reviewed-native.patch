@@ -1,0 +1,2875 @@
+diff --git a/internal/server/db/cluster/guard_caller_pending_test.go b/internal/server/db/cluster/guard_caller_pending_test.go
+new file mode 100644
+index 000000000..407b9f4d8
+--- /dev/null
++++ b/internal/server/db/cluster/guard_caller_pending_test.go
+@@ -0,0 +1,104 @@
++package cluster
++
++// Transaction composition at the actual native mapper boundary, not execution
++// of CreateInternal, driver initialization, or a physical callback.
++import (
++	"context"
++	"database/sql"
++	"testing"
++	"time"
++)
++
++func TestGuardNativeCallerConfigDeviceProfileTransaction(t *testing.T) {
++	for _, failConfig := range []bool{true, false} {
++		name := "success"
++		if failConfig {
++			name = "late-config-failure"
++		}
++		t.Run(name, func(t *testing.T) {
++			db := guardFixture(t)
++			guardEnableFixture(t, db)
++			ctx := context.Background()
++			if _, err := db.Exec(`INSERT INTO nodes(id,name,description,address,schema,api_extensions,arch) VALUES(999,'fixture','','fixture',73,1,1); INSERT INTO profiles(name,description,project_id) VALUES('default','',1)`); err != nil {
++				t.Fatal(err)
++			}
++			statements, err := PrepareStmts(db, false)
++			if err != nil {
++				t.Fatal(err)
++			}
++			old := PreparedStmts
++			PreparedStmts = statements
++			defer func() {
++				PreparedStmts = old
++				for _, stmt := range statements {
++					if stmt != nil {
++						stmt.Close()
++					}
++				}
++			}()
++			if err = guardTx(db, func(tx *sql.Tx) error {
++				if err := guardBound(tx, "caller"); err != nil {
++					return err
++				}
++				return guardReserveCreate(ctx, tx, "caller", "fixture", 1, 999, "caller")
++			}); err != nil {
++				t.Fatal(err)
++			}
++			if failConfig {
++				if _, err = db.Exec(`CREATE TRIGGER fail_guard_config BEFORE INSERT ON instances_config BEGIN SELECT RAISE(ABORT,'fixture late config failure'); END`); err != nil {
++					t.Fatal(err)
++				}
++			}
++			var id int64
++			var token string
++			// This mirrors the non-snapshot mapper sequence in CreateInternal. It
++			// deliberately does not copy the complete function or claim caller coverage.
++			err = guardTx(db, func(tx *sql.Tx) error {
++				var err error
++				id, token, err = guardCreateMappedRow(ctx, tx, "caller", "fixture", Instance{Project: "default", Name: "caller", Node: "fixture", Architecture: 1, CreationDate: time.Unix(100, 0)})
++				if err != nil {
++					return err
++				}
++				if err = CreateInstanceDevices(ctx, tx, id, map[string]Device{"root": {Name: "root", Type: TypeDisk, Config: map[string]string{"path": "/", "pool": "guard-fixture"}}}); err != nil {
++					return err
++				}
++				if err = CreateInstanceConfig(ctx, tx, id, map[string]string{"limits.memory": "512MiB"}); err != nil {
++					return err
++				}
++				return UpdateInstanceProfiles(ctx, tx, int(id), "default", []string{"default"})
++			})
++			if failConfig {
++				if err == nil {
++					t.Fatal("injected late config error ignored")
++				}
++				for _, table := range []string{"instances", "instances_devices", "instances_config", "instances_profiles", "guard_row_history", "guard_storage_attempts"} {
++					var n int
++					if err = db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil || n != 0 {
++						t.Fatal("partial mapper transaction", table, n, err)
++					}
++				}
++				var n int
++				if err = db.QueryRow(`SELECT count(*) FROM guard_create_scopes`).Scan(&n); err != nil || n != 1 {
++					t.Fatal("earlier retained reservation lost", n, err)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			var n int
++			for _, table := range []string{"instances_devices", "instances_config", "instances_profiles", "guard_row_history"} {
++				if err = db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil || n != 1 {
++					t.Fatal(table, n, err)
++				}
++			}
++			// Only a successful OUTER transaction reaches a new attempt transaction.
++			if err = guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "caller", "fixture", token) }); err != nil {
++				t.Fatal(err)
++			}
++			if err = db.QueryRow(`SELECT count(*) FROM guard_storage_attempts WHERE observed_return IS NULL`).Scan(&n); err != nil || n != 1 {
++				t.Fatal(n, err)
++			}
++		})
++	}
++}
+diff --git a/internal/server/db/cluster/guard_mapper_pending.go b/internal/server/db/cluster/guard_mapper_pending.go
+new file mode 100644
+index 000000000..cf795a015
+--- /dev/null
++++ b/internal/server/db/cluster/guard_mapper_pending.go
+@@ -0,0 +1,63 @@
++package cluster
++
++import (
++	"context"
++	"crypto/rand"
++	"database/sql"
++	"encoding/hex"
++)
++
++// guardCreateMappedRow is a dormant native mapper insertion candidate, not an
++// admission-to-I/O bridge. It supports only a non-snapshot/non-ephemeral empty
++// container row. No daemon caller exists. Source type/policy is not represented
++// by Instance, so the missing native capability remains an activation blocker.
++func guardCreateMappedRow(ctx context.Context, tx *sql.Tx, request, principal string, object Instance) (id int64, token string, err error) {
++	if object.Type != 0 || object.Snapshot || object.Ephemeral || object.Stateful {
++		return 0, "", errGuardDenied
++	}
++	var scope int64
++	err = tx.QueryRowContext(ctx, `SELECT s.project_id FROM guard_create_scopes s JOIN projects p ON p.id=s.project_id JOIN guard_envelopes e ON e.id=s.request_id JOIN guard_epoch g ON g.id=1 AND g.epoch=e.epoch
++ WHERE s.request_id=? AND e.principal=? AND e.state='bound' AND g.sealed=0 AND p.name=? AND s.name=?
++ AND NOT EXISTS(SELECT 1 FROM guard_row_history WHERE request_id=s.request_id)`, request, principal, object.Project, object.Name).Scan(&scope)
++	if err != nil {
++		return 0, "", err
++	}
++	bytes := make([]byte, 32)
++	if _, err = rand.Read(bytes); err != nil {
++		return 0, "", err
++	}
++	token = hex.EncodeToString(bytes)
++	if _, err = tx.ExecContext(ctx, `SAVEPOINT guard_mapped_row`); err != nil {
++		return 0, "", err
++	}
++	defer func() {
++		if err != nil {
++			_, rollbackErr := tx.ExecContext(context.Background(), `ROLLBACK TO guard_mapped_row`)
++			if rollbackErr != nil {
++				err = rollbackErr
++			}
++			id = 0
++			token = ""
++		}
++		_, releaseErr := tx.ExecContext(context.Background(), `RELEASE guard_mapped_row`)
++		if releaseErr != nil {
++			err = releaseErr
++			id = 0
++			token = ""
++		}
++	}()
++	id, err = CreateInstance(ctx, tx, object)
++	if err != nil {
++		return 0, "", err
++	}
++	var r sql.Result
++	r, err = tx.ExecContext(ctx, `UPDATE instances SET guard_token=? WHERE id=? AND project_id=? AND name=? AND guard_token IS NULL`, token, id, scope, object.Name)
++	if err = guardChanged(r, err); err != nil {
++		return 0, "", err
++	}
++	r, err = tx.ExecContext(ctx, `INSERT INTO guard_row_history(request_id,native_id,token,project_id,name) VALUES(?,?,?,?,?)`, request, id, token, scope, object.Name)
++	if err = guardChanged(r, err); err != nil {
++		return 0, "", err
++	}
++	return id, token, nil
++}
+diff --git a/internal/server/db/cluster/guard_mapper_pending_test.go b/internal/server/db/cluster/guard_mapper_pending_test.go
+new file mode 100644
+index 000000000..b13b82040
+--- /dev/null
++++ b/internal/server/db/cluster/guard_mapper_pending_test.go
+@@ -0,0 +1,112 @@
++package cluster
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"testing"
++	"time"
++)
++
++func TestGuardActualMapperAtomicBinding(t *testing.T) {
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	ctx := context.Background()
++	if _, err := db.Exec(`INSERT INTO nodes(id,name,description,address,schema,api_extensions,arch) VALUES(999,'fixture','','fixture',73,1,1)`); err != nil {
++		t.Fatal(err)
++	}
++	// Same generated prepared statement and mapper used by native CreateInternal.
++	text, err := StmtString(instanceCreate)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stmt, err := db.Prepare(text)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stmt.Close()
++	old, had := PreparedStmts[instanceCreate]
++	PreparedStmts[instanceCreate] = stmt
++	defer func() {
++		if had {
++			PreparedStmts[instanceCreate] = old
++		} else {
++			delete(PreparedStmts, instanceCreate)
++		}
++	}()
++	object := Instance{Project: "default", Name: "mapped", Node: "fixture", Architecture: 1, Description: "preserved native metadata", CreationDate: time.Unix(100, 0)}
++	if err = guardTx(db, func(tx *sql.Tx) error {
++		if err := guardBound(tx, "mapped"); err != nil {
++			return err
++		}
++		return guardReserveCreate(ctx, tx, "mapped", "fixture", 1, 999, "mapped")
++	}); err != nil {
++		t.Fatal(err)
++	}
++	// Inject post-mapper history failure. Caller intentionally commits after the
++	// error: internal savepoint must not leave an unbound inserted native row.
++	if _, err = db.Exec(`CREATE TRIGGER fail_guard_history BEFORE INSERT ON guard_row_history BEGIN SELECT RAISE(ABORT,'fixture history failure'); END`); err != nil {
++		t.Fatal(err)
++	}
++	tx, err := db.Begin()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err = guardCreateMappedRow(ctx, tx, "mapped", "fixture", object); err == nil {
++		t.Fatal("injected history failure ignored")
++	}
++	if err = tx.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	var n int
++	if err = db.QueryRow(`SELECT count(*) FROM instances WHERE name='mapped'`).Scan(&n); err != nil || n != 0 {
++		t.Fatal("partial native row committed", n, err)
++	}
++	if _, err = db.Exec(`DROP TRIGGER fail_guard_history`); err != nil {
++		t.Fatal(err)
++	}
++	var token string
++	var id int64
++	if err = guardTx(db, func(tx *sql.Tx) error {
++		var err error
++		id, token, err = guardCreateMappedRow(ctx, tx, "mapped", "fixture", object)
++		return err
++	}); err != nil {
++		t.Fatal(err)
++	}
++	var description, current string
++	if err = db.QueryRow(`SELECT description,guard_token FROM instances WHERE id=?`, id).Scan(&description, &current); err != nil || description != object.Description || current != token {
++		t.Fatal(description, current, err)
++	}
++	if err = guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "mapped", "fixture", token) }); err != nil {
++		t.Fatal(err)
++	}
++	// Committed DB intent only: no native effect is invoked by this test.
++	for index, mutate := range []func(*Instance){func(o *Instance) { o.Type = 1 }, func(o *Instance) { o.Snapshot = true }, func(o *Instance) { o.Ephemeral = true }, func(o *Instance) { o.Stateful = true }} {
++		name := fmt.Sprintf("unsupported-%d", index)
++		candidate := object
++		candidate.Name = name
++		mutate(&candidate)
++		if err = guardTx(db, func(tx *sql.Tx) error {
++			if err := guardBound(tx, name); err != nil {
++				return err
++			}
++			return guardReserveCreate(ctx, tx, name, "fixture", 1, 999, name)
++		}); err != nil {
++			t.Fatal(err)
++		}
++		if err = guardTx(db, func(tx *sql.Tx) error {
++			_, _, err := guardCreateMappedRow(ctx, tx, name, "fixture", candidate)
++			return err
++		}); err == nil {
++			t.Fatal("unsupported native row admitted", index)
++		}
++		var n int
++		if err = db.QueryRow(`SELECT count(*) FROM instances WHERE name=?`, name).Scan(&n); err != nil || n != 0 {
++			t.Fatal("unsupported mapper row", n, err)
++		}
++		if err = db.QueryRow(`SELECT count(*) FROM guard_row_history WHERE request_id=?`, name).Scan(&n); err != nil || n != 0 {
++			t.Fatal("unsupported history", n, err)
++		}
++	}
++}
+diff --git a/internal/server/db/cluster/guard_pending.go b/internal/server/db/cluster/guard_pending.go
+new file mode 100644
+index 000000000..c832d27b7
+--- /dev/null
++++ b/internal/server/db/cluster/guard_pending.go
+@@ -0,0 +1,117 @@
++package cluster
++
++// Offline candidate only: this migration is deliberately NOT registered in
++// updates and these primitives have no daemon callers or activation setting.
++// Authentication, native locks and effect dispatch are NOT implemented here.
++import (
++	"context"
++	"database/sql"
++	"errors"
++)
++
++var errGuardDenied = errors.New("native guard denied")
++
++func guardPendingMigration(ctx context.Context, tx *sql.Tx) error {
++	_, err := tx.ExecContext(ctx, `
++ ALTER TABLE instances ADD COLUMN guard_token TEXT;
++ CREATE UNIQUE INDEX instances_guard_token ON instances(guard_token) WHERE guard_token IS NOT NULL;
++ CREATE TRIGGER guard_token_immutable BEFORE UPDATE OF guard_token ON instances WHEN OLD.guard_token IS NOT NULL AND NEW.guard_token IS NOT OLD.guard_token BEGIN SELECT RAISE(ABORT,'immutable guard token'); END;
++ CREATE TABLE guard_row_history(request_id TEXT PRIMARY KEY, native_id INTEGER NOT NULL, token TEXT NOT NULL UNIQUE, project_id INTEGER NOT NULL, name TEXT NOT NULL);
++ CREATE TABLE guard_storage_attempts(request_id TEXT PRIMARY KEY, token TEXT NOT NULL, effect TEXT NOT NULL CHECK(effect='create_storage'), observed_return TEXT CHECK(observed_return IN ('success','error')));
++ CREATE TRIGGER guard_keep_rows BEFORE DELETE ON guard_row_history BEGIN SELECT RAISE(ABORT,'retained row history'); END;
++ CREATE TRIGGER guard_immutable_rows BEFORE UPDATE ON guard_row_history BEGIN SELECT RAISE(ABORT,'immutable row history'); END;
++ CREATE TRIGGER guard_keep_attempts BEFORE DELETE ON guard_storage_attempts BEGIN SELECT RAISE(ABORT,'retained attempt'); END;
++ CREATE TABLE guard_epoch (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL CHECK(epoch>0), sealed INTEGER NOT NULL CHECK(sealed IN (0,1)));
++ INSERT INTO guard_epoch VALUES(1,1,1);
++ CREATE TABLE guard_envelopes (
++ id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
++ principal TEXT NOT NULL CHECK(length(principal) BETWEEN 1 AND 256),
++ epoch INTEGER NOT NULL,
++ state TEXT NOT NULL CHECK(state IN ('accepted','bound','abandoned')),
++ deadline INTEGER NOT NULL,
++ digest TEXT,
++ CHECK((state='bound' AND length(digest)=64) OR state!='bound')
++ );
++ CREATE TABLE guard_create_scopes (
++ request_id TEXT NOT NULL UNIQUE,
++ project_id INTEGER NOT NULL,
++ pool_id INTEGER NOT NULL,
++ name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 63),
++ PRIMARY KEY(project_id,name),
++ UNIQUE(pool_id,project_id,name)
++ );
++ CREATE TRIGGER guard_keep_envelopes BEFORE DELETE ON guard_envelopes BEGIN SELECT RAISE(ABORT,'retained envelope'); END;
++ CREATE TRIGGER guard_keep_scopes BEFORE DELETE ON guard_create_scopes BEGIN SELECT RAISE(ABORT,'retained scope'); END;
++ CREATE TRIGGER guard_immutable_scope BEFORE UPDATE ON guard_create_scopes BEGIN SELECT RAISE(ABORT,'immutable scope'); END;
++ `)
++	return err
++}
++
++// Retained envelopes count against conservative fixed bounds even after
++// abandonment. No garbage collection/physical release is supplied.
++func guardAccept(ctx context.Context, tx *sql.Tx, epoch int64, id, principal string) error {
++	r, err := tx.ExecContext(ctx, `INSERT INTO guard_envelopes(id,principal,epoch,state,deadline)
++ SELECT ?,?,?,'accepted',CAST(strftime('%s','now') AS INTEGER)+30
++ WHERE EXISTS(SELECT 1 FROM guard_epoch WHERE id=1 AND epoch=? AND sealed=0)
++ AND (SELECT COUNT(*) FROM guard_envelopes)<64
++ AND (SELECT COUNT(*) FROM guard_envelopes WHERE principal=?)<8`, id, principal, epoch, epoch, principal)
++	return guardChanged(r, err)
++}
++func guardBindBody(ctx context.Context, tx *sql.Tx, id, principal, digest string, bytes int64) error {
++	if bytes < 0 || bytes > 1048576 || len(digest) != 64 {
++		return errGuardDenied
++	}
++	for _, c := range digest {
++		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
++			return errGuardDenied
++		}
++	}
++	r, err := tx.ExecContext(ctx, `UPDATE guard_envelopes SET state='bound',digest=? WHERE id=? AND principal=? AND state='accepted'
++ AND deadline>CAST(strftime('%s','now') AS INTEGER)
++ AND EXISTS(SELECT 1 FROM guard_epoch WHERE id=1 AND epoch=guard_envelopes.epoch AND sealed=0)`, digest, id, principal)
++	return guardChanged(r, err)
++}
++func guardAbandon(ctx context.Context, tx *sql.Tx, id, principal string) error {
++	// No bound/attempted request can be abandoned through this narrow primitive.
++	r, err := tx.ExecContext(ctx, `UPDATE guard_envelopes SET state='abandoned' WHERE id=? AND principal=? AND state='accepted'`, id, principal)
++	return guardChanged(r, err)
++}
++func guardReserveCreate(ctx context.Context, tx *sql.Tx, id, principal string, project, pool int64, name string) error {
++	// Deliberately restrictive canonical ASCII subset. Native alias/project feature
++	// handling and complete naming semantics remain an integration prerequisite.
++	if len(name) == 0 || len(name) > 63 {
++		return errGuardDenied
++	}
++	for i, c := range name {
++		if !(c >= 'a' && c <= 'z' || i > 0 && c >= '0' && c <= '9' || i > 0 && c == '-') {
++			return errGuardDenied
++		}
++	}
++	if name[len(name)-1] == '-' {
++		return errGuardDenied
++	}
++	r, err := tx.ExecContext(ctx, `INSERT INTO guard_create_scopes(request_id,project_id,pool_id,name)
++ SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM guard_envelopes e JOIN guard_epoch g ON g.id=1 AND g.epoch=e.epoch WHERE e.id=? AND e.principal=? AND e.state='bound' AND g.sealed=0)
++ AND EXISTS(SELECT 1 FROM projects WHERE id=?)
++ AND EXISTS(SELECT 1 FROM storage_pools WHERE id=?)
++ AND NOT EXISTS(SELECT 1 FROM instances WHERE project_id=? AND name=?)
++ AND NOT EXISTS(SELECT 1 FROM storage_volumes WHERE project_id=? AND storage_pool_id=? AND name=?)`, id, project, pool, name, id, principal, project, pool, project, name, project, pool, name)
++	return guardChanged(r, err)
++}
++func guardSeal(ctx context.Context, tx *sql.Tx, epoch int64) error {
++	r, err := tx.ExecContext(ctx, `UPDATE guard_epoch SET sealed=1 WHERE id=1 AND epoch=? AND sealed=0`, epoch)
++	return guardChanged(r, err)
++}
++func guardChanged(r sql.Result, err error) error {
++	if err != nil {
++		return err
++	}
++	n, err := r.RowsAffected()
++	if err != nil {
++		return err
++	}
++	if n != 1 {
++		return errGuardDenied
++	}
++	return nil
++}
+diff --git a/internal/server/db/cluster/guard_pending_test.go b/internal/server/db/cluster/guard_pending_test.go
+new file mode 100644
+index 000000000..6ac331c2a
+--- /dev/null
++++ b/internal/server/db/cluster/guard_pending_test.go
+@@ -0,0 +1,220 @@
++package cluster
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func guardFixture(t *testing.T) *sql.DB {
++	t.Helper()
++	s := Schema()
++	s.Add(guardPendingMigration)
++	db, err := s.ExerciseUpdate(SchemaVersion+1, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { db.Close() })
++	_, err = db.Exec(`INSERT INTO storage_pools(id,name,driver,description) VALUES(999,'guard-fixture','dir','');`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return db
++}
++func guardTx(db *sql.DB, f func(*sql.Tx) error) error {
++	tx, err := db.Begin()
++	if err != nil {
++		return err
++	}
++	defer tx.Rollback()
++	if err = f(tx); err != nil {
++		return err
++	}
++	return tx.Commit()
++}
++func guardEnableFixture(t *testing.T, db *sql.DB) {
++	t.Helper()
++	if _, err := db.Exec(`UPDATE guard_epoch SET sealed=0`); err != nil {
++		t.Fatal(err)
++	}
++}
++func guardBound(tx *sql.Tx, id string) error {
++	ctx := context.Background()
++	if err := guardAccept(ctx, tx, 1, id, "fixture"); err != nil {
++		return err
++	}
++	return guardBindBody(ctx, tx, id, "fixture", strings.Repeat("a", 64), 16)
++}
++func TestGuardPendingMigrationIsNotRegistered(t *testing.T) {
++	db, err := Schema().ExerciseUpdate(SchemaVersion, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer db.Close()
++	var count int
++	if err = db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='guard_epoch'`).Scan(&count); err != nil || count != 0 {
++		t.Fatal("candidate became active", count, err)
++	}
++	db2 := guardFixture(t)
++	if err = guardTx(db2, func(tx *sql.Tx) error { return guardAccept(context.Background(), tx, 1, "first", "fixture") }); err == nil {
++		t.Fatal("migration must start sealed")
++	}
++}
++func TestGuardAbandonedBodyNeverBindsOrReserves(t *testing.T) {
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	ctx := context.Background()
++	if err := guardTx(db, func(tx *sql.Tx) error {
++		if err := guardAccept(ctx, tx, 1, "a", "fixture"); err != nil {
++			return err
++		}
++		return guardAbandon(ctx, tx, "a", "fixture")
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardBindBody(ctx, tx, "a", "fixture", strings.Repeat("a", 64), 1) }); err == nil {
++		t.Fatal("abandoned body bound")
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardReserveCreate(ctx, tx, "a", "fixture", 1, 999, "one") }); err == nil {
++		t.Fatal("abandoned body reserved")
++	}
++	for i := 0; i < 7; i++ {
++		if err := guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, fmt.Sprint(i), "fixture") }); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, "overflow", "fixture") }); err == nil {
++		t.Fatal("retained envelope quota bypass")
++	}
++	if _, err := db.Exec(`DELETE FROM guard_envelopes`); err == nil {
++		t.Fatal("history deleted")
++	}
++}
++func TestGuardScopeSurvivesNativeRowCleanup(t *testing.T) {
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	ctx := context.Background()
++	if err := guardTx(db, func(tx *sql.Tx) error {
++		if err := guardBound(tx, "a"); err != nil {
++			return err
++		}
++		return guardReserveCreate(ctx, tx, "a", "fixture", 1, 999, "one")
++	}); err != nil {
++		t.Fatal(err)
++	}
++	// Actual pinned native schema/row, not a replacement minimal instances table.
++	_, err := db.Exec(`INSERT INTO nodes(id,name,description,address,schema,api_extensions,arch) VALUES(999,'fixture','','fixture',73,1,1);
++ INSERT INTO instances(node_id,name,architecture,type,description,project_id) VALUES(999,'one',1,0,'',1);
++ DELETE FROM instances WHERE name='one';`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error {
++		if err := guardBound(tx, "b"); err != nil {
++			return err
++		}
++		return guardReserveCreate(ctx, tx, "b", "fixture", 1, 999, "one")
++	}); err == nil {
++		t.Fatal("new identity reused retained scope")
++	}
++	var n int
++	if err = db.QueryRow(`SELECT count(*) FROM guard_create_scopes`).Scan(&n); err != nil || n != 1 {
++		t.Fatal(n, err)
++	}
++	if _, err = db.Exec(`DELETE FROM guard_create_scopes`); err == nil {
++		t.Fatal("reservation deleted")
++	}
++}
++func TestGuardRollbackSealAndBodyLimits(t *testing.T) {
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	ctx := context.Background()
++	tx, err := db.Begin()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = guardBound(tx, "rolled-back"); err != nil {
++		t.Fatal(err)
++	}
++	tx.Rollback()
++	if err = guardTx(db, func(tx *sql.Tx) error { return guardBound(tx, "rolled-back") }); err != nil {
++		t.Fatal("rollback retained phantom", err)
++	}
++	if err = guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, "oversize", "fixture") }); err != nil {
++		t.Fatal(err)
++	}
++	if err = guardTx(db, func(tx *sql.Tx) error {
++		return guardBindBody(ctx, tx, "oversize", "fixture", strings.Repeat("a", 64), 1048577)
++	}); err == nil {
++		t.Fatal("oversize bound")
++	}
++	if err = guardTx(db, func(tx *sql.Tx) error { return guardSeal(ctx, tx, 1) }); err != nil {
++		t.Fatal(err)
++	}
++	if err = guardTx(db, func(tx *sql.Tx) error { return guardReserveCreate(ctx, tx, "rolled-back", "fixture", 1, 999, "two") }); err == nil {
++		t.Fatal("reserve after seal")
++	}
++	if err = guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, "after", "fixture") }); err == nil {
++		t.Fatal("accept after seal")
++	}
++}
++
++func TestGuardRetainedScopeReopen(t *testing.T) {
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	if err := guardTx(db, func(tx *sql.Tx) error {
++		if err := guardBound(tx, "a"); err != nil {
++			return err
++		}
++		return guardReserveCreate(context.Background(), tx, "a", "fixture", 1, 999, "one")
++	}); err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(t.TempDir(), "native.db")
++	if _, err := db.Exec(`VACUUM INTO ?`, path); err != nil {
++		t.Fatal(err)
++	}
++	reopened, err := sql.Open("sqlite3", path+"?_foreign_keys=1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reopened.Close()
++	if err = guardTx(reopened, func(tx *sql.Tx) error {
++		if err := guardBound(tx, "b"); err != nil {
++			return err
++		}
++		return guardReserveCreate(context.Background(), tx, "b", "fixture", 1, 999, "one")
++	}); err == nil {
++		t.Fatal("reopen reused reservation")
++	}
++}
++func TestGuardDeadlinePrincipalAndGlobalQuota(t *testing.T) {
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	ctx := context.Background()
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, "expired", "fixture") }); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`UPDATE guard_envelopes SET deadline=0 WHERE id='expired'`); err != nil {
++		t.Fatal(err)
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error {
++		return guardBindBody(ctx, tx, "expired", "fixture", strings.Repeat("a", 64), 1)
++	}); err == nil {
++		t.Fatal("expired bound")
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardAbandon(ctx, tx, "expired", "other") }); err == nil {
++		t.Fatal("wrong principal changed state")
++	}
++	for i := 0; i < 63; i++ {
++		if err := guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, fmt.Sprint(i), fmt.Sprint(i)) }); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardAccept(ctx, tx, 1, "overflow", "new") }); err == nil {
++		t.Fatal("global quota bypass")
++	}
++}
+diff --git a/internal/server/db/cluster/guard_row_pending.go b/internal/server/db/cluster/guard_row_pending.go
+new file mode 100644
+index 000000000..7799baf13
+--- /dev/null
++++ b/internal/server/db/cluster/guard_row_pending.go
+@@ -0,0 +1,57 @@
++package cluster
++
++// Non-activatable native-table candidate. No CreateInternal/driver callers.
++import (
++	"context"
++	"crypto/rand"
++	"database/sql"
++	"encoding/hex"
++)
++
++// guardCreateRow inserts a deliberately narrow empty, non-ephemeral container
++// row AND history itself. It cannot adopt a pre-existing row. The caller MUST
++// roll back its transaction on any error (as for native mapper operations).
++// This does not execute the full upstream CreateInternal/config/device path.
++func guardCreateRow(ctx context.Context, tx *sql.Tx, request, principal string, node, architecture int64) (int64, string, error) {
++	b := make([]byte, 32)
++	if _, err := rand.Read(b); err != nil {
++		return 0, "", err
++	}
++	token := hex.EncodeToString(b)
++	r, err := tx.ExecContext(ctx, `INSERT INTO instances(node_id,name,architecture,type,ephemeral,description,project_id,guard_token)
++ SELECT ?,s.name,?,0,0,'',s.project_id,? FROM guard_create_scopes s JOIN guard_envelopes e ON e.id=s.request_id JOIN guard_epoch g ON g.id=1 AND g.epoch=e.epoch
++ WHERE s.request_id=? AND e.principal=? AND e.state='bound' AND g.sealed=0
++ AND NOT EXISTS(SELECT 1 FROM guard_row_history WHERE request_id=s.request_id)`, node, architecture, token, request, principal)
++	if err = guardChanged(r, err); err != nil {
++		return 0, "", err
++	}
++	id, err := r.LastInsertId()
++	if err != nil {
++		return 0, "", err
++	}
++	r, err = tx.ExecContext(ctx, `INSERT INTO guard_row_history(request_id,native_id,token,project_id,name) SELECT ?,id,guard_token,project_id,name FROM instances WHERE id=? AND guard_token=?`, request, id, token)
++	if err = guardChanged(r, err); err != nil {
++		return 0, "", err
++	}
++	return id, token, nil
++}
++
++// A committed attempt is NEVER an instruction to retry. The caller may call
++// native I/O only on a known-success commit in the SAME execution, with native
++// reservation/locking still held. Those locks/dispatchers are not implemented.
++func guardBeginStorage(ctx context.Context, tx *sql.Tx, request, principal, token string) error {
++	r, err := tx.ExecContext(ctx, `INSERT INTO guard_storage_attempts(request_id,token,effect)
++ SELECT h.request_id,h.token,'create_storage' FROM guard_row_history h
++ JOIN instances i ON i.id=h.native_id AND i.guard_token=h.token AND i.project_id=h.project_id AND i.name=h.name
++ JOIN guard_create_scopes s ON s.request_id=h.request_id AND s.project_id=h.project_id AND s.name=h.name
++ JOIN guard_envelopes e ON e.id=h.request_id JOIN guard_epoch g ON g.id=1 AND g.epoch=e.epoch
++ WHERE h.request_id=? AND e.principal=? AND h.token=? AND e.state='bound' AND g.sealed=0`, request, principal, token)
++	return guardChanged(r, err)
++}
++func guardRecordStorageReturn(ctx context.Context, tx *sql.Tx, request, token, result string) error {
++	if result != "success" && result != "error" {
++		return errGuardDenied
++	}
++	r, err := tx.ExecContext(ctx, `UPDATE guard_storage_attempts SET observed_return=? WHERE request_id=? AND token=? AND observed_return IS NULL`, result, request, token)
++	return guardChanged(r, err)
++}
+diff --git a/internal/server/db/cluster/guard_row_pending_test.go b/internal/server/db/cluster/guard_row_pending_test.go
+new file mode 100644
+index 000000000..ac1f7caee
+--- /dev/null
++++ b/internal/server/db/cluster/guard_row_pending_test.go
+@@ -0,0 +1,153 @@
++package cluster
++
++import (
++	"context"
++	"database/sql"
++	"path/filepath"
++	"testing"
++)
++
++func guardRowFixture(t *testing.T) (*sql.DB, int64, string) {
++	t.Helper()
++	db := guardFixture(t)
++	guardEnableFixture(t, db)
++	if _, err := db.Exec(`INSERT INTO nodes(id,name,description,address,schema,api_extensions,arch) VALUES(999,'fixture','','fixture',73,1,1)`); err != nil {
++		t.Fatal(err)
++	}
++	var id int64
++	var token string
++	err := guardTx(db, func(tx *sql.Tx) error {
++		ctx := context.Background()
++		if err := guardBound(tx, "a"); err != nil {
++			return err
++		}
++		if err := guardReserveCreate(ctx, tx, "a", "fixture", 1, 999, "one"); err != nil {
++			return err
++		}
++		var err error
++		id, token, err = guardCreateRow(ctx, tx, "a", "fixture", 999, 1)
++		return err
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return db, id, token
++}
++func TestGuardNativeAttemptRetainedAfterRowCleanupAndReopen(t *testing.T) {
++	db, _, token := guardRowFixture(t)
++	ctx := context.Background()
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", token) }); err != nil {
++		t.Fatal(err)
++	}
++	// Simulates an unknown ACK: do not record return. No native I/O is executed.
++	if _, err := db.Exec(`DELETE FROM instances WHERE name='one'`); err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(t.TempDir(), "native.db")
++	if _, err := db.Exec(`VACUUM INTO ?`, path); err != nil {
++		t.Fatal(err)
++	}
++	re, err := sql.Open("sqlite3", path+"?_foreign_keys=1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer re.Close()
++	var n int
++	var outcome sql.NullString
++	if err = re.QueryRow(`SELECT count(*),observed_return FROM guard_storage_attempts`).Scan(&n, &outcome); err != nil || n != 1 || outcome.Valid {
++		t.Fatal(n, outcome, err)
++	}
++	if err = guardTx(re, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", token) }); err == nil {
++		t.Fatal("repeated unknown attempt")
++	}
++	if _, err = re.Exec(`DELETE FROM guard_row_history`); err == nil {
++		t.Fatal("history removed")
++	}
++	if _, err = re.Exec(`DELETE FROM guard_storage_attempts`); err == nil {
++		t.Fatal("attempt removed")
++	}
++}
++func TestGuardNativeIdentityMismatchAndSealDeny(t *testing.T) {
++	db, id, token := guardRowFixture(t)
++	ctx := context.Background()
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", "wrong") }); err == nil {
++		t.Fatal("wrong token accepted")
++	}
++	// Out-of-band SQL is an explicit unqualified writer, not an upstream behavior.
++	if _, err := db.Exec(`UPDATE instances SET guard_token='replacement' WHERE id=?`, id); err == nil {
++		t.Fatal("immutable token changed")
++	}
++	if _, err := db.Exec(`UPDATE instances SET name='renamed' WHERE id=?`, id); err != nil {
++		t.Fatal(err)
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", token) }); err == nil {
++		t.Fatal("renamed current identity accepted")
++	}
++	if _, err := db.Exec(`UPDATE instances SET name='one' WHERE id=?`, id); err != nil {
++		t.Fatal(err)
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardSeal(ctx, tx, 1) }); err != nil {
++		t.Fatal(err)
++	}
++	if err := guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", token) }); err == nil {
++		t.Fatal("new attempt after seal")
++	}
++}
++func TestGuardNativeReturnNeverReleasesOrReplays(t *testing.T) {
++	for _, result := range []string{"success", "error"} {
++		t.Run(result, func(t *testing.T) {
++			db, _, token := guardRowFixture(t)
++			ctx := context.Background()
++			if err := guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", token) }); err != nil {
++				t.Fatal(err)
++			}
++			if err := guardTx(db, func(tx *sql.Tx) error { return guardSeal(ctx, tx, 1) }); err != nil {
++				t.Fatal(err)
++			}
++			// A previously committed call can return after seal. Store receipt, not release.
++			if err := guardTx(db, func(tx *sql.Tx) error { return guardRecordStorageReturn(ctx, tx, "a", token, result) }); err != nil {
++				t.Fatal(err)
++			}
++			if err := guardTx(db, func(tx *sql.Tx) error { return guardRecordStorageReturn(ctx, tx, "a", token, result) }); err == nil {
++				t.Fatal("receipt overwritten")
++			}
++			var n int
++			if err := db.QueryRow(`SELECT count(*) FROM guard_create_scopes`).Scan(&n); err != nil || n != 1 {
++				t.Fatal(n, err)
++			}
++			if err := guardTx(db, func(tx *sql.Tx) error { return guardBeginStorage(ctx, tx, "a", "fixture", token) }); err == nil {
++				t.Fatal("attempt replayed")
++			}
++		})
++	}
++}
++func TestGuardNativeRowRollbackAndNoAdoption(t *testing.T) {
++	db, _, _ := guardRowFixture(t)
++	ctx := context.Background()
++	if err := guardTx(db, func(tx *sql.Tx) error { _, _, err := guardCreateRow(ctx, tx, "a", "fixture", 999, 1); return err }); err == nil {
++		t.Fatal("existing row adopted")
++	}
++	tx, err := db.Begin()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = guardBound(tx, "b"); err != nil {
++		t.Fatal(err)
++	}
++	if err = guardReserveCreate(ctx, tx, "b", "fixture", 1, 999, "two"); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err = guardCreateRow(ctx, tx, "b", "fixture", 999, 1); err != nil {
++		t.Fatal(err)
++	}
++	if err = tx.Rollback(); err != nil {
++		t.Fatal(err)
++	}
++	var n int
++	if err = db.QueryRow(`SELECT count(*) FROM instances WHERE name='two'`).Scan(&n); err != nil || n != 0 {
++		t.Fatal(n, err)
++	}
++	if err = db.QueryRow(`SELECT count(*) FROM guard_row_history WHERE request_id='b'`).Scan(&n); err != nil || n != 0 {
++		t.Fatal(n, err)
++	}
++}
+diff --git a/qualification/native-empty-insertion-map.md b/qualification/native-empty-insertion-map.md
+new file mode 100644
+index 000000000..d4cd7620a
+--- /dev/null
++++ b/qualification/native-empty-insertion-map.md
+@@ -0,0 +1,143 @@
++# Exact empty-LXC caller insertion map and dormant patch plan
++
++Pinned Incus a99413afd0c742da3bba10eb4f75d639f9dbbd32. This is source-inspected
++integration planning, not a complete callgraph proof or runnable patch. No
++upstream daemon hooks are changed. Native DB candidates remain unregistered.
++
++## New integration finding
++
++A guard immediately before `pool.CreateInstance` is TOO LATE for the entire
++empty-container path. `CreateInternal` calls native driver initialization and
++`lxcCreate` calls `devicesAdd` before returning. `CreateInternal` also invokes
++`os.RemoveAll(inst.LogPath())` and `os.RemoveAll(inst.RunPath())` when requested.
++Those effects require coverage independently of root storage creation. The
++single-effect DB candidate does not yet represent all supported-path attempts.
++
++## Transaction and caller chain (actual pinned symbols)
++
++1. `cmd/incusd/instances_post.go:instancesPost` authenticates through route
++   handling, decodes input and dispatches source-specific creation. Insert
++   bounded accepted envelope after verified principal/scope and BEFORE body
++   processing. Transport byte/time limits must be enforced here, not trusted
++   from the DB helper arguments. Binary backup and forwarding paths must be
++   rejected separately under the restricted profile.
++2. `cmd/incusd/instance.go:instanceCreateAsEmpty` invokes
++   `instance.CreateInternal(s,args,op,true,true)` and receives an operation lock
++   and cleanup hook. It then loads pool, calls `pool.CreateInstance`, registers
++   `inst.Delete(true)` cleanup and calls `inst.UpdateBackupFile`.
++3. `internal/server/instance/instance_utils.go:CreateInternal` resolves profiles,
++   takes `operationlock.Create(... ActionCreate ...)`, and opens a native
++   `s.DB.Cluster.Transaction`. Within it, the non-snapshot path calls
++   `cluster.CreateInstance`, creates devices/config, assigns profiles, reads
++   back the row and reconstructs arguments. Insert scope reservation and
++   immutable row binding in THIS same transaction, preserving all those native
++   mapper/config/device operations. The narrow candidate row insertion must
++   NOT replace the existing full native mapper path as-is.
++4. After transaction commit, CreateInternal registers name-based DB cleanup,
++   calls driver `Create`, registers its cleanup and removes old log/run paths.
++   Preserve retained guard history/reservation even if all ordinary row/config
++   rollback helpers succeed. A cleanup callback must not become an unjournaled
++   storage mutation just because it is a deferred error path.
++5. `internal/server/instance/drivers/driver_lxc.go:lxcCreate` initializes and
++   validates expanded configuration/devices, loads the effective root pool,
++   assigns idmaps/volatile state, reinitializes, then calls `devicesAdd(d,false)`.
++   Effective profile/device configuration must be frozen or revision-checked
++   against the approved policy. A profile NAME alone is not a capability.
++6. `internal/server/storage/backend.go:CreateInstance` creates native volume DB
++   state, updates authorizer state, computes effective root volume overrides,
++   calls `b.driver.CreateVolume` with a rootfs filler, registers DeleteInstance
++   cleanup, creates instance symlink and schedules template application. Each
++   nested driver/filler and cleanup callback belongs to the accepted-work tree.
++7. UpdateBackupFile and outer deferred Delete/DB cleanup run after those steps.
++   Their success cannot produce physical release. A late error leaves retained
++   unresolved attempt(s), even when the visible native row was removed.
++
++## Minimal next insertion patch shape
++
++Do not wire the current DB candidate directly into step 2 and call it complete.
++First extend the native transaction API to support a bounded enumerated effect
++plan with parent/child attempts, exact immutable incarnation, policy digest and
++retained outcomes. The API must bind original controller lineage/reservation/
++dispatch identity and exact daemon/backend/project scope, not only request name.
++
++Then a dormant integration change should:
++
++- Add an internal opaque guarded-create context to the empty source dispatcher
++  and CreateInternal. No public JSON/config field may fabricate this capability.
++  Missing capability rejects guarded mode before the first possible effect.
++- Reserve canonical project/name/storage scope in the existing row transaction,
++  use the full native mapper and bind its newly inserted row/token before commit.
++  Unknown transaction commit does not invoke driver Create or repeat insertion.
++- Carry a native reservation through driver initialization, devicesAdd, log/run
++  preparation, backend CreateInstance, nested driver/filler, symlink/template
++  and backup stages. Commit distinct attempt before each effect boundary.
++  Record an observed return separately; do not infer terminal physical state.
++- Replace unguarded revert closures in the guarded branch with either typed,
++  journaled cleanup suboperations or intentional no-cleanup/retained leak.
++  Merely omitting outer inst.Delete does not suppress nested driver cleanup.
++- Deny all uncovered Start/Stop/reboot/autoRestart/native-ephemeral cleanup,
++  snapshots, rename/move, restore/rebuild, import/copy/image/migration and QEMU
++  at their native entrypoints for the guarded profile. Read-only admission at
++  the HTTP router cannot enforce internal paths or old in-flight handlers.
++- Leave the feature impossible to activate until the complete supported path
++  compiles and runs in a disposable native integration environment. Preserve
++  stock unguarded behavior only outside the unqualified experimental profile;
++  mixing stock writers into its managed scope is never permitted.
++
++**This is not yet a drop-in patch:** operation-lock ownership/handoff across
++nested callbacks and reentrant cleanup must be resolved before modifying live
++callers. There is no honest smaller active hook that covers the declared path.
++
++## Acceptance checks for that patch
++
++Use the actual `CreateInternal` mapper/config/device transaction (not the narrow
++candidate insertion) in native-package integration tests. Then build actual
++LXC/storage dependencies and fault the real daemon at every transition listed
++above. Assert no effect before a committed attempt, retained descendants after
++parent errors, no replay after restart/unknown commit, and no bypass through
++internal cleanup or native lifecycle. Audit denied paths via real calls, not
++just strings/AST checks. Pin actual effective profile/device/root pool policy.
++
++Actual cluster DB tests are currently feasible; full daemon compilation remains
++blocked on native dependencies and the reviewed disposable build recipe is not
++yet executed. cgroup facts and DB receipts do not establish whole-asset capacity,
++sole writer, anti-rollback lineage or job-intake fencing. No release API exists.
++
++## Dormant first native mapper bridge
++
++`guard_mapper_pending.go` now provides a non-exported, uncalled native DB helper
++that executes the actual generated `cluster.CreateInstance` mapper and binds
++its new row to retained history in the same transaction. It uses the existing
++native metadata fields rather than the earlier narrow raw INSERT. A savepoint
++rolls back the row/token if history insertion fails. Tests inject that failure
++and intentionally commit the outer transaction to verify no unbound row remains.
++The actual native prepared statement is used, with metadata preservation checked.
++
++The returned row can enter the existing one-shot database storage-attempt
++primitive. Neither helper invokes storage. Unsupported VM/snapshot/ephemeral/
++stateful rows are rejected. Source kind (empty versus image/import), native
++config/devices, effective policy, full CreateInternal transaction, daemon identity
++and original controller lineage are NOT represented by this mapper argument.
++Therefore this is not a safe public entrypoint or activation-ready capability.
++All missing checks remain hard integration prerequisites. No HTTP/native caller,
++feature flag or schema registration is added; unsupported daemon paths have NOT
++been globally fenced by adding this helper. Native locks and nested attempts
++remain as mapped above. Savepoint success is not transaction commit success;
++commit uncertainty must still forbid native I/O or replay.
++
++### Actual mapper-sequence composition test
++
++`guard_caller_pending_test.go` now composes the real native generated row,
++device and config mappers plus UpdateInstanceProfiles in a single SQLite
++transaction, following CreateInternal's non-snapshot database sequence. It
++uses actual prepared statements and native tables. An injected late config
++failure rolls back row/token/history/devices and retains the previously
++committed scope. Success preserves device/config/profile records and only
++then enters a separate retained storage-attempt transaction. No storage runs.
++This is mapper-sequence coverage, not execution of CreateInternal, device
++callbacks, native policy validation or daemon/cowsql commit faults.
++
++Unsupported-row regression cases now each have a fresh bound/reserved request
++and otherwise valid native object, so rejection cannot be attributed to a
++previously exhausted request or blank scope. They verify no row or history was
++inserted. No safety assertion or production check was relaxed.
+diff --git a/qualification/native-frontier-design.md b/qualification/native-frontier-design.md
+new file mode 100644
+index 000000000..6239e48dd
+--- /dev/null
++++ b/qualification/native-frontier-design.md
+@@ -0,0 +1,34 @@
++# Offline native extension feasibility, not an installed authority
++
++Pinned Incus a99413afd0c742da3bba10eb4f75d639f9dbbd32.
++
++## Proposed narrow transaction boundary
++
++A native cluster-database extension can persist a request intent before body processing and atomically record database-row authorization in the SAME transaction that creates its native instance row. Seal must atomically close epoch acceptance AND invalidate unconsumed birth grants. An accepted-before-seal handler is retained as unresolved but cannot create a new instance row after seal. Already committed row grants remain charged and unknown, not physically terminal. This is stronger than the external HTTP proxy's acceptance frontier, but does not stop OS side effects from paths that bypass this gate.
++
++Prototype API accepts an existing *sql.Tx, never opens a separate ledger: Accept(epoch, request ID); Seal(epoch); ClaimRow(epoch, request ID, generated incarnation, native row ID) after row INSERT but before transaction commit. Failed row claim rolls back the whole transaction, including row INSERT. A separate native table binds a never-reused generated incarnation to native instance ID; volatile.uuid is NOT authority (CreateInternal accepts it from args.Config and restore can copy it). Request state remains retained. No release method.
++
++Deletion design: acquire the existing native per-instance operation lock; reread native instance ID AND new immutable incarnation under the database transaction, then persist a deletion intent before external storage/device cleanup. Reject mismatch before touching storage. Hold identity/name reservations through cleanup; all rename/restore/start/recreate paths must reject the reserved identity. Final DB removal alone is insufficient: lxc.delete invokes pool.DeleteInstance, device cleanup and backups before deleting the DB row, so an SQL conditional DELETE after cleanup is too late. Uncertain cleanup retains deleting/charged and forbids name reuse. No automatic release on DB absence.
++
++## Concrete pinned insertion points
++
++- cmd/incusd/instances_post.go instancesPost: durable acceptance before body Decode (authenticated route context still required).
++- internal/server/instance/instance_utils.go CreateInternal: same DB transaction around cluster.CreateInstance; snapshot branch requires separate coverage and is excluded initially.
++- internal/server/instance/drivers/driver_lxc.go Delete: identity recheck AFTER operation lock, BEFORE d.delete side effects. The internal d.delete path bypasses that lock and therefore must also require a typed delete grant; otherwise no qualification.
++- internal/server/db/cluster/instances.mapper.go: generated SQL currently deletes/renames by name; new incarnation table cannot alone protect pre-DB physical operations.
++
++## Explicit incomplete coverage
++
++CREATE from empty/image/copy/migration/backup, snapshots, restore, rename/move, start/restart/autostart, device hotplug, cluster forwarding, database recovery and internal calls all need traced gates. VMs/QEMU, clustered multi-node mode, snapshots/restores, arbitrary admin/SQL writes are excluded from the initial candidate and must be DENIED, not silently ignored. Local socket/CLI/admin execution cannot be controlled by this test extension alone. Fresh installation enrollment must reject prior unknown requests/resources; snapshot rollback requires external anti-rollback generation. A native epoch stored in the same database still rolls back with it.
++
++## Prototype boundary
++
++First executable slice runs pure Go/SQLite tests in this pinned source tree against transaction-bound row records, seal races, SQL rollback/unknown ACK, and identity mismatch refusal. It will not be wired into the daemon or claim covered native side effects. Full daemon compilation/runtime is a separate gate (Incus requires native libraries and privileges). A passing transaction prototype does not qualify an installation, permit deletion, or release capacity.
++
++## Post-commit native side effects are not row birth
++
++Pinned createAsEmpty commits CreateInternal BEFORE pool.CreateInstance/backup. Native reverts can remove a database row with storage cleanup incomplete. The experiment therefore calls its result `row_bound`, not physical birth, and retains incarnation/request history WITHOUT cascading native-row foreign keys. No row absence or completed SQL transaction is a terminal physical outcome. A native extension must also gate post-commit storage/driver work, retain unresolved outcomes across errors/reverts, and fence replay/cleanup. ClaimRow alone cannot close the native frontier.
++
++The synthetic native row contains a current native_token separate from permanent incarnation history; the guard requires BOTH to match. Deleted rows and reused numeric IDs reject old delete intents. This models a needed new immutable native identity column, not existing Incus schema or config. Only same-transaction identity intent is tested; no physical deletion is performed.
++
++Pinned Incus's instances schema uses AUTOINCREMENT. The explicit numeric-ID replacement fixture represents an out-of-band/restore mutation and is NOT evidence of normal committed Incus row-ID reuse. The absent-row guard matters independently. This experiment deliberately does not apply schema migrations or wire guards into native handlers.
+diff --git a/qualification/native-guard-implementation-proposal.md b/qualification/native-guard-implementation-proposal.md
+new file mode 100644
+index 000000000..3c1144277
+--- /dev/null
++++ b/qualification/native-guard-implementation-proposal.md
+@@ -0,0 +1,218 @@
++# Proposed native guard integration: decision and patch contract
++
++Status: **proposal only**, pinned Incus `a99413afd0c742da3bba10eb4f75d639f9dbbd32`.
++No daemon hook, migration, storage driver or deployment is implemented here.
++The reviewed fixtures establish failure cases and source ordering, not native
++safety. This proposal advances from those cases to specific patch boundaries.
++
++## Decision
++
++Do not integrate automatic physical release next. Integrate a retained native
++attempt journal and fail-closed mutation capability first. A return from Incus,
++operation-list emptiness, row deletion or storage helper success will never
++release a charge. An incomplete native attempt blocks automatic replay and
++retains its reservation indefinitely. A later completion certificate needs a
++separate, driver-specific design and review.
++
++The initial candidate is a **single-node, non-clustered, LXC empty-container
++creation experiment**, not a runnable CI service. Empty containers do not by
++themselves provide a runner image/bootstrap; do not market this profile as a
++useful deployed GARM MVP. Image-backed creation is a subsequent traced path.
++
++## Durable native data contract
++
++Use the actual native database and its transaction API, not a second SQLite
++ledger. Table/column names below are proposed, not current upstream schema.
++
++- `guard_epoch`: deployment UUID, epoch, accepting/sealed. Deployment identity
++  must be externally bound against restoring an old DB; local epoch alone is
++  not anti-rollback.
++- `guard_requests`: UUID, authenticated principal, canonical scope, epoch,
++  requested verb, bounded body digest once decoded, immutable retained state.
++  Persist admission before body decoding, after authentication/authorization.
++  Reject reused UUID with differing scope, principal, verb or digest.
++- `guard_incarnations`: unpredictable immutable token, native instance ID,
++  project identity, request UUID. The current native row holds the same token;
++  history has no cascading delete. Never use configurable `volatile.uuid`.
++- `guard_attempts`: request UUID, incarnation token, monotonic suboperation
++  sequence, exact effect kind, epoch, `attempted` plus optional observed return.
++  Uniqueness is enforced in the database. Never update `attempted` into a state
++  meaning no physical effect merely because a callback returned an error.
++- `guard_reservations`: current identity/name reservation and unresolved parent
++  binding. Removal requires an independently qualified protocol, not row absence.
++
++Before allocating a native row, acquire a durable create-name/storage-scope
++reservation in the same native transaction. Reject ANY unresolved retained
++reservation for that native project/name/storage scope, even if its old row was
++cleaned up, its token differs, or the daemon restarted. ClaimRow must verify this
++exclusive pre-row reservation; a new token does not grant permission to reuse
++possibly occupied storage. Reservation keys must follow native canonical naming
++and all alias/rename rules, not caller-supplied display names.
++
++Pre-body acceptance must enforce per-principal and global bounded outstanding
++envelopes, body size and decode time. Disconnect, expiry or abandoned body marks
++the envelope abandoned but retains its identity and no-dispatch history; never
++discard it or automatically execute it later. Reclaiming envelope bookkeeping
++capacity requires proof that no native attempt was committed and all associated
++handlers are unable to dispatch; until that protocol exists, quotas fail closed.
++This is not release of a physical resource reservation.
++
++Accept, seal and row claim must serialize in native transactions. ClaimRow
++requires a matching current native row/token in the same transaction as row
++creation. Seal closes new acceptance and unclaimed row creation; it does NOT
++revoke an effect already durably attempted or stop a scheduled callback.
++
++## Required native primitive API
++
++These signatures are design pseudocode, not an exported implementation:
++
++```
++Accept(tx, authenticatedScope, epoch, requestID, verb) -> Request
++BindBody(tx, Request, digest) -> Request
++ReserveCreateScope(tx, Request, canonicalNativeScope) -> CreateReservation
++ClaimRow(tx, Request, CreateReservation, nativeID, immutableToken) -> Incarnation
++ReserveMutation(nativeOperationLock, Incarnation, verb) -> Reservation
++BeginAttempt(tx, Reservation, sequence, exactEffect) -> Attempt
++RecordObservedReturn(tx, Attempt, resultClass) // not physical completion
++Seal(tx, epoch) -> durable accepted/attempted frontier
++```
++
++`Reservation` and `Attempt` must be opaque native-owned handles. Guarded driver
++entrypoints must not accept an arbitrary boolean or caller-constructed token.
++Every actual side-effect method verifies its handle against the retained native
++record and the held identity reservation. Threading context only through HTTP
++handlers is insufficient: internal callbacks, reverts and backup entrypoints
++are independent paths. If native locks are reentrant or cannot span a callback,
++that path stays disabled until lock ordering and callback handoff are proven.
++
++Do not hold a SQL transaction over storage I/O. Commit BeginAttempt before I/O,
++while retaining the native identity/name reservation across the commit and call.
++On commit error/unknown ACK: make no new call; reopen/reconcile the unique record,
++but do not automatically execute an `attempted` record. After process restart,
++all such records remain unresolved, even if the effect may never have started.
++This intentionally trades liveness for avoiding duplicate effects.
++
++## Smallest production patch series to propose (not applied)
++
++1. **Native schema and transaction-only primitives.** Add native schema migration
++   and retained tables using the pinned native database mechanisms; add actual
++   DB tests for acceptance/claim/seal/rollback/reopen and immutable token checks.
++   Keep the feature non-activatable/default off. No HTTP success or physical
++   authority claim. Review generated mapper changes and history retention.
++2. **One guarded storage path plus deny coverage.** Trace empty LXC creation from
++   authenticated `instancesPost` through `CreateInternal` and `createAsEmpty`.
++   Persist attempt before `pool.CreateInstance`; preserve unresolved reservation
++   through backup-file creation, revert callbacks and row cleanup. Thread typed
++   capability to all participating methods. In the restrictive experiment,
++   deny image/copy/migration/backup/snapshot/restore/rebuild/rename/move and VM
++   paths before their first effect, at native entrypoints as well as routes.
++   Deny start/restart/autostart, hotplug and internal ephemeral deletion until
++   explicitly guarded. Unsupported cleanups may leak a resource intentionally;
++   they must not silently bypass the journal in the name of error recovery.
++3. **Disposable real-daemon qualification.** Build/link the exact fork with actual
++   native dependencies, run isolated native DB and LXC/storage fault tests,
++   and review the complete reachable mutation graph. Only then consider an
++   explicit experimental activation mode on a fresh dedicated instance.
++
++Patch 1 is the immediate implementation-sized step. Patches 2 and 3 are required
++before even the restricted profile is enforceable. Partial denial at the API
++router must never be described as completing patch 2. Until the native build
++recipe succeeds, neither compilation nor integration feasibility is verified.
++
++## Failure obligations derived from reviewed seams
++
++| Seam | Required insertion and unresolved obligation |
++| --- | --- |
++| Empty creation | Row commit precedes storage; journal before storage; retain history if revert removes row. |
++| Rebuild | First destructive DeleteInstance needs reservation and attempt, not a later config transaction. Delete/create are separate sequenced effects; interruption cannot restart the whole prefix. Initially denied. |
++| Backup import | Storage can begin before instance row. Requires separate import identity and scope reservation, not ClaimRow on a nonexistent instance; failed cleanup remains unresolved. Initially denied. |
++| Internal onStop | Reboot/autoRestart calls Start; otherwise native ephemeral cleanup calls internal delete(true). API admission does not see these. Deny unsupported callback transitions at their actual native entrypoints, not by assuming GitHub JIT implies native ephemeral. |
++| Delete | Existing native lock plus immutable current incarnation recheck BEFORE devices/storage. Name-targeted database deletion afterwards is not protection. Initially denied. |
++| Return/operation record | Observed success/error is only a receipt; expiry and authorization-filtered lists cannot drain the frontier. |
++
++## Qualification tests that move beyond the fixtures
++
++- Actual native DB migration forward/reopen and concurrent accept/seal/claim;
++  durable unknown-commit fault, history surviving native-row deletion. Reject
++  creation with a new token into an unresolved old project/name/storage scope
++  after row cleanup and database reopen. Exercise alias/canonical-name collisions.
++- Real dispatcher attempts before body completion; no admitted untracked handler;
++  authenticated local socket and cluster refusal paths included. Bound pending
++  body envelopes; exercise disconnect/timeout before and during decode, retain
++  abandoned identity, and deny delayed execution/replay after abandonment.
++- Fork process killed at committed attempt/before call, during storage, and after
++  storage/before outcome receipt. Restart must retain reservation and never replay.
++- Actual storage driver leaves a resource after injected return/cleanup failure;
++  row cleanup cannot release reservation. Test each supported storage backend.
++- Internal callback invoked after API response/seal; reject unsupported restart
++  and delete before effects. Test name reuse, rename and restoration attempts
++  against reserved incarnation, without relying on inventory visibility.
++- Negative activation tests: pre-existing unknown resources/requests, unsupported
++  type/path, alternate writer, old database lineage, incomplete host ownership.
++
++## External prerequisites still required
++
++An enforceable native resource parent covering the entire intended physical
++asset, sole writer/whole-asset ownership, trusted root/admin boundary, complete
++local/internal ingress coverage and externally anchored database lineage are
++not provided by these tables or fixtures. Container cgroup facts do not cover
++QEMU/VM memory or every out-of-band writer. A hostile host administrator is
++outside the enforceable boundary; such a host cannot be qualified by this API.
++
++Keep controller provisioning disabled unless its independently required
++capacity/scope/writer/lineage gates are actually satisfied. Do not increase
++budget or reset/recreate a ledger to work around retained unknowns. This series
++contains no manual or automatic release mechanism and no live rollout approval.
++
++## Offline first native-package candidate
++
++`internal/server/db/cluster/guard_pending.go` is now an unregistered migration
++and unexported transaction primitive candidate in the actual pinned native DB
++package. There are no daemon callers, activation setting, `updates` registration
++or generated fresh-schema changes. Migration initializes a sealed epoch. Tests
++explicitly unseal their disposable database, never a running installation.
++
++Tests append the candidate via native `Schema().Add`/`ExerciseUpdate`, applying
++real upstream migrations and using real native instances/projects/pool tables.
++They check retained scope after actual instance row deletion, SQLite snapshot
++file reopen, rollback, sealed admission, abandoned/expired body binding refusal,
++principal mismatch, per-principal/global retained-envelope caps and oversize
++body refusal. Race instrumentation does not by itself establish concurrent
++transaction ordering, and file reopen is not a killed-daemon crash test.
++
++Implemented scope is acceptance/body binding/abandonment, pre-row create scope
++reservation and sealing ONLY. ClaimRow/current immutable native token, native
++attempt journal, canonical alias resolution, native locks, authenticated route
++integration and body-stream limits remain unimplemented. Caller-supplied byte
++count/principal are inputs, not verified transport facts. Reservation checks
++existing native DB rows/volumes but cannot detect unrecorded physical storage;
++fresh enrollment and complete writer coverage remain prerequisites. No output
++from these methods is authority to dispatch physical work. The unregistered
++migration intentionally cannot be activated by restarting an ordinary daemon.
++
++### Offline row/attempt follow-on
++
++The separate follow-on adds an immutable nullable token on the real `instances`
++table within the still-unregistered migration. `guardCreateRow` inserts a narrow
++empty/non-ephemeral container row itself and binds retained history in the same
++caller transaction; it cannot adopt an existing row. It is NOT the full native
++CreateInternal mapper/config/device path. The caller must roll back on error,
++as with native transaction helpers. Existing unguarded rows remain nullable and
++are not enrolled or treated as qualified.
++
++`guardBeginStorage` records one `create_storage` attempt per request, after
++checking retained reservation/history/current row identity and the live epoch.
++It permits no generic delete, restore, image or lifecycle effect. Successful
++commit is necessary but insufficient for I/O: native identity locking, full
++scope policy and actual effect-site wiring remain missing. Unknown commit must
++not trigger I/O/retry. A stored attempt after restart is NOT a work queue.
++`guardRecordStorageReturn` records one success/error receipt, including after
++seal or row cleanup, and never removes scope/history or releases a charge.
++
++Actual native-schema tests now include row/history transaction rollback,
++non-adoption, immutable token enforcement, changed native name refusal, attempt
++retention through row removal and SQLite file reopen, post-seal observed return,
++no repeated attempt/receipt and retained scope after either return. No storage
++callback is invoked. Unknown ACK is modeled by omitting the return receipt,
++not by a killed daemon or faulted cowsql commit. Migration is still unregistered
++and no production daemon can activate this through configuration.
+diff --git a/qualification/native-mutation-coverage.md b/qualification/native-mutation-coverage.md
+new file mode 100644
+index 000000000..d103b4339
+--- /dev/null
++++ b/qualification/native-mutation-coverage.md
+@@ -0,0 +1,97 @@
++# Pinned native integration coverage: all live paths currently unqualified
++
++Source: Incus 6.0.4 a99413afd0c742da3bba10eb4f75d639f9dbbd32. This is a conservative implementation map, NOT a completed call-graph or authorization proof. No daemon hook is installed. Initial restricted profile must deny every unsupported mutation, including internal callbacks, rather than merely hiding API routes.
++
++| Mutation family | Concrete source boundary | Current executable coverage | Still required |
++|---|---|---|---|
++| Empty creation | `cmd/incusd/instance.go:instanceCreateAsEmpty`; `instance_utils.go:CreateInternal`; `backend.go:CreateInstance` | Exact hashed upstream orchestration body transplanted with two dependency substitutions; actual upstream revert helper, fake row/storage dependencies | Native accepted intent propagation, same cowsql row transaction, durable pre-storage attempt, actual driver outcome |
++| Image creation | `instance.go`; `backend.go:CreateInstanceFromImage` | Source inspection only | Image download/cache effects, driver create and revert obligations |
++| Copy/migration | `instances_post.go`, `instance.go`, `backend.go:CreateInstanceFromCopy/FromMigration` | None | Per-resource accepted work across source/target, both sides of migration and snapshots |
++| Backup import | `backend.go:CreateInstanceFromBackup` | Source comment confirms storage BEFORE native instance-row creation | Gate before unpack/storage; row-only gate insufficient |
++| Restore/snapshots | `driver_lxc.go:Restore/Snapshot`; `backend.go:RestoreInstanceSnapshot/CreateInstanceSnapshot` | None | Identity generation changes, snapshot and storage mutation frontier |
++| Rename/move | `instance_post.go`; `driver_lxc.go:Rename`; `backend.go:RenameInstance` | None | Stable incarnation reservation before any name-targeted action |
++| Start/restart/autostart | `instance_state.go`; `instances_put.go`; `driver_lxc.go:Start` and stop callback | Source read confirms stop callback invokes Start(false) | Deny or gate reboot/autorestart before process creation |
++| Delete/ephemeral cleanup | `instance_delete.go`; `driver_lxc.go:Delete/delete`, stop callback; `backend.go:DeleteInstance` | SQL identity-intent fixture only; empty-create cleanup failure counterexample | Native operation lock and immutable identity recheck BEFORE physical cleanup; internal delete bypass must share authority |
++| Rebuild | `driver_common.go:rebuildCommon` | Source read shows DeleteInstance then CreateInstance/FromImage | One retained operation spanning destruction and recreation |
++| Internal recovery/import | `api_internal.go`; `api_internal_recover.go` call CreateInternal | None | Deny restoration/import in restricted domain or include native accepted work and external rollback anchor |
++| VM/QEMU | `driver_qemu.go` | None | Excluded, must deny; container cgroup coverage does not establish VM scope |
++| Device/storage/cluster/admin | native update/hotplug, storage drivers, cluster forwarding, local SQL/root | None | Whole-asset membership, all writers, driver coverage and independent enforcement |
++
++GitHub ephemeral/JIT runner registration is NOT Incus `instance.ephemeral`. Native ephemeral guests may call internal `d.delete(true)` after stop without the public DELETE handler. A GitHub completion signal or exhausted JIT token cannot stand in for native deletion history.
++
++## Executed upstream orchestration boundary
++
++`empty_path_test.go` transplants the exact pinned `instanceCreateAsEmpty` function body. Only its signature and two dependency constructor calls are adapted. A hash and normalized source-body comparison prevent silently replacing its control flow. It uses upstream `shared/revert` but row, pool, operation and instance objects are fixtures, not Incus daemon/storage execution.
++
++Tests reproduce (1) storage created then error/unknown ACK, leaving physical state while row cleanup runs; (2) backup failure whose deferred forced-delete cleanup fails and is ignored, also leaving physical state with no row; (3) upstream `defer instOp.Done(err)` captures earlier nil, so lock completion does not prove native terminal outcome. A simulated durable-intent failure blocks storage before attempt. None of these is authoritative physical release evidence.
++
++## Proposed phase contract, not implemented in daemon
++
++1. Native request accepted durably before dispatch/body-dependent work, retaining unparsed intents too.
++2. Native row grant and immutable incarnation bind in same database transaction; seal denies any unconsumed row grant.
++3. Before EACH potentially effectful storage/process/device call, persist a unique suboperation intent and consume a fencing generation. Native epochs/ownership must also be enforced against direct/internal paths.
++4. Record response independently from completion; errors, crash, missing ACK and failed reverts retain unknowns. Cleanup is a separately journaled mutation, not an unobserved `revert.Hook`.
++5. Only a qualified driver/resource adapter may issue durable terminal physical outcomes. Never infer them from row removal, operation-lock completion, timeout, swallowed cleanup error or a successful outer HTTP reply.
++6. Even all known local suboperations terminal does not prove sole ownership or anti-rollback history. Unsupported paths and out-of-band writers must be prevented by installation/native enforcement before any authority is exposed.
++
++Feasibility: the transaction and orchestration ordering can be tested offline. Full pinned daemon compilation/runtime remains unperformed; this environment currently lacks lxc, libdqlite and libacl pkg-config entries. These tests do not justify enabling an allocator, destructive finalizer or automatic capacity reuse.
++
++## Compile-only probe result
++
++A subsequent `go test -c -o /tmp/incusd-frontier-build-probe.test ./cmd/incusd` was attempted against the pinned source (no daemon/test binary was launched). It failed with missing `lxc.pc`, `cowsql.h`, `libudev.h`, and `sys/capability.h`. The pinned source uses cowsql; the earlier generic libdqlite pkg-config probe is not the actual compilation diagnosis. A disposable native build image providing those development dependencies is needed before daemon-level hook tests. No packages or system services were installed or changed by this probe.
++
++## Next insertion map: three pinned source contracts, not installed hooks
++
++`mutation_boundaries_test.go` parses SHA-256-pinned upstream Go ASTs. It executes no native driver. These checks preserve the inspected negative facts when updating the prototype; passing them does not qualify daemon mutation coverage or authorize capacity release.
++
++| Pinned method | Observed boundary | Necessary insertion and retained obligation |
++|---|---|---|
++| `backend.CreateInstanceFromBackup` | `driver.CreateVolumeFromBackup` runs before the `postHook` closure containing `VolumeDBCreate` is even defined. The backend comment separately documents storage before instance-row creation. | Persist accepted import/suboperation identity **before** native unpack/storage. Do not wait for the row hook. A returned error, crash, missing driver ACK, or failed rollback leaves the import charged/unknown, including volumes/snapshots without instance rows. The AST test does not prove all callers or inspect actual storage. |
++| `common.rebuildCommon` | `DeleteInstance`, then either empty/image creation, then config DB update, all for an existing instance. There is no `instance.CreateInternal` call in this method. | Bind one durable rebuild identity to the existing incarnation before deletion; record distinct destructive and birth attempts without releasing the parent reservation between them. Every failure/unknown result remains charged. Updating config or completing a row transaction is not native physical completion. Full caller/lock/restore analysis is still required. |
++| `lxc.onStop` | A goroutine can invoke `Start(false)` on reboot/autorestart and `delete(true)` for an Incus-ephemeral guest, without a new public API request. | Gate these native transitions or reject this guest/profile capability under an enforceable native installation. A public HTTP proxy alone cannot be sole ingress. Their retained operation identities must survive API request exit and daemon crash. Merely setting GitHub one-job registration does not disable native reboot or ephemeral cleanup. |
++
++The assertions use actual syntax-node nesting and source positions. They do not execute the ordering, demonstrate error-path completion, instrument cowsql, or establish ownership/anti-rollback guarantees. The existing exact empty-create transplant remains the only orchestration slice executed with the upstream revert helper; its physical state is still simulated. All paths in the coverage table remain **unqualified**.
++
++## Offline storage-attempt seam (rebuild prefix only)
++
++`storage_attempt_test.go` executes the exact pinned `rebuildCommon` storage-call prefix against fixture pool methods. The prefix has only fixture signature/`err` declaration/final-return scaffolding; a pinned-source/body comparison checks the delete/empty-or-image-create control flow. No config transaction, native pool, cowsql or LXC operation lock is executed.
++
++The proposed insertion records a SQLite attempt before the fixture call, keyed by accepted request, bound existing incarnation and ordered `delete`/`create` phase. Duplicate phases cannot auto-reissue after an error or crash. Creation cannot start without an observed successful delete return. That ordering condition is only control flow, **not** a physical deletion certificate. Parent and attempt history remain after every return. Outcomes are deliberately named `returned_success`/`returned_error`, never `physically_absent` or `released`.
++
++Tests cover side effect followed by lost ACK, failure recording the returned outcome across database reopen, an execution gap after durable attempt but before native call, interruption between delete/create, wrong target/out-of-order phase, and a callback that performs its effect after sealing. The last counterexample is intentional: this journal cannot revoke an already admitted callback. It also cannot prevent a different writer changing the incarnation after its SQL check; a real shared native lock/fencing mechanism remains required. Simulated crash points discard fixture execution, not kill a real daemon.
++
++Restore and internal lifecycle transitions need analogous accepted-operation identities **before** their native calls, but are not implemented by this rebuild-only seam. Backup import has no existing instance row to bind at its first storage call and therefore needs a separate resource-scope identity contract; this helper rejects unsupported phases rather than treating that case as qualified. Database history retention is not a physical capacity reservation, native fence, safe rollback, automatic recovery/resume protocol or release authority. There is no release API.
++
++## Offline backup error-prefix negative
++
++`backup_prefix_test.go` source-compares the actual prefix beginning at `importRevert := revert.New()` through the symlink-error return. It executes the upstream `shared/revert` helper with fake storage, then deliberately returns a fixture sentinel before the remaining import and posthook logic. It is not a successful backup-import implementation.
++
++The prefix returns immediately on `CreateVolumeFromBackup` error, before registering any reverter returned alongside that error. A fixture storage effect followed by an unknown/error response therefore survives with no registered cleanup. After a successful driver return, a later symlink failure invokes the registered `revert.Hook`; the hook has no error return, and a simulated failed cleanup can leave storage present while the caller receives only the symlink error. These are counterexamples to treating an outer error or executed reverter as proof of absence, not a claim that any particular stock storage driver necessarily exhibits those injected failures.
++
++No instance/volume database row is constructed in this prefix fixture. The rebuild experiment's existing-incarnation binding cannot qualify this import path. Required next work is an accepted import identity bound to the native storage domain before unpack, complete subresource membership (including snapshots), and independently enforced writer/epoch/physical completion semantics. The before-call failure case here is injected only; it does not implement that durable import contract. Unknown native effects must remain unresolved in any future capacity integration.
++
++## Executed internal stop callback tail (offline only)
++
++`nativefrontier/lifecycle_tail_test.go` compares and executes the exact pinned
++`lxc.onStop` tail beginning at `// Reboot the container`. The function signature
++and enclosing `err` declaration are fixture scaffolding; lifecycle notification
++and scheduler calls are replaced with counters. Start and internal delete are
++fake callbacks. The real earlier stop cleanup, operation-lock creation,
++`shouldAutoRestart` calculation and goroutine are NOT executed. Tests supply the
++already-computed `target`, `autoRestart` and native `ephemeral` fields.
++
++The exact branch is retained: reboot OR autoRestart calls Start and returns,
++even when the native instance is ephemeral; otherwise native ephemeral guests
++call internal `delete(true)`, not the public Delete entrypoint. A deterministic
++fixture queue illustrates that an API-return/ingress-seal marker does not fence
++that internal callback. These markers are not a native fence implementation.
++Injected restart/delete effects followed by errors remain ambiguous. Neither
++fake success nor error proves actual driver completion, absence, operation
++terminality, or that additional callbacks cannot follow. GitHub ephemeral/JIT
++registration is unrelated to this Incus instance flag.
++
++Next real insertion must cover the earlier callbacks and operation locks,
++revalidate native identity before effects under the same lock as all other
++writers, and durably retain every accepted attempt and unknown outcome. The
++public API-only frontier still cannot qualify these native internal paths.
++No live hook, capacity accounting/release API or production code was changed.
+diff --git a/qualification/native-reservation-propagation.md b/qualification/native-reservation-propagation.md
+new file mode 100644
+index 000000000..169849c8f
+--- /dev/null
++++ b/qualification/native-reservation-propagation.md
+@@ -0,0 +1,108 @@
++# Typed reservation propagation: next dormant integration boundary
++
++Design only, pinned Incus a99413afd0c742da3bba10eb4f75d639f9dbbd32. No caller,
++capability issuer, native hook or activation setting is installed by this file.
++This document narrows the earlier insertion map; it does not claim that a type
++alone enforces native storage or protects against an untrusted host root.
++
++## Issuance and ownership
++
++Introduce one internal native guard service owned by daemon state. It owns the
++native DB handle and installed deployment identity, not an arbitrary caller
++supplied `Journal` interface. Its admission route must verify the original
++controller lineage/reservation/dispatch identity, daemon/backend/project,
++canonical resource scope and effective policy digest. A plain request UUID or
++label cannot substitute for that binding.
++
++The service returns a pointer to an opaque `CreateReservation` with private
++fields; only the issuer package constructs it. The same pointer carries native
++operation-lock ownership (or a checked lock lease) across callers. Avoid serializing
++this live capability into user config, operation metadata or volatile.uuid. A
++restarted process reloads unresolved history for reporting, NOT runnable handles.
++
++`BeginEffect` returns a process-local, one-use `EffectPermit` only after its
++native transaction has definitely committed. An ambiguous commit returns no
++permit; reopening an existing attempt must never reconstruct one. Caller cannot
++choose an arbitrary effect kind or sequence: these come from an issuer-owned,
++versioned allowlist plan bound to the effective policy. Delivery/consumption of
++a permit still needs a real native reservation and effect-site check; a copied
++pointer or Go type is not sufficient proof.
++
++## Explicit proposed call propagation
++
++Signatures below describe a future guarded branch, not current compiled APIs:
++
++```
++instanceCreateAsEmptyGuarded(..., create *nativeguard.CreateReservation)
++  -> CreateInternalGuarded(..., create)
++     -> existing native mapper/config/device transaction + identity binding
++     -> guarded driver Create(..., create)
++        -> lxcCreate(..., create)
++           -> devicesAddGuarded(..., create)
++              -> deviceAddGuarded(device, create.BeginEffect(devicePlanEntry))
++  -> pool.CreateInstanceGuarded(..., create)
++     -> guarded CreateVolume + rootfs filler + symlink/template child attempts
++  -> UpdateBackupFileGuarded(..., create)
++```
++
++Missing context fails before effects in the guarded branch. Do not silently
++fall back to the unguarded method when a guard error occurs. Stock paths outside
++the candidate scope are not transformed into qualified writers by preserving
++their behavior. A dedicated guarded daemon must reject those mutation paths.
++
++The database mapper bridge currently binds a row and one attempt only. Before
++this call chain can compile honestly, its native transaction contract needs
++policy/source/lineage binding, a bounded child-effect plan and checked native
++lock handoff. It is not safe to promote the existing one-shot create_storage
++helper as a grant for all initialization effects.
++
++## Pre-storage device effects and cleanup
++
++Actual pinned `common.devicesAdd` loads each effective device and calls
++`deviceAdd` -> `dev.Add()`. It registers `deviceRemove` -> `dev.Remove()` as a
++revert. Validation errors may call `deviceVolatileReset`; conflict errors can
++skip adding a device. Therefore the plan must bind the exact expanded ordered
++device set and distinguish attempted, deliberately skipped, error and cleanup.
++Never treat returning a revert hook as proof cleanup ran or succeeded.
++
++A useful minimization for the INITIAL NON-RUNNING EXPERIMENT is an exact root
++ disk-only policy, no NIC/other devices. The pinned disk type embeds
++`deviceCommon` and has no Add override; deviceCommon.Add returns nil. This
++reduces the immediate Add effect surface, but is NOT a proof that device loading,
++validation, idmap allocation or all surrounding driver initialization is pure.
++Those calls still require trace/qualification. No networked CI service is
++claimed by this intentionally incomplete profile.
++
++Guarded cleanup must consume its own predeclared cleanup permit before Remove.
++If not yet supported, retain the original reservation and report leaked/unknown;
++do not invoke an unguarded cleanup as an emergency escape. Cleanup loops and
++nested storage-driver reverts need the same rule, not only the outer hook.
++
++## Log/run path handling
++
++Current empty-create calls CreateInternal with clearLogDir=true, causing two
++post-row `os.RemoveAll` calls. The narrow guarded branch should set clearLogDir
++FALSE and reject preexisting path conflicts rather than delete them. This is a
++new restricted branch behavior, not a reinterpretation of today's tests.
++
++A pathname existence check is not identity-safe deletion authorization. If log
++cleanup is later required, it needs an anchored directory capability, retained
++path/incarnation binding, symlink/mount/race controls and a separate typed effect
++permit. Never reuse the storage-create permit for RemoveAll. Disabling cleanup
++also requires proving later create/log code cannot truncate or replace those
++preexisting paths; the preflight check alone is not that proof.
++
++## Integration test acceptance, not another stand-alone boolean model
++
++1. Build the real guarded call chain against pinned native drivers and state.
++2. Exercise real effective root-only policy and reject altered profiles/device
++   order/source kind before creation or device callbacks.
++3. Inject native DB commit uncertainty: no EffectPermit, no device/storage call.
++4. Run real caller failure/revert paths: every reached cleanup is denied or has
++   a distinct committed child attempt; no raw fallback.
++5. Prove native locks remain held/revalidated across initialization and callback
++   boundaries; test delayed calls after seal and restart without issuing permits.
++6. Show log/run conflicts cannot be deleted/truncated through any supported path.
++
++Daemon native dependencies remain unbuilt here. These gates cannot be replaced
++by the passing SQLite/native-mapper tests. No physical release is proposed.
+diff --git a/qualification/nativebuild/Dockerfile b/qualification/nativebuild/Dockerfile
+new file mode 100644
+index 000000000..8127e8c6c
+--- /dev/null
++++ b/qualification/nativebuild/Dockerfile
+@@ -0,0 +1,29 @@
++# Build via run.sh only, which requires an official Debian image pinned by digest.
++ARG BASE_IMAGE
++FROM ${BASE_IMAGE}
++ARG DEBIAN_FRONTEND=noninteractive
++ENV GOTOOLCHAIN=local
++RUN . /etc/os-release && test "$ID" = debian && test "$VERSION_ID" = 13 \
++ && apt-get update && apt-get install --no-install-recommends -y \
++    ca-certificates gcc g++ make pkg-config golang-go \
++    libacl1-dev libcap-dev libdbus-1-dev libcowsql-dev liblxc-dev \
++    libseccomp-dev libselinux1-dev libsqlite3-dev libudev-dev \
++ && dpkg-query -W -f='${Package}\t${Version}\n' | sort > /native-package-versions.tsv \
++ && rm -rf /var/lib/apt/lists/*
++# No lxc/incus service, daemon binary, Docker socket or host directory is mounted.
++WORKDIR /src
++COPY . /src
++RUN test "$(cat qualification/nativebuild/INCUS_SOURCE_REVISION)" = a99413afd0c742da3bba10eb4f75d639f9dbbd32 \
++ && go mod verify \
++ && go mod download \
++ && go mod verify \
++ && mkdir /out \
++ && cp /native-package-versions.tsv /out/ \
++ && go version > /out/go-version.txt \
++ && go env > /out/go-env.txt \
++ && go test -c -o /out/incusd-compile-only.test ./cmd/incusd \
++ && go test -race -count=3 ./qualification/nativefrontier \
++ && go vet ./qualification/nativefrontier
++# Only the already-reviewed nonprivileged fixture tests are executable at runtime.
++# Never run incusd-compile-only.test or incusd; full daemon validation is not covered.
++ENTRYPOINT ["/bin/true"]
+diff --git a/qualification/nativebuild/INCUS_SOURCE_REVISION b/qualification/nativebuild/INCUS_SOURCE_REVISION
+new file mode 100644
+index 000000000..3a03d90b2
+--- /dev/null
++++ b/qualification/nativebuild/INCUS_SOURCE_REVISION
+@@ -0,0 +1 @@
++a99413afd0c742da3bba10eb4f75d639f9dbbd32
+diff --git a/qualification/nativebuild/README.md b/qualification/nativebuild/README.md
+new file mode 100644
+index 000000000..225c72154
+--- /dev/null
++++ b/qualification/nativebuild/README.md
+@@ -0,0 +1,34 @@
++# Disposable native compile recipe (prepared, not executed)
++
++This recipe attempts a pinned-source Incus daemon **compile only** and runs the
++nonprivileged qualification fixtures. It does not run Incus, mount a host socket,
++request devices/privileged mode, change live hosts, or grant release authority.
++The current workspace has neither Docker nor Podman. Therefore this recipe has
++NOT built an image or verified package availability; do not report it passing.
++
++Use a disposable trusted build worker. Supply a verified official Debian 13 slim
++image by immutable manifest digest, not a moving tag:
++
++```
++qualification/nativebuild/run.sh docker.io/library/debian@sha256:<verified-64-hex-digest>
++```
++
++The digest must identify Debian **13**. The script validates official image name
++and digest syntax; it cannot derive distro version from a hash. The Dockerfile
++uses that official image's signed distro apt sources, no third-party package
++repository/install script. Before execution review the resolved image and apt
++sources. Go uses the pinned source go.mod/go.sum; downloaded dependency checksums
++are verified by Go. No user credentials are supplied.
++
++Exact resolved package versions are generated in `/out/native-package-versions.tsv`,
++with Go version/environment in `/out`. These values are **unknown until a real
++build succeeds**, not guessed. The base digest and source commit must accompany
++any build evidence. Apt repositories may evolve; exact package manifest captures
++that build but alone does not make future builds reproducible. A subsequent
++qualified workflow should pin a verified official snapshot/versions.
++
++The compile artifact `/out/incusd-compile-only.test` must NOT be executed. Fixture
++success uses fake storage/row objects and cannot establish native driver semantics,
++complete mutation coverage, cowsql transaction behavior, or safe capacity release.
++Do not run this on a production runner with secrets or combine it with live Incus.
++There is intentionally no auto-triggered CI workflow or automatic publishing here.
+diff --git a/qualification/nativebuild/run.sh b/qualification/nativebuild/run.sh
+new file mode 100755
+index 000000000..f3225c50b
+--- /dev/null
++++ b/qualification/nativebuild/run.sh
+@@ -0,0 +1,25 @@
++#!/bin/sh
++# Offline-prepared recipe. Requires a disposable Docker/Podman build worker.
++set -eu
++base=${1:?Usage: run.sh docker.io/library/debian@sha256:DIGEST}
++case "$base" in docker.io/library/debian@sha256:*) ;; *) echo 'Require official Debian image pinned by digest' >&2; exit 2;; esac
++digest=${base##*@sha256:}
++[ "${#digest}" -eq 64 ] && ! printf '%s' "$digest" | grep -q '[^0-9a-f]' || exit 2
++engine=${CONTAINER_ENGINE:-docker}
++case "$engine" in docker|podman) ;; *) echo 'Unsupported engine' >&2; exit 2;; esac
++command -v "$engine" >/dev/null
++root=$(git rev-parse --show-toplevel)
++[ "$(git -C "$root" rev-parse a99413afd0c742da3bba10eb4f75d639f9dbbd32^{commit})" = a99413afd0c742da3bba10eb4f75d639f9dbbd32 ]
++git -C "$root" merge-base --is-ancestor a99413afd0c742da3bba10eb4f75d639f9dbbd32 HEAD
++# Ensure none of the actual pinned upstream sources changed. Only qualification/
++# is permitted by this prototype. No untracked upstream files enter the context.
++[ -z "$(git -C "$root" diff --name-only a99413afd0c742da3bba10eb4f75d639f9dbbd32 HEAD -- . ':!qualification')" ]
++context=$(mktemp -d)
++trap 'rm -rf "$context"' EXIT HUP INT TERM
++git -C "$root" archive HEAD | tar -x -C "$context"
++# No host socket, credentials, devices, privileged mode, runtime or host mounts.
++# The build does access signed distro repositories and Go module downloads.
++"$engine" build --no-cache --build-arg "BASE_IMAGE=$base" \
++ -f "$context/qualification/nativebuild/Dockerfile" \
++ -t incus-native-frontier-compile-only:local "$context"
++printf '%s\n' 'Build success is compile-only plus fixture tests, NOT daemon validation.'
+diff --git a/qualification/nativefrontier/backup_prefix_test.go b/qualification/nativefrontier/backup_prefix_test.go
+new file mode 100644
+index 000000000..4f218cd97
+--- /dev/null
++++ b/qualification/nativefrontier/backup_prefix_test.go
+@@ -0,0 +1,146 @@
++package nativefrontier
++
++// Only the pinned backup import ERROR prefix is executed with fake storage.
++// A sentinel ends the fixture before all remaining import/posthook work. No
++// successful import, physical completion, or release protocol is implemented.
++import (
++	"errors"
++	"go/format"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/lxc/incus/v6/shared/revert"
++)
++
++var prefixStop = errors.New("fixture boundary before remaining import work")
++
++type backupInfo struct{ Project, Name string }
++type backupVolume struct{}
++
++func (backupVolume) MountPath() string { return "fixture-only" }
++
++type backupHarness struct {
++	driver       *backupDriver
++	symlinkError bool
++}
++type backupDriver struct {
++	physical                                 bool
++	beforeCallError, loseACK, cleanupFailure bool
++	calls, cleanupCalls                      int
++}
++
++func (d *backupDriver) CreateVolumeFromBackup(_ backupVolume, _ backupInfo, _ any, _ any) (func() error, revert.Hook, error) {
++	if d.beforeCallError {
++		return nil, nil, errors.New("intent unavailable before fixture I/O")
++	}
++	d.calls++
++	d.physical = true
++	cleanup := func() {
++		d.cleanupCalls++
++		if !d.cleanupFailure {
++			d.physical = false
++		}
++	}
++	if d.loseACK {
++		return nil, cleanup, errors.New("native backup return unknown")
++	}
++	return func() error { return nil }, cleanup, nil
++}
++func (b *backupHarness) ensureInstanceSymlink(_ any, _ string, _ string, _ string) error {
++	if b.symlinkError {
++		return errors.New("symlink stage failed")
++	}
++	return nil
++}
++
++// All statements through the symlink-error branch are pinned upstream source.
++// Only the signature/types and final sentinel are fixture scaffolding.
++func pinnedBackupErrorPrefix(b *backupHarness, vol backupVolume, srcBackup backupInfo, srcData any, op any, instanceType any) (func() error, revert.Hook, error) {
++	importRevert := revert.New()
++	defer importRevert.Fail()
++
++	// Unpack the backup into the new storage volume(s).
++	volPostHook, revertHook, err := b.driver.CreateVolumeFromBackup(vol, srcBackup, srcData, op)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if revertHook != nil {
++		importRevert.Add(revertHook)
++	}
++
++	err = b.ensureInstanceSymlink(instanceType, srcBackup.Project, srcBackup.Name, vol.MountPath())
++	if err != nil {
++		return nil, nil, err
++	}
++
++	_ = volPostHook
++	return nil, nil, prefixStop
++}
++func TestPinnedBackupErrorPrefixIdentity(t *testing.T) {
++	pinnedMethod(t, "internal/server/storage/backend.go", "cb8275216f42b2685fd8a76718953dc4020975d6597de420c70721509d281b74", "CreateInstanceFromBackup")
++	raw, err := os.ReadFile("../../internal/server/storage/backend.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	src := string(raw)
++	src = src[strings.Index(src, "func (b *backend) CreateInstanceFromBackup("):]
++	start := strings.Index(src, "importRevert := revert.New()")
++	end := strings.Index(src, "importRevert.Add(func()")
++	signature := "func pinnedBackupErrorPrefix(b *backupHarness,vol backupVolume,srcBackup backupInfo,srcData any,op any,instanceType any)(func()error,revert.Hook,error){\n"
++	expected, err := format.Source([]byte("package nativefrontier\n" + signature + src[start:end] + "_=volPostHook\nreturn nil,nil,prefixStop\n}"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	own, err := os.ReadFile("backup_prefix_test.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(own)
++	start = strings.Index(text, "func pinnedBackupErrorPrefix(")
++	end = strings.Index(text, "func TestPinnedBackupErrorPrefixIdentity(")
++	actual, err := format.Source([]byte("package nativefrontier\n" + text[start:end]))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(actual) != string(expected) {
++		t.Fatal("pinned backup error prefix changed")
++	}
++}
++func TestBackupDriverErrorBeforeRevertRegistrationLeavesStorage(t *testing.T) {
++	d := &backupDriver{loseACK: true}
++	b := &backupHarness{driver: d}
++	_, _, err := pinnedBackupErrorPrefix(b, backupVolume{}, backupInfo{}, nil, nil, nil)
++	if err == nil || err == prefixStop || !d.physical || d.calls != 1 || d.cleanupCalls != 0 {
++		t.Fatal("pre-registration lost ACK counterexample lost", d, err)
++	}
++	// A returned hook accompanied by error is not registered by this prefix.
++	// There is no instance/volume database row in this fixture at all.
++}
++func TestBackupRegisteredCleanupCannotCertifyAbsence(t *testing.T) {
++	d := &backupDriver{cleanupFailure: true}
++	b := &backupHarness{driver: d, symlinkError: true}
++	_, _, err := pinnedBackupErrorPrefix(b, backupVolume{}, backupInfo{}, nil, nil, nil)
++	if err == nil || err.Error() != "symlink stage failed" || !d.physical || d.cleanupCalls != 1 {
++		t.Fatal("void revert hook failure was mistaken for absence", d, err)
++	}
++}
++func TestBackupPrefixEarlyDeniedAttemptHasNoFixtureNativeEffect(t *testing.T) {
++	d := &backupDriver{beforeCallError: true}
++	b := &backupHarness{driver: d}
++	_, _, err := pinnedBackupErrorPrefix(b, backupVolume{}, backupInfo{}, nil, nil, nil)
++	if err == nil || d.physical || d.calls != 0 || d.cleanupCalls != 0 {
++		t.Fatal("early denial dispatched storage", d, err)
++	}
++	// This is an injected failure, NOT a durable no-row admission implementation.
++}
++func TestBackupPrefixStopsWithoutClaimingSuccessfulImport(t *testing.T) {
++	d := &backupDriver{}
++	b := &backupHarness{driver: d}
++	_, _, err := pinnedBackupErrorPrefix(b, backupVolume{}, backupInfo{}, nil, nil, nil)
++	if err != prefixStop || d.cleanupCalls != 1 || d.physical {
++		t.Fatal("prefix boundary bypassed", d, err)
++	}
++	// Success of the real remainder/posthook is intentionally not represented.
++}
+diff --git a/qualification/nativefrontier/empty_path_test.go b/qualification/nativefrontier/empty_path_test.go
+new file mode 100644
+index 000000000..846f47f21
+--- /dev/null
++++ b/qualification/nativefrontier/empty_path_test.go
+@@ -0,0 +1,165 @@
++// Test-only transplant of pinned upstream empty-create orchestration.
++// Only signature and two dependency calls are adapted; no actual Incus daemon,
++// storage backend, cgroup, cowsql or privileges are exercised.
++package nativefrontier
++
++import (
++	"crypto/sha256"
++	"errors"
++	"fmt"
++	"github.com/lxc/incus/v6/shared/revert"
++	"go/format"
++	"os"
++	"strings"
++	"testing"
++)
++
++func pinnedEmptyCreate(h *nativeHarness) (*fakeInstance, error) {
++	revert := revert.New()
++	defer revert.Fail()
++
++	// Create the instance record.
++	inst, instOp, cleanup, err := h.createInternal()
++	if err != nil {
++		return nil, fmt.Errorf("Failed creating instance record: %w", err)
++	}
++
++	revert.Add(cleanup)
++	defer instOp.Done(err)
++
++	pool, err := h.loadPool(inst)
++	if err != nil {
++		return nil, fmt.Errorf("Failed loading instance storage pool: %w", err)
++	}
++
++	err = pool.CreateInstance(inst, nil)
++	if err != nil {
++		return nil, fmt.Errorf("Failed creating instance: %w", err)
++	}
++
++	revert.Add(func() { _ = inst.Delete(true) })
++
++	err = inst.UpdateBackupFile()
++	if err != nil {
++		return nil, err
++	}
++
++	revert.Success()
++	return inst, nil
++}
++
++type nativeHarness struct {
++	row, physical                                                     bool
++	journalUnavailable, loseStorageACK, backupFailure, cleanupFailure bool
++	attempts, deletes                                                 int
++	operationDone                                                     error
++}
++type fakeInstance struct{ h *nativeHarness }
++type fakeOperation struct{ h *nativeHarness }
++type fakePool struct{ h *nativeHarness }
++
++func (h *nativeHarness) createInternal() (*fakeInstance, *fakeOperation, revert.Hook, error) {
++	h.row = true
++	return &fakeInstance{h}, &fakeOperation{h}, func() { h.row = false }, nil
++}
++func (h *nativeHarness) loadPool(_ *fakeInstance) (*fakePool, error) { return &fakePool{h}, nil }
++func (o *fakeOperation) Done(err error)                              { o.h.operationDone = err }
++func (p *fakePool) CreateInstance(_ *fakeInstance, op any) error {
++	if op != nil {
++		return errors.New("unexpected non-nil operation propagation")
++	}
++	// Proposed BEFORE-native-I/O journal boundary, represented by a fixture.
++	if p.h.journalUnavailable {
++		return errors.New("intent persistence failed")
++	}
++	p.h.attempts++
++	p.h.physical = true
++	if p.h.loseStorageACK {
++		return errors.New("storage outcome unknown")
++	}
++	return nil
++}
++func (i *fakeInstance) UpdateBackupFile() error {
++	if i.h.backupFailure {
++		return errors.New("backup failure")
++	}
++	return nil
++}
++func (i *fakeInstance) Delete(force bool) error {
++	i.h.deletes++
++	if !force {
++		return errors.New("expected upstream force cleanup")
++	}
++	if i.h.cleanupFailure {
++		return errors.New("cleanup incomplete")
++	}
++	i.h.physical = false
++	return nil
++}
++func TestPinnedEmptyCreateBodyIdentity(t *testing.T) {
++	raw, err := os.ReadFile("../../cmd/incusd/instance.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if fmt.Sprintf("%x", sha256.Sum256(raw)) != "a0869997881bf2475cecc9f1436dd90ed3d373e9b74a57d1dfeeb651191c474c" {
++		t.Fatal("pinned source changed")
++	}
++	src := string(raw)
++	part := src[strings.Index(src, "func instanceCreateAsEmpty("):strings.Index(src, "// instanceImageTransfer")]
++	body := strings.TrimSpace(part[strings.Index(part, "{"):])
++	body = strings.ReplaceAll(body, "instance.CreateInternal(s, args, op, true, true)", "h.createInternal()")
++	body = strings.ReplaceAll(body, "storagePools.LoadByInstance(s, inst)", "h.loadPool(inst)")
++	expected, err := format.Source([]byte("package nativefrontier\nfunc pinnedEmptyCreate(h *nativeHarness) (*fakeInstance, error) " + body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	own, err := os.ReadFile("empty_path_test.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	a := strings.Index(string(own), "func pinnedEmptyCreate(")
++	b := strings.Index(string(own), "type nativeHarness struct")
++	actual, err := format.Source([]byte("package nativefrontier\n" + string(own)[a:b]))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(actual) != string(expected) {
++		t.Fatal("transplanted upstream control flow changed")
++	}
++}
++func TestNativeJournalFailureStopsStorageBeforeAttempt(t *testing.T) {
++	h := &nativeHarness{journalUnavailable: true}
++	_, err := pinnedEmptyCreate(h)
++	if err == nil || h.physical || h.attempts != 0 || h.row {
++		t.Fatal("failed before-I/O intent did not fail closed", h, err)
++	}
++}
++func TestNativeLostStorageACKLeavesPhysicalDespiteNoRow(t *testing.T) {
++	h := &nativeHarness{loseStorageACK: true}
++	_, err := pinnedEmptyCreate(h)
++	if err == nil || !h.physical || h.row || h.attempts != 1 || h.deletes != 0 {
++		t.Fatal("lost ACK counterexample disappeared", h, err)
++	}
++	// Deferred Done(err) captured the earlier nil, not later storage error.
++	// An operation-lock Done callback is therefore not physical terminal proof.
++	if h.operationDone != nil {
++		t.Fatal("pinned defer behavior changed")
++	}
++}
++func TestNativeIgnoredCleanupFailureLeavesPhysicalDespiteNoRow(t *testing.T) {
++	h := &nativeHarness{backupFailure: true, cleanupFailure: true}
++	_, err := pinnedEmptyCreate(h)
++	if err == nil || !h.physical || h.row || h.deletes != 1 {
++		t.Fatal("revert counterexample disappeared", h, err)
++	}
++	if err.Error() != "backup failure" {
++		t.Fatal("upstream cleanup failure unexpectedly propagated", err)
++	}
++}
++func TestNativeSuccessStillOwnsPhysicalAllocation(t *testing.T) {
++	h := &nativeHarness{}
++	_, err := pinnedEmptyCreate(h)
++	if err != nil || !h.physical || !h.row || h.deletes != 0 {
++		t.Fatal("native creation mismatch", h, err)
++	}
++}
+diff --git a/qualification/nativefrontier/frontier_test.go b/qualification/nativefrontier/frontier_test.go
+new file mode 100644
+index 000000000..4d3549ba0
+--- /dev/null
++++ b/qualification/nativefrontier/frontier_test.go
+@@ -0,0 +1,299 @@
++// Offline SQL transaction experiment only; not linked by incusd.
++package nativefrontier
++
++import (
++	"database/sql"
++	"errors"
++	"fmt"
++	"path/filepath"
++	"sync"
++	"testing"
++
++	_ "github.com/mattn/go-sqlite3"
++)
++
++var denied = errors.New("native frontier denied")
++
++const schema = `
++CREATE TABLE epoch(id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL, sealed INTEGER NOT NULL);
++INSERT INTO epoch VALUES(1,1,0);
++CREATE TABLE accepted(seq INTEGER PRIMARY KEY AUTOINCREMENT, request TEXT NOT NULL UNIQUE, epoch INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('accepted','row_bound','deleting')));
++-- Minimal native row fixture, NOT Incus's full schema or all driver side effects.
++CREATE TABLE instances(id INTEGER PRIMARY KEY, project TEXT NOT NULL, name TEXT NOT NULL, native_token TEXT, UNIQUE(project,name));
++CREATE TABLE incarnations(token TEXT PRIMARY KEY, instance_id INTEGER NOT NULL UNIQUE, request TEXT NOT NULL UNIQUE REFERENCES accepted(request), state TEXT NOT NULL CHECK(state IN ('row_bound','deleting')));
++CREATE TRIGGER keep_request BEFORE DELETE ON accepted BEGIN SELECT RAISE(ABORT,'retain history'); END;
++`
++
++func database(t *testing.T) *sql.DB {
++	t.Helper()
++	d, err := sql.Open("sqlite3", "file:"+filepath.Join(t.TempDir(), "native.db")+"?_journal_mode=WAL&_synchronous=FULL&_foreign_keys=on&_txlock=immediate&_busy_timeout=5000")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { d.Close() })
++	if _, err = d.Exec(schema); err != nil {
++		t.Fatal(err)
++	}
++	return d
++}
++func transaction(d *sql.DB, f func(*sql.Tx) error) error {
++	tx, err := d.Begin()
++	if err != nil {
++		return err
++	}
++	defer tx.Rollback()
++	if err = f(tx); err != nil {
++		return err
++	}
++	return tx.Commit()
++}
++func accept(tx *sql.Tx, epoch int, id string) error {
++	r, err := tx.Exec(`INSERT INTO accepted(request,epoch,state) SELECT ?,generation,'accepted' FROM epoch WHERE id=1 AND generation=? AND sealed=0`, id, epoch)
++	if err != nil {
++		return err
++	}
++	n, err := r.RowsAffected()
++	if err != nil {
++		return err
++	}
++	if n != 1 {
++		return denied
++	}
++	return nil
++}
++func seal(tx *sql.Tx, epoch int) error {
++	r, err := tx.Exec(`UPDATE epoch SET sealed=1 WHERE id=1 AND generation=? AND sealed=0`, epoch)
++	if err != nil {
++		return err
++	}
++	n, err := r.RowsAffected()
++	if err != nil {
++		return err
++	}
++	if n != 1 {
++		return denied
++	}
++	return nil
++}
++
++// claimRow records only database-row authorization, never physical birth/outcome.
++// claimRow must run in the very SAME transaction as the native INSERT.
++// Tokens here are deterministic test values; production must generate an
++// unforgeable/non-reused incarnation itself, never take caller volatile.uuid.
++func claimRow(tx *sql.Tx, epoch int, id, token string, nativeID int64) error {
++	r, err := tx.Exec(`UPDATE accepted SET state='row_bound' WHERE request=? AND epoch=? AND state='accepted' AND EXISTS(SELECT 1 FROM epoch WHERE id=1 AND generation=? AND sealed=0) AND EXISTS(SELECT 1 FROM instances WHERE id=? AND native_token=?)`, id, epoch, epoch, nativeID, token)
++	if err != nil {
++		return err
++	}
++	n, err := r.RowsAffected()
++	if err != nil {
++		return err
++	}
++	if n != 1 {
++		return denied
++	}
++	_, err = tx.Exec(`INSERT INTO incarnations VALUES(?,?,?,'row_bound')`, token, nativeID, id)
++	return err
++}
++func rowBirth(d *sql.DB, id, token, name string) error {
++	return transaction(d, func(tx *sql.Tx) error {
++		r, err := tx.Exec(`INSERT INTO instances(project,name,native_token) VALUES('default',?,?)`, name, token)
++		if err != nil {
++			return err
++		}
++		row, err := r.LastInsertId()
++		if err != nil {
++			return err
++		}
++		return claimRow(tx, 1, id, token, row)
++	})
++}
++
++// beginDelete is merely an identity guard + durable intent, NOT permission to
++// call a driver. A real adapter must hold native lifecycle locks/reservations
++// across physical cleanup and every rename/start/restore path. No finalizer exists.
++func beginDelete(tx *sql.Tx, token string, row int64) error {
++	r, err := tx.Exec(`UPDATE incarnations SET state='deleting' WHERE token=? AND instance_id=? AND state='row_bound' AND EXISTS(SELECT 1 FROM instances WHERE id=incarnations.instance_id AND native_token=incarnations.token)`, token, row)
++	if err != nil {
++		return err
++	}
++	n, err := r.RowsAffected()
++	if err != nil {
++		return err
++	}
++	if n != 1 {
++		return denied
++	}
++	_, err = tx.Exec(`UPDATE accepted SET state='deleting' WHERE request=(SELECT request FROM incarnations WHERE token=?)`, token)
++	return err
++}
++func count(t *testing.T, d *sql.DB, table string) int {
++	t.Helper()
++	var n int
++	if err := d.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
++		t.Fatal(err)
++	}
++	return n
++}
++func must(t *testing.T, err error) {
++	t.Helper()
++	if err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestLateAcceptedHandlerCannotCommitBirthAfterSeal(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "pre-body") }))
++	must(t, transaction(d, func(tx *sql.Tx) error { return seal(tx, 1) }))
++	if !errors.Is(rowBirth(d, "pre-body", "inc1", "runner"), denied) {
++		t.Fatal("late birth accepted")
++	}
++	if count(t, d, "instances") != 0 || count(t, d, "incarnations") != 0 || count(t, d, "accepted") != 1 {
++		t.Fatal("rollback/history violated")
++	}
++}
++func TestBirthCommittedBeforeSealRemainsChargedAndNoRepeat(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++	must(t, rowBirth(d, "r", "inc1", "runner"))
++	must(t, transaction(d, func(tx *sql.Tx) error { return seal(tx, 1) }))
++	if rowBirth(d, "r", "inc2", "other") == nil {
++		t.Fatal("repeat")
++	}
++	if count(t, d, "instances") != 1 || count(t, d, "incarnations") != 1 {
++		t.Fatal("lost birth")
++	}
++}
++func TestTransactionRollbackDoesNotConsumeGrant(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++	injected := errors.New("after native insertion before commit")
++	err := transaction(d, func(tx *sql.Tx) error {
++		_, e := tx.Exec(`INSERT INTO instances VALUES(1,'default','runner','inc1')`)
++		if e != nil {
++			return e
++		}
++		if e = claimRow(tx, 1, "r", "inc1", 1); e != nil {
++			return e
++		}
++		return injected
++	})
++	if !errors.Is(err, injected) || count(t, d, "instances") != 0 {
++		t.Fatal(err)
++	}
++	must(t, rowBirth(d, "r", "inc1", "runner"))
++}
++func TestLostCommitAcknowledgmentCannotDuplicateBirth(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++	// COMMIT succeeds but caller intentionally discards its success. This is not
++	// a simulated OS fsync failure: recovery is conservative for an unknown ACK.
++	must(t, rowBirth(d, "r", "inc1", "runner"))
++	if rowBirth(d, "r", "inc2", "replacement") == nil {
++		t.Fatal("duplicate")
++	}
++	if count(t, d, "instances") != 1 {
++		t.Fatal("repeat side effect")
++	}
++}
++func TestSealBirthSerialization(t *testing.T) {
++	for i := 0; i < 20; i++ {
++		d := database(t)
++		must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++		var wg sync.WaitGroup
++		wg.Add(2)
++		var b, s error
++		go func() { defer wg.Done(); b = rowBirth(d, "r", "inc1", "runner") }()
++		go func() { defer wg.Done(); s = transaction(d, func(tx *sql.Tx) error { return seal(tx, 1) }) }()
++		wg.Wait()
++		must(t, s)
++		if b != nil && !errors.Is(b, denied) {
++			t.Fatal(b)
++		}
++		n := count(t, d, "instances")
++		if (b == nil && n != 1) || (b != nil && n != 0) {
++			t.Fatal("partial birth")
++		}
++	}
++}
++func TestImmutableIdentityCheckedBeforeAnyCleanup(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++	must(t, rowBirth(d, "r", "new-incarnation", "runner"))
++	cleanup := 0
++	err := transaction(d, func(tx *sql.Tx) error { return beginDelete(tx, "stale-incarnation", 1) })
++	if err == nil {
++		cleanup++
++	}
++	if !errors.Is(err, denied) || cleanup != 0 {
++		t.Fatal("stale delete")
++	}
++	must(t, transaction(d, func(tx *sql.Tx) error { return beginDelete(tx, "new-incarnation", 1) }))
++	if count(t, d, "instances") != 1 || count(t, d, "accepted") != 1 {
++		t.Fatal("intent incorrectly reclaimed")
++	}
++}
++func TestUncoveredNativeWritesRemainCounterexample(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return seal(tx, 1) }))
++	_, err := d.Exec(`INSERT INTO instances VALUES(1,'foreign','bypass',NULL)`)
++	must(t, err)
++	if count(t, d, "instances") != 1 || count(t, d, "incarnations") != 0 {
++		t.Fatal("counterexample lost")
++	}
++	t.Log(fmt.Sprint("extension not wired: direct native mapper bypass remains possible; no authority"))
++}
++
++// Incus CreateInternal commits its row before storage CreateInstance and backup.
++// A later revert may remove the row while physical cleanup remains unknown.
++func TestPostCommitRowRevertDoesNotEraseUnknownPhysicalHistory(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++	must(t, rowBirth(d, "r", "inc1", "runner"))
++	_, err := d.Exec(`DELETE FROM instances WHERE id=1`)
++	must(t, err)
++	if count(t, d, "instances") != 0 || count(t, d, "incarnations") != 1 || count(t, d, "accepted") != 1 {
++		t.Fatal("native row revert erased history")
++	}
++	must(t, transaction(d, func(tx *sql.Tx) error { return seal(tx, 1) }))
++	if rowBirth(d, "r", "inc2", "runner") == nil {
++		t.Fatal("reused unresolved intent")
++	}
++}
++
++func TestDeletedAndReusedRowIDsDoNotAuthorizeOldDelete(t *testing.T) {
++	d := database(t)
++	must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++	must(t, rowBirth(d, "r", "old", "runner"))
++	_, err := d.Exec(`DELETE FROM instances WHERE id=1`)
++	must(t, err)
++	if !errors.Is(transaction(d, func(tx *sql.Tx) error { return beginDelete(tx, "old", 1) }), denied) {
++		t.Fatal("absent row allowed old delete")
++	}
++	_, err = d.Exec(`INSERT INTO instances VALUES(1,'default','runner','replacement')`)
++	must(t, err)
++	if !errors.Is(transaction(d, func(tx *sql.Tx) error { return beginDelete(tx, "old", 1) }), denied) {
++		t.Fatal("reused row ID allowed old delete")
++	}
++}
++
++func TestClaimRowChecksCurrentNativeIdentity(t *testing.T) {
++	for _, present := range []bool{false, true} {
++		d := database(t)
++		must(t, transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "r") }))
++		if present {
++			_, err := d.Exec(`INSERT INTO instances VALUES(1,'default','runner','actual')`)
++			must(t, err)
++		}
++		err := transaction(d, func(tx *sql.Tx) error { return claimRow(tx, 1, "r", "wrong", 1) })
++		if !errors.Is(err, denied) || count(t, d, "incarnations") != 0 {
++			t.Fatal("invalid row claim", err)
++		}
++		var state string
++		must(t, d.QueryRow(`SELECT state FROM accepted WHERE request='r'`).Scan(&state))
++		if state != "accepted" {
++			t.Fatal("consumed invalid grant")
++		}
++	}
++}
+diff --git a/qualification/nativefrontier/lifecycle_tail_test.go b/qualification/nativefrontier/lifecycle_tail_test.go
+new file mode 100644
+index 000000000..00793e653
+--- /dev/null
++++ b/qualification/nativefrontier/lifecycle_tail_test.go
+@@ -0,0 +1,148 @@
++package nativefrontier
++
++// Exact pinned callback TAIL only. Scheduling, driver I/O and operation records
++// are simulations. The earlier stop/cleanup/autorestart decision is not executed.
++import (
++	"errors"
++	"fmt"
++	"go/format"
++	"os"
++	"strings"
++	"testing"
++)
++
++type lifecycleFixture struct {
++	ephemeral, effectObserved, fail            bool
++	starts, deletes, notifications, rebalances int
++}
++
++func (d *lifecycleFixture) Start(_ bool) error {
++	d.starts++
++	d.effectObserved = true
++	if d.fail {
++		return errors.New("unknown restart outcome")
++	}
++	return nil
++}
++func (d *lifecycleFixture) delete(_ bool) error {
++	d.deletes++
++	d.effectObserved = true
++	if d.fail {
++		return errors.New("unknown deletion outcome")
++	}
++	return nil
++}
++func (d *lifecycleFixture) notifyRestart() { d.notifications++ }
++func (d *lifecycleFixture) rebalance()     { d.rebalances++ }
++
++type lifecycleOperation struct{ errors []error }
++
++func (o *lifecycleOperation) Done(err error) { o.errors = append(o.errors, err) }
++func pinnedStopCallbackTail(d *lifecycleFixture, target string, autoRestart bool, op *lifecycleOperation) {
++	var err error // Declared in enclosing upstream callback.
++	// Reboot the container
++	if target == "reboot" || autoRestart {
++		// Start the container again
++		err = d.Start(false)
++		if err != nil {
++			op.Done(fmt.Errorf("Failed restarting instance: %w", err))
++			return
++		}
++
++		d.notifyRestart()
++
++		return
++	}
++
++	// Trigger a rebalance
++	d.rebalance()
++
++	// Destroy ephemeral containers
++	if d.ephemeral {
++		err = d.delete(true)
++		if err != nil {
++			op.Done(fmt.Errorf("Failed deleting ephemeral instance: %w", err))
++			return
++		}
++	}
++}
++
++func TestPinnedStopTailIdentity(t *testing.T) {
++	pinnedMethod(t, "internal/server/instance/drivers/driver_lxc.go", "5d2502f80e72098decb5f57f2df644006e0a17c0f8a93f017a216a6dcf59fda8", "onStop")
++	raw, err := os.ReadFile("../../internal/server/instance/drivers/driver_lxc.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	src := string(raw)
++	src = src[strings.Index(src, "func (d *lxc) onStop("):]
++	src = src[strings.Index(src, "// Reboot the container"):strings.Index(src, "}(d, target, op)")]
++	src = strings.ReplaceAll(src, "d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceRestarted.Event(d, nil))", "d.notifyRestart()")
++	src = strings.ReplaceAll(src, `cgroup.TaskSchedulerTrigger("container", d.name, "stopped")`, "d.rebalance()")
++	signature := "func pinnedStopCallbackTail(d *lifecycleFixture,target string,autoRestart bool,op *lifecycleOperation){\nvar err error // Declared in enclosing upstream callback.\n"
++	expected, err := format.Source([]byte("package nativefrontier\n" + signature + src + "}"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	own, err := os.ReadFile("lifecycle_tail_test.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(own)
++	text = text[strings.Index(text, "func pinnedStopCallbackTail("):strings.Index(text, "func TestPinnedStopTailIdentity(")]
++	actual, err := format.Source([]byte("package nativefrontier\n" + text))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(expected) != string(actual) {
++		t.Fatal("pinned tail changed")
++	}
++}
++func TestRestartTailSkipsEphemeralDelete(t *testing.T) {
++	for _, tc := range []struct {
++		target string
++		auto   bool
++	}{{"reboot", false}, {"stop", true}} {
++		d := &lifecycleFixture{ephemeral: true}
++		op := &lifecycleOperation{}
++		pinnedStopCallbackTail(d, tc.target, tc.auto, op)
++		if d.starts != 1 || d.deletes != 0 || d.notifications != 1 || d.rebalances != 0 {
++			t.Fatal("restart branch changed", d)
++		}
++	}
++}
++func TestInternalTailErrorsDoNotProveNoEffect(t *testing.T) {
++	for _, target := range []string{"stop", "reboot"} {
++		d := &lifecycleFixture{ephemeral: true, fail: true}
++		op := &lifecycleOperation{}
++		pinnedStopCallbackTail(d, target, false, op)
++		if !d.effectObserved || len(op.errors) != 1 || op.errors[0] == nil {
++			t.Fatal("unknown native outcome erased", d, op)
++		}
++		if target == "stop" && (d.deletes != 1 || d.starts != 0) {
++			t.Fatal("internal deletion not called")
++		}
++	}
++}
++func TestQueuedInternalCallbackAfterAPIReturnAndSeal(t *testing.T) {
++	d := &lifecycleFixture{ephemeral: true}
++	op := &lifecycleOperation{}
++	// A test-owned queue models upstream goroutine scheduling, not the daemon.
++	callback := func() { pinnedStopCallbackTail(d, "stop", false, op) }
++	apiReturned := true
++	ingressSealed := true
++	if !apiReturned || !ingressSealed || d.effectObserved {
++		t.Fatal("fixture ordering")
++	}
++	callback()
++	if d.deletes != 1 || !d.effectObserved {
++		t.Fatal("API-only seal was incorrectly treated as native callback fence")
++	}
++	// No authority, capacity charge, release, or real operation completion is inferred.
++}
++func TestNonEphemeralStopTailDoesNotDelete(t *testing.T) {
++	d := &lifecycleFixture{}
++	pinnedStopCallbackTail(d, "stop", false, &lifecycleOperation{})
++	if d.starts != 0 || d.deletes != 0 || d.rebalances != 1 {
++		t.Fatal("non-ephemeral branch changed", d)
++	}
++}
+diff --git a/qualification/nativefrontier/mutation_boundaries_test.go b/qualification/nativefrontier/mutation_boundaries_test.go
+new file mode 100644
+index 000000000..9d2c3ad82
+--- /dev/null
++++ b/qualification/nativefrontier/mutation_boundaries_test.go
+@@ -0,0 +1,144 @@
++package nativefrontier
++
++// Source-contract fixtures only: these parse pinned upstream code. They do not
++// execute an Incus driver, discover every caller, or provide release authority.
++import (
++	"crypto/sha256"
++	"fmt"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"os"
++	"testing"
++)
++
++func pinnedMethod(t *testing.T, path, hash, name string) *ast.FuncDecl {
++	t.Helper()
++	raw, err := os.ReadFile("../../" + path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if fmt.Sprintf("%x", sha256.Sum256(raw)) != hash {
++		t.Fatal("pinned source changed:", path)
++	}
++	file, err := parser.ParseFile(token.NewFileSet(), path, raw, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var found *ast.FuncDecl
++	for _, decl := range file.Decls {
++		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == name {
++			if found != nil {
++				t.Fatal("ambiguous method", name)
++			}
++			found = fn
++		}
++	}
++	if found == nil {
++		t.Fatal("method missing", name)
++	}
++	return found
++}
++func selectorName(expr ast.Expr) string {
++	switch x := expr.(type) {
++	case *ast.Ident:
++		return x.Name
++	case *ast.SelectorExpr:
++		return selectorName(x.X) + "." + x.Sel.Name
++	}
++	return ""
++}
++func callsNamed(node ast.Node, name string) []*ast.CallExpr {
++	var out []*ast.CallExpr
++	ast.Inspect(node, func(n ast.Node) bool {
++		if call, ok := n.(*ast.CallExpr); ok && selectorName(call.Fun) == name {
++			out = append(out, call)
++		}
++		return true
++	})
++	return out
++}
++func soleCall(t *testing.T, node ast.Node, name string) *ast.CallExpr {
++	t.Helper()
++	calls := callsNamed(node, name)
++	if len(calls) != 1 {
++		t.Fatalf("expected one %s call, got %d", name, len(calls))
++	}
++	return calls[0]
++}
++func TestPinnedBackupStoragePrecedesDeferredVolumeRowHook(t *testing.T) {
++	fn := pinnedMethod(t, "internal/server/storage/backend.go", "cb8275216f42b2685fd8a76718953dc4020975d6597de420c70721509d281b74", "CreateInstanceFromBackup")
++	native := soleCall(t, fn, "b.driver.CreateVolumeFromBackup")
++	var post *ast.FuncLit
++	ast.Inspect(fn, func(n ast.Node) bool {
++		a, ok := n.(*ast.AssignStmt)
++		if !ok {
++			return true
++		}
++		for i, l := range a.Lhs {
++			if id, ok := l.(*ast.Ident); ok && id.Name == "postHook" && i < len(a.Rhs) {
++				post, _ = a.Rhs[i].(*ast.FuncLit)
++			}
++		}
++		return true
++	})
++	if post == nil || native.Pos() >= post.Pos() {
++		t.Fatal("expected native storage before deferred post hook definition")
++	}
++	rows := callsNamed(post, "VolumeDBCreate")
++	if len(rows) != 2 {
++		t.Fatal("expected instance and snapshot volume row creation in post hook")
++	}
++	for _, row := range rows {
++		if row.Pos() <= native.Pos() {
++			t.Fatal("volume row precedes storage")
++		}
++	}
++	// AST nesting is important: the row call is in the returned closure, not an
++	// earlier transaction. This does NOT establish all callers or driver effects.
++	if len(callsNamed(fn, "instance.CreateInternal")) != 0 {
++		t.Fatal("revisit instance-row ordering")
++	}
++}
++func TestPinnedRebuildDeletesThenCreatesWithoutNewRowGrant(t *testing.T) {
++	fn := pinnedMethod(t, "internal/server/instance/drivers/driver_common.go", "4285ff9e2c791a85a6420da5abed139b5ec61edfa47f1033e3905e566d90a60f", "rebuildCommon")
++	remove := soleCall(t, fn, "pool.DeleteInstance")
++	empty := soleCall(t, fn, "pool.CreateInstance")
++	image := soleCall(t, fn, "pool.CreateInstanceFromImage")
++	update := soleCall(t, fn, "dbCluster.UpdateInstanceConfig")
++	if !(remove.Pos() < empty.Pos() && remove.Pos() < image.Pos() && empty.Pos() < update.Pos() && image.Pos() < update.Pos()) {
++		t.Fatal("rebuild ordering changed")
++	}
++	if len(callsNamed(fn, "instance.CreateInternal")) != 0 {
++		t.Fatal("revisit same-row rebuild premise")
++	}
++	// Sequential source ordering is not physical completion, especially when a
++	// deletion/create returns an error after side effects or loses its ACK.
++}
++func TestPinnedStopCallbackHasAsynchronousInternalMutations(t *testing.T) {
++	fn := pinnedMethod(t, "internal/server/instance/drivers/driver_lxc.go", "5d2502f80e72098decb5f57f2df644006e0a17c0f8a93f017a216a6dcf59fda8", "onStop")
++	var callback ast.Node
++	ast.Inspect(fn, func(n ast.Node) bool {
++		if goCall, ok := n.(*ast.GoStmt); ok && len(callsNamed(goCall, "d.Start")) > 0 {
++			if callback != nil {
++				t.Fatal("ambiguous callback")
++			}
++			callback = goCall
++		}
++		return true
++	})
++	if callback == nil {
++		t.Fatal("stop callback not found")
++	}
++	for name, arg := range map[string]string{"d.Start": "false", "d.delete": "true"} {
++		call := soleCall(t, callback, name)
++		if len(call.Args) != 1 || selectorName(call.Args[0]) != arg {
++			t.Fatal("internal mutation signature changed", name)
++		}
++	}
++	if len(callsNamed(callback, "d.Delete")) != 0 {
++		t.Fatal("revisit internal delete versus public Delete distinction")
++	}
++	// The callback is asynchronous and bypasses a new public HTTP request. The
++	// fact that we can inspect it is not authority to fence or charge it.
++}
+diff --git a/qualification/nativefrontier/storage_attempt_test.go b/qualification/nativefrontier/storage_attempt_test.go
+new file mode 100644
+index 000000000..a0930e707
+--- /dev/null
++++ b/qualification/nativefrontier/storage_attempt_test.go
+@@ -0,0 +1,326 @@
++package nativefrontier
++
++// Offline per-native-call journal seam. SQLite and fake storage are not Incus
++// cowsql/driver execution. Native locks, sole writers and complete coverage are
++// absent: this records uncertainty; it NEVER authorizes release or repetition.
++import (
++	"database/sql"
++	"errors"
++	"go/format"
++	"os"
++	"strings"
++	"testing"
++)
++
++const attemptSchema = `CREATE TABLE mutation_parents(request TEXT PRIMARY KEY REFERENCES accepted(request), incarnation TEXT NOT NULL REFERENCES incarnations(token));
++CREATE TABLE mutation_attempts(
++ request TEXT NOT NULL REFERENCES mutation_parents(request), phase TEXT NOT NULL CHECK(phase IN ('delete','create')),
++ incarnation TEXT NOT NULL, observation TEXT NOT NULL CHECK(observation IN ('attempted','returned_success','returned_error')),
++ PRIMARY KEY(request,phase));
++ CREATE TRIGGER keep_attempt BEFORE DELETE ON mutation_attempts BEGIN SELECT RAISE(ABORT,'retain attempt'); END;`
++
++func beginStorageAttempt(d *sql.DB, request, phase, incarnation string) error {
++	// No callback on failed/unknown COMMIT. A duplicate phase is NOT retried,
++	// including when its previous call returned an error after a native effect.
++	return transaction(d, func(tx *sql.Tx) error {
++		r, err := tx.Exec(`INSERT INTO mutation_attempts SELECT ?,?,?,'attempted' FROM accepted a JOIN epoch e ON e.id=1 AND e.generation=a.epoch JOIN mutation_parents p ON p.request=a.request AND p.incarnation=? WHERE a.request=? AND a.state='accepted' AND e.sealed=0 AND EXISTS(SELECT 1 FROM instances i JOIN incarnations n ON n.instance_id=i.id AND n.token=i.native_token WHERE n.token=?) AND (?='delete' OR EXISTS(SELECT 1 FROM mutation_attempts m WHERE m.request=a.request AND m.phase='delete' AND m.observation='returned_success'))`, request, phase, incarnation, incarnation, request, incarnation, phase)
++		if err != nil {
++			return err
++		}
++		n, err := r.RowsAffected()
++		if err != nil {
++			return err
++		}
++		if n != 1 {
++			return denied
++		}
++		return nil
++	})
++}
++
++func storageAttempt(d *sql.DB, request, phase, incarnation string, native func() error) error {
++	err := beginStorageAttempt(d, request, phase, incarnation)
++	if err != nil {
++		return err
++	}
++
++	nativeErr := native()
++	observation := "returned_success"
++	if nativeErr != nil {
++		observation = "returned_error"
++	}
++	r, err := d.Exec(`UPDATE mutation_attempts SET observation=? WHERE request=? AND phase=? AND observation='attempted'`, observation, request, phase)
++	if err != nil {
++		return errors.Join(nativeErr, err)
++	}
++	if n, countErr := r.RowsAffected(); countErr != nil || n != 1 {
++		return errors.Join(nativeErr, denied, countErr)
++	}
++	return nativeErr
++}
++
++type rebuildImage struct{ Fingerprint string }
++type rebuildStorage struct {
++	d                            *sql.DB
++	token                        string
++	physical                     bool
++	loseDeleteACK, loseCreateACK bool
++	calls                        []string
++}
++
++func (p *rebuildStorage) DeleteInstance(_ any, _ any) error {
++	return storageAttempt(p.d, "rebuild", "delete", p.token, func() error {
++		p.calls = append(p.calls, "delete")
++		p.physical = false
++		if p.loseDeleteACK {
++			return errors.New("delete ACK unknown")
++		}
++		return nil
++	})
++}
++func (p *rebuildStorage) CreateInstance(_ any, _ any) error { return p.create("empty") }
++func (p *rebuildStorage) CreateInstanceFromImage(_ any, _ string, _ any) error {
++	return p.create("image")
++}
++func (p *rebuildStorage) create(kind string) error {
++	return storageAttempt(p.d, "rebuild", "create", p.token, func() error {
++		p.calls = append(p.calls, kind)
++		p.physical = true
++		if p.loseCreateACK {
++			return errors.New("create ACK unknown")
++		}
++		return nil
++	})
++}
++
++// Exact storage-only prefix of pinned rebuildCommon; config updates and driver
++// preparation are deliberately NOT executed. Signature/predeclared err and the
++// final return are fixture scaffolding, checked against the source slice below.
++func pinnedRebuildStorage(pool *rebuildStorage, inst any, img *rebuildImage, op any) error {
++	var err error
++	err = pool.DeleteInstance(inst, op)
++	if err != nil {
++		return err
++	}
++
++	// Rebuild as empty if there is no image provided.
++	if img == nil {
++		err = pool.CreateInstance(inst, nil)
++		if err != nil {
++			return err
++		}
++	} else {
++		err = pool.CreateInstanceFromImage(inst, img.Fingerprint, op)
++		if err != nil {
++			return err
++		}
++	}
++
++	return nil
++}
++func TestPinnedRebuildStoragePrefixIdentity(t *testing.T) {
++	pinnedMethod(t, "internal/server/instance/drivers/driver_common.go", "4285ff9e2c791a85a6420da5abed139b5ec61edfa47f1033e3905e566d90a60f", "rebuildCommon")
++	raw, err := os.ReadFile("../../internal/server/instance/drivers/driver_common.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	src := string(raw)
++	start := strings.Index(src, "func (d *common) rebuildCommon(")
++	src = src[start:]
++	start = strings.Index(src, "err = pool.DeleteInstance(inst, op)")
++	end := strings.Index(src, "err = d.state.DB.Cluster.Transaction")
++	expected, err := format.Source([]byte("package nativefrontier\nfunc pinnedRebuildStorage(pool *rebuildStorage, inst any, img *rebuildImage, op any) error { var err error\n" + src[start:end] + "return nil\n}"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	own, err := os.ReadFile("storage_attempt_test.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(own)
++	start = strings.Index(text, "func pinnedRebuildStorage(")
++	end = strings.Index(text, "func TestPinnedRebuildStoragePrefixIdentity(")
++	actual, err := format.Source([]byte("package nativefrontier\n" + text[start:end]))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(actual) != string(expected) {
++		t.Fatal("pinned storage prefix changed")
++	}
++}
++func storageFixture(t *testing.T) *sql.DB {
++	d := database(t)
++	if _, err := d.Exec(attemptSchema); err != nil {
++		t.Fatal(err)
++	}
++	if err := transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "birth") }); err != nil {
++		t.Fatal(err)
++	}
++	if err := rowBirth(d, "birth", "native-incarnation", "guest"); err != nil {
++		t.Fatal(err)
++	}
++	if err := transaction(d, func(tx *sql.Tx) error { return accept(tx, 1, "rebuild") }); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := d.Exec("INSERT INTO mutation_parents VALUES('rebuild','native-incarnation')"); err != nil {
++		t.Fatal(err)
++	}
++	return d
++}
++func retainedAttempts(t *testing.T, d *sql.DB) int {
++	t.Helper()
++	var n int
++	if err := d.QueryRow("SELECT count(*) FROM mutation_attempts").Scan(&n); err != nil {
++		t.Fatal(err)
++	}
++	return n
++}
++func TestRebuildUnknownDeleteStopsBirthAndCannotReplay(t *testing.T) {
++	d := storageFixture(t)
++	p := &rebuildStorage{d: d, token: "native-incarnation", physical: true, loseDeleteACK: true}
++	if err := pinnedRebuildStorage(p, nil, nil, nil); err == nil {
++		t.Fatal("lost ACK accepted")
++	}
++	if len(p.calls) != 1 || p.physical || retainedAttempts(t, d) != 1 {
++		t.Fatal("delete uncertainty lost")
++	}
++	if err := pinnedRebuildStorage(p, nil, nil, nil); err == nil || len(p.calls) != 1 {
++		t.Fatal("unknown attempt replayed")
++	}
++}
++func TestRebuildNativeCreateErrorRetainsAttemptHistory(t *testing.T) {
++	for _, img := range []*rebuildImage{nil, {Fingerprint: "fixture-image"}} {
++		t.Run(func() string {
++			if img == nil {
++				return "empty"
++			}
++			return "image"
++		}(), func(t *testing.T) {
++			d := storageFixture(t)
++			p := &rebuildStorage{d: d, token: "native-incarnation", physical: true, loseCreateACK: true}
++			if err := pinnedRebuildStorage(p, nil, img, nil); err == nil {
++				t.Fatal("unknown create accepted")
++			}
++			if !p.physical || len(p.calls) != 2 || retainedAttempts(t, d) != 2 {
++				t.Fatal("lost rebuild effects/history")
++			}
++			if _, err := d.Exec("DELETE FROM mutation_attempts"); err == nil {
++				t.Fatal("attempts could be discarded")
++			}
++		})
++	}
++}
++func TestSealAfterAttemptDoesNotProveNativeQuiescence(t *testing.T) {
++	d := storageFixture(t)
++	effectObserved := false
++	err := storageAttempt(d, "rebuild", "delete", "native-incarnation", func() error {
++		if err := transaction(d, func(tx *sql.Tx) error { return seal(tx, 1) }); err != nil {
++			return err
++		}
++		effectObserved = true // accepted callback executes AFTER seal; still retained.
++		return nil
++	})
++	if err != nil || !effectObserved || retainedAttempts(t, d) != 1 {
++		t.Fatal("late accepted effect/history counterexample lost", err)
++	}
++	if err := storageAttempt(d, "rebuild", "create", "native-incarnation", func() error { t.Fatal("sealed new attempt dispatched"); return nil }); err == nil {
++		t.Fatal("seal admitted new attempt")
++	}
++}
++func TestOutcomeJournalFailureRetainsAttemptAcrossReopen(t *testing.T) {
++	d := storageFixture(t)
++	var seq int
++	var name, file string
++	if err := d.QueryRow("PRAGMA database_list").Scan(&seq, &name, &file); err != nil {
++		t.Fatal(err)
++	}
++	physical := false
++	err := storageAttempt(d, "rebuild", "delete", "native-incarnation", func() error { physical = true; return d.Close() })
++	if err == nil || !physical {
++		t.Fatal("lost outcome journal not surfaced")
++	}
++	reopened, err := sql.Open("sqlite3", file)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reopened.Close()
++	var observation string
++	if err := reopened.QueryRow("SELECT observation FROM mutation_attempts").Scan(&observation); err != nil {
++		t.Fatal(err)
++	}
++	if observation != "attempted" {
++		t.Fatal("unknown outcome fabricated", observation)
++	}
++}
++func TestMissingCurrentIncarnationDeniesBeforeNativeCall(t *testing.T) {
++	d := storageFixture(t)
++	if _, err := d.Exec("DELETE FROM instances"); err != nil {
++		t.Fatal(err)
++	}
++	if err := storageAttempt(d, "rebuild", "delete", "native-incarnation", func() error { t.Fatal("missing incarnation dispatched"); return nil }); err == nil {
++		t.Fatal("missing identity accepted")
++	}
++	if retainedAttempts(t, d) != 0 {
++		t.Fatal("denied attempt persisted")
++	}
++}
++
++func TestCrashAfterAttemptBeforeNativeCallNeverAutoReissues(t *testing.T) {
++	d := storageFixture(t)
++	if err := beginStorageAttempt(d, "rebuild", "delete", "native-incarnation"); err != nil {
++		t.Fatal(err)
++	}
++	// Simulate process death at this durable boundary by discarding execution;
++	// no physical callback happened. The unresolved attempt still forbids replay.
++	if err := storageAttempt(d, "rebuild", "delete", "native-incarnation", func() error { t.Fatal("unknown attempt replayed"); return nil }); err == nil {
++		t.Fatal("duplicate accepted")
++	}
++	if retainedAttempts(t, d) != 1 {
++		t.Fatal("uncertainty erased")
++	}
++}
++func TestCrashBetweenRebuildPhasesKeepsParentAndDoesNotReplayPrefix(t *testing.T) {
++	d := storageFixture(t)
++	p := &rebuildStorage{d: d, token: "native-incarnation", physical: true}
++	if err := p.DeleteInstance(nil, nil); err != nil {
++		t.Fatal(err)
++	}
++	// No automatic resumption protocol is implemented. Re-entering the outer
++	// prefix must not delete again or assume absence gives a fresh allocation.
++	if err := pinnedRebuildStorage(p, nil, nil, nil); err == nil {
++		t.Fatal("prefix replayed")
++	}
++	var parents int
++	if err := d.QueryRow("SELECT count(*) FROM mutation_parents").Scan(&parents); err != nil {
++		t.Fatal(err)
++	}
++	if parents != 1 || retainedAttempts(t, d) != 1 || len(p.calls) != 1 || p.physical {
++		t.Fatal("parent or attempted history lost")
++	}
++}
++func TestStorageAttemptRequiresBoundTargetAndPriorPhase(t *testing.T) {
++	d := storageFixture(t)
++	for _, c := range []struct{ phase, token string }{{"delete", "different-incarnation"}, {"create", "native-incarnation"}, {"restore", "native-incarnation"}} {
++		if err := storageAttempt(d, "rebuild", c.phase, c.token, func() error { t.Fatal("unbound or out-of-order native call"); return nil }); err == nil {
++			t.Fatal("invalid attempt admitted", c)
++		}
++	}
++	if retainedAttempts(t, d) != 0 {
++		t.Fatal("invalid intent recorded")
++	}
++}
++
++func TestRebuildSuccessfulReturnsStillRetainAllAttemptHistory(t *testing.T) {
++	d := storageFixture(t)
++	p := &rebuildStorage{d: d, token: "native-incarnation", physical: true}
++	if err := pinnedRebuildStorage(p, nil, nil, nil); err != nil {
++		t.Fatal(err)
++	}
++	var successes int
++	if err := d.QueryRow("SELECT count(*) FROM mutation_attempts WHERE observation='returned_success'").Scan(&successes); err != nil {
++		t.Fatal(err)
++	}
++	if successes != 2 || retainedAttempts(t, d) != 2 || !p.physical {
++		t.Fatal("successful return discarded history or allocation")
++	}
++}

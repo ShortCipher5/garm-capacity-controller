@@ -113,3 +113,40 @@ restart/global blocking, failed receipt audit, delayed accepted POST after calle
 cancellation, and write-blocked inspection backups. Pinned stock Runner/SQLite
 qualification proves max-zero/native-zero rejection and the absence of a provider
 validation call; it is not proof of installed source8 support or live routing.
+
+## Confirmed-journal and fresh-source lookup helper
+
+`Manager.ConfirmedDisabledPool(ctx, requestID)` is a trusted-server read helper,
+not an HTTP proof endpoint. The only caller-selected identity is an existing
+request UUID. It resolves the exact canonical native creation intent/result in
+the live independently bound journal, recomputes the request/spec identity and
+checks the global unresolved slot. It derives repository/pool UUIDs internally,
+then performs one fresh authenticated read of that exact scoped disabled pool.
+There is no reconstructed POST receipt, matching-list search or pool allowlist
+mutation. Unknown/pending creation can never be adopted through this method.
+
+Observation time is the conservative GET start, not delayed response completion
+or the later journal check; the registrar must apply its own age bound.
+A second short journal check after network IO rejects intervening uncertainty or
+changed evidence. No database lock spans the remote request. The result contains
+only restricted facts for an inactive registrar: recorded identity/spec/generation,
+fresh full settings fingerprint, exact image/flavor/Linux/architecture and native
+zero/shell-false/empty-extras/disabled/min0/bounded-max observations, plus the actual
+forge endpoint **alias**, never its URL or credential. The full fingerprint and
+generation must still match the confirmed historical readback. Unexpected drift,
+malformed canonical history, scope removal and unavailable source return no facts.
+No intent, audit row, admission state, route or remote setting is changed.
+
+The low-level `ObserveDisabledRepoPool` transport exists only for this trusted
+composition; never expose it as a raw user-facing read proxy. `AllowWrites:false`
+is supported, but the configured token must independently authorize the GET.
+Private startup templates must pin the expected forge alias and explicit JIT mode;
+JIT mode is not inferred from API/agent state and no source actor grants come from
+caller JSON. A small server-side adapter must translate these facts to the core
+registrar without creating a package dependency cycle.
+
+Both journal checks are observations, not an atomic transaction with Garm or the
+admission ledger. They cannot fence a later/external writer or prove pool
+incarnation after an unqualified source restore. Facts are not registration or
+activation permission. Missing runtime integration, independent scope/writer
+qualification, inactive core ACK and explicit activation gates remain unchanged.
