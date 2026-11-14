@@ -270,6 +270,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 }
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
+	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
@@ -305,6 +306,14 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableExperimentalOnboardingProbes = true
+	}
+	if *checkConfig {
+		if checkStaticConfig(config, *provision) != nil {
+			fmt.Fprintln(os.Stderr, "gateway static configuration check failed")
+			os.Exit(1)
+		}
+		fmt.Println("gateway selected static checks passed; full configuration, runtime policy, connectivity, safety and deployment readiness not checked")
+		return
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
