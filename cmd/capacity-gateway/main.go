@@ -144,7 +144,9 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 		return err
 	}
 	// No secrets, request bodies, URLs, panic values or provider output in logs.
-	server := &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 12 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}
+	ingress := newServiceIngress()
+	defer ingress.stop()
+	server := &http.Server{Addr: config.Listen, Handler: ingress.handler(handler), TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 12 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}
 	if err := validateGarmManagementRouting(config); err != nil {
 		return err
 	}
@@ -170,6 +172,10 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	}
 	defer closeAdmin()
 	if adminServer != nil {
+		if adminServer.Handler == nil {
+			return gatewayrpc.ErrConfiguration
+		}
+		adminServer.Handler = ingress.handler(adminServer.Handler)
 		if adminListener == nil {
 			adminListener, err = net.Listen("tcp", adminServer.Addr)
 			if err != nil {
@@ -237,31 +243,28 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 			}
 		}()
 	}
-	shutdownDone := make(chan struct{})
+	shutdownDone := make(chan error, 1)
 	go func() {
-		defer close(shutdownDone)
 		<-runctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if server.Shutdown(shutdown) != nil {
-			_ = server.Close()
-		}
-		if adminServer != nil {
-			adminStop, stop := context.WithTimeout(context.Background(), 15*time.Second)
-			defer stop()
-			if adminServer.Shutdown(adminStop) != nil {
-				_ = adminServer.Close()
-			}
-		}
+		shutdownDone <- stopAndJoinService(ingress, 15*time.Second, server, adminServer)
 	}()
 	err = server.ServeTLS(listener, "", "")
 	cancel()
-	<-shutdownDone
+	shutdownErr := <-shutdownDone
+	var adminErr error
 	if adminDone != nil {
-		adminErr := <-adminDone
-		if !errors.Is(adminErr, http.ErrServerClosed) {
-			return adminErr
-		}
+		adminErr = <-adminDone
+	}
+	// Join both Serve loops and all accepted work before choosing the primary
+	// error. A forced socket close must never turn a failed drain into success.
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	if adminErr != nil && !errors.Is(adminErr, http.ErrServerClosed) {
+		return adminErr
+	}
+	if shutdownErr != nil {
+		return shutdownErr
 	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
