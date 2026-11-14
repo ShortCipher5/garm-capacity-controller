@@ -30,9 +30,11 @@ type disabledPoolObserver interface {
 	ObserveDisabledRepoPool(context.Context, string, string, garmapi.DisabledPoolSpec) (garmapi.DisabledPoolObservation, error)
 }
 type confirmedStage struct {
-	stage     StagedPool
-	spec      garmapi.DisabledPoolSpec
-	signature string
+	stage            StagedPool
+	spec             garmapi.DisabledPoolSpec
+	signature        string
+	binding          *disabledPoolTemplateBinding
+	expected, reason string
 }
 
 // confirmedStage reads and validates the LIVE bound journal and global stop
@@ -81,7 +83,10 @@ func (m *Manager) confirmedStage(ctx context.Context, id string) (confirmedStage
 		if err != nil || !bytes.Equal(encoded(stage), recorded) {
 			return ErrJournal
 		}
-		result = confirmedStage{stage: stage, spec: canonical, signature: hash + string(recorded)}
+		if intent.TemplateBinding != nil && !validDisabledPoolTemplateBinding(intent.TemplateBinding, id, target, expected, reason, canonical, identity, lineage) {
+			return ErrJournal
+		}
+		result = confirmedStage{stage: stage, spec: canonical, signature: hash + string(recorded), binding: intent.TemplateBinding, expected: expected, reason: reason}
 		return nil
 	})
 	return result, err

@@ -37,9 +37,10 @@ type disabledPoolRemote interface {
 	VerifyDisabledRepoPool(context.Context, garmapi.DisabledPoolReceipt, garmapi.DisabledPoolSpec) (garmapi.ManagedPool, error)
 }
 type disabledPoolIntent struct {
-	Operation string                   `json:"operation"`
-	Protocol  string                   `json:"protocol"`
-	Spec      garmapi.DisabledPoolSpec `json:"spec"`
+	Operation       string                       `json:"operation"`
+	Protocol        string                       `json:"protocol"`
+	Spec            garmapi.DisabledPoolSpec     `json:"spec"`
+	TemplateBinding *disabledPoolTemplateBinding `json:"template_binding,omitempty"`
 }
 
 // capturePoolReceipt preserves a UUID before a subsequent GET or client timeout.
@@ -67,6 +68,9 @@ func (j *Journal) capturePoolReceipt(ctx context.Context, id string, result Stag
 // Repository-kind intents target the repository subresource, explicitly recording
 // operation=create_disabled_pool; this shares the existing global stop barrier.
 func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryID, expected string, spec garmapi.DisabledPoolSpec, reason string) (StagedPool, error) {
+	return m.createDisabledPool(ctx, requestID, repositoryID, expected, spec, reason, nil)
+}
+func (m *Manager) createDisabledPool(ctx context.Context, requestID, repositoryID, expected string, spec garmapi.DisabledPoolSpec, reason string, binding *disabledPoolTemplateBinding) (StagedPool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if err := m.enter(ctx); err != nil {
@@ -81,7 +85,14 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 	if err != nil {
 		return StagedPool{}, err
 	}
-	desired := disabledPoolIntent{"create_disabled_pool", DisabledPoolProtocol, owned}
+	if binding != nil {
+		copy := *binding
+		binding = &copy
+		if !validDisabledPoolTemplateBinding(binding, requestID, repositoryID, expected, reason, owned, m.remote.ManagementIdentity(), m.journal.Lineage()) {
+			return StagedPool{}, ErrDisabledPoolSelection
+		}
+	}
+	desired := disabledPoolIntent{Operation: "create_disabled_pool", Protocol: DisabledPoolProtocol, Spec: owned, TemplateBinding: binding}
 	hash, err := requestHash(requestID, repositoryID, expected, "repository", reason, desired)
 	if err != nil {
 		return StagedPool{}, err

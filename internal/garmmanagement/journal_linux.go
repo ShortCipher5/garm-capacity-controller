@@ -159,7 +159,7 @@ func openJournalFile(absolute, expected string, initialize bool) (*Journal, erro
 		return nil, ErrJournal
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
 		return nil, ErrJournal
 	}
 	location := url.URL{Scheme: "file", Path: absolute}
