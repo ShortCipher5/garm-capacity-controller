@@ -268,11 +268,19 @@ test("discovery-only Garm snapshot shows summaries and removes a pending edit re
   await expect(section).toContainText("Provider: capacity");
   await expect(section).toContainText("Maximum runners: 4");
   await expect(section).toContainText("example/app");
-  await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
+  await expect(section.locator("form, input, textarea")).toHaveCount(0);
+  // The only select is read-only scope inspection, not a settings editor.
+  await expect(section.locator("select")).toHaveCount(1);
+  await expect(section.getByLabel("Existing entity", { exact: true })).toBeDisabled();
+  await expect(section.getByRole("button", { name: "View existing pools" })).toBeDisabled();
   await expect(section.getByRole("button", { name: /Review Garm change|Apply reviewed Garm change/ })).toHaveCount(0);
   await expect(page.getByLabel("Garm management write token")).toHaveCount(0);
   await page.getByRole("button", { name: "Refresh Garm settings" }).click();
-  await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
+  await expect(section.locator("form, input, textarea")).toHaveCount(0);
+  // The only select is read-only scope inspection, not a settings editor.
+  await expect(section.locator("select")).toHaveCount(1);
+  await expect(section.getByLabel("Existing entity", { exact: true })).toBeDisabled();
+  await expect(section.getByRole("button", { name: "View existing pools" })).toBeDisabled();
   expect(writes).toHaveLength(0);
 });
 
