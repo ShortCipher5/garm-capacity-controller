@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -191,6 +192,28 @@ func TestPreparationCommandsSelectOnlyExplicitSourceCredentialsAndExactBootstrap
 			var output bytes.Buffer
 			if exit := run(context.Background(), environment(env), bytes.NewReader(body), &output); exit != 1 || output.Len() != 0 || requests.Load() != 2 {
 				t.Fatalf("invalid source command reached wire or leaked output exit%d output%s", exit, &output)
+			}
+		})
+	}
+}
+
+// Discovery is part of the native provider handshake. Failed stdout must not
+// advertise successful version/schema delivery to the caller.
+type brokenDiscoveryOutput struct{}
+
+func (brokenDiscoveryOutput) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestDiscoveryOutputFailureReturnsNonzeroWithoutConfigurationAccess(t *testing.T) {
+	for _, command := range []string{"GetVersion", "GetConfigJSONSchema", "GetSupportedInterfaceVersions", "GetExtraSpecsJSONSchema"} {
+		t.Run(command, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key != "GARM_COMMAND" {
+					t.Fatalf("discovery accessed configuration: %s", key)
+				}
+				return command
+			}
+			if exit := run(context.Background(), getenv, strings.NewReader(""), brokenDiscoveryOutput{}); exit != 1 {
+				t.Fatalf("failed delivery reported success: %d", exit)
 			}
 		})
 	}
