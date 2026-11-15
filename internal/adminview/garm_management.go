@@ -32,6 +32,7 @@ type GarmChangeEvent struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 }
 type GarmOverview struct {
+	ScaleSetInventory *garmapi.ScaleSetDiscovery `json:"scaleset_inventory,omitempty"`
 	DiscoveryOnly     bool                       `json:"discovery_only,omitempty"`
 	PoolInventory     *garmapi.PoolDiscovery     `json:"pool_inventory,omitempty"`
 	HistoryTruncated  bool                       `json:"history_truncated"`
@@ -141,6 +142,7 @@ func (h *Handler) serveGarm(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view.WritesEnabled = view.WritesEnabled && h.garmWrites && h.management
+		view = withBoundedScaleSetInventory(view)
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {
 			fail(http.StatusServiceUnavailable, "Garm settings unavailable")

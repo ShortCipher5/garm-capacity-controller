@@ -19,11 +19,21 @@ func NewPoolDiscoveryView(reader PoolDiscoveryReader) (GarmManager, error) {
 	return &poolDiscoveryView{reader: reader}, nil
 }
 func (v *poolDiscoveryView) Snapshot(ctx context.Context) (GarmOverview, error) {
-	inventory, e := v.reader.DiscoverPools(ctx)
-	if e != nil {
+	poolCtx, cancel := boundedPoolDiscoveryContext(ctx)
+	inventory, e := v.reader.DiscoverPools(poolCtx)
+	if poolCtx.Err() != nil {
+		e = poolCtx.Err()
+	}
+	cancel()
+	view := GarmOverview{DiscoveryOnly: true, History: []GarmChangeEvent{}, Settings: garmapi.ManagementSnapshot{Pools: []garmapi.ManagedPool{}, Repositories: []garmapi.ManagedRepository{}}}
+	if e == nil {
+		view.PoolInventory = &inventory
+	}
+	view.ScaleSetInventory = observeScaleSets(ctx, v.reader)
+	if e != nil && view.ScaleSetInventory == nil {
 		return GarmOverview{}, e
 	}
-	return GarmOverview{DiscoveryOnly: true, History: []GarmChangeEvent{}, Settings: garmapi.ManagementSnapshot{Pools: []garmapi.ManagedPool{}, Repositories: []garmapi.ManagedRepository{}}, PoolInventory: &inventory}, nil
+	return view, nil
 }
 func (*poolDiscoveryView) UpdatePool(context.Context, string, string, string, garmapi.PoolUpdate, string) (garmapi.ManagedPool, error) {
 	return garmapi.ManagedPool{}, garmapi.ErrManagementDisabled

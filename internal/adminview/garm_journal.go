@@ -93,6 +93,7 @@ func (j *journalledGarm) Snapshot(ctx context.Context) (GarmOverview, error) {
 	if discoveryErr == nil {
 		view.PoolInventory = &inventory
 	}
+	view.ScaleSetInventory = observeScaleSets(ctx, j.manager)
 	snapshot, err := j.manager.Snapshot(ctx)
 	if err != nil {
 		return view, nil

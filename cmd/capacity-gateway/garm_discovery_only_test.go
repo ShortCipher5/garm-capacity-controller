@@ -15,11 +15,16 @@ import (
 
 func TestGarmZeroEnrolledRuntimeDiscoveryNoJournalOrWrites(t *testing.T) {
 	keys := credentials(t)
-	var reads atomic.Int32
+	var reads, scaleReads atomic.Int32
 	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.URL.Path != "/api/v1/pools" || r.Header.Get("Authorization") != "Bearer upstream-discovery-fixture" {
+		if r.Method != "GET" || (r.URL.Path != "/api/v1/pools" && r.URL.Path != "/api/v1/scalesets") || r.Header.Get("Authorization") != "Bearer upstream-discovery-fixture" {
 			t.Error("unexpected upstream action")
 			w.WriteHeader(400)
+			return
+		}
+		if r.URL.Path == "/api/v1/scalesets" {
+			scaleReads.Add(1)
+			json.NewEncoder(w).Encode([]any{map[string]any{"id": 42, "name": "existing-scale", "provider_name": "capacity", "state": "created", "generation": 1, "max_runners": 4, "min_idle_runners": 0, "enabled": true, "tags": []any{}}})
 			return
 		}
 		reads.Add(1)
@@ -47,7 +52,7 @@ func TestGarmZeroEnrolledRuntimeDiscoveryNoJournalOrWrites(t *testing.T) {
 	if _, e = view.UpdatePool(context.Background(), "", testManagedPool, "", garmapi.PoolUpdate{}, ""); e != garmapi.ErrManagementDisabled {
 		t.Fatal("mutation available")
 	}
-	if reads.Load() != 1 {
+	if reads.Load() != 1 || scaleReads.Load() != 1 || snap.ScaleSetInventory == nil || len(snap.ScaleSetInventory.ScaleSets) != 1 || snap.ScaleSetInventory.ScaleSets[0].ID != 42 {
 		t.Fatal("unexpected traffic")
 	}
 	files, e := os.ReadDir(dir)

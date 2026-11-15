@@ -4,6 +4,7 @@
 export function preserveDraftWithLatestInventory(previous, latest) {
   return {...previous,
     pool_inventory: latest.pool_inventory,
+    scaleset_inventory: latest.scaleset_inventory,
     write_blocked: latest.write_blocked,
     pending: latest.pending,
     history: latest.history,

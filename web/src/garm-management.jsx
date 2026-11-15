@@ -1,3 +1,4 @@
+import { GarmScaleSetInventory } from "./garm-scalesets.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { GarmConflictDetails } from "./garm-conflict.jsx";
 import { preserveDraftWithLatestInventory, retainGarmDraftConflict } from "./garm-observation.js";
@@ -88,6 +89,7 @@ export function GarmManagement({ read }) {
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
     {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings may be stale; editing is blocked until a successful refresh.</p>}
     {snapshot && <GarmPoolInventory inventory={snapshot.pool_inventory} />}
+    {snapshot && <GarmScaleSetInventory inventory={snapshot.scaleset_inventory} />}
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
     {snapshot && !snapshot.discovery_only && !snapshot.settings_available && <p className="error">Remote settings are unavailable. Durable journal status is still shown; editing stays disabled.</p>}
     {snapshot?.write_blocked && <p className="error">A durable pending or unknown operation blocks Garm writes. Reading fresh state does not fence a delayed write and cannot safely clear this block.</p>}

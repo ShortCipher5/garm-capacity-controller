@@ -29,6 +29,10 @@ export function validateGarm(value) {
     const inv=value.pool_inventory;
     if(!object(inv)||!Array.isArray(inv.pools)||inv.pools.length>10000||!Array.isArray(inv.missing_configured_pool_ids)||!inv.missing_configured_pool_ids.every(string)||new Set(inv.missing_configured_pool_ids).size!==inv.missing_configured_pool_ids.length||new Set(inv.pools.map(p=>p?.id)).size!==inv.pools.length||!inv.pools.every(p=>object(p)&&[p.id,p.provider_name].every(string)&&validInventoryOwner(p)&&p.fingerprint===""&&hash(p.discovery_fingerprint)&&typeof p.configured==="boolean"&&typeof p.enabled==="boolean"&&[p.priority,p.max_runners,p.min_idle_runners,p.generation].every(integer)&&p.min_idle_runners<=p.max_runners&&validInventoryTags(p.tags))||inv.missing_configured_pool_ids.some(id=>inv.pools.some(p=>p.id===id)))throw new Error("The server returned unsupported Garm pool inventory.");
   }
+  if(value.scaleset_inventory!==undefined){
+    const inv=value.scaleset_inventory;
+    if(!object(inv)||!Array.isArray(inv.scalesets)||inv.scalesets.length>10000||new Set(inv.scalesets.map(s=>s?.id)).size!==inv.scalesets.length||!inv.scalesets.every(s=>object(s)&&integer(s.id)&&s.id>0&&[s.name,s.provider_name].every(v=>string(v)&&v.length>0)&&validInventoryOwner(s)&&hash(s.discovery_fingerprint)&&typeof s.enabled==="boolean"&&[s.max_runners,s.min_idle_runners,s.generation].every(integer)&&s.min_idle_runners<=s.max_runners&&["pending_create","created","error","pending_delete","pending_force_delete"].includes(s.state)&&validInventoryTags(s.tags)))throw new Error("The server returned unsupported Garm scaleset inventory.");
+  }
   return value;
 }
 export async function applyGarmChange(token, kind, change, { signal, fetcher = globalThis.fetch } = {}) {
