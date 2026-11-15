@@ -163,3 +163,42 @@ func TestUnrelatedForeignInventoryDoesNotAffectHostAssessment(t *testing.T) {
 		t.Fatalf("unrelated host changed assessment: %+v %v", result, err)
 	}
 }
+
+func TestObservationGapsAreDistinctAndRemainCharged(t *testing.T) {
+	snapshot, now := fixture()
+	snapshot.Reservations["linked"] = admission.Reservation{Request: admission.Request{Key: "linked", Host: "host-a", Pool: "pool-a"}, State: "creating"}
+	snapshot.Reservations["missing"] = admission.Reservation{Request: admission.Request{Key: "missing", Host: "host-a", Pool: "pool-a"}, State: "unknown"}
+	snapshot.Inventory = []admission.InventoryResource{
+		{ID: "linked-resource", Host: "host-a", Pool: "pool-a", ReservationKey: "linked", State: "idle"},
+		{ID: "unlinked-resource", Host: "host-a", Pool: "pool-a", State: "running"},
+	}
+	before, _ := json.Marshal(snapshot)
+	result, err := Assess(snapshot, "host-a", now)
+	if err != nil || result.TrackedAllocations != 3 || result.UnobservedReservations != 1 || result.UnreservedResources != 1 {
+		t.Fatalf("observation gaps not distinguished: %+v %v", result, err)
+	}
+	for _, blocker := range []string{"reservations_without_inventory_remain_charged", "inventory_without_reservation_requires_reconciliation", "job_assignment_fence_unqualified", "confirmed_retirement_unimplemented"} {
+		if !hasBlocker(result, blocker) {
+			t.Fatalf("missing blocker %s", blocker)
+		}
+	}
+	after, _ := json.Marshal(snapshot)
+	if string(before) != string(after) {
+		t.Fatal("assessment changed charges or identity")
+	}
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), "linked-resource") || strings.Contains(string(encoded), "unlinked-resource") || strings.Contains(string(encoded), "pool-a") {
+		t.Fatal("observation gaps exposed raw allocation identities")
+	}
+}
+
+func TestCompleteObservationHasNoGapButDoesNotPermitRetirement(t *testing.T) {
+	snapshot, now := fixture()
+	result, err := Assess(snapshot, "host-a", now)
+	if err != nil || result.UnobservedReservations != 0 || result.UnreservedResources != 0 || hasBlocker(result, "reservations_without_inventory_remain_charged") || hasBlocker(result, "inventory_without_reservation_requires_reconciliation") {
+		t.Fatalf("empty snapshot has invented gaps: %+v %v", result, err)
+	}
+	if !hasBlocker(result, "job_assignment_fence_unqualified") || !hasBlocker(result, "confirmed_retirement_unimplemented") {
+		t.Fatal("zero gaps became retirement authority")
+	}
+}

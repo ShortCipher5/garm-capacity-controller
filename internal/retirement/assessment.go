@@ -27,8 +27,11 @@ type Assessment struct {
 	ObservationFresh      bool      `json:"observation_fresh"`
 	ObservedAt            time.Time `json:"observed_at"`
 	TrackedAllocations    int       `json:"tracked_allocations"`
-	States                Counts    `json:"last_observed_states"`
-	Blockers              []string  `json:"blockers"`
+	// Observation gaps remain charged and must not become absence evidence.
+	UnobservedReservations int      `json:"unobserved_reservations"`
+	UnreservedResources    int      `json:"unreserved_resources"`
+	States                 Counts   `json:"last_observed_states"`
+	Blockers               []string `json:"blockers"`
 }
 
 // Assess reads one transactionally consistent ledger snapshot. Counts are last
@@ -95,6 +98,8 @@ func Assess(snapshot admission.SQLiteSnapshot, hostID string, now time.Time) (As
 				return Assessment{}, ErrSnapshot
 			}
 			linked[resource.ReservationKey] = true
+		} else {
+			result.UnreservedResources++
 		}
 		count(resource.State)
 	}
@@ -106,11 +111,18 @@ func Assess(snapshot admission.SQLiteSnapshot, hostID string, now time.Time) (As
 			return Assessment{}, ErrSnapshot
 		}
 		if !linked[key] {
+			result.UnobservedReservations++
 			count(reservation.State)
 		}
 	}
 	if result.TrackedAllocations != 0 {
 		result.Blockers = append(result.Blockers, "tracked_allocations_remain_charged")
+	}
+	if result.UnobservedReservations != 0 {
+		result.Blockers = append(result.Blockers, "reservations_without_inventory_remain_charged")
+	}
+	if result.UnreservedResources != 0 {
+		result.Blockers = append(result.Blockers, "inventory_without_reservation_requires_reconciliation")
 	}
 	// These are capability gates, not booleans inferred from counts or modes.
 	// Never make them disappear merely because a row, operation or runner is absent.
