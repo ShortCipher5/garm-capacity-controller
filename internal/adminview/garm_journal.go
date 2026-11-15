@@ -87,7 +87,10 @@ func (j *journalledGarm) Snapshot(ctx context.Context) (GarmOverview, error) {
 	}
 	// Discovery does not expand write scope. Preserve it even when an existing
 	// configured target disappears and the editable snapshot cannot be read.
-	if inventory, discoveryErr := j.manager.DiscoverPools(ctx); discoveryErr == nil {
+	discoveryCtx, cancelDiscovery := boundedPoolDiscoveryContext(ctx)
+	inventory, discoveryErr := j.manager.DiscoverPools(discoveryCtx)
+	cancelDiscovery()
+	if discoveryErr == nil {
 		view.PoolInventory = &inventory
 	}
 	snapshot, err := j.manager.Snapshot(ctx)
@@ -140,4 +143,19 @@ func (j *journalledGarm) UpdateRepositoryBalancer(ctx context.Context, request, 
 	}
 	result, err := j.manager.UpdateRepositoryBalancer(ctx, request, id, fingerprint, value, reason)
 	return result, garmControlError(err)
+}
+
+// Optional collection discovery must not spend the entire overview deadline and
+// incorrectly hide independently reachable configured settings. Give it at most
+// three seconds and half the remaining caller budget, without extending either.
+// No background request, cached success or mutation is introduced.
+func boundedPoolDiscoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := 3 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline) / 2
+		if remaining < budget {
+			budget = remaining
+		}
+	}
+	return context.WithTimeout(ctx, budget)
 }
