@@ -36,9 +36,11 @@ export function GarmPoolInventory({inventory}) {
   if(!inventory)return <p>Existing-pool inventory is unavailable. No missing pool is recreated.</p>;
   return <section aria-label="Existing Garm pool inventory">
     <h3>Existing Garm pools</h3>
-    <p>Live read-only inventory for configured providers. Discovering a pool does not authorize editing it. Refreshes are observations, not atomic revisions.</p>
+    <p>Live read-only inventory for configured providers. Discovering a pool does not authorize editing it. Refreshes are observations, not atomic revisions. Owner metadata does not grant access or identify a physical host.</p>
     {inventory.pools.map(pool=><article key={pool.id}>
       <h4>Pool {pool.id}</h4><p>Provider: {pool.provider_name}</p>
+      <p>Owner: {({repository:"Repository",organization:"Organization",enterprise:"Enterprise"})[pool.owner_kind] || "Unknown"}{pool.owner_id ? ` · ${pool.owner_id}` : ""}</p>
+      <p>Future-runner tags: {pool.tags.length ? pool.tags.join(", ") : "No tags reported"}</p>
       <p>{pool.configured?"Configured for management; separate write safeguards still apply.":"Discovered outside the management allowlist; read-only."}</p>
       <p>{pool.enabled?"Enabled":"Disabled, not drained"} · Maximum runners: {pool.max_runners} · Minimum idle runners: {pool.min_idle_runners} · Priority: {pool.priority}</p>
     </article>)}

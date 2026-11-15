@@ -2,6 +2,19 @@ const hash = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 const object = (v) => v && typeof v === "object" && !Array.isArray(v);
 const integer = (v) => Number.isSafeInteger(v) && v >= 0;
 const string = (v) => typeof v === "string";
+// Older observations may omit both owner fields. Never infer ownership from
+// pool/provider names; present that case as unknown, not an authorization.
+function validInventoryOwner(pool) {
+  if (pool.owner_kind === undefined) return pool.owner_id === undefined;
+  if (pool.owner_kind === "unknown") return pool.owner_id === undefined;
+  return ["repository", "organization", "enterprise"].includes(pool.owner_kind) &&
+    typeof pool.owner_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(pool.owner_id);
+}
+function validInventoryTags(tags) {
+  return Array.isArray(tags) && tags.length <= 100 && new Set(tags).size === tags.length &&
+    tags.every(tag => typeof tag === "string" && tag.length > 0 &&
+      new TextEncoder().encode(tag).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/.test(tag));
+}
 export function validateGarm(value) {
   if (!object(value) || !object(value.settings) || typeof value.settings.writes_enabled !== "boolean" || typeof value.history_truncated !== "boolean" || typeof value.settings_available !== "boolean" || typeof value.writes_enabled !== "boolean" || typeof value.write_blocked !== "boolean" ||
     !Array.isArray(value.history) || value.history.length>25 || !value.history.every((e)=>object(e)&&[e.request_id,e.kind,e.target,e.state,e.reason,e.created_at].every(string)&&["pending","unknown","confirmed","rejected"].includes(e.state)&&Number.isFinite(Date.parse(e.created_at))&&object(e.before)&&object(e.desired)&&(e.result===undefined||object(e.result))) ||
@@ -14,7 +27,7 @@ export function validateGarm(value) {
   if(value.discovery_only!==undefined && (typeof value.discovery_only!=="boolean" || (value.discovery_only && (value.writes_enabled || value.settings.writes_enabled || value.settings_available || value.settings.pools.length || value.settings.repositories.length))))throw new Error("The server returned unsupported discovery-only state.");
   if(value.pool_inventory!==undefined){
     const inv=value.pool_inventory;
-    if(!object(inv)||!Array.isArray(inv.pools)||inv.pools.length>10000||!Array.isArray(inv.missing_configured_pool_ids)||!inv.missing_configured_pool_ids.every(string)||new Set(inv.missing_configured_pool_ids).size!==inv.missing_configured_pool_ids.length||new Set(inv.pools.map(p=>p?.id)).size!==inv.pools.length||!inv.pools.every(p=>object(p)&&[p.id,p.provider_name].every(string)&&p.fingerprint===""&&hash(p.discovery_fingerprint)&&typeof p.configured==="boolean"&&typeof p.enabled==="boolean"&&[p.priority,p.max_runners,p.min_idle_runners,p.generation].every(integer)&&p.min_idle_runners<=p.max_runners&&Array.isArray(p.tags)&&p.tags.every(string))||inv.missing_configured_pool_ids.some(id=>inv.pools.some(p=>p.id===id)))throw new Error("The server returned unsupported Garm pool inventory.");
+    if(!object(inv)||!Array.isArray(inv.pools)||inv.pools.length>10000||!Array.isArray(inv.missing_configured_pool_ids)||!inv.missing_configured_pool_ids.every(string)||new Set(inv.missing_configured_pool_ids).size!==inv.missing_configured_pool_ids.length||new Set(inv.pools.map(p=>p?.id)).size!==inv.pools.length||!inv.pools.every(p=>object(p)&&[p.id,p.provider_name].every(string)&&validInventoryOwner(p)&&p.fingerprint===""&&hash(p.discovery_fingerprint)&&typeof p.configured==="boolean"&&typeof p.enabled==="boolean"&&[p.priority,p.max_runners,p.min_idle_runners,p.generation].every(integer)&&p.min_idle_runners<=p.max_runners&&validInventoryTags(p.tags))||inv.missing_configured_pool_ids.some(id=>inv.pools.some(p=>p.id===id)))throw new Error("The server returned unsupported Garm pool inventory.");
   }
   return value;
 }
