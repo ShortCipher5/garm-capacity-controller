@@ -5,8 +5,10 @@ export function ExistingEntityOnboardingPanel({readEntities,readEntityPools}){
  const [state,setState]=useState({snapshot:{available:false,entities:[]},pools:[],entity:null,busy:false,message:""});
  const [flow,setFlow]=useState(null);
  useEffect(()=>{setState({snapshot:{available:false,entities:[]},pools:[],entity:null,busy:false,message:""});const next=createEntityOnboardingFlow({readEntities,readEntityPools,onChange:setState});setFlow(next);return()=>next.dispose();},[readEntities,readEntityPools]);
+ useEffect(()=>{if(!flow)return;const refresh=()=>{if(document.visibilityState!=="hidden")void flow.refreshViewed();};const timer=setInterval(refresh,15000);window.addEventListener("focus",refresh);document.addEventListener("visibilitychange",refresh);return()=>{clearInterval(timer);window.removeEventListener("focus",refresh);document.removeEventListener("visibilitychange",refresh);};},[flow]);
  return <section aria-label="Existing GARM onboarding"><button type="button" disabled={!flow} onClick={()=>flow?.refresh()}>Refresh existing entities</button>
  {state.busy&&<button type="button" onClick={()=>flow?.cancel()}>Cancel reading</button>}
+ <p>Once inspected, this entity is observed every 15 seconds while visible and on focus. Cancel or a failed observation stops automatic reads until you inspect again. No automatic writes.</p>
  {state.busy&&<p role="status">Reading existing GARM scope…</p>}{state.message&&<p role="status">{state.message}</p>}
  <ExistingEntityOnboarding snapshot={state.snapshot} onInspect={choice=>flow?.inspect(choice)}/>
  {state.entity&&!state.busy&&!state.message&&<div aria-label="Existing pools read only"><h4>{state.entity.type} {state.entity.id}</h4><button type="button" onClick={()=>flow?.inspect(state.entity)}>Refresh viewed entity</button>

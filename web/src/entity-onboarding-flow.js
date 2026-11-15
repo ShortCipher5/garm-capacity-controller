@@ -15,7 +15,7 @@ export function createEntityOnboardingFlow({readEntities,readEntityPools,onChang
  const emit=()=>{if(!disposed)onChange({...state,changes:state.changes?{added:[...state.changes.added],absent:[...state.changes.absent],changed:[...state.changes.changed]}:null,pools:state.pools.map(p=>({...p})),snapshot:{...state.snapshot,entities:state.snapshot.entities.map(e=>({...e}))}})};
  const begin=()=>{active?.abort();active=new AbortController();return {version:++generation,signal:active.signal}};
  const current=request=>!disposed&&request.version===generation&&!request.signal.aborted;
- return {
+ const api = {
  async refresh(){if(disposed)return;const request=begin();state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,changes:null,busy:true,message:""};emit();
  try{const value=entityOnboardingView(await readEntities({signal:request.signal}));if(!current(request))return;if(!value.available)throw new Error("unavailable");state={...state,snapshot:value};}
  catch{if(current(request))state={...state,message:"Entity discovery unavailable."};}
@@ -32,7 +32,9 @@ export function createEntityOnboardingFlow({readEntities,readEntityPools,onChang
  catch{if(current(request))state={...state,pools:[],entity:null,changes:null,message:"Pool inspection unavailable."};}
  finally{if(current(request)){state={...state,busy:false};emit()}}
  },
+ async refreshViewed(){if(disposed||state.busy||!state.entity||state.message)return;return api.inspect({...state.entity});},
  cancel(){if(disposed)return;generation++;active?.abort();active=null;state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,changes:null,busy:false,message:"Reading canceled. Refresh existing entities to continue."};emit();},
  dispose(){disposed=true;generation++;active?.abort();}
  };
+ return api;
 }
