@@ -75,7 +75,14 @@ func Assess(snapshot admission.SQLiteSnapshot, hostID string, now time.Time) (As
 		}
 	}
 	for _, resource := range snapshot.Inventory {
+		// Validate links into this host before filtering foreign inventory. A
+		// reservation cannot be treated as merely absent from inventory when
+		// another host claims its identity. Neither conflicting observation is
+		// retirement authority, even if the foreign resource is reported idle.
 		if resource.Host != hostID {
+			if reservation, exists := snapshot.Reservations[resource.ReservationKey]; resource.ReservationKey != "" && exists && reservation.Request.Host == hostID {
+				return Assessment{}, ErrSnapshot
+			}
 			continue
 		}
 		if resource.ID == "" || seen[resource.ID] {

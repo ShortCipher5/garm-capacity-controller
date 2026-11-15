@@ -134,3 +134,32 @@ func TestInvalidObservationAndClosedReadinessPauseClaims(t *testing.T) {
 		}
 	}
 }
+
+func TestForeignInventoryCannotClaimTargetHostReservation(t *testing.T) {
+	for _, foreignHost := range []string{"host-b", ""} {
+		for _, state := range []string{"idle", "running", "unknown"} {
+			snapshot, now := fixture()
+			snapshot.Reservations["key"] = admission.Reservation{Request: admission.Request{Key: "key", Host: "host-a", Pool: "pool-a"}, State: "creating"}
+			snapshot.Inventory = []admission.InventoryResource{{ID: "runner", Host: foreignHost, Pool: "pool-a", ReservationKey: "key", State: state}}
+			before, _ := json.Marshal(snapshot)
+			result, err := Assess(snapshot, "host-a", now)
+			if err != ErrSnapshot || !reflect.DeepEqual(result, Assessment{}) {
+				t.Fatalf("foreign identity accepted for %q/%s: %+v %v", foreignHost, state, result, err)
+			}
+			after, _ := json.Marshal(snapshot)
+			if string(before) != string(after) {
+				t.Fatal("assessment mutated conflicting snapshot")
+			}
+		}
+	}
+}
+
+func TestUnrelatedForeignInventoryDoesNotAffectHostAssessment(t *testing.T) {
+	snapshot, now := fixture()
+	snapshot.Reservations["other"] = admission.Reservation{Request: admission.Request{Key: "other", Host: "host-b", Pool: "pool-b"}, State: "creating"}
+	snapshot.Inventory = []admission.InventoryResource{{ID: "runner", Host: "host-b", Pool: "pool-b", ReservationKey: "other", State: "idle"}}
+	result, err := Assess(snapshot, "host-a", now)
+	if err != nil || result.TrackedAllocations != 0 || !hasBlocker(result, "job_assignment_fence_unqualified") || !hasBlocker(result, "confirmed_retirement_unimplemented") {
+		t.Fatalf("unrelated host changed assessment: %+v %v", result, err)
+	}
+}
