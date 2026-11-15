@@ -134,8 +134,11 @@ func (m *Manager) Probe(ctx context.Context, request Request) (Result, error) {
 	result := Result{Mode: "read-only-onboarding-preflight", RequestID: request.RequestID, ProfileID: request.ProfileID, ObservedAt: time.Now().UTC(), BindingClass: "not_checked", Blockers: []string{"enrollment_not_implemented", "physical_capacity_scope_unqualified"}}
 	read, cancel := context.WithTimeout(ctx, 5*time.Second)
 	identity, err := observer.PhysicalIdentity(read)
+	// An observer returning nil error after cancellation cannot turn an expired
+	// probe into an available observation. Check before our cleanup cancel.
+	readErr := read.Err()
 	cancel()
-	if err == nil && identity.Valid() && safeVersion(identity.ServerVersion()) {
+	if err == nil && readErr == nil && identity.Valid() && safeVersion(identity.ServerVersion()) {
 		result.ObservationAvailable = true
 		result.ServerVersion = identity.ServerVersion()
 		bindings, err := m.store.ReadOnboardingBindings(ctx)
