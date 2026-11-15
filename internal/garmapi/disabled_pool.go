@@ -164,7 +164,9 @@ func (m *ManagementClient) verifyDisabledPool(fields map[string]json.RawMessage,
 	return pool, nil
 }
 func (m *ManagementClient) VerifyDisabledRepoPool(ctx context.Context, receipt DisabledPoolReceipt, spec DisabledPoolSpec) (ManagedPool, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedPool{}, ErrManagementOutcomeUnknown
+	}
 	defer m.mu.Unlock()
 	canonical, err := CanonicalDisabledPoolSpec(spec)
 	if err != nil || receipt.client != m || !receipt.postValidated || receipt.fingerprint != DisabledPoolSpecFingerprint(canonical) || !m.repositories[receipt.repo] {
