@@ -84,6 +84,7 @@ export function GarmManagement({ read }) {
     <p>New demand is ledger-enforced only for separately qualified gateway-routed pools. Repository balancing can affect other eligible pools outside this allowlist; its routing acknowledgement must cover that complete pool/provider graph.</p>
     <p className="drain-warning">Garm v0.2.1 has no atomic conditional updates. A fresh fingerprint check does not fence other Garm UI/CLI writers. Use only with externally coordinated exclusive settings ownership. Tags affect future runners only. Priority is not a fair scheduler. Disabling does not drain idle runners. Decreasing minimum idle is blocked.</p>
     <button className="quiet" onClick={()=>load(false)} disabled={busy}>{busy?"Working…":(needsRefresh||draftDirty||review)?"Discard draft and refresh Garm settings":snapshot?"Refresh Garm settings":"Load Garm settings"}</button>
+    {snapshot && <button className="quiet" type="button" onClick={()=>load(true)} disabled={busy}>Refresh observations, keep draft</button>}
     <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. No automatic writes or recreation.</p>
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
