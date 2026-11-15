@@ -1,3 +1,4 @@
+import { ExistingEntityOnboardingPanel } from "./entity-onboarding-flow.jsx";
 import { GarmScaleSetInventory } from "./garm-scalesets.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { GarmConflictDetails } from "./garm-conflict.jsx";
@@ -6,7 +7,7 @@ import { garmSettingsChanged } from "./garm-sync.js";
 import { applyGarmChange } from "./garm-client.js";
 import { canEditGarm, GarmSettingsPresentation, GarmPoolInventory } from "./garm-discovery.jsx";
 
-export function GarmManagement({ read }) {
+export function GarmManagement({ read, readEntities, readEntityPools }) {
   const [snapshot,setSnapshot] = useState(null), [message,setMessage] = useState(""), [busy,setBusy] = useState(false), [review,setReview] = useState(null), [kind,setKind] = useState("pool"), [target,setTarget] = useState("");
   const [formEpoch,setFormEpoch] = useState(0), [draftDirty,setDraftDirty] = useState(false);
   const [conflictLatest,setConflictLatest] = useState(null);
@@ -80,6 +81,7 @@ export function GarmManagement({ read }) {
   const blocked=needsRefresh||syncError||busy||!canEditGarm(snapshot)||snapshot?.write_blocked||uncertain.current||stale;
   return <section className="card management" id="garm-management">
     <h2>Garm settings</h2>
+    {typeof readEntities === "function" && typeof readEntityPools === "function" && <ExistingEntityOnboardingPanel readEntities={readEntities} readEntityPools={readEntityPools} />}
     <p>Actual settings on explicitly configured Garm pools and repositories, separate from ledger budgets. No registration, deletion, runner placement or drain controls.</p>
     <p>New demand is ledger-enforced only for separately qualified gateway-routed pools. Repository balancing can affect other eligible pools outside this allowlist; its routing acknowledgement must cover that complete pool/provider graph.</p>
     <p className="drain-warning">Garm v0.2.1 has no atomic conditional updates. A fresh fingerprint check does not fence other Garm UI/CLI writers. Use only with externally coordinated exclusive settings ownership. Tags affect future runners only. Priority is not a fair scheduler. Disabling does not drain idle runners. Decreasing minimum idle is blocked.</p>
