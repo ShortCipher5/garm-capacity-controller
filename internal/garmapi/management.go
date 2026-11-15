@@ -156,7 +156,7 @@ func (m *ManagementClient) exchange(ctx context.Context, method, path string, va
 		return nil, failure
 	}
 	data, err := io.ReadAll(io.LimitReader(res.Body, (2<<20)+1))
-	if err != nil || len(data) > 2<<20 {
+	if err != nil || len(data) > 2<<20 || !utf8.Valid(data) {
 		return nil, failure
 	}
 	fields, err := row(data)
