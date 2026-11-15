@@ -27,6 +27,7 @@ export function createEntityOnboardingFlow({readEntities,readEntityPools,onChang
  catch{if(current(request))state={...state,pools:[],entity:null,message:"Pool inspection unavailable."};}
  finally{if(current(request)){state={...state,busy:false};emit()}}
  },
+ cancel(){if(disposed)return;generation++;active?.abort();active=null;state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,busy:false,message:"Reading canceled. Refresh existing entities to continue."};emit();},
  dispose(){disposed=true;generation++;active?.abort();}
  };
 }
