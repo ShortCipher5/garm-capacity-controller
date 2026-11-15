@@ -1,4 +1,5 @@
 import React from "react";
+import { GarmInventoryBrowser } from "./garm-inventory-browser.jsx";
 
 export function canEditGarm(snapshot) {
   return snapshot?.settings_available === true && snapshot.writes_enabled === true && snapshot.settings.writes_enabled === true;
@@ -37,13 +38,13 @@ export function GarmPoolInventory({inventory}) {
   return <section aria-label="Existing Garm pool inventory">
     <h3>Existing Garm pools</h3>
     <p>Live read-only inventory for configured providers. Discovering a pool does not authorize editing it. Refreshes are observations, not atomic revisions. Owner metadata does not grant access or identify a physical host.</p>
-    {inventory.pools.map(pool=><article key={pool.id}>
+    <GarmInventoryBrowser rows={inventory.pools} kind="pools">{pool=><article key={pool.id}>
       <h4>Pool {pool.id}</h4><p>Provider: {pool.provider_name}</p>
       <p>Owner: {({repository:"Repository",organization:"Organization",enterprise:"Enterprise"})[pool.owner_kind] || "Unknown"}{pool.owner_id ? ` · ${pool.owner_id}` : ""}</p>
       <p>Future-runner tags: {pool.tags.length ? pool.tags.join(", ") : "No tags reported"}</p>
       <p>{pool.configured?"Configured for management; separate write safeguards still apply.":"Discovered outside the management allowlist; read-only."}</p>
       <p>{pool.enabled?"Enabled":"Disabled, not drained"} · Maximum runners: {pool.max_runners} · Minimum idle runners: {pool.min_idle_runners} · Priority: {pool.priority}</p>
-    </article>)}
+    </article>}</GarmInventoryBrowser>
     {!inventory.pools.length && <p>No pools observed in this provider scope.</p>}
     {inventory.missing_configured_pool_ids.length>0 && <div role="status"><h4>Configured pools not observed</h4><p>These pools may have been removed or moved outside provider scope. Absence is not proof of deletion; no runners or capacity are released and nothing is recreated.</p><ul>{inventory.missing_configured_pool_ids.map(id=><li key={id}>{id}</li>)}</ul></div>}
   </section>;

@@ -20,7 +20,7 @@ test('scaleset collection uses exact local numeric identity and separate truthfu
 test('scalesets never render editing or infer physical capacity from metadata',async()=>{
  const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});
  try{const {GarmScaleSetInventory}=await server.ssrLoadModule('/src/garm-scalesets.jsx');const render=inventory=>renderToStaticMarkup(React.createElement(GarmScaleSetInventory,{inventory}));
- const html=render(view().scaleset_inventory);assert.match(html,/Local Garm scaleset ID: 42/);assert.match(html,/&lt;script&gt;scale&lt;\/script&gt;/);assert.match(html,/Disabled, not drained/);assert.match(html,/Organization/);assert.doesNotMatch(html,/<script|<button|<form|<input/);
+ const html=render(view().scaleset_inventory);assert.match(html,/Local Garm scaleset ID: 42/);assert.match(html,/&lt;script&gt;scale&lt;\/script&gt;/);assert.match(html,/Disabled, not drained/);assert.match(html,/Organization/);assert.doesNotMatch(html,/<script|<form|type="submit"|Apply reviewed|Review Garm change/);
  assert.match(render(undefined),/unavailable or unsupported/);assert.doesNotMatch(render(undefined),/No scalesets observed/);assert.match(render({scalesets:[]}),/No scalesets observed in this provider scope/);
  }finally{await server.close();}
 });

@@ -41,7 +41,7 @@ test("inventory displays external and missing pools without edit or recreation c
  const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});
  try{const {GarmPoolInventory}=await server.ssrLoadModule("/src/garm-discovery.jsx");
  const html=renderToStaticMarkup(React.createElement(GarmPoolInventory,{inventory:{pools:[{id:"existing",provider_name:"capacity",configured:false,enabled:true,max_runners:4,min_idle_runners:1,priority:2,tags:[]}],missing_configured_pool_ids:["missing"]}}));
- assert.match(html,/existing/);assert.match(html,/outside the management allowlist; read-only/);assert.match(html,/missing/);assert.match(html,/Absence is not proof of deletion/);assert.doesNotMatch(html,/<button|<form|<input|<select/);
+ assert.match(html,/existing/);assert.match(html,/outside the management allowlist; read-only/);assert.match(html,/missing/);assert.match(html,/Absence is not proof of deletion/);assert.doesNotMatch(html,/<form|type="submit"|Apply reviewed|Review Garm change/);
  }finally{await server.close();}
 });
 
@@ -58,7 +58,7 @@ test("inventory shows exact upstream ownership and escaped future-runner tags, n
    if(pool.owner_id)assert.ok(html.includes(id));else assert.ok(!html.includes(id));
    assert.match(html,/Future-runner tags: linux, &lt;script&gt;no&lt;\/script&gt;/);
    assert.match(html,/Owner metadata does not grant access/);
-   assert.doesNotMatch(html,/<button|<form|<input|<select|<script>/);
+   assert.doesNotMatch(html,/<form|type="submit"|<script>|Apply reviewed|Review Garm change/);
   }
  }finally{await server.close();}
 });
