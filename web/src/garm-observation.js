@@ -14,3 +14,11 @@ export function preserveDraftWithLatestInventory(previous, latest) {
 export function retainGarmDraftConflict(previous, latest, conflictLatched, hasDraft, settingsChanged) {
   return conflictLatched || (hasDraft && settingsChanged(previous, latest));
 }
+
+// A failed refresh is not a successful old or empty collection observation.
+// Preserve local draft settings and last-known journal details, explicitly
+// marked stale by the caller, but withdraw both independent inventory cards.
+export function invalidateGarmInventories(previous) {
+  if (!previous) return previous;
+  return {...previous, pool_inventory: undefined, scaleset_inventory: undefined};
+}

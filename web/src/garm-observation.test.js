@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {preserveDraftWithLatestInventory, retainGarmDraftConflict} from './garm-observation.js';
+import {preserveDraftWithLatestInventory, retainGarmDraftConflict, invalidateGarmInventories} from './garm-observation.js';
 import {garmSettingsChanged} from './garm-sync.js';
 const snapshot=()=>({settings_available:true,writes_enabled:true,write_blocked:false,settings:{writes_enabled:true,pools:[{id:'p',fingerprint:'old'}],repositories:[]},pool_inventory:{pools:[{id:'original'}]}});
 test('latched conflict retains review barrier after settings revert while refreshing inventory',()=>{
@@ -50,4 +50,16 @@ test('new journal observation can remove stale pending without clearing conflict
  assert.equal(result.pending,undefined);assert.deepEqual(result.history,[]);
  assert.equal(result.history_truncated,false);assert.equal(result.settings,previous.settings);
  assert.equal(retainGarmDraftConflict(result,latest,true,false,garmSettingsChanged),true);
+});
+
+test('failed refresh withdraws inventories without mutating draft or last journal; reconnect restores fresh collections',()=>{
+ const previous=snapshot();previous.scaleset_inventory={scalesets:[{id:5}]};previous.pending={request_id:'unknown'};previous.history=[{state:'unknown'}];previous.write_blocked=true;
+ const failed=invalidateGarmInventories(previous);
+ assert.equal(failed.pool_inventory,undefined);assert.equal(failed.scaleset_inventory,undefined);
+ assert.equal(failed.settings,previous.settings);assert.equal(failed.pending,previous.pending);assert.equal(failed.history,previous.history);assert.equal(failed.write_blocked,true);
+ assert.ok(previous.pool_inventory);assert.ok(previous.scaleset_inventory);
+ const fresh=snapshot();fresh.scaleset_inventory={scalesets:[{id:7}]};
+ const recovered=preserveDraftWithLatestInventory(failed,fresh);
+ assert.equal(recovered.settings,previous.settings);assert.equal(recovered.pool_inventory,fresh.pool_inventory);assert.equal(recovered.scaleset_inventory,fresh.scaleset_inventory);
+ assert.equal(invalidateGarmInventories(null),null);
 });

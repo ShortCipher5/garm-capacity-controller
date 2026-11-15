@@ -1,7 +1,7 @@
 import { GarmScaleSetInventory } from "./garm-scalesets.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { GarmConflictDetails } from "./garm-conflict.jsx";
-import { preserveDraftWithLatestInventory, retainGarmDraftConflict } from "./garm-observation.js";
+import { preserveDraftWithLatestInventory, retainGarmDraftConflict, invalidateGarmInventories } from "./garm-observation.js";
 import { garmSettingsChanged } from "./garm-sync.js";
 import { applyGarmChange } from "./garm-client.js";
 import { canEditGarm, GarmSettingsPresentation, GarmPoolInventory } from "./garm-discovery.jsx";
@@ -33,7 +33,7 @@ export function GarmManagement({ read }) {
       }
     } catch(error) {
       if(mounted.current && generation===readGeneration.current){
-        setSyncError(true);if(token.current)token.current.value="";
+        setSyncError(true);if(background)setSnapshot(invalidateGarmInventories);if(token.current)token.current.value="";
         if(!background){setSnapshot(null);setReview(null);setMessage(error.message || "Garm settings unavailable.");}
       }
     } finally {if(mounted.current && generation===readGeneration.current)setBusy(false);}
@@ -87,7 +87,7 @@ export function GarmManagement({ read }) {
     <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. No automatic writes or recreation.</p>
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
-    {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings may be stale; editing is blocked until a successful refresh.</p>}
+    {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings and journal details may be stale; pool and scaleset inventories are unavailable. Editing is blocked until a successful refresh.</p>}
     {snapshot && <GarmPoolInventory inventory={snapshot.pool_inventory} />}
     {snapshot && <GarmScaleSetInventory inventory={snapshot.scaleset_inventory} />}
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
