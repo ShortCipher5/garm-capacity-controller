@@ -110,6 +110,25 @@ func (m *ManagementClient) DiscoverPools(ctx context.Context) (PoolDiscovery, er
 		if !m.client.providers[provider] {
 			continue
 		}
+		// Tag labels are shown as observed settings. A second case-folded name
+		// must not be silently ignored in favour of the canonical spelling.
+		if rawTags, ok := fields["tags"]; ok {
+			var tags []json.RawMessage
+			if json.Unmarshal(rawTags, &tags) != nil || len(tags) > 100 {
+				return PoolDiscovery{}, ErrManagement
+			}
+			for _, tag := range tags {
+				label, err := row(tag)
+				if err != nil {
+					return PoolDiscovery{}, ErrManagement
+				}
+				for key := range label {
+					if key != "name" && strings.EqualFold(key, "name") {
+						return PoolDiscovery{}, ErrManagement
+					}
+				}
+			}
+		}
 		pool, err := m.decodePool(fields, id)
 		if err != nil {
 			return PoolDiscovery{}, ErrManagement
