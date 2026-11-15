@@ -36,3 +36,11 @@ test("Garm discovery renders honest separate summaries, never editable children"
     assert.doesNotMatch(empty, /No pools exist|No repositories exist/);
   } finally { await server.close(); }
 });
+
+test("inventory displays external and missing pools without edit or recreation controls",async()=>{
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});
+ try{const {GarmPoolInventory}=await server.ssrLoadModule("/src/garm-discovery.jsx");
+ const html=renderToStaticMarkup(React.createElement(GarmPoolInventory,{inventory:{pools:[{id:"existing",provider_name:"capacity",configured:false,enabled:true,max_runners:4,min_idle_runners:1,priority:2}],missing_configured_pool_ids:["missing"]}}));
+ assert.match(html,/existing/);assert.match(html,/outside the management allowlist; read-only/);assert.match(html,/missing/);assert.match(html,/Absence is not proof of deletion/);assert.doesNotMatch(html,/<button|<form|<input|<select/);
+ }finally{await server.close();}
+});

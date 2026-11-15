@@ -11,6 +11,11 @@ export function validateGarm(value) {
     (value.pending !== undefined && (!object(value.pending) || ![value.pending.request_id,value.pending.kind,value.pending.target].every(string) || !Number.isFinite(Date.parse(value.pending.started_at))))) {
     throw new Error("The server returned unsupported Garm management settings.");
   }
+  if(value.discovery_only!==undefined && (typeof value.discovery_only!=="boolean" || (value.discovery_only && (value.writes_enabled || value.settings.writes_enabled || value.settings_available || value.settings.pools.length || value.settings.repositories.length))))throw new Error("The server returned unsupported discovery-only state.");
+  if(value.pool_inventory!==undefined){
+    const inv=value.pool_inventory;
+    if(!object(inv)||!Array.isArray(inv.pools)||inv.pools.length>10000||!Array.isArray(inv.missing_configured_pool_ids)||!inv.missing_configured_pool_ids.every(string)||new Set(inv.missing_configured_pool_ids).size!==inv.missing_configured_pool_ids.length||new Set(inv.pools.map(p=>p?.id)).size!==inv.pools.length||!inv.pools.every(p=>object(p)&&[p.id,p.provider_name].every(string)&&p.fingerprint===""&&hash(p.discovery_fingerprint)&&typeof p.configured==="boolean"&&typeof p.enabled==="boolean"&&[p.priority,p.max_runners,p.min_idle_runners,p.generation].every(integer)&&p.min_idle_runners<=p.max_runners&&Array.isArray(p.tags)&&p.tags.every(string))||inv.missing_configured_pool_ids.some(id=>inv.pools.some(p=>p.id===id)))throw new Error("The server returned unsupported Garm pool inventory.");
+  }
   return value;
 }
 export async function applyGarmChange(token, kind, change, { signal, fetcher = globalThis.fetch } = {}) {

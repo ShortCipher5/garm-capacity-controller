@@ -29,3 +29,20 @@ export function GarmSettingsPresentation({ snapshot, children }) {
     {!snapshot.settings.repositories.length && <p>No repositories returned in this configured discovery scope.</p>}
   </div>;
 }
+
+// Inventory is separate from editable settings. Never feed discovery hashes into
+// a write review or infer deletion/release from an absent configured pool.
+export function GarmPoolInventory({inventory}) {
+  if(!inventory)return <p>Existing-pool inventory is unavailable. No missing pool is recreated.</p>;
+  return <section aria-label="Existing Garm pool inventory">
+    <h3>Existing Garm pools</h3>
+    <p>Live read-only inventory for configured providers. Discovering a pool does not authorize editing it. Refreshes are observations, not atomic revisions.</p>
+    {inventory.pools.map(pool=><article key={pool.id}>
+      <h4>Pool {pool.id}</h4><p>Provider: {pool.provider_name}</p>
+      <p>{pool.configured?"Configured for management; separate write safeguards still apply.":"Discovered outside the management allowlist; read-only."}</p>
+      <p>{pool.enabled?"Enabled":"Disabled, not drained"} · Maximum runners: {pool.max_runners} · Minimum idle runners: {pool.min_idle_runners} · Priority: {pool.priority}</p>
+    </article>)}
+    {!inventory.pools.length && <p>No pools observed in this provider scope.</p>}
+    {inventory.missing_configured_pool_ids.length>0 && <div role="status"><h4>Configured pools not observed</h4><p>These pools may have been removed or moved outside provider scope. Absence is not proof of deletion; no runners or capacity are released and nothing is recreated.</p><ul>{inventory.missing_configured_pool_ids.map(id=><li key={id}>{id}</li>)}</ul></div>}
+  </section>;
+}

@@ -85,6 +85,11 @@ func (j *journalledGarm) Snapshot(ctx context.Context) (GarmOverview, error) {
 		view.History = append(view.History, item)
 		historyBytes += len(encoded)
 	}
+	// Discovery does not expand write scope. Preserve it even when an existing
+	// configured target disappears and the editable snapshot cannot be read.
+	if inventory, discoveryErr := j.manager.DiscoverPools(ctx); discoveryErr == nil {
+		view.PoolInventory = &inventory
+	}
 	snapshot, err := j.manager.Snapshot(ctx)
 	if err != nil {
 		return view, nil

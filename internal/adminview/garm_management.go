@@ -32,6 +32,8 @@ type GarmChangeEvent struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 }
 type GarmOverview struct {
+	DiscoveryOnly     bool                       `json:"discovery_only,omitempty"`
+	PoolInventory     *garmapi.PoolDiscovery     `json:"pool_inventory,omitempty"`
 	HistoryTruncated  bool                       `json:"history_truncated"`
 	History           []GarmChangeEvent          `json:"history"`
 	SettingsAvailable bool                       `json:"settings_available"`

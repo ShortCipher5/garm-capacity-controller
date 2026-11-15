@@ -40,3 +40,15 @@ test("ordinary overview refresh does not supersede current remote discovery",asy
  const session=new ReadSession(async(url)=>url.endsWith("overview")?{ok:true,status:200,json:async()=>overview}:new Promise((done)=>resolve=done));
  await session.connect(read);const pending=session.garmSnapshot();await session.refresh();resolve({ok:true,status:200,json:async()=>settings});assert.deepEqual(await pending,settings);session.disconnect();
 });
+
+test("inventory validates safe read-only hashes and rejects contradictory identities",()=>{
+ const value=structuredClone(settings);value.pool_inventory={pools:[{...value.settings.pools[0],fingerprint:"",configured:true,discovery_fingerprint:"a".repeat(64)}],missing_configured_pool_ids:[]};
+ assert.equal(validateGarm(value),value);
+ for(const mutate of [v=>v.pool_inventory.pools[0].fingerprint="f".repeat(64),v=>v.pool_inventory.pools.push(v.pool_inventory.pools[0]),v=>v.pool_inventory.missing_configured_pool_ids.push(v.pool_inventory.pools[0].id),v=>v.pool_inventory.pools[0].configured="true"]){const bad=structuredClone(value);mutate(bad);assert.throws(()=>validateGarm(bad),/unsupported/);}
+});
+
+test("zero-enrolled discovery cannot advertise editable state",()=>{
+ const v=structuredClone(settings);v.discovery_only=true;v.settings_available=false;v.writes_enabled=false;v.settings.writes_enabled=false;v.settings.pools=[];v.settings.repositories=[];
+ assert.equal(validateGarm(v),v);
+ for(const mutate of [x=>x.writes_enabled=true,x=>x.settings_available=true,x=>x.settings.pools=settings.settings.pools]){const bad=structuredClone(v);mutate(bad);assert.throws(()=>validateGarm(bad),/unsupported/);}
+});
