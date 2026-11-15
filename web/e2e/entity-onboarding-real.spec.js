@@ -7,6 +7,6 @@ test('unmocked authenticated admin discovery reaches existing upstream pool',asy
  const panel=page.getByRole('region',{name:'Existing GARM onboarding',exact:true});await panel.getByRole('button',{name:'Refresh existing entities'}).click();await panel.getByLabel('Existing entity',{exact:true}).selectOption('repository/'+repo);await panel.getByRole('button',{name:'View existing pools'}).click();
  await expect(panel.getByRole('heading',{name:'Pool '+pool,exact:true})).toBeVisible();
  await panel.getByRole('button',{name:'Refresh viewed entity'}).click();await expect(panel.getByLabel('Entity observation changes')).toContainText('0 changed');
- expect(requests.length).toBeGreaterThanOrEqual(3);expect(requests.every(r=>r.method==='GET'&&r.url().endsWith('/admin/api/v1/garm'))).toBe(true);await expect(page.getByLabel('Garm management write token')).toHaveCount(0);
+ expect(requests.length).toBeGreaterThanOrEqual(3);expect(requests.every(r=>r.method==='GET'&&r.url.endsWith('/admin/api/v1/garm'))).toBe(true);await expect(page.getByLabel('Garm management write token')).toHaveCount(0);
  await page.getByRole('button',{name:'Disconnect',exact:true}).click();await expect(panel).toHaveCount(0);
 });
