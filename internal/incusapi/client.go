@@ -605,6 +605,18 @@ func parseInstance(row json.RawMessage) (Instance, error) {
 	if err != nil {
 		return Instance{}, ErrUnbounded
 	}
+	// Incus defaults to hard enforcement, but a soft container limit may be
+	// exceeded when host memory is available. It is not an allocation bound.
+	// This container-only setting is rejected conservatively if supplied as
+	// non-hard on a VM too; that may over-reject a misconfigured VM snapshot.
+	// Accepting a VM row here is not proof of hypervisor enforcement or overhead.
+	// https://linuxcontainers.org/incus/docs/main/reference/instance_options/#limits-memory-enforce
+	if _, present := config["limits.memory.enforce"]; present {
+		enforcement, err := field[string](config, "limits.memory.enforce")
+		if err != nil || (enforcement != "" && enforcement != "hard") {
+			return Instance{}, ErrUnbounded
+		}
+	}
 	instance.RAMMiB, err = parseMemory(memory)
 	if err != nil {
 		return Instance{}, err
