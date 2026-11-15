@@ -438,23 +438,31 @@ test("host attention filters use recorded flags without requests or changing bud
   await expect(section.locator("h3")).toHaveCount(3);
 });
 
+// UI-only sync cases need independent state: the shared real-journal test above
+// intentionally leaves an UNKNOWN operation. Keep that production safeguard intact.
+// Fulfill browser GETs directly; route.fetch uses Node TLS, not the fixture's
+// Chromium-only exact-SPKI trust. No TLS verification is weakened here.
+async function isolatedGarmSyncSnapshot(page) {
+  const fixture={reads:0,snapshot:{settings_available:true,writes_enabled:true,write_blocked:false,history:[],history_truncated:false,settings:{writes_enabled:true,pools:[{id:"00000000-0000-4000-8000-000000000001",provider_name:"capacity",fingerprint:"f".repeat(64),enabled:true,priority:2,max_runners:4,min_idle_runners:1,generation:1,tags:["linux"]}],repositories:[]}}};
+  await page.route("**/admin/api/v1/garm",route=>{
+    expect(route.request().method()).toBe("GET");fixture.reads++;
+    return route.fulfill({status:200,json:fixture.snapshot});
+  });
+  return fixture;
+}
+
 test("external Garm edits refresh on focus but preserve and block a dirty draft", async ({page}) => {
+  const fixture=await isolatedGarmSyncSnapshot(page);
   await connect(page);
   await page.getByRole("button",{name:"Load Garm settings"}).click();
   const priority=page.getByLabel("Pool priority",{exact:true});
   await expect(priority).toBeVisible();
   await priority.fill("17");
   await page.getByLabel("Garm audit reason").fill("preserve local draft");
-  let reads=0;
   const writes=[];
   page.on("request",r=>{if(r.method()!=="GET" && r.url().includes("/admin/api/"))writes.push(r);});
-  await page.route("**/admin/api/v1/garm",async route=>{
-    const response=await route.fetch();const body=await response.json();
-    body.settings.pools[0].priority=23;
-    body.settings.pools[0].fingerprint="e".repeat(64);
-    reads++;
-    await route.fulfill({response,json:body});
-  });
+  fixture.snapshot.settings.pools[0].priority=23;
+  fixture.snapshot.settings.pools[0].fingerprint="e".repeat(64);
   await page.evaluate(()=>window.dispatchEvent(new Event("focus")));
   await expect(page.getByText("Garm settings changed elsewhere.",{exact:false})).toBeVisible();
   await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toContainText("priority:");
@@ -465,10 +473,11 @@ test("external Garm edits refresh on focus but preserve and block a dirty draft"
   await page.getByRole("button",{name:"Discard draft and refresh Garm settings"}).click();
   await expect(priority).toHaveValue("23");
   await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toHaveCount(0);
-  expect(reads).toBeGreaterThan(0);expect(writes).toHaveLength(0);
+  expect(fixture.reads).toBeGreaterThan(1);expect(writes).toHaveLength(0);
 });
 
 test("explicit discard resets unchanged uncontrolled fields and conflict blocks replay", async ({page})=>{
+  await isolatedGarmSyncSnapshot(page);
   await connect(page);await page.getByRole("button",{name:"Load Garm settings"}).click();
   const priority=page.getByLabel("Pool priority",{exact:true});
   const original=await priority.inputValue();
@@ -489,10 +498,11 @@ test("explicit discard resets unchanged uncontrolled fields and conflict blocks 
 });
 
 test("pending manual refresh disables draft fields until read completes",async({page})=>{
+ const fixture=await isolatedGarmSyncSnapshot(page);
  await connect(page);await page.getByRole("button",{name:"Load Garm settings"}).click();
  await expect(page.getByLabel("Pool priority",{exact:true})).toBeVisible();
  let finish;const gate=new Promise(resolve=>finish=resolve);
- await page.route("**/admin/api/v1/garm",async route=>{await gate;await route.continue();});
+ await page.route("**/admin/api/v1/garm",async route=>{await gate;await route.fulfill({status:200,json:fixture.snapshot});});
  await page.getByRole("button",{name:"Refresh Garm settings"}).click();
  await expect(page.getByLabel("Pool priority",{exact:true})).toBeDisabled();
  await expect(page.getByLabel("Garm audit reason")).toBeDisabled();
