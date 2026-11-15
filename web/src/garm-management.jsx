@@ -70,7 +70,7 @@ export function GarmManagement({ read }) {
     try {
       await applyGarmChange(credential,review.kind,review.change,{signal:controller.signal});
       if(!mounted.current)return;
-      dirty.current=false;setDraftDirty(false);setReview(null);setMessage("Operation recorded as confirmed. Ledger budgets remain independently enforced.");
+      dirty.current=false;setDraftDirty(false);setReview(null);setFormEpoch(value=>value+1);setMessage("Operation recorded as confirmed. Ledger budgets remain independently enforced.");
       try {const next=await read();if(mounted.current)setSnapshot(next);}catch{if(mounted.current){setSnapshot(null);setMessage("Operation recorded as confirmed, but current settings could not be refreshed. Refresh Garm settings before another change.");}}
     } catch(error) { if(mounted.current){setMessage(error.message);if(error.message.includes("Garm settings changed or another change is pending")){setNeedsRefresh(true);setReview(null);}if(error.message.includes("outcome")||error.message.includes("confirmation")){uncertain.current=true;setReview(null);}} }
     finally {clearTimeout(timeout);active.current=null;if(mounted.current)setBusy(false);}
@@ -96,7 +96,7 @@ export function GarmManagement({ read }) {
     {snapshot?.pending && <p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target}</p>}
     {uncertain.current && <p className="error">This session has an uncertain write. Further changes are disabled. Inspect journal status and resolve the external operation before reconnecting.</p>}
     {snapshot && !canEditGarm(snapshot) && <p>Garm editing is unavailable. Discovery only.</p>}
-    {snapshot && !review && <GarmSettingsPresentation snapshot={snapshot}><form key={formEpoch} onSubmit={prepare} onChange={()=>{dirty.current=true;setDraftDirty(true);}}><fieldset disabled={busy} style={{border:0,padding:0,margin:0,minWidth:0}}>
+    {snapshot && <div hidden={Boolean(review)}><GarmSettingsPresentation snapshot={snapshot}><form key={formEpoch} onSubmit={prepare} onChange={()=>{dirty.current=true;setDraftDirty(true);}}><fieldset disabled={busy || Boolean(review)} style={{border:0,padding:0,margin:0,minWidth:0}}>
       <label>Garm object type<select aria-label="Garm object type" value={kind} onChange={(e)=>{setKind(e.target.value);setTarget((e.target.value==="pool"?snapshot.settings.pools:snapshot.settings.repositories)[0]?.id||"");}}><option value="pool">Pool settings</option><option value="repository">Repository balancing</option></select></label>
       <label>Garm object<select value={target} onChange={(e)=>setTarget(e.target.value)}>{choices.map((v)=><option key={v.id} value={v.id}>{v.owner?`${v.owner}/${v.name}`:v.id}</option>)}</select></label>
       {selected && (kind==="pool"?<div className="budget-fields" key={selected.fingerprint}>
@@ -108,7 +108,7 @@ export function GarmManagement({ read }) {
       </div>:<label key={selected.fingerprint}>Repository balancing<select aria-label="Repository balancing" name="balancer" defaultValue={selected.pool_balancing_type}>{selected.pool_balancing_type===""&&<option value="">Upstream default</option>}<option value="roundrobin">Round robin</option><option value="pack">Pack</option></select></label>)}
       <label>Garm audit reason<input name="reason" maxLength="256" required placeholder="No credentials or sensitive data" /></label>
       <button className="primary" disabled={blocked||!selected} type="submit">Review Garm change</button>
-    </fieldset></form></GarmSettingsPresentation>}
+    </fieldset></form></GarmSettingsPresentation></div>}
     {review && canEditGarm(snapshot) && <form onSubmit={apply}>
       <h3>Review actual Garm change</h3><p>{review.kind}: {review.change.target}</p>
       {review.change.pool?Object.entries(review.change.pool).map(([key,value])=><p key={key}>{key}: {Array.isArray(value)?value.join(", "):String(value)}</p>):<p>Repository balancing: {review.change.balancer}</p>}
