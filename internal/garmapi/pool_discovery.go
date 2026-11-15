@@ -38,8 +38,22 @@ type PoolDiscovery struct {
 // fresh, not a cached or atomic multi-object revision. Failures return no partial
 // discovery. No setting, route, allowlist or capacity-accounting state changes.
 func (m *ManagementClient) DiscoverPools(ctx context.Context) (PoolDiscovery, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Scope maps/base are constructor-owned and immutable. Collection reads do
+	// not need the mutation mutex (and do not promise atomic upstream state).
+	// Keep one client-side discovery attempt active without uninterruptible
+	// queuing. Cancellation does not prove upstream processing has stopped.
+	if m == nil || ctx == nil || ctx.Err() != nil || m.discoveryGate == nil {
+		return PoolDiscovery{}, ErrManagement
+	}
+	select {
+	case m.discoveryGate <- struct{}{}:
+		defer func() { <-m.discoveryGate }()
+	case <-ctx.Done():
+		return PoolDiscovery{}, ErrManagement
+	}
+	if ctx.Err() != nil {
+		return PoolDiscovery{}, ErrManagement
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/pools", nil)
 	if err != nil {
 		return PoolDiscovery{}, ErrManagement
@@ -160,7 +174,7 @@ func NewPoolDiscovery(endpoint, token string, trust *tls.Config, providers []str
 	if err != nil {
 		return nil, ErrManagement
 	}
-	management := &ManagementClient{client: client, base: strings.TrimSuffix(client.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}}
+	management := &ManagementClient{client: client, base: strings.TrimSuffix(client.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, discoveryGate: make(chan struct{}, 1)}
 	return &PoolDiscoveryClient{management: management}, nil
 }
 func (c *PoolDiscoveryClient) Close() {

@@ -52,6 +52,7 @@ type ManagementClient struct {
 	writes               bool
 	disabledPoolCreation bool
 	mu                   sync.Mutex
+	discoveryGate        chan struct{}
 }
 
 // ManagedPool deliberately omits provider specs, instance/job payloads and secrets.
@@ -106,7 +107,7 @@ func NewManagement(config ManagementConfig) (*ManagementClient, error) {
 	if err != nil {
 		return nil, ErrManagement
 	}
-	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation}
+	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation, discoveryGate: make(chan struct{}, 1)}
 	for _, pair := range []struct {
 		ids   []string
 		scope map[string]bool
