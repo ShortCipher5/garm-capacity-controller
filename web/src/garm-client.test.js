@@ -68,3 +68,18 @@ test("inventory future-runner tags respect upstream read bounds without treating
  for(const tags of [[],["linux","<script>text</script>"],["é".repeat(128)],[" spaced "]]){v.pool_inventory.pools[0].tags=tags;assert.equal(validateGarm(v),v);}
  for(const tags of [null,[3],[""],["linux","linux"],["x".repeat(257)],["é".repeat(129)],["line\nnext"],["\u0085"],Array.from({length:101},(_,i)=>`tag${i}`)]){v.pool_inventory.pools[0].tags=tags;assert.throws(()=>validateGarm(v),/unsupported/);}
 });
+
+test("editable settings refuse ambiguous target identities and excessive configured scope",()=>{
+ const repo={id:settings.settings.pools[0].id,owner:"org",name:"repo",pool_balancing_type:"pack",fingerprint:"b".repeat(64)};
+ const good=structuredClone(settings);good.settings.repositories=[repo];
+ // Equal spelling across different endpoint namespaces is not a collision.
+ assert.equal(validateGarm(good),good);
+ for(const mutate of [v=>v.settings.pools.push({...v.settings.pools[0],priority:9}),v=>v.settings.repositories.push({...repo,pool_balancing_type:"roundrobin"}),v=>v.settings.pools[0].id="",v=>v.settings.repositories[0].id="",v=>v.settings.pools.push(null)]){
+  const bad=structuredClone(good);mutate(bad);assert.throws(()=>validateGarm(bad),/unsupported/);
+ }
+ const bounded=structuredClone(settings);
+ bounded.settings.pools=Array.from({length:1000},(_,i)=>({...settings.settings.pools[0],id:`legacy-${i}`}));
+ assert.equal(validateGarm(bounded),bounded);
+ bounded.settings.repositories=[repo];assert.throws(()=>validateGarm(bounded),/unsupported/);
+ const empty=structuredClone(settings);empty.settings.pools=[];assert.equal(validateGarm(empty),empty);
+});

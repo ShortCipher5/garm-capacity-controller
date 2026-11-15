@@ -2,6 +2,8 @@ const hash = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 const object = (v) => v && typeof v === "object" && !Array.isArray(v);
 const integer = (v) => Number.isSafeInteger(v) && v >= 0;
 const string = (v) => typeof v === "string";
+// Editable target identities must be unambiguous within each endpoint namespace.
+const uniqueSettingsIDs = (rows) => rows.every(row => object(row) && string(row.id) && row.id.length > 0) && new Set(rows.map(row => row.id)).size === rows.length;
 // Older observations may omit both owner fields. Never infer ownership from
 // pool/provider names; present that case as unknown, not an authorization.
 function validInventoryOwner(pool) {
@@ -19,6 +21,7 @@ export function validateGarm(value) {
   if (!object(value) || !object(value.settings) || typeof value.settings.writes_enabled !== "boolean" || typeof value.history_truncated !== "boolean" || typeof value.settings_available !== "boolean" || typeof value.writes_enabled !== "boolean" || typeof value.write_blocked !== "boolean" ||
     !Array.isArray(value.history) || value.history.length>25 || !value.history.every((e)=>object(e)&&[e.request_id,e.kind,e.target,e.state,e.reason,e.created_at].every(string)&&["pending","unknown","confirmed","rejected"].includes(e.state)&&Number.isFinite(Date.parse(e.created_at))&&object(e.before)&&object(e.desired)&&(e.result===undefined||object(e.result))) ||
     !Array.isArray(value.settings.pools) || !Array.isArray(value.settings.repositories) ||
+    value.settings.pools.length + value.settings.repositories.length > 1000 || !uniqueSettingsIDs(value.settings.pools) || !uniqueSettingsIDs(value.settings.repositories) ||
     !value.settings.pools.every((p) => object(p) && [p.id,p.provider_name].every(string) && hash(p.fingerprint) && typeof p.enabled === "boolean" && [p.priority,p.max_runners,p.min_idle_runners,p.generation].every(integer) && Array.isArray(p.tags) && p.tags.every(string)) ||
     !value.settings.repositories.every((r) => object(r) && [r.id,r.owner,r.name].every(string) && ["","pack","roundrobin"].includes(r.pool_balancing_type) && hash(r.fingerprint)) ||
     (value.pending !== undefined && (!object(value.pending) || ![value.pending.request_id,value.pending.kind,value.pending.target].every(string) || !Number.isFinite(Date.parse(value.pending.started_at))))) {
