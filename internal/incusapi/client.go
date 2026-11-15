@@ -593,6 +593,20 @@ func parseInstance(row json.RawMessage) (Instance, error) {
 	if err != nil {
 		return Instance{}, err
 	}
+	// Low-level LXC/QEMU overrides can change the generated runtime resource
+	// configuration independently of limits.cpu and limits.memory. We do not
+	// interpret these programs, so nonempty overrides cannot be bounded from
+	// this snapshot. This conservatively rejects benign overrides as well.
+	// https://linuxcontainers.org/incus/docs/main/reference/instance_options/#raw-instance-configuration
+	for key := range config {
+		if key != "raw.lxc" && key != "raw.qemu" && !strings.HasPrefix(key, "raw.qemu.") {
+			continue
+		}
+		value, err := field[string](config, key)
+		if err != nil || value != "" {
+			return Instance{}, ErrUnbounded
+		}
+	}
 	cpu, err := field[string](config, "limits.cpu")
 	if err != nil {
 		return Instance{}, ErrUnbounded
