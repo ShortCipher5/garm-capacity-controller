@@ -62,3 +62,8 @@ test("inventory shows exact upstream ownership and escaped future-runner tags, n
   }
  }finally{await server.close();}
 });
+test("provider display filter has an explicit stable accessible name",async()=>{
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});try{
+ const {GarmInventoryBrowser}=await server.ssrLoadModule('/src/garm-inventory-browser.jsx');const html=renderToStaticMarkup(React.createElement(GarmInventoryBrowser,{rows:[],kind:'pools',children:()=>null}));assert.match(html,/<select aria-label="Filter pools provider"/);
+ }finally{await server.close()}
+});

@@ -9,7 +9,7 @@ export function GarmInventoryBrowser({rows, kind, children}) {
  return <div>
   <GarmInventoryChanges rows={rows} kind={kind}/>
   <label>Search {kind} inventory<input type="search" maxLength={256} value={query} onChange={event=>{setQuery(event.target.value);setPage(0);}} placeholder="Name, ID, owner or tag" /></label>
-  <label>Filter {kind} provider<select value={provider} onChange={event=>{setProvider(event.target.value);setPage(0);}}><option value="">All observed providers</option>{inventoryProviders(rows,provider).map(value=><option key={value} value={value}>{value}</option>)}</select></label>
+  <label>Filter {kind} provider<select aria-label={`Filter ${kind} provider`} value={provider} onChange={event=>{setProvider(event.target.value);setPage(0);}}><option value="">All observed providers</option>{inventoryProviders(rows,provider).map(value=><option key={value} value={value}>{value}</option>)}</select></label>
   <p role="status">Showing {view.rows.length} of {view.matched} matching {kind}; {view.total} observed in provider scope. Display filters do not change discovery scope or permissions.</p>
   {view.rows.map(children)}
   {view.total > 0 && view.matched === 0 && <p>No observed {kind} match these display filters. This does not mean none exist.</p>}
