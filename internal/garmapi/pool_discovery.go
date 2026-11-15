@@ -20,6 +20,8 @@ import (
 // NOT a write precondition. Fetch Pool separately before an authorized edit.
 type DiscoveredPool struct {
 	ManagedPool
+	OwnerKind            string `json:"owner_kind"`
+	OwnerID              string `json:"owner_id,omitempty"`
 	Configured           bool   `json:"configured"`
 	DiscoveryFingerprint string `json:"discovery_fingerprint"`
 }
@@ -76,7 +78,7 @@ func (m *ManagementClient) DiscoverPools(ctx context.Context) (PoolDiscovery, er
 		// JSON names are case-sensitive. Refuse decoder-like aliases rather than
 		// presenting an upstream Enabled/Max_Runners value as omitted false/zero.
 		for field := range fields {
-			for _, known := range []string{"id", "provider_name", "repo_id", "generation", "priority", "max_runners", "min_idle_runners", "enabled", "tags"} {
+			for _, known := range []string{"id", "provider_name", "repo_id", "org_id", "enterprise_id", "generation", "priority", "max_runners", "min_idle_runners", "enabled", "tags"} {
 				if field != known && strings.EqualFold(field, known) {
 					return PoolDiscovery{}, ErrManagement
 				}
@@ -102,12 +104,19 @@ func (m *ManagementClient) DiscoverPools(ctx context.Context) (PoolDiscovery, er
 		// discovery. Only allowlisted redacted fields contribute to this change token.
 		pool.Fingerprint = ""
 		pool.protected = ""
-		canonical, err := json.Marshal(pool)
+		ownerKind, ownerID, err := discoveryPoolOwner(fields)
+		if err != nil {
+			return PoolDiscovery{}, ErrManagement
+		}
+		canonical, err := json.Marshal(struct {
+			Pool               ManagedPool
+			OwnerKind, OwnerID string
+		}{pool, ownerKind, ownerID})
 		if err != nil {
 			return PoolDiscovery{}, ErrManagement
 		}
 		digest := sha256.Sum256(canonical)
-		entry := DiscoveredPool{ManagedPool: pool, Configured: m.pools[id], DiscoveryFingerprint: hex.EncodeToString(digest[:])}
+		entry := DiscoveredPool{ManagedPool: pool, OwnerKind: ownerKind, OwnerID: ownerID, Configured: m.pools[id], DiscoveryFingerprint: hex.EncodeToString(digest[:])}
 		encoded, err := json.Marshal(entry)
 		if err != nil {
 			return PoolDiscovery{}, ErrManagement
@@ -164,4 +173,24 @@ func (c *PoolDiscoveryClient) DiscoverPools(ctx context.Context) (PoolDiscovery,
 		return PoolDiscovery{}, ErrManagement
 	}
 	return c.management.DiscoverPools(ctx)
+}
+
+// Ownership is upstream metadata, not authorization. Missing ownership stays
+// explicitly unknown for legacy observations. Never guess from provider/name.
+func discoveryPoolOwner(fields map[string]json.RawMessage) (string, string, error) {
+	kind, id := "unknown", ""
+	for _, owner := range []struct{ field, kind string }{{"repo_id", "repository"}, {"org_id", "organization"}, {"enterprise_id", "enterprise"}} {
+		value, err := textField(fields, owner.field, false)
+		if err != nil || (value != "" && !managementID(value)) {
+			return "", "", ErrManagement
+		}
+		if value == "" {
+			continue
+		}
+		if id != "" {
+			return "", "", ErrManagement
+		}
+		kind, id = owner.kind, value
+	}
+	return kind, id, nil
 }
