@@ -36,6 +36,14 @@ func browserGarm(dir string) (adminview.GarmManager, func(), error) {
 			w.WriteHeader(401)
 			return
 		}
+		if r.URL.Path == "/api/v1/pools" {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{pool})
+			return
+		}
 		var target map[string]any
 		switch r.URL.Path {
 		case "/api/v1/pools/" + browserPool:
