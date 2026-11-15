@@ -29,3 +29,25 @@ test('a complete empty observation replaces old pools without clearing the edit 
  assert.deepEqual(preserveDraftWithLatestInventory(previous,latest).pool_inventory,latest.pool_inventory);
  assert.equal(previous.pool_inventory.pools.length,1);
 });
+
+test('draft freeze does not hide a new pending or unknown journal observation',()=>{
+ const previous=snapshot(),latest=snapshot();
+ latest.settings.pools[0].fingerprint='changed';latest.write_blocked=true;
+ latest.pending={request_id:'request-2',kind:'pool',target:'p'};
+ latest.history=[{request_id:'request-2',state:'unknown'}];latest.history_truncated=true;
+ const result=preserveDraftWithLatestInventory(previous,latest);
+ assert.equal(result.settings,previous.settings);
+ assert.equal(result.write_blocked,true);assert.equal(result.pending,latest.pending);
+ assert.equal(result.history,latest.history);assert.equal(result.history_truncated,true);
+ assert.equal(retainGarmDraftConflict(result,latest,true,false,garmSettingsChanged),true);
+ assert.equal(previous.write_blocked,false);
+});
+test('new journal observation can remove stale pending without clearing conflict or changing draft',()=>{
+ const previous=snapshot(),latest=snapshot();
+ previous.pending={request_id:'old'};previous.history=[{state:'pending'}];previous.history_truncated=true;
+ latest.history=[];latest.history_truncated=false;
+ const result=preserveDraftWithLatestInventory(previous,latest);
+ assert.equal(result.pending,undefined);assert.deepEqual(result.history,[]);
+ assert.equal(result.history_truncated,false);assert.equal(result.settings,previous.settings);
+ assert.equal(retainGarmDraftConflict(result,latest,true,false,garmSettingsChanged),true);
+});
