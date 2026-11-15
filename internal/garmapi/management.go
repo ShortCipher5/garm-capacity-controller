@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -51,7 +50,7 @@ type ManagementClient struct {
 	repositories         map[string]bool
 	writes               bool
 	disabledPoolCreation bool
-	mu                   sync.Mutex
+	mu                   managementMutex
 	discoveryGate        chan struct{}
 }
 
@@ -315,12 +314,16 @@ func (m *ManagementClient) repository(ctx context.Context, id string) (ManagedRe
 func balancer(value string) bool { return value == "" || value == "roundrobin" || value == "pack" }
 
 func (m *ManagementClient) Pool(ctx context.Context, id string) (ManagedPool, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedPool{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	return m.pool(ctx, id)
 }
 func (m *ManagementClient) Repository(ctx context.Context, id string) (ManagedRepository, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedRepository{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	return m.repository(ctx, id)
 }
@@ -439,7 +442,9 @@ type ManagementSnapshot struct {
 }
 
 func (m *ManagementClient) Snapshot(ctx context.Context) (ManagementSnapshot, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagementSnapshot{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	payloadBytes := 0
 	snapshot := ManagementSnapshot{Pools: []ManagedPool{}, Repositories: []ManagedRepository{}, WritesEnabled: m.writes}
