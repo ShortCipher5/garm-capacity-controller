@@ -11,23 +11,28 @@ function poolView(value){
 // or a URL from discovered data. No draft, enrollment or mutation callbacks exist.
 export function createEntityOnboardingFlow({readEntities,readEntityPools,onChange}){
  let generation=0,active=null,disposed=false;
- let state={snapshot:{available:false,entities:[]},pools:[],entity:null,busy:false,message:""};
- const emit=()=>{if(!disposed)onChange({...state,pools:state.pools.map(p=>({...p})),snapshot:{...state.snapshot,entities:state.snapshot.entities.map(e=>({...e}))}})};
+ let state={snapshot:{available:false,entities:[]},pools:[],entity:null,busy:false,message:"",changes:null};
+ const emit=()=>{if(!disposed)onChange({...state,changes:state.changes?{added:[...state.changes.added],absent:[...state.changes.absent],changed:[...state.changes.changed]}:null,pools:state.pools.map(p=>({...p})),snapshot:{...state.snapshot,entities:state.snapshot.entities.map(e=>({...e}))}})};
  const begin=()=>{active?.abort();active=new AbortController();return {version:++generation,signal:active.signal}};
  const current=request=>!disposed&&request.version===generation&&!request.signal.aborted;
  return {
- async refresh(){if(disposed)return;const request=begin();state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,busy:true,message:""};emit();
+ async refresh(){if(disposed)return;const request=begin();state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,changes:null,busy:true,message:""};emit();
  try{const value=entityOnboardingView(await readEntities({signal:request.signal}));if(!current(request))return;if(!value.available)throw new Error("unavailable");state={...state,snapshot:value};}
  catch{if(current(request))state={...state,message:"Entity discovery unavailable."};}
  finally{if(current(request)){state={...state,busy:false};emit()}}
  },
  async inspect(choice){if(disposed)return;const valid=choice&&typeof choice.type==="string"&&typeof choice.id==="string"&&existingEntityChoice(state.snapshot,`${choice.type}/${choice.id}`);if(!valid)return;
- const request=begin();state={...state,pools:[],entity:valid,busy:true,message:""};emit();
- try{const pools=poolView(await readEntityPools({...valid},{signal:request.signal}));if(current(request))state={...state,pools};}
- catch{if(current(request))state={...state,pools:[],entity:null,message:"Pool inspection unavailable."};}
+ const previous=state.entity?.type===valid.type&&state.entity?.id===valid.id&&state.message===""&&!state.busy?state.pools:null;
+ const request=begin();state={...state,pools:[],entity:valid,changes:null,busy:true,message:""};emit();
+ try{const pools=poolView(await readEntityPools({...valid},{signal:request.signal}));if(current(request)){
+ const before=new Map((previous||[]).map(p=>[p.id,p]));const after=new Map(pools.map(p=>[p.id,p]));
+ const changes=previous===null?null:{added:pools.filter(p=>!before.has(p.id)).map(p=>p.id),absent:previous.filter(p=>!after.has(p.id)).map(p=>p.id),changed:pools.filter(p=>before.has(p.id)&&["enabled","priority","max_runners","min_idle_runners"].some(k=>p[k]!==before.get(p.id)[k])).map(p=>p.id)};
+ state={...state,pools,changes};
+ }}
+ catch{if(current(request))state={...state,pools:[],entity:null,changes:null,message:"Pool inspection unavailable."};}
  finally{if(current(request)){state={...state,busy:false};emit()}}
  },
- cancel(){if(disposed)return;generation++;active?.abort();active=null;state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,busy:false,message:"Reading canceled. Refresh existing entities to continue."};emit();},
+ cancel(){if(disposed)return;generation++;active?.abort();active=null;state={...state,snapshot:{...state.snapshot,available:false},pools:[],entity:null,changes:null,busy:false,message:"Reading canceled. Refresh existing entities to continue."};emit();},
  dispose(){disposed=true;generation++;active?.abort();}
  };
 }
