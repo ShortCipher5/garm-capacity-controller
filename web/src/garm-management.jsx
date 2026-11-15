@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { GarmConflictDetails } from "./garm-conflict.jsx";
+import { preserveDraftWithLatestInventory, retainGarmDraftConflict } from "./garm-observation.js";
 import { garmSettingsChanged } from "./garm-sync.js";
 import { applyGarmChange } from "./garm-client.js";
 import { canEditGarm, GarmSettingsPresentation, GarmPoolInventory } from "./garm-discovery.jsx";
@@ -20,9 +21,8 @@ export function GarmManagement({ read }) {
       const next=await read();
       if(mounted.current && generation===readGeneration.current){
         setSyncError(false);
-        if(background && needsRefresh)setConflictLatest(next);
-        if(background && (dirty.current || review) && garmSettingsChanged(snapshot,next)) {
-          setConflictLatest(next);setSnapshot(previous=>({...previous,pool_inventory:next.pool_inventory}));setNeedsRefresh(true);if(token.current)token.current.value="";
+        if(background && retainGarmDraftConflict(snapshot,next,needsRefresh,Boolean(dirty.current || review),garmSettingsChanged)) {
+          setConflictLatest(next);setSnapshot(previous=>preserveDraftWithLatestInventory(previous,next));setNeedsRefresh(true);if(token.current)token.current.value="";
         } else if(!needsRefresh || !background) {
           setSnapshot(next);setNeedsRefresh(false);setConflictLatest(null);
           if(!canEditGarm(next)){setReview(null);if(token.current)token.current.value="";}
