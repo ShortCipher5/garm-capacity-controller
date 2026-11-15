@@ -138,6 +138,7 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 	}
 	result := []gateway.GarmInstance{}
 	seen := map[string]bool{}
+	seenRows := map[string]bool{}
 	for _, raw := range rows {
 		fields, err := row(raw)
 		if err != nil {
@@ -213,8 +214,11 @@ func (c *Client) Instances(ctx context.Context) ([]gateway.GarmInstance, error) 
 		if err != nil {
 			return nil, ErrInventory
 		}
-		if id != "" && !preparationUUID(id) {
+		if id != "" && (!preparationUUID(id) || seenRows[id]) {
 			return nil, ErrInventory
+		}
+		if id != "" {
+			seenRows[id] = true
 		}
 		instance.RowID = id
 		if raw, known := fields["generation"]; known {
