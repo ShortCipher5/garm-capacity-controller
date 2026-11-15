@@ -226,6 +226,9 @@ func boundedSettingText(value string, max int) bool {
 	return true
 }
 func (m *ManagementClient) decodePool(f map[string]json.RawMessage, id string) (ManagedPool, error) {
+	if !canonicalManagementFields(f, "id", "provider_name", "repo_id", "generation", "priority", "max_runners", "min_idle_runners", "enabled", "tags") {
+		return ManagedPool{}, ErrManagement
+	}
 	p := ManagedPool{Tags: []string{}}
 	var err error
 	p.ID, err = textField(f, "id", true)
@@ -266,7 +269,7 @@ func (m *ManagementClient) decodePool(f map[string]json.RawMessage, id string) (
 		seen := map[string]bool{}
 		for _, tag := range tags {
 			tf, e := row(tag)
-			if e != nil {
+			if e != nil || !canonicalManagementFields(tf, "name") {
 				return ManagedPool{}, ErrManagement
 			}
 			name, e := textField(tf, "name", true)
@@ -289,6 +292,9 @@ func (m *ManagementClient) repository(ctx context.Context, id string) (ManagedRe
 	f, err := m.exchange(ctx, http.MethodGet, "/repositories/"+url.PathEscape(id), nil)
 	if err != nil {
 		return ManagedRepository{}, err
+	}
+	if !canonicalManagementFields(f, "id", "owner", "name", "pool_balancing_type") {
+		return ManagedRepository{}, ErrManagement
 	}
 	r := ManagedRepository{}
 	r.ID, err = textField(f, "id", true)
@@ -483,4 +489,17 @@ func (m *ManagementClient) Snapshot(ctx context.Context) (ManagementSnapshot, er
 		snapshot.Repositories = append(snapshot.Repositories, repository)
 	}
 	return snapshot, nil
+}
+
+// canonicalManagementFields refuses ambiguous spellings of interpreted fields.
+// Unknown future fields remain accepted and covered by the existing fingerprint.
+func canonicalManagementFields(fields map[string]json.RawMessage, names ...string) bool {
+	for field := range fields {
+		for _, name := range names {
+			if field != name && strings.EqualFold(field, name) {
+				return false
+			}
+		}
+	}
+	return true
 }
