@@ -24,3 +24,13 @@ test('scalesets never render editing or infer physical capacity from metadata',a
  assert.match(render(undefined),/unavailable or unsupported/);assert.doesNotMatch(render(undefined),/No scalesets observed/);assert.match(render({scalesets:[]}),/No scalesets observed in this provider scope/);
  }finally{await server.close();}
 });
+test('desired target is optional legacy metadata, bounded and never clamped to maximum',async()=>{
+ const good=view();good.scaleset_inventory.scalesets[0].desired_runner_count=17;assert.equal(validateGarm(good),good);
+ for(const value of [-1,1.5,null,'3',Number.MAX_SAFE_INTEGER+1]){const bad=view();bad.scaleset_inventory.scalesets[0].desired_runner_count=value;assert.throws(()=>validateGarm(bad),/unsupported/);}
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});
+ try{const {GarmScaleSetInventory}=await server.ssrLoadModule('/src/garm-scalesets.jsx');const render=v=>renderToStaticMarkup(React.createElement(GarmScaleSetInventory,{inventory:v.scaleset_inventory}));
+ assert.match(render(good),/Upstream requested runner target: 17/);assert.match(render(good),/Not observed runners or reserved capacity/);
+ assert.match(render(view()),/Upstream requested runner target: Not reported/);
+ good.scaleset_inventory.scalesets[0].desired_runner_count=0;assert.match(render(good),/Upstream requested runner target: 0/);
+ }finally{await server.close();}
+});

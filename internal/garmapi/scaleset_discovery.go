@@ -17,6 +17,9 @@ import (
 // separate forge scale_set_id. No route, physical host, capacity grant or edit
 // authority is inferred. Fingerprint covers only these redacted display fields.
 type DiscoveredScaleSet struct {
+	// DesiredRunnerCount is the upstream requested target, not observed occupancy
+	// or reserved capacity. Native v0.2.1 omits its zero value in JSON.
+	DesiredRunnerCount   uint64   `json:"desired_runner_count"`
 	ID                   uint64   `json:"id"`
 	Name                 string   `json:"name"`
 	ProviderName         string   `json:"provider_name"`
@@ -93,7 +96,7 @@ func (m *ManagementClient) DiscoverScaleSets(ctx context.Context) (ScaleSetDisco
 			return ScaleSetDiscovery{}, ErrManagement
 		}
 		for key := range fields {
-			for _, known := range []string{"id", "name", "provider_name", "repo_id", "org_id", "enterprise_id", "state", "enabled", "max_runners", "min_idle_runners", "generation", "tags"} {
+			for _, known := range []string{"id", "name", "provider_name", "repo_id", "org_id", "enterprise_id", "state", "enabled", "max_runners", "min_idle_runners", "generation", "tags", "desired_runner_count"} {
 				if key != known && strings.EqualFold(key, known) {
 					return ScaleSetDiscovery{}, ErrManagement
 				}
@@ -135,6 +138,11 @@ func (m *ManagementClient) DiscoverScaleSets(ctx context.Context) (ScaleSetDisco
 				return ScaleSetDiscovery{}, ErrManagement
 			}
 		}
+		item.DesiredRunnerCount, err = number(fields, "desired_runner_count", false)
+		if err != nil || item.DesiredRunnerCount > 9007199254740991 {
+			return ScaleSetDiscovery{}, ErrManagement
+		}
+		// A reported target above max is still a valid observation, not a grant.
 		if item.MinIdleRunners > item.MaxRunners || item.MaxRunners > 1000000 || item.Generation > 9007199254740991 {
 			return ScaleSetDiscovery{}, ErrManagement
 		}

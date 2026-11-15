@@ -31,7 +31,7 @@ export function validateGarm(value) {
   }
   if(value.scaleset_inventory!==undefined){
     const inv=value.scaleset_inventory;
-    if(!object(inv)||!Array.isArray(inv.scalesets)||inv.scalesets.length>10000||new Set(inv.scalesets.map(s=>s?.id)).size!==inv.scalesets.length||!inv.scalesets.every(s=>object(s)&&integer(s.id)&&s.id>0&&[s.name,s.provider_name].every(v=>string(v)&&v.length>0)&&validInventoryOwner(s)&&hash(s.discovery_fingerprint)&&typeof s.enabled==="boolean"&&[s.max_runners,s.min_idle_runners,s.generation].every(integer)&&s.min_idle_runners<=s.max_runners&&["pending_create","created","error","pending_delete","pending_force_delete"].includes(s.state)&&validInventoryTags(s.tags)))throw new Error("The server returned unsupported Garm scaleset inventory.");
+    if(!object(inv)||!Array.isArray(inv.scalesets)||inv.scalesets.length>10000||new Set(inv.scalesets.map(s=>s?.id)).size!==inv.scalesets.length||!inv.scalesets.every(s=>object(s)&&integer(s.id)&&s.id>0&&(s.desired_runner_count===undefined||integer(s.desired_runner_count))&&[s.name,s.provider_name].every(v=>string(v)&&v.length>0)&&validInventoryOwner(s)&&hash(s.discovery_fingerprint)&&typeof s.enabled==="boolean"&&[s.max_runners,s.min_idle_runners,s.generation].every(integer)&&s.min_idle_runners<=s.max_runners&&["pending_create","created","error","pending_delete","pending_force_delete"].includes(s.state)&&validInventoryTags(s.tags)))throw new Error("The server returned unsupported Garm scaleset inventory.");
   }
   return value;
 }

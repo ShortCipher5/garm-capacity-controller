@@ -9,6 +9,7 @@ export function GarmScaleSetInventory({inventory}) {
  <p>Owner: {({repository:"Repository",organization:"Organization",enterprise:"Enterprise"})[s.owner_kind] || "Unknown"}{s.owner_id ? ` · ${s.owner_id}` : ""}</p>
  <p>Observed state: {s.state} · {s.enabled ? "Enabled" : "Disabled, not drained"}</p>
  <p>Maximum runners: {s.max_runners} · Minimum idle runners: {s.min_idle_runners} · Generation: {s.generation}</p>
+ <p>Upstream requested runner target: {s.desired_runner_count === undefined ? "Not reported" : s.desired_runner_count}. Not observed runners or reserved capacity.</p>
  <p>Future-runner tags: {s.tags.length ? s.tags.join(", ") : "No tags reported"}</p></article>)}
  {!inventory.scalesets.length && <p>No scalesets observed in this provider scope.</p>}
  </section>;
