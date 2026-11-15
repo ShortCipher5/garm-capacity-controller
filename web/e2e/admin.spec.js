@@ -457,11 +457,14 @@ test("external Garm edits refresh on focus but preserve and block a dirty draft"
   });
   await page.evaluate(()=>window.dispatchEvent(new Event("focus")));
   await expect(page.getByText("Garm settings changed elsewhere.",{exact:false})).toBeVisible();
+  await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toContainText("priority:");
+  await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toContainText("→ 23");
   await expect(priority).toHaveValue("17");
   await expect(page.getByLabel("Garm audit reason")).toHaveValue("preserve local draft");
   await expect(page.getByRole("button",{name:"Review Garm change"})).toBeDisabled();
   await page.getByRole("button",{name:"Discard draft and refresh Garm settings"}).click();
   await expect(priority).toHaveValue("23");
+  await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toHaveCount(0);
   expect(reads).toBeGreaterThan(0);expect(writes).toHaveLength(0);
 });
 

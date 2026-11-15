@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { GarmConflictDetails } from "./garm-conflict.jsx";
 import { garmSettingsChanged } from "./garm-sync.js";
 import { applyGarmChange } from "./garm-client.js";
 import { canEditGarm, GarmSettingsPresentation, GarmPoolInventory } from "./garm-discovery.jsx";
@@ -6,6 +7,7 @@ import { canEditGarm, GarmSettingsPresentation, GarmPoolInventory } from "./garm
 export function GarmManagement({ read }) {
   const [snapshot,setSnapshot] = useState(null), [message,setMessage] = useState(""), [busy,setBusy] = useState(false), [review,setReview] = useState(null), [kind,setKind] = useState("pool"), [target,setTarget] = useState("");
   const [formEpoch,setFormEpoch] = useState(0), [draftDirty,setDraftDirty] = useState(false);
+  const [conflictLatest,setConflictLatest] = useState(null);
   const [needsRefresh,setNeedsRefresh] = useState(false), [syncError,setSyncError] = useState(false);
   const dirty = useRef(false), latestLoad = useRef(null);
   const active = useRef(null), token = useRef(null), mounted = useRef(true), uncertain = useRef(false), readGeneration=useRef(0);
@@ -18,10 +20,11 @@ export function GarmManagement({ read }) {
       const next=await read();
       if(mounted.current && generation===readGeneration.current){
         setSyncError(false);
+        if(background && needsRefresh)setConflictLatest(next);
         if(background && (dirty.current || review) && garmSettingsChanged(snapshot,next)) {
-          setSnapshot(previous=>({...previous,pool_inventory:next.pool_inventory}));setNeedsRefresh(true);if(token.current)token.current.value="";
+          setConflictLatest(next);setSnapshot(previous=>({...previous,pool_inventory:next.pool_inventory}));setNeedsRefresh(true);if(token.current)token.current.value="";
         } else if(!needsRefresh || !background) {
-          setSnapshot(next);setNeedsRefresh(false);
+          setSnapshot(next);setNeedsRefresh(false);setConflictLatest(null);
           if(!canEditGarm(next)){setReview(null);if(token.current)token.current.value="";}
           const objects=kind==="pool"?next.settings.pools:next.settings.repositories;
           if(!objects.some(value=>value.id===target))setTarget(objects[0]?.id || "");
@@ -82,6 +85,7 @@ export function GarmManagement({ read }) {
     <button className="quiet" onClick={()=>load(false)} disabled={busy}>{busy?"Working…":(needsRefresh||draftDirty||review)?"Discard draft and refresh Garm settings":snapshot?"Refresh Garm settings":"Load Garm settings"}</button>
     <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. No automatic writes or recreation.</p>
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
+    {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
     {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings may be stale; editing is blocked until a successful refresh.</p>}
     {snapshot && <GarmPoolInventory inventory={snapshot.pool_inventory} />}
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
