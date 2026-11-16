@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import ExperimentalPoolSettingsEditor from './ExperimentalPoolSettingsEditor.svelte';
 import { createMockPool } from '../../test/factories.js';
@@ -27,7 +27,11 @@ function priorityInput(): HTMLInputElement {
 }
 
 describe('ExperimentalPoolSettingsEditor', () => {
+	beforeEach(() => {
+		localStorage.clear();
+	});
 	afterEach(() => {
+		localStorage.clear();
 		vi.unstubAllEnvs();
 		vi.unstubAllGlobals();
 	});
@@ -76,7 +80,7 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		await renderEditor();
 
 		await fireEvent.input(priorityInput(), { target: { value: '77' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Save changes' }));
 
 		await waitFor(() => expect(screen.getByText(/Conflict \(412\)/)).toBeInTheDocument());
 		// draft preserved in the inputs
@@ -84,8 +88,10 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		// fresh ETag recorded
 		expect(screen.getByText(/Fresh ETag: "99:1"/)).toBeInTheDocument();
 
-		// operator saves again: fresh ETag goes out, auth token intact
-		await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+		// operator saves again: fresh ETag goes out, auth token intact. The
+		// button returns to "Save changes" once the conflict state settles.
+		await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled());
+		await fireEvent.click(await screen.findByRole('button', { name: 'Save changes' }));
 		await waitFor(() => expect(screen.getByText('Settings applied. Draft cleared.')).toBeInTheDocument());
 
 		expect(ifMatchHeaders).toEqual(['"42:7"', '"99:1"']);
@@ -105,7 +111,7 @@ describe('ExperimentalPoolSettingsEditor', () => {
 
 		await renderEditor();
 		await fireEvent.input(priorityInput(), { target: { value: '30' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Save changes' }));
 
 		await waitFor(() => expect(screen.getByText('Settings applied. Draft cleared.')).toBeInTheDocument());
 		// inputs now show the server-confirmed values; no unsent draft remains
@@ -114,7 +120,8 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		expect(screen.getByText('"43:1"')).toBeInTheDocument();
 	});
 
-	it('UNKNOWN hold: no retry, manual re-read never auto-submits', async () => {
+	it('UNKNOWN hold: blocks saving, survives re-read, resolves via the durable receipt', async () => {
+		localStorage.clear();
 		const methods: string[] = [];
 		const fetchMock = vi
 			.fn()
@@ -126,6 +133,9 @@ describe('ExperimentalPoolSettingsEditor', () => {
 			})
 			.mockImplementationOnce(async () =>
 				jsonResponse(200, { priority: 11, max_runners: 5, min_idle_runners: 1 }, '"50:1"')
+			)
+			.mockImplementationOnce(async () =>
+				jsonResponse(200, { priority: 44, max_runners: 5, min_idle_runners: 1 }, '"50:2"')
 			);
 		vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
 			methods.push(init?.method ?? 'GET');
@@ -134,20 +144,61 @@ describe('ExperimentalPoolSettingsEditor', () => {
 
 		await renderEditor();
 		await fireEvent.input(priorityInput(), { target: { value: '44' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Save changes' }));
 
 		await waitFor(() => expect(screen.getByText(/UNKNOWN:/)).toBeInTheDocument());
 		// draft held exactly as the operator left it
 		expect(priorityInput().value).toBe('44');
 		// exactly one PATCH was dispatched; nothing auto-retried
 		expect(methods.filter((m) => m === 'PATCH')).toHaveLength(1);
+		// saving is blocked until the outcome is resolved
+		await waitFor(() =>
+			expect((screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled).toBe(true)
+		);
+		// the pending request is journaled for restart recovery
+		expect(localStorage.getItem('garm.expPoolSettings.pending')).toContain('"payload"');
 
-		// manual re-read reconciles, preserves the draft, never auto-submits
+		// a manual re-read does NOT clear the UNKNOWN state
 		await fireEvent.click(screen.getByRole('button', { name: 'Re-read settings' }));
 		await waitFor(() => expect(screen.getByText('"50:1"')).toBeInTheDocument());
 		expect(priorityInput().value).toBe('44');
 		expect(methods.filter((m) => m === 'PATCH')).toHaveLength(1);
+		expect(screen.getByText(/UNKNOWN:/)).toBeInTheDocument();
+
+		// deliberate resolution re-presents the journaled request; the server
+		// answers definitively and the hold clears
+		await fireEvent.click(screen.getByRole('button', { name: 'Resolve outcome' }));
+		await waitFor(() => expect(screen.getByText('Settings applied. Draft cleared.')).toBeInTheDocument());
 		expect(screen.queryByText(/UNKNOWN:/)).not.toBeInTheDocument();
+		expect(methods.filter((m) => m === 'PATCH')).toHaveLength(2);
+		expect(localStorage.getItem('garm.expPoolSettings.pending')).toBeNull();
+	});
+
+	it('recovers an unresolved request across restart from the journal', async () => {
+		localStorage.clear();
+		localStorage.setItem(
+			'garm.expPoolSettings.pending',
+			JSON.stringify({
+				requestId: 'req-from-before-restart',
+				payload: { priority: 44 },
+				etag: '"42:7"',
+				poolID: 'pool-9',
+				at: new Date().toISOString()
+			})
+		);
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { priority: 10, max_runners: 5, min_idle_runners: 1 }, '"60:1"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await renderEditor();
+
+		// The UNKNOWN hold re-enters immediately, the journaled draft is
+		// restored and saving stays blocked even though the re-read succeeds.
+		await waitFor(() => expect(screen.getByText(/UNKNOWN:/)).toBeInTheDocument());
+		expect(priorityInput().value).toBe('44');
+		expect((screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByRole('button', { name: 'Resolve outcome' })).toBeInTheDocument();
 	});
 });
 

@@ -17,6 +17,7 @@ package sql
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -955,4 +956,52 @@ func (s *OfflinePoolSettingsTestSuite) TestConcurrentConditionalUpdatesExactlyOn
 
 func TestOfflinePoolSettingsTestSuite(t *testing.T) {
 	suite.Run(t, new(OfflinePoolSettingsTestSuite))
+}
+
+// TestAbsentRevisionTableErrorDialects qualifies the benign-error
+// classifier across the database dialects GARM supports. Only the
+// absent-side-table form may be swallowed by the legacy bump; anything
+// else must fail the write.
+func TestAbsentRevisionTableErrorDialects(t *testing.T) {
+	benign := []string{
+		"no such table: offline_pool_settings_revisions",                                 // SQLite (mattn, modernc)
+		"Error 1146 (42S02): Table 'garm.offline_pool_settings_revisions' doesn't exist", // MySQL
+		`pq: relation "offline_pool_settings_revisions" does not exist`,                  // PostgreSQL
+	}
+	for _, msg := range benign {
+		if !absentRevisionTableError(fmt.Errorf("%w", errors.New(msg))) {
+			t.Errorf("expected benign classification for %q", msg)
+		}
+	}
+	real := []string{
+		"database is locked",
+		"UNIQUE constraint failed: pools.id",
+		"Error 1213 (40001): Deadlock found when trying to get lock",
+		"context deadline exceeded",
+		"disk I/O error",
+		"missing destination name some_column in *sql.Row",
+	}
+	for _, msg := range real {
+		if absentRevisionTableError(errors.New(msg)) {
+			t.Errorf("expected real-failure classification for %q", msg)
+		}
+	}
+}
+
+// TestLegacyWriteWithoutExperimentalSchema verifies the benign bump path:
+// a stock pool update on a database where the experimental feature was
+// never used must succeed, change the row and leave no experimental
+// schema behind.
+func (s *OfflinePoolSettingsTestSuite) TestLegacyWriteWithoutExperimentalSchema() {
+	s.Require().False(s.revisionExists())
+	s.Require().False(s.receiptsExist())
+
+	maxRunners := uint(11)
+	_, err := s.Store.UpdateEntityPool(s.adminCtx, s.orgEntity(), s.pool.ID, params.UpdatePoolParams{
+		MaxRunners: &maxRunners,
+	})
+	s.Require().NoError(err)
+	s.Require().Equal(uint(11), s.currentPoolRow(s.pool.ID).MaxRunners)
+	s.Require().False(s.revisionExists())
+	s.Require().False(s.receiptsExist())
 }

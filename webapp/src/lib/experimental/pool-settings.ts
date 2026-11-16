@@ -154,7 +154,7 @@ function validatePatch(patch: PoolSettingsPatch): void {
 async function requestPoolSettings(
 	method: 'GET' | 'PATCH',
 	ref: PoolSettingsRef,
-	opts: { ifMatch?: string; patch?: PoolSettingsPatch } = {}
+	opts: { ifMatch?: string; patch?: PoolSettingsPatch; requestId?: string } = {}
 ): Promise<PoolSettingsPatchResult> {
 	const headers: Record<string, string> = { Accept: 'application/json' };
 	const token = garmApi.getToken();
@@ -170,6 +170,12 @@ async function requestPoolSettings(
 		headers['Content-Type'] = 'application/json';
 		// Strong quoted ETag, exactly as obtained from GET.
 		headers['If-Match'] = opts.ifMatch;
+		if (opts.requestId) {
+			// Persistent request identity: lets the server answer a
+			// re-presented request from its durable receipt instead of
+			// re-applying it.
+			headers['Idempotency-Key'] = opts.requestId;
+		}
 		body = JSON.stringify(opts.patch);
 	}
 
@@ -271,7 +277,8 @@ export async function getPoolSettings(ref: PoolSettingsRef): Promise<PoolSetting
 export function patchPoolSettings(
 	ref: PoolSettingsRef,
 	ifMatch: string,
-	patch: PoolSettingsPatch
+	patch: PoolSettingsPatch,
+	requestId?: string
 ): Promise<PoolSettingsPatchResult> {
-	return requestPoolSettings('PATCH', ref, { ifMatch, patch });
+	return requestPoolSettings('PATCH', ref, { ifMatch, patch, requestId });
 }

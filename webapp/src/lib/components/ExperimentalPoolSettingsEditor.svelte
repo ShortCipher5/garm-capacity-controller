@@ -33,6 +33,53 @@
 	let unknownHeld = false;
 	let errorMessage = '';
 
+	// Client-side durable journal of a dispatched-but-unresolved write. The
+	// exact request id, payload and precondition are persisted before
+	// dispatch and cleared on any definitive outcome, so a browser restart
+	// recovers the UNKNOWN state instead of silently dropping it.
+	interface PendingRequest {
+		requestId: string;
+		payload: Partial<PoolSettings>;
+		etag: string;
+		poolID: string;
+		at: string;
+	}
+	let pendingRequest: PendingRequest | null = null;
+
+	function pendingStorageKey(): string {
+		return 'garm.expPoolSettings.pending';
+	}
+
+	function persistPending(rec: PendingRequest) {
+		try {
+			localStorage.setItem(pendingStorageKey(), JSON.stringify(rec));
+		} catch {
+			// Storage unavailable: the UNKNOWN state still holds for this
+			// session; only cross-restart recovery is lost.
+		}
+	}
+
+	function clearPending() {
+		pendingRequest = null;
+		try {
+			localStorage.removeItem(pendingStorageKey());
+		} catch {
+			// ignore
+		}
+	}
+
+	function restorePending(): PendingRequest | null {
+		try {
+			const raw = localStorage.getItem(pendingStorageKey());
+			if (!raw) return null;
+			const rec = JSON.parse(raw) as PendingRequest;
+			if (!rec || !rec.requestId || !rec.payload || rec.poolID !== pool.id) return null;
+			return rec;
+		} catch {
+			return null;
+		}
+	}
+
 	$: ref = deriveRef(pool);
 
 	function deriveRef(p: Pool): PoolSettingsRef | null {
@@ -55,13 +102,17 @@
 			const res = await getPoolSettings(ref);
 			serverValues = res.settings;
 			etag = res.etag;
-			if (!preserveDraft) {
-				// First load seeds the draft from the server document.
+			if (!preserveDraft && !pendingRequest) {
+				// First load seeds the draft from the server document —
+				// unless an unresolved request is being recovered, in which
+				// case the journaled draft wins.
 				draft = { ...res.settings };
 			}
 			applied = false;
 			conflictEtag = null;
-			unknownHeld = false;
+			// unknownHeld is intentionally NOT cleared here: a refresh does
+			// not resolve an unresolved write. It clears only through
+			// resolve() after a definitive outcome.
 			errorMessage = '';
 		} catch (err) {
 			loadError = describeError(err);
@@ -80,6 +131,12 @@
 
 	async function save() {
 		if (!ref || !etag || !serverValues) return;
+		if (unknownHeld || pendingRequest) {
+			// An unresolved write blocks further writes until its outcome
+			// is resolved through the durable receipt.
+			errorMessage = 'An earlier save is still unresolved. Use "Resolve outcome" before saving again.';
+			return;
+		}
 		const patch: Partial<PoolSettings> = {};
 		if (draft.priority !== serverValues.priority) patch.priority = draft.priority;
 		if (draft.max_runners !== serverValues.max_runners) patch.max_runners = draft.max_runners;
@@ -89,50 +146,98 @@
 			return;
 		}
 
+		// Persistent request identity, journaled before dispatch so an
+		// UNKNOWN outcome survives a browser restart.
+		const requestId = crypto.randomUUID();
 		saving = true;
 		applied = false;
 		conflictEtag = null;
-		unknownHeld = false;
 		errorMessage = '';
+		const rec: PendingRequest = {
+			requestId,
+			payload: patch,
+			etag,
+			poolID: pool.id,
+			at: new Date().toISOString()
+		};
+		pendingRequest = rec;
+		persistPending(rec);
 		try {
-			const res = await patchPoolSettings(ref, etag, patch);
+			await dispatchPatch(requestId, patch, etag);
+		} finally {
+			saving = false;
+		}
+	}
+
+	// dispatchPatch issues exactly one PATCH and routes every outcome class.
+	// Shared by save() and by the deliberate resolve of an unresolved
+	// request; it never retries on its own.
+	async function dispatchPatch(requestId: string, patch: Partial<PoolSettings>, precondition: string) {
+		if (!ref) return;
+		try {
+			const res = await patchPoolSettings(ref, precondition, patch, requestId);
 			if (res.replayed) {
-				// The server answered from a durable request receipt: this
-				// exact request already applied earlier. Adopt the recorded
-				// resulting ETag, then re-read the document deliberately
-				// (preserving the draft) so the editor bases itself on
-				// current server state without ever auto-retrying the write.
+				// The server answered from its durable receipt: this exact
+				// request already applied earlier. The outcome is now known;
+				// adopt the recorded ETag and re-read deliberately.
+				clearPending();
+				unknownHeld = false;
 				etag = res.etag;
 				await load(true);
 				applied = true;
 				return;
 			}
-			// Applied: the server document is the new baseline and the draft is
-			// cleared (it equals the applied document).
 			if (!res.settings) {
 				throw new Error('applied response carried no settings document');
 			}
+			clearPending();
+			unknownHeld = false;
+			// Applied: the server document is the new baseline and the draft is
+			// cleared (it equals the applied document).
 			serverValues = res.settings;
 			etag = res.etag;
 			draft = { ...res.settings };
 			applied = true;
 		} catch (err) {
 			if (err instanceof PoolSettingsError && err.kind === 'conflict') {
-				// 412 proves non-effect. Keep the draft exactly as the operator
-				// typed it, and adopt the fresh ETag so a deliberate re-save is
-				// preconditioned on it (a manual re-read still precedes a truly
-				// reconciled save).
+				// 412 proves non-effect. For a resolve() re-presentation it
+				// additionally proves the original unresolved request did not
+				// commit (a committed request would have left a durable
+				// receipt and been answered by replay). Definitive either way.
+				clearPending();
+				unknownHeld = false;
+				// Keep the draft exactly as the operator typed it, and adopt
+				// the fresh ETag so a deliberate re-save is preconditioned on
+				// it (a manual re-read still precedes a truly reconciled save).
 				conflictEtag = err.etag;
 				if (err.etag) {
 					etag = err.etag;
 				}
+			} else if (err instanceof PoolSettingsError && err.kind === 'rejected') {
+				clearPending();
+				unknownHeld = false;
+				errorMessage = describeError(err);
 			} else if (err instanceof PoolSettingsError && err.kind === 'unknown') {
-				// Lost or ambiguous response after dispatch: hold in UNKNOWN.
-				// Never auto-retry; the operator re-reads manually.
+				// Lost or ambiguous response after dispatch: keep the journal
+				// and the hold. Never auto-retry.
 				unknownHeld = true;
 			} else {
 				errorMessage = describeError(err);
 			}
+		}
+	}
+
+	// resolve deliberately re-presents the journaled request so the
+	// server's durable receipt turns the UNKNOWN into a definitive outcome.
+	// It never submits new content.
+	async function resolve() {
+		if (!ref || !pendingRequest || saving || refreshing) return;
+		saving = true;
+		applied = false;
+		conflictEtag = null;
+		errorMessage = '';
+		try {
+			await dispatchPatch(pendingRequest.requestId, pendingRequest.payload, pendingRequest.etag);
 		} finally {
 			saving = false;
 		}
@@ -144,6 +249,14 @@
 	}
 
 	onMount(() => {
+		const rec = restorePending();
+		if (rec) {
+			// Recover an unresolved write from before the restart: re-enter
+			// the UNKNOWN hold and restore the operator's draft.
+			pendingRequest = rec;
+			unknownHeld = true;
+			draft = { ...draft, ...rec.payload };
+		}
 		load(false);
 	});
 </script>
@@ -204,10 +317,10 @@
 			{#if unknownHeld}
 				<div class="rounded-md bg-orange-50 dark:bg-orange-900 p-4" role="alert">
 					<p class="text-sm font-medium text-orange-800 dark:text-orange-200">
-						UNKNOWN: the outcome of the last save could not be determined. The request was dispatched, but the response was lost or ambiguous.
+						UNKNOWN: the outcome of a save could not be determined. The request was dispatched, but the response was lost or ambiguous.
 					</p>
 					<p class="text-sm text-orange-800 dark:text-orange-200 mt-1">
-						Your edits below are held and have not been confirmed applied. Do not auto-retry: re-read the current settings, reconcile, and only then save again.
+						Your edits below are held and have not been confirmed applied. Saving is blocked until the outcome is resolved: use "Resolve outcome" to re-present the exact journaled request (id {pendingRequest?.requestId ?? 'unknown'}) and read the server's durable receipt. A re-read alone does not clear this state.
 					</p>
 				</div>
 			{/if}
@@ -264,7 +377,7 @@
 							bind:value={draft.min_idle_runners}
 							on:change={(e) => (draft.min_idle_runners = (e.currentTarget as HTMLInputElement).valueAsNumber || 0)}
 							min="0"
-							disabled={saving}
+							disabled={saving || unknownHeld}
 							class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white disabled:opacity-50"
 						/>
 					</div>
@@ -278,7 +391,7 @@
 							bind:value={draft.max_runners}
 							on:change={(e) => (draft.max_runners = (e.currentTarget as HTMLInputElement).valueAsNumber || 0)}
 							min="1"
-							disabled={saving}
+							disabled={saving || unknownHeld}
 							class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white disabled:opacity-50"
 						/>
 					</div>
@@ -292,7 +405,7 @@
 							bind:value={draft.priority}
 							on:change={(e) => (draft.priority = (e.currentTarget as HTMLInputElement).valueAsNumber || 0)}
 							min="1"
-							disabled={saving}
+							disabled={saving || unknownHeld}
 							class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white disabled:opacity-50"
 						/>
 					</div>
@@ -323,10 +436,20 @@
 						Re-read settings
 					{/if}
 				</button>
+				{#if unknownHeld}
+					<button
+						type="button"
+						on:click={resolve}
+						disabled={saving || refreshing || !pendingRequest}
+						class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+					>
+						Resolve outcome
+					</button>
+				{/if}
 				<button
 					type="button"
 					on:click={save}
-					disabled={saving || refreshing || !etag}
+					disabled={saving || refreshing || !etag || unknownHeld}
 					class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
 				>
 					{#if saving}

@@ -103,6 +103,27 @@ func (s *sqlDatabase) ensureOfflinePoolSettingsSchema() error {
 	return nil
 }
 
+// absentRevisionTableError reports whether err is the dialect-specific
+// "experimental revision side table does not exist" error. Only that case
+// is benign for the legacy bump: the feature was never enabled against
+// this database. Recognized forms: SQLite ("no such table"), MySQL
+// ("Table ... doesn't exist", error 1146) and PostgreSQL
+// ("relation ... does not exist", sqlstate 42P01). Anything else is a
+// real failure and must fail the write.
+func absentRevisionTableError(err error) bool {
+	msg := err.Error()
+	if strings.Contains(msg, "no such table") {
+		return true
+	}
+	if strings.Contains(msg, "doesn't exist") && strings.Contains(msg, "Table") {
+		return true
+	}
+	if strings.Contains(msg, "does not exist") && strings.Contains(msg, "relation") {
+		return true
+	}
+	return false
+}
+
 // bumpOfflineRevisionForLegacyWrite advances the experimental offline pool
 // settings revision of a pool from the stock (legacy) pool update path, so
 // that a client holding a strong ETag from the experimental API observes
@@ -122,9 +143,7 @@ func (s *sqlDatabase) bumpOfflineRevisionForLegacyWrite(tx *gorm.DB, poolID uuid
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "no such table") {
-		// Experimental feature never enabled (or schema not yet
-		// installed): nothing to bump, by design.
+	if absentRevisionTableError(err) {
 		return nil
 	}
 	return fmt.Errorf("error advancing offline pool settings revision for legacy write: %w", err)

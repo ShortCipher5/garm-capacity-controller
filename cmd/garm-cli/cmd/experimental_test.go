@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,15 @@ func newTestRawClient(srv *httptest.Server) *rawClient {
 	}
 }
 
+// Isolate the pending-request journal from the real user configuration
+// directory for every test in this package.
+func init() {
+	dir, err := os.MkdirTemp("", "garm-cli-exp-pending")
+	if err == nil {
+		experimentalPendingPathOverride = filepath.Join(dir, "pending.json")
+	}
+}
+
 // resetExpFlags clears the package-level flag backing variables so state
 // cannot bleed between executions of the experimental command tree.
 func resetExpFlags() {
@@ -47,6 +57,7 @@ func resetExpFlags() {
 	expPoolID = ""
 	expPoolSettingsETag = ""
 	expPoolSettingsDraftFile = ""
+	expPoolSettingsRequestID = ""
 	expPriority = 0
 	expMaxRunners = 0
 	expMinIdleRunners = 0
@@ -330,6 +341,128 @@ func TestPoolSettingsGetRejectedIsNotUnknown(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected status to be surfaced, got: %v", err)
+	}
+}
+
+func TestPoolSettingsPatchSendsIdempotencyKey(t *testing.T) {
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		gotKey = r.Header.Get("Idempotency-Key")
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":7,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if gotKey == "" {
+		t.Fatal("expected an Idempotency-Key header on the PATCH")
+	}
+
+	// Operator-supplied request id is sent verbatim.
+	gotKey = ""
+	_, err = executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7", "--request-id", "my-request-1")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if gotKey != "my-request-1" {
+		t.Fatalf("expected --request-id to be sent as Idempotency-Key, got %q", gotKey)
+	}
+}
+
+func TestPoolSettingsPatchAppliedClearsPendingJournal(t *testing.T) {
+	clearExperimentalPending()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":7,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); !os.IsNotExist(statErr) {
+		t.Fatalf("applied outcome must clear the pending journal, stat err: %v", statErr)
+	}
+}
+
+func TestPoolSettingsPatchDefinitiveRejectionClearsPendingJournal(t *testing.T) {
+	clearExperimentalPending()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusPreconditionFailed)
+		fmt.Fprint(w, `{"error":"stale"}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); !os.IsNotExist(statErr) {
+		t.Fatalf("definitive outcome must clear the pending journal, stat err: %v", statErr)
+	}
+}
+
+func TestPoolSettingsPatchUnknownKeepsPendingJournal(t *testing.T) {
+	clearExperimentalPending()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		// Committed-but-unreadable response: 200 with a body that is not a
+		// settings document and not a replay outcome.
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"unexpected":true}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("expected UNKNOWN hold on unreadable applied response")
+	}
+	var pse *poolSettingsError
+	if !errors.As(err, &pse) || pse.outcome != outcomeUnknown {
+		t.Fatalf("expected UNKNOWN outcome, got: %v", err)
+	}
+	data, readErr := os.ReadFile(experimentalPendingPath())
+	if readErr != nil {
+		t.Fatalf("UNKNOWN outcome must retain the pending journal: %v", readErr)
+	}
+	var rec experimentalPendingRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("pending journal is not readable: %v", err)
+	}
+	if rec.RequestID == "" || rec.Payload == "" || rec.ETag != `"100:8"` {
+		t.Fatalf("pending journal does not record the exact request: %+v", rec)
 	}
 }
 
