@@ -268,11 +268,25 @@ test("discovery-only Garm snapshot shows summaries and removes a pending edit re
   await expect(section).toContainText("Provider: capacity");
   await expect(section).toContainText("Maximum runners: 4");
   await expect(section).toContainText("example/app");
-  await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
+  await expect(section.locator("form, textarea")).toHaveCount(0);
+  // Real collection discovery adds only display search/filter, not editing.
+  await expect(section.locator("input")).toHaveCount(1);
+  await expect(section.getByLabel("Search pools inventory", { exact: true })).toHaveAttribute("type", "search");
+  await expect(section.locator("select")).toHaveCount(2);
+  await expect(section.getByLabel("Filter pools provider", { exact: true })).toBeVisible();
+  await expect(section.getByLabel("Existing entity", { exact: true })).toBeDisabled();
+  await expect(section.getByRole("button", { name: "View existing pools" })).toBeDisabled();
   await expect(section.getByRole("button", { name: /Review Garm change|Apply reviewed Garm change/ })).toHaveCount(0);
   await expect(page.getByLabel("Garm management write token")).toHaveCount(0);
   await page.getByRole("button", { name: "Refresh Garm settings" }).click();
-  await expect(section.locator("form, input, textarea, select")).toHaveCount(0);
+  await expect(section.locator("form, textarea")).toHaveCount(0);
+  // Real collection discovery adds only display search/filter, not editing.
+  await expect(section.locator("input")).toHaveCount(1);
+  await expect(section.getByLabel("Search pools inventory", { exact: true })).toHaveAttribute("type", "search");
+  await expect(section.locator("select")).toHaveCount(2);
+  await expect(section.getByLabel("Filter pools provider", { exact: true })).toBeVisible();
+  await expect(section.getByLabel("Existing entity", { exact: true })).toBeDisabled();
+  await expect(section.getByRole("button", { name: "View existing pools" })).toBeDisabled();
   expect(writes).toHaveLength(0);
 });
 
@@ -437,4 +451,76 @@ test("host attention filters use recorded flags without requests or changing bud
   await page.getByRole("button", { name: "Connect read-only", exact: true }).click();
   await expect(page.getByLabel("Show hosts", { exact: true })).toHaveValue("all");
   await expect(section.locator("h3")).toHaveCount(3);
+});
+
+// UI-only sync cases need independent state: the shared real-journal test above
+// intentionally leaves an UNKNOWN operation. Keep that production safeguard intact.
+// Fulfill browser GETs directly; route.fetch uses Node TLS, not the fixture's
+// Chromium-only exact-SPKI trust. No TLS verification is weakened here.
+async function isolatedGarmSyncSnapshot(page) {
+  const fixture={reads:0,snapshot:{settings_available:true,writes_enabled:true,write_blocked:false,history:[],history_truncated:false,settings:{writes_enabled:true,pools:[{id:"00000000-0000-4000-8000-000000000001",provider_name:"capacity",fingerprint:"f".repeat(64),enabled:true,priority:2,max_runners:4,min_idle_runners:1,generation:1,tags:["linux"]}],repositories:[]}}};
+  await page.route("**/admin/api/v1/garm",route=>{
+    expect(route.request().method()).toBe("GET");fixture.reads++;
+    return route.fulfill({status:200,json:fixture.snapshot});
+  });
+  return fixture;
+}
+
+test("external Garm edits refresh on focus but preserve and block a dirty draft", async ({page}) => {
+  const fixture=await isolatedGarmSyncSnapshot(page);
+  await connect(page);
+  await page.getByRole("button",{name:"Load Garm settings"}).click();
+  const priority=page.getByLabel("Pool priority",{exact:true});
+  await expect(priority).toBeVisible();
+  await priority.fill("17");
+  await page.getByLabel("Garm audit reason").fill("preserve local draft");
+  const writes=[];
+  page.on("request",r=>{if(r.method()!=="GET" && r.url().includes("/admin/api/"))writes.push(r);});
+  fixture.snapshot.settings.pools[0].priority=23;
+  fixture.snapshot.settings.pools[0].fingerprint="e".repeat(64);
+  await page.evaluate(()=>window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("Garm settings changed elsewhere.",{exact:false})).toBeVisible();
+  await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toContainText("priority:");
+  await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toContainText("→ 23");
+  await expect(priority).toHaveValue("17");
+  await expect(page.getByLabel("Garm audit reason")).toHaveValue("preserve local draft");
+  await expect(page.getByRole("button",{name:"Review Garm change"})).toBeDisabled();
+  await page.getByRole("button",{name:"Discard draft and refresh Garm settings"}).click();
+  await expect(priority).toHaveValue("23");
+  await expect(page.getByRole("region",{name:"Observed Garm conflict details"})).toHaveCount(0);
+  expect(fixture.reads).toBeGreaterThan(1);expect(writes).toHaveLength(0);
+});
+
+test("explicit discard resets unchanged uncontrolled fields and conflict blocks replay", async ({page})=>{
+  await isolatedGarmSyncSnapshot(page);
+  await connect(page);await page.getByRole("button",{name:"Load Garm settings"}).click();
+  const priority=page.getByLabel("Pool priority",{exact:true});
+  const original=await priority.inputValue();
+  await priority.fill("19");await page.getByLabel("Garm audit reason").fill("discard me");
+  // Focus refresh causes a render while preserving the same fingerprint/draft.
+  await page.evaluate(()=>window.dispatchEvent(new Event("focus")));
+  await page.getByRole("button",{name:"Discard draft and refresh Garm settings"}).click();
+  await expect(priority).toHaveValue(original);await expect(page.getByLabel("Garm audit reason")).toHaveValue("");
+  await priority.fill("19");await page.getByLabel("Garm audit reason").fill("conflict");
+  await page.getByRole("button",{name:"Review Garm change"}).click();
+  let posts=0;await page.route("**/admin/api/v1/garm/pool",route=>{posts++;return route.fulfill({status:409,json:{error:"conflict"}});});
+  await page.getByLabel("Garm management write token").fill("c".repeat(64));
+  await page.getByRole("button",{name:"Apply reviewed Garm change"}).click();
+  await expect(page.getByText("Garm settings changed elsewhere.",{exact:false})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Review Garm change"})).toBeDisabled();
+  await expect(page.getByRole("button",{name:"Apply reviewed Garm change"})).toHaveCount(0);
+  expect(posts).toBe(1);
+});
+
+test("pending manual refresh disables draft fields until read completes",async({page})=>{
+ const fixture=await isolatedGarmSyncSnapshot(page);
+ await connect(page);await page.getByRole("button",{name:"Load Garm settings"}).click();
+ await expect(page.getByLabel("Pool priority",{exact:true})).toBeVisible();
+ let finish;const gate=new Promise(resolve=>finish=resolve);
+ await page.route("**/admin/api/v1/garm",async route=>{await gate;await route.fulfill({status:200,json:fixture.snapshot});});
+ await page.getByRole("button",{name:"Refresh Garm settings"}).click();
+ await expect(page.getByLabel("Pool priority",{exact:true})).toBeDisabled();
+ await expect(page.getByLabel("Garm audit reason")).toBeDisabled();
+ finish();
+ await expect(page.getByLabel("Pool priority",{exact:true})).toBeEnabled();
 });

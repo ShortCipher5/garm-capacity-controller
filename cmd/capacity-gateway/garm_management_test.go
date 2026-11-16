@@ -38,6 +38,20 @@ func TestGarmRuntimeRealTLSJournalledRoutesAndRestartUncertainty(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
+		if r.URL.Path == "/api/v1/pools" && r.Method == http.MethodGet {
+			if failRead {
+				w.WriteHeader(500)
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]any{pool})
+			return
+		}
+		if r.URL.Path == "/api/v1/scalesets" && r.Method == http.MethodGet {
+			// Older upstream without this independent collection is unavailable,
+			// not an empty success and never a reason to weaken existing gates.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		var target map[string]any
 		switch r.URL.Path {
 		case "/api/v1/pools/" + testManagedPool:

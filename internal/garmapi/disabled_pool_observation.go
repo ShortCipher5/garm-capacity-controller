@@ -23,7 +23,9 @@ type DisabledPoolObservation struct {
 // raw browser endpoint. It works with AllowWrites:false; the supplied token
 // must independently authorize the GET. No upstream permission is granted.
 func (m *ManagementClient) ObserveDisabledRepoPool(ctx context.Context, repositoryID, poolID string, spec DisabledPoolSpec) (DisabledPoolObservation, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return DisabledPoolObservation{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	canonical, err := CanonicalDisabledPoolSpec(spec)
 	if err != nil || !m.repositories[repositoryID] || !managementID(poolID) || !m.client.providers[canonical.ProviderName] {

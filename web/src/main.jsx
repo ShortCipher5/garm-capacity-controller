@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import { createEntityInventoryReader } from "./entity-inventory-client.js";
+import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { ReadSession, SessionEnded } from "./client.js";
 import "./style.css";
@@ -88,7 +89,8 @@ function Usage({ allocation, metric = false }) {
     );
   });
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory }) {
+  const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
   return (
@@ -152,7 +154,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </span>
         </div>
         <Management data={data} refresh={refresh} />
-        {data.garm_management_available && <GarmManagement read={readGarm} />}
+        {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
         {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}
         <div className="metrics">
           <Usage allocation={data.global} metric />
@@ -307,14 +309,18 @@ export function App() {
   const [data, setData] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
-  const disconnect = () => {
+  const disconnect = useCallback(() => {
     generation.current++;
     session.current.disconnect();
     if (input.current) input.current.value = "";
     setData(null);
     setBusy(false);
     setError("");
-  };
+  }, []);
+  const readEntityInventory = useCallback(async (options) => {
+    try { return await session.current.entityInventorySnapshot(options); }
+    catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+  }, [disconnect]);
   useEffect(() => {
     window.addEventListener("pagehide", disconnect);
     return () => {
@@ -351,6 +357,7 @@ export function App() {
           try { return await session.current.onboardingSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
+        readEntityInventory={readEntityInventory}
         readGarm={async () => {
           try { return await session.current.garmSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }

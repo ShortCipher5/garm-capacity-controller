@@ -130,7 +130,9 @@ func uniqueJSON(body []byte) bool {
 			for d.More() {
 				key, err := d.Token()
 				name, ok := key.(string)
-				if err != nil || !ok || name != strings.ToLower(name) || seen[name] {
+				// All callers decode fixed ASCII-tagged request structs. Unicode
+				// case-fold aliases (for example long-s) are not distinct keys.
+				if err != nil || !ok || !asciiJSONKey(name) || name != strings.ToLower(name) || seen[name] {
 					return false
 				}
 				seen[name] = true
@@ -157,4 +159,14 @@ func uniqueJSON(body []byte) bool {
 	}
 	_, err := d.Token()
 	return err == io.EOF
+}
+
+// Restrict field names, not user values such as audit reasons or tags.
+func asciiJSONKey(name string) bool {
+	for _, r := range name {
+		if r > 127 {
+			return false
+		}
+	}
+	return true
 }

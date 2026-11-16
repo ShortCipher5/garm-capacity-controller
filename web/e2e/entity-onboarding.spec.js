@@ -1,0 +1,16 @@
+import {expect} from '@playwright/test';
+import {test} from './fixtures.js';
+test('authenticated existing entity picker reads pools without granting edits or writing',async({page})=>{
+ const owner='22222222-2222-4222-8222-222222222222',id='11111111-1111-4111-8111-111111111111';let gets=0,posts=0,priority=3;
+ const pool={id,owner_kind:'organization',owner_id:owner,provider_name:'fixture',fingerprint:'',discovery_fingerprint:'f'.repeat(64),configured:false,enabled:false,priority:3,max_runners:2,min_idle_runners:0,generation:1,tags:[]};
+ await page.route('**/admin/api/v1/garm',route=>{gets++;expect(route.request().method()).toBe('GET');expect(route.request().headers().authorization).toBe('Bearer '+'a'.repeat(64));return route.fulfill({status:200,json:{settings_available:false,writes_enabled:false,write_blocked:false,history:[],history_truncated:false,settings:{pools:[],repositories:[],writes_enabled:false},pool_inventory:{pools:[{...pool,priority}],missing_configured_pool_ids:[]}}});});
+ await page.route('**/admin/api/v1/garm/**',route=>{posts++;return route.abort()});
+ await page.goto('/');await page.getByLabel('Admin read token').fill('a'.repeat(64));await page.getByRole('button',{name:'Connect read-only'}).click();
+ await page.getByRole('button',{name:'Refresh existing entities'}).click();await page.getByLabel('Existing entity',{exact:true}).selectOption('organization/'+owner);await page.getByRole('button',{name:'View existing pools'}).click();
+ await expect(page.getByRole('heading',{name:'Pool '+id,exact:true})).toBeVisible();await expect(page.getByText('Disabled, not drained',{exact:true})).toBeVisible();expect(gets).toBe(2);expect(posts).toBe(0);
+ const priorSelection=await page.getByLabel('Existing entity',{exact:true}).inputValue();
+ const overviewResponse=page.waitForResponse(r=>r.url().endsWith('/admin/api/v1/overview'));await page.getByRole('button',{name:'Refresh snapshot',exact:true}).click();await overviewResponse;await expect(page.getByRole('button',{name:'Refresh snapshot',exact:true})).toBeEnabled();await expect(page.getByRole('heading',{name:'Pool '+id,exact:true})).toBeVisible();await expect(page.getByLabel('Existing entity',{exact:true})).toHaveValue(priorSelection);
+ priority=7;await page.getByRole('button',{name:'Refresh viewed entity',exact:true}).click();await expect(page.getByLabel('Entity observation changes')).toContainText('1 changed');await expect(page.getByText('Maximum 2 · Minimum idle 0 · Priority 7',{exact:true})).toBeVisible();expect(posts).toBe(0);
+ priority=8;await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await expect(page.getByText('Maximum 2 · Minimum idle 0 · Priority 8',{exact:true})).toBeVisible();expect(posts).toBe(0);
+ await expect(page.getByLabel('Pool priority')).toHaveCount(0);await page.getByRole('button',{name:'Refresh existing entities'}).click();await expect(page.getByRole('heading',{name:'Pool '+id,exact:true})).toHaveCount(0);await expect(page.getByLabel('Existing entity',{exact:true})).toHaveValue('');expect(posts).toBe(0);
+});

@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -51,7 +50,8 @@ type ManagementClient struct {
 	repositories         map[string]bool
 	writes               bool
 	disabledPoolCreation bool
-	mu                   sync.Mutex
+	mu                   managementMutex
+	discoveryGate        chan struct{}
 }
 
 // ManagedPool deliberately omits provider specs, instance/job payloads and secrets.
@@ -106,7 +106,7 @@ func NewManagement(config ManagementConfig) (*ManagementClient, error) {
 	if err != nil {
 		return nil, ErrManagement
 	}
-	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation}
+	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation, discoveryGate: make(chan struct{}, 1)}
 	for _, pair := range []struct {
 		ids   []string
 		scope map[string]bool
@@ -158,7 +158,7 @@ func (m *ManagementClient) exchange(ctx context.Context, method, path string, va
 	data, err := io.ReadAll(io.LimitReader(res.Body, (2<<20)+1))
 	// Cancellation may race with a successful body EOF. A dispatched write
 	// remains unknown, not confirmed success; reads must not return stale proof.
-	if err != nil || ctx.Err() != nil || len(data) > 2<<20 {
+	if err != nil || ctx.Err() != nil || len(data) > 2<<20 || !utf8.Valid(data) {
 		return nil, failure
 	}
 	fields, err := row(data)
@@ -228,6 +228,9 @@ func boundedSettingText(value string, max int) bool {
 	return true
 }
 func (m *ManagementClient) decodePool(f map[string]json.RawMessage, id string) (ManagedPool, error) {
+	if !canonicalManagementFields(f, "id", "provider_name", "repo_id", "generation", "priority", "max_runners", "min_idle_runners", "enabled", "tags") {
+		return ManagedPool{}, ErrManagement
+	}
 	p := ManagedPool{Tags: []string{}}
 	var err error
 	p.ID, err = textField(f, "id", true)
@@ -268,7 +271,7 @@ func (m *ManagementClient) decodePool(f map[string]json.RawMessage, id string) (
 		seen := map[string]bool{}
 		for _, tag := range tags {
 			tf, e := row(tag)
-			if e != nil {
+			if e != nil || !canonicalManagementFields(tf, "name") {
 				return ManagedPool{}, ErrManagement
 			}
 			name, e := textField(tf, "name", true)
@@ -291,6 +294,9 @@ func (m *ManagementClient) repository(ctx context.Context, id string) (ManagedRe
 	f, err := m.exchange(ctx, http.MethodGet, "/repositories/"+url.PathEscape(id), nil)
 	if err != nil {
 		return ManagedRepository{}, err
+	}
+	if !canonicalManagementFields(f, "id", "owner", "name", "pool_balancing_type") {
+		return ManagedRepository{}, ErrManagement
 	}
 	r := ManagedRepository{}
 	r.ID, err = textField(f, "id", true)
@@ -316,12 +322,16 @@ func (m *ManagementClient) repository(ctx context.Context, id string) (ManagedRe
 func balancer(value string) bool { return value == "" || value == "roundrobin" || value == "pack" }
 
 func (m *ManagementClient) Pool(ctx context.Context, id string) (ManagedPool, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedPool{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	return m.pool(ctx, id)
 }
 func (m *ManagementClient) Repository(ctx context.Context, id string) (ManagedRepository, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedRepository{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	return m.repository(ctx, id)
 }
@@ -440,7 +450,9 @@ type ManagementSnapshot struct {
 }
 
 func (m *ManagementClient) Snapshot(ctx context.Context) (ManagementSnapshot, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagementSnapshot{}, ErrManagement
+	}
 	defer m.mu.Unlock()
 	payloadBytes := 0
 	snapshot := ManagementSnapshot{Pools: []ManagedPool{}, Repositories: []ManagedRepository{}, WritesEnabled: m.writes}
@@ -479,4 +491,17 @@ func (m *ManagementClient) Snapshot(ctx context.Context) (ManagementSnapshot, er
 		snapshot.Repositories = append(snapshot.Repositories, repository)
 	}
 	return snapshot, nil
+}
+
+// canonicalManagementFields refuses ambiguous spellings of interpreted fields.
+// Unknown future fields remain accepted and covered by the existing fingerprint.
+func canonicalManagementFields(fields map[string]json.RawMessage, names ...string) bool {
+	for field := range fields {
+		for _, name := range names {
+			if field != name && strings.EqualFold(field, name) {
+				return false
+			}
+		}
+	}
+	return true
 }

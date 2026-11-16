@@ -15,6 +15,8 @@ import (
 // This operator-only configuration never comes from a browser or job payload.
 // The explicit acknowledgement is not an implemented external writer fence.
 type garmManagementConfiguration struct {
+	// DiscoveryOnly permits provider-scoped reads with no enrolled targets or journal.
+	DiscoveryOnly  bool                 `json:"discovery_only"`
 	Endpoint       string               `json:"endpoint"`
 	TokenFile      string               `json:"token_file"`
 	TLS            securefiles.TLSFiles `json:"tls"`
@@ -42,20 +44,26 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 		return nil, noop, nil
 	}
 	remote := config.GarmManagement
-	lineage, err := hex.DecodeString(remote.JournalLineage)
-	if err != nil || len(lineage) != 32 || remote.JournalLineage != strings.ToLower(remote.JournalLineage) {
+	if remote.DiscoveryOnly && (config.EnableExperimentalGarmManagement || len(remote.PoolIDs) != 0 || len(remote.RepositoryIDs) != 0 || remote.Journal != "" || remote.JournalLineage != "" || remote.QualifiedAdmissionRouting || remote.ExclusiveSettingsWriter) {
 		return nil, noop, adminview.ErrConfiguration
 	}
-	if config.EnableExperimentalGarmManagement && (!config.EnableExperimentalManagement || !remote.ExclusiveSettingsWriter || !remote.QualifiedAdmissionRouting) {
-		return nil, noop, adminview.ErrConfiguration
-	}
-	ledgerPath, err := filepath.Abs(ledger)
-	if err != nil {
-		return nil, noop, adminview.ErrConfiguration
-	}
-	journalPath, err := filepath.Abs(remote.Journal)
-	if err != nil || remote.Journal == "" || journalPath == ledgerPath {
-		return nil, noop, adminview.ErrConfiguration
+	if !remote.DiscoveryOnly {
+		lineage, err := hex.DecodeString(remote.JournalLineage)
+		if err != nil || len(lineage) != 32 || remote.JournalLineage != strings.ToLower(remote.JournalLineage) {
+			return nil, noop, adminview.ErrConfiguration
+		}
+		if config.EnableExperimentalGarmManagement && (!config.EnableExperimentalManagement || !remote.ExclusiveSettingsWriter || !remote.QualifiedAdmissionRouting) {
+			return nil, noop, adminview.ErrConfiguration
+		}
+		ledgerPath, err := filepath.Abs(ledger)
+		if err != nil {
+			return nil, noop, adminview.ErrConfiguration
+		}
+		journalPath, err := filepath.Abs(remote.Journal)
+		if err != nil || remote.Journal == "" || journalPath == ledgerPath {
+			return nil, noop, adminview.ErrConfiguration
+		}
+
 	}
 	token, err := securefiles.Read(remote.TokenFile, 16384)
 	if err != nil {
@@ -77,6 +85,18 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 	trust, err := securefiles.LoadTLS(remote.TLS)
 	if err != nil {
 		return nil, noop, adminview.ErrConfiguration
+	}
+	if remote.DiscoveryOnly {
+		client, err := garmapi.NewPoolDiscovery(remote.Endpoint, string(token), trust, remote.Providers)
+		if err != nil {
+			return nil, noop, adminview.ErrConfiguration
+		}
+		adapter, err := adminview.NewPoolDiscoveryView(client)
+		if err != nil {
+			client.Close()
+			return nil, noop, err
+		}
+		return adapter, client.Close, nil
 	}
 	client, err := garmapi.NewManagement(garmapi.ManagementConfig{Endpoint: remote.Endpoint, Token: string(token), Trust: trust, Providers: remote.Providers, PoolIDs: remote.PoolIDs, RepositoryIDs: remote.RepositoryIDs, AllowWrites: config.EnableExperimentalGarmManagement})
 	if err != nil {

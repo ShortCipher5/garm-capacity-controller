@@ -79,6 +79,8 @@ export class ReadSession {
   #request;
   #onboardingRequest;
   #onboardingGeneration=0;
+  #entityRequest;
+  #entityGeneration = 0;
   #remoteRequest;
   #remoteGeneration = 0;
   constructor(fetcher = globalThis.fetch) {
@@ -87,6 +89,9 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+    this.#entityGeneration++;
+    this.#entityRequest?.abort();
+    this.#entityRequest = undefined;
     this.#onboardingGeneration++;
     this.#onboardingRequest?.abort();
     this.#onboardingRequest=undefined;
@@ -116,16 +121,38 @@ export class ReadSession {
     try {
       const response = await this.fetcher("/admin/api/v1/onboarding", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
       if (generation !== this.#onboardingGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
       if (!response.ok) throw new OnboardingResponseError("Onboarding preflight profiles are unavailable.");
       const result = validateOnboardingDiscovery(await response.json());
       if (generation !== this.#onboardingGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       return result;
     } catch (error) {
       if (generation !== this.#onboardingGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
       if (error instanceof SessionEnded || error instanceof OnboardingResponseError) throw error;
       throw new OnboardingResponseError("Onboarding preflight discovery failed. No server was enrolled.");
     } finally { clearTimeout(timeout); }
+  }
+  async entityInventorySnapshot({signal} = {}) {
+    if (!this.#token || signal?.aborted) throw new SessionEnded();
+    this.#entityRequest?.abort();
+    const generation = ++this.#entityGeneration;
+    const controller = new AbortController(); this.#entityRequest = controller;
+    const abort = () => controller.abort(); signal?.addEventListener("abort", abort, {once:true});
+    const timeout = setTimeout(abort, 15000);
+    try {
+      const response = await this.fetcher("/admin/api/v1/garm", {method:"GET",headers:{Authorization:`Bearer ${this.#token}`,Accept:"application/json"},credentials:"omit",cache:"no-store",redirect:"error",signal:controller.signal});
+      if (generation !== this.#entityGeneration || controller.signal.aborted) throw new SessionEnded();
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error();
+      const result = validateGarm(await response.json());
+      if (generation !== this.#entityGeneration || controller.signal.aborted) throw new SessionEnded();
+      return result;
+    } catch(error) {
+      if(error instanceof SessionEnded) throw error;
+      throw new Error("Existing Garm scope observation unavailable.");
+    } finally {clearTimeout(timeout);signal?.removeEventListener("abort",abort);}
   }
   async garmSnapshot() {
     if (!this.#token) throw new SessionEnded();
@@ -136,10 +163,12 @@ export class ReadSession {
     try {
       const response = await this.fetcher("/admin/api/v1/garm", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
       if (generation !== this.#remoteGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
       if (!response.ok) throw new Error("Garm settings are unavailable. No settings were changed by this read.");
       const result = validateGarm(await response.json());
       if (generation !== this.#remoteGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       return result;
     } catch (error) {
       if (generation !== this.#remoteGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
@@ -167,6 +196,7 @@ export class ReadSession {
         signal: controller.signal,
       });
       if (generation !== this.#generation) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       if (response.status === 401)
         throw new Error(
           "Read token rejected or expired. Reconnect with a valid token.",
@@ -177,6 +207,7 @@ export class ReadSession {
         );
       const data = validateOverview(await response.json());
       if (generation !== this.#generation) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       return data;
     } catch (error) {
       if (generation !== this.#generation) throw new SessionEnded();

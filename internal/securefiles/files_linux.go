@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"syscall"
 )
@@ -15,7 +16,7 @@ import (
 var ErrFile = errors.New("private configuration or credential file unavailable")
 
 func Read(path string, maximum int64) ([]byte, error) {
-	if path == "" || maximum <= 0 {
+	if path == "" || maximum <= 0 || maximum == math.MaxInt64 {
 		return nil, ErrFile
 	}
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
