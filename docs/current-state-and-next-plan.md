@@ -119,18 +119,18 @@ or assert deployability.
   mean the underlying production requirements are implemented. Reuse of
   selected evidence remains conditional on the physical-authority design.
 
-| PR | Reviewed head prefix | Preserved research / deferred purpose |
+| PR | Reviewed head SHA | Preserved research / deferred purpose |
 |---|---|---|
-| [#37](https://github.com/ShortCipher5/garm-capacity-controller/pull/37) | `71cc18c3` | Runner lifecycle evidence; not qualified retirement |
-| [#39](https://github.com/ShortCipher5/garm-capacity-controller/pull/39) | `f3a1f956` | Local drain-gate counterexample; polling suppression can block control/cancellation |
-| [#40](https://github.com/ShortCipher5/garm-capacity-controller/pull/40) | `98d2bbc6` | Runner control/restart evidence |
-| [#41](https://github.com/ShortCipher5/garm-capacity-controller/pull/41) | `617c8dd8` | Isolation tests/threat model |
-| [#42](https://github.com/ShortCipher5/garm-capacity-controller/pull/42) | `1f70b8ac` | Local audit-history research, not production authority |
-| [#48](https://github.com/ShortCipher5/garm-capacity-controller/pull/48) | `e5954652` | Conditional finite create-only pilot evidence, not sustained retirement |
-| [#51](https://github.com/ShortCipher5/garm-capacity-controller/pull/51) | `e3289459` | Unix transport research; authority/integration deferred |
-| [#52](https://github.com/ShortCipher5/garm-capacity-controller/pull/52) | `bc8ceab4` | Local client research; authority/integration deferred |
-| [#70](https://github.com/ShortCipher5/garm-capacity-controller/pull/70) | `c39d42d9` | Compile-only native-parent experiment |
-| [#71](https://github.com/ShortCipher5/garm-capacity-controller/pull/71) | `f989a1db` | Read-only capability survey; depends on historical audit stack |
+| [#37](https://github.com/ShortCipher5/garm-capacity-controller/pull/37) | `71cc18c3f62fdefe91027fdbb9d338f615d8fa8a` | Runner lifecycle evidence; not qualified retirement |
+| [#39](https://github.com/ShortCipher5/garm-capacity-controller/pull/39) | `f3a1f956051439bbab8ee7a919ec683e837167a0` | Local drain-gate counterexample; polling suppression can block control/cancellation |
+| [#40](https://github.com/ShortCipher5/garm-capacity-controller/pull/40) | `98d2bbc6908f5c04a5521dc5d2f2c4abf3cb30b9` | Runner control/restart evidence |
+| [#41](https://github.com/ShortCipher5/garm-capacity-controller/pull/41) | `617c8dd82ecc5251bc9b56f2239acb89155f36b3` | Isolation tests/threat model |
+| [#42](https://github.com/ShortCipher5/garm-capacity-controller/pull/42) | `1f70b8ac61f76b60b91750c7c3270409f59bd403` | Local audit-history research, not production authority |
+| [#48](https://github.com/ShortCipher5/garm-capacity-controller/pull/48) | `e5954652a5396f7003d80e394ceadcb6abcb5bd9` | Conditional finite create-only pilot evidence, not sustained retirement |
+| [#51](https://github.com/ShortCipher5/garm-capacity-controller/pull/51) | `e3289459ae2913a798ec6d408baa91be10e391f6` | Unix transport research; authority/integration deferred |
+| [#52](https://github.com/ShortCipher5/garm-capacity-controller/pull/52) | `bc8ceab44b76ca7570a66031a2ba2572c5cc62b4` | Local client research; authority/integration deferred |
+| [#70](https://github.com/ShortCipher5/garm-capacity-controller/pull/70) | `c39d42d9b071f7c270dbbe740e402fdb1c133d77` | Compile-only native-parent experiment |
+| [#71](https://github.com/ShortCipher5/garm-capacity-controller/pull/71) | `f989a1db8bf0d452f00ec8e83f52dd8dedc8db5d` | Read-only capability survey; depends on historical audit stack |
 
 The table records preservation targets, not proof that closure has already
 succeeded. The linked PR state is authoritative for the cleanup outcome.
