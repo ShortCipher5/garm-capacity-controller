@@ -118,6 +118,43 @@ or assert deployability.
   at the platform level), so this file and its PR serve as the fresh
   status ledger until that restriction changes.
 
+## Native review access (added 2026-11-16)
+
+The experimental native commits are available for independent review as
+two read-only refs in this repository (review-only; no PR is opened
+from them and they are not a merge proposal):
+
+- `review/native-settings-a9d7b0a3` — tip
+  `a9d7b0a3dafb5506ac54ad69e47165dea969d4c1`: the combined server
+  (slices `013ed0e7` + `a895ba25`) and CLI/webapp client (`7e3cc544`)
+  integration merge. Base is upstream
+  `154638445c3949c1958b01812f69d9a1e4d82684` (v0.2.1), an ancestor of
+  the tip. 25 files, +5222/-11: experimental additive files plus
+  flag-gated registration only.
+- `review/capacity-hold-2971b0b6` — tip
+  `2971b0b6e9a5e667c8c11abb1139f34a4078e1ca`: the separate offline
+  hold-register leaf package (`experimental/capacityhold`), same base.
+
+Integrity checks a reviewer can run:
+
+```sh
+git fetch origin review/native-settings-a9d7b0a3 review/capacity-hold-2971b0b6
+git rev-parse origin/review/native-settings-a9d7b0a3
+# expect a9d7b0a3dafb5506ac54ad69e47165dea969d4c1
+git rev-parse origin/review/capacity-hold-2971b0b6
+# expect 2971b0b6e9a5e667c8c11abb1139f34a4078e1ca
+git merge-base --is-ancestor 154638445c3949c1958b01812f69d9a1e4d82684 \
+  origin/review/native-settings-a9d7b0a3 && echo base-ok
+git diff 154638445c3949c1958b01812f69d9a1e4d82684..origin/review/native-settings-a9d7b0a3
+```
+
+Commit-level SHA-1 verification is stronger than the transmitted-patch
+SHA-256 in the bundle manifest; the manifest (`BUNDLE.txt`,
+`files.stat`, `SHA256SUMS`) remains available from the orchestrator for
+cross-checking file-level scope. No credentials and no previously
+denied controller route-guard/dispatch/schema material are in either
+ref.
+
 ## Evidence rules (unchanged)
 
 Record exact branch/head/base/merge tree, tested commands with
