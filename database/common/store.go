@@ -212,14 +212,16 @@ type OfflinePoolSettingsStore interface {
 	// verifying that the pool is a member of the given entity. The
 	// returned revision maps 1:1 to the strong ETag exposed by the API.
 	GetOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string) (params.OfflinePoolSettings, params.OfflinePoolSettingsRevision, error)
-	// UpdateOfflinePoolSettings applies a partial update to the pool
-	// settings. The revision check, the entity membership check, the
-	// update itself and the revision advance all happen in one database
-	// transaction. If the expected revision does not match the current
-	// one, an *OfflinePoolSettingsStaleRevisionError carrying the current
-	// revision is returned. A patch that would not change any field is a
-	// no-op and does not advance the revision.
-	UpdateOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string, expected params.OfflinePoolSettingsRevision, patch params.OfflinePoolSettingsPatch) (params.OfflinePoolSettings, params.OfflinePoolSettingsRevision, error)
+	// UpdateOfflinePoolSettings classifies, applies and receipts one
+	// experimental PATCH request. The entity membership check, the
+	// idempotency replay check, the revision check, the update itself and
+	// the durable request receipt all happen in one database transaction;
+	// the revision advance is a single conditional UPDATE, so a lost race
+	// is detected atomically and rolls everything back. Rejected outcomes
+	// (stale, policy, malformed) persist only their receipt; requests
+	// rejected with 403/404/428 never reach the store (or never persist a
+	// receipt), and a generic failure persists nothing at all.
+	UpdateOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string, req params.OfflinePoolSettingsUpdateRequest) (params.OfflinePoolSettingsUpdateResult, error)
 }
 
 //go:generate go run github.com/vektra/mockery/v2@latest

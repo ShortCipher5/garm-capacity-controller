@@ -71,3 +71,90 @@ func (r OfflinePoolSettingsRevision) String() string {
 func (r OfflinePoolSettingsRevision) ETag() string {
 	return fmt.Sprintf("%q", r.String())
 }
+
+// OfflinePoolSettingsRequestOutcome is the durable classification of one
+// experimental PATCH request. It is persisted in the request receipts side
+// table and returned verbatim when a request is answered from a stored
+// receipt (idempotent replay).
+type OfflinePoolSettingsRequestOutcome string
+
+const (
+	// OfflinePoolSettingsOutcomeAppliedChanged marks a request that changed
+	// the pool settings and advanced the revision.
+	OfflinePoolSettingsOutcomeAppliedChanged OfflinePoolSettingsRequestOutcome = "applied_changed"
+	// OfflinePoolSettingsOutcomeAppliedNoop marks a request whose supplied
+	// values all equaled the current values; it succeeded without advancing
+	// the revision.
+	OfflinePoolSettingsOutcomeAppliedNoop OfflinePoolSettingsRequestOutcome = "applied_noop"
+	// OfflinePoolSettingsOutcomeRejectedStale marks a request rejected with a
+	// stale precondition (HTTP 412).
+	OfflinePoolSettingsOutcomeRejectedStale OfflinePoolSettingsRequestOutcome = "rejected_stale"
+	// OfflinePoolSettingsOutcomeRejectedInvalid is reserved for payload
+	// rejections that are not syntax-level malformed (e.g. semantically
+	// invalid content). No code path produces it in this version; it only
+	// exists in the database CHECK constraint so the outcome set is stable.
+	OfflinePoolSettingsOutcomeRejectedInvalid OfflinePoolSettingsRequestOutcome = "rejected_invalid"
+	// OfflinePoolSettingsOutcomeRejectedPolicy marks a request rejected by
+	// the coupled-limits policy (min_idle_runners > max_runners, HTTP 422).
+	OfflinePoolSettingsOutcomeRejectedPolicy OfflinePoolSettingsRequestOutcome = "rejected_policy"
+	// OfflinePoolSettingsOutcomeRejectedMalformed marks a request rejected
+	// with HTTP 400 because its body or If-Match precondition was malformed.
+	OfflinePoolSettingsOutcomeRejectedMalformed OfflinePoolSettingsRequestOutcome = "rejected_malformed"
+)
+
+// OfflinePoolSettingsUpdateRequest carries everything the store needs to
+// classify, apply and receipt one experimental PATCH request. The handler
+// performs all HTTP-level validation (it owns the detailed rejection
+// errors) and passes the results in; the store replays, applies and
+// persists the durable receipt in a single transaction.
+type OfflinePoolSettingsUpdateRequest struct {
+	// RequestID is the raw Idempotency-Key header value; empty when the
+	// client did not send one.
+	RequestID string
+	// PayloadHash identifies the exact payload bytes the client sent
+	// (hex-encoded SHA-256).
+	PayloadHash string
+	// IfMatchErr carries the If-Match parsing failure, if any. A missing
+	// If-Match header never reaches the store: the handler rejects it with
+	// 428 before calling in, and a 428 never persists a receipt.
+	IfMatchErr error
+	// IfMatch is the parsed precondition. Only meaningful when IfMatchErr
+	// is nil.
+	IfMatch OfflinePoolSettingsRevision
+	// BodyErr carries the strict body decoding failure, if any.
+	BodyErr error
+	// Patch is the decoded patch; nil when BodyErr is set.
+	Patch *OfflinePoolSettingsPatch
+}
+
+// OfflinePoolSettingsUpdateResult describes how one experimental PATCH
+// request was answered.
+type OfflinePoolSettingsUpdateResult struct {
+	// Replayed is true when the request was answered from a stored receipt:
+	// nothing was applied and nothing was written.
+	Replayed bool
+	// Outcome is the durable classification of the request. It is set for
+	// replayed requests (mirroring the stored row) and for applied
+	// requests; for fresh rejections it mirrors the returned error.
+	Outcome OfflinePoolSettingsRequestOutcome
+	// Settings and Revision carry the applied state of a fresh applied
+	// request; they are zero for rejections and replays.
+	Settings OfflinePoolSettings
+	Revision OfflinePoolSettingsRevision
+	// ResultingETag is the quoted ETag recorded by the original request. It
+	// is set for replayed requests (the stored value) and lets the handler
+	// answer a safe retry without re-deriving any state.
+	ResultingETag string
+}
+
+// OfflinePoolSettingsRequestReplay is the wire document returned when a
+// PATCH is answered from a stored request receipt instead of being
+// re-applied: the durable outcome of the original request, plus the ETag
+// that resulted from it.
+type OfflinePoolSettingsRequestReplay struct {
+	// Outcome is the stored outcome of the original request.
+	Outcome OfflinePoolSettingsRequestOutcome `json:"outcome"`
+	// ResultingETag is the quoted ETag observed or produced by the original
+	// request.
+	ResultingETag string `json:"resulting_etag"`
+}

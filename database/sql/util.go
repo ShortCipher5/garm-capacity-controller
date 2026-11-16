@@ -655,6 +655,14 @@ func (s *sqlDatabase) updatePool(tx *gorm.DB, pool Pool, param params.UpdatePool
 			return params.Pool{}, 0, fmt.Errorf("error saving database entry: %w", q.Error)
 		}
 		rowsAffected = q.RowsAffected
+		if rowsAffected > 0 {
+			// Every stock write that changes the pool row participates in
+			// the experimental revision scheme: a client holding a strong
+			// ETag from the offline API must observe this write as a
+			// conflict. Best-effort by design (see the helper): a no-op
+			// when the experimental side table does not exist.
+			s.bumpOfflineRevisionForLegacyWrite(tx, pool.ID)
+		}
 	}
 
 	tags := []Tag{}

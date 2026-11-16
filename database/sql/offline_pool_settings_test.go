@@ -16,6 +16,7 @@ package sql
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"testing"
@@ -145,6 +146,39 @@ func (s *OfflinePoolSettingsTestSuite) revisionExists() bool {
 	return sqlDB.conn.Migrator().HasTable(&OfflinePoolSettingsRevision{})
 }
 
+func (s *OfflinePoolSettingsTestSuite) receiptsExist() bool {
+	sqlDB := s.Store.(*sqlDatabase)
+	return sqlDB.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{})
+}
+
+func (s *OfflinePoolSettingsTestSuite) receiptCount() int64 {
+	sqlDB := s.Store.(*sqlDatabase)
+	var count int64
+	s.Require().NoError(sqlDB.conn.Model(&OfflinePoolSettingsRequestReceipt{}).Count(&count).Error)
+	return count
+}
+
+func (s *OfflinePoolSettingsTestSuite) getReceipt(requestID string) OfflinePoolSettingsRequestReceipt {
+	sqlDB := s.Store.(*sqlDatabase)
+	var receipt OfflinePoolSettingsRequestReceipt
+	s.Require().NoError(sqlDB.conn.Where("request_id = ?", requestID).First(&receipt).Error)
+	return receipt
+}
+
+func offlineHash(payload string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+}
+
+// offlineUpdateReq builds a store request for a well-formed patch without
+// an idempotency key.
+func offlineUpdateReq(rev params.OfflinePoolSettingsRevision, patch params.OfflinePoolSettingsPatch) params.OfflinePoolSettingsUpdateRequest {
+	return params.OfflinePoolSettingsUpdateRequest{
+		PayloadHash: offlineHash("offline|" + rev.String() + "|" + fmt.Sprintf("%+v", patch)),
+		IfMatch:     rev,
+		Patch:       &patch,
+	}
+}
+
 func (s *OfflinePoolSettingsTestSuite) currentRevision(poolID string) params.OfflinePoolSettingsRevision {
 	sqlDB := s.Store.(*sqlDatabase)
 	var rev OfflinePoolSettingsRevision
@@ -156,11 +190,12 @@ func (s *OfflinePoolSettingsTestSuite) currentRevision(poolID string) params.Off
 // migrating) a database does not create the experimental schema.
 func (s *OfflinePoolSettingsTestSuite) TestNoSchemaSideEffectsWithoutUse() {
 	s.Require().False(s.revisionExists())
+	s.Require().False(s.receiptsExist())
 
 	sqlDB := s.Store.(*sqlDatabase)
 	var count int64
 	s.Require().NoError(sqlDB.conn.Raw(
-		"SELECT count(1) FROM sqlite_master WHERE type='table' AND name='offline_pool_settings_revisions'").
+		"SELECT count(1) FROM sqlite_master WHERE type='table' AND name IN ('offline_pool_settings_revisions', 'offline_pool_settings_request_receipts')").
 		Scan(&count).Error)
 	s.Require().Zero(count)
 }
@@ -214,10 +249,11 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdateHappyPath() {
 	s.Require().NoError(err)
 
 	priority := uint(7)
-	settings, rev1, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().NoError(err)
+	settings, rev1 := result.Settings, result.Revision
 	s.Require().Equal(uint(7), settings.Priority)
 	s.Require().Equal(uint(5), settings.MaxRunners)
 	s.Require().Equal(uint(2), settings.MinIdleRunners)
@@ -229,11 +265,11 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdateHappyPath() {
 
 	// another update advances the revision again
 	minIdle := uint(4)
-	_, rev2, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev1, params.OfflinePoolSettingsPatch{
+	result, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev1, params.OfflinePoolSettingsPatch{
 		MinIdleRunners: &minIdle,
-	})
+	}))
 	s.Require().NoError(err)
-	s.Require().Equal(rev1.Seq+1, rev2.Seq)
+	s.Require().Equal(rev1.Seq+1, result.Revision.Seq)
 	s.Require().Equal(uint(4), s.currentPoolRow(s.pool.ID).MinIdleRunners)
 }
 
@@ -242,22 +278,22 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdateStaleRevision() {
 	s.Require().NoError(err)
 
 	priority := uint(3)
-	_, _, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().NoError(err)
 
 	// patching with the now stale revision fails and reports the current one
 	priority = 9
-	settings, _, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().Error(err)
 	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsStaleRevision)
 	var staleErr *dbCommon.OfflinePoolSettingsStaleRevisionError
 	s.Require().ErrorAs(err, &staleErr)
 	s.Require().Equal(rev0.Seq+1, staleErr.Current.Seq)
-	s.Require().Equal(params.OfflinePoolSettings{}, settings)
+	s.Require().Equal(params.OfflinePoolSettings{}, result.Settings)
 
 	// row is byte-for-byte unchanged: priority stuck at 3, seq advanced once
 	s.Require().Equal(uint(3), s.currentPoolRow(s.pool.ID).Priority)
@@ -270,17 +306,17 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdateMinIdleGreaterThanMax() {
 
 	// min_idle_runners exceeding the current max_runners
 	minIdle := uint(6)
-	_, _, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		MinIdleRunners: &minIdle,
-	})
+	}))
 	s.Require().ErrorIs(err, runnerErrors.ErrUnprocessable)
 
 	// lowering max_runners below the current min_idle_runners also trips the
 	// invariant, even though min_idle_runners is not supplied
 	maxRunners := uint(1)
-	_, _, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		MaxRunners: &maxRunners,
-	})
+	}))
 	s.Require().ErrorIs(err, runnerErrors.ErrUnprocessable)
 
 	// nothing changed
@@ -294,12 +330,12 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdateNoopDoesNotAdvanceRevision() {
 	s.Require().NoError(err)
 
 	priority := uint(0)
-	settings, rev, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().NoError(err)
-	s.Require().Equal(rev0, rev)
-	s.Require().Equal(uint(0), settings.Priority)
+	s.Require().Equal(rev0, result.Revision)
+	s.Require().Equal(uint(0), result.Settings.Priority)
 	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
 }
 
@@ -307,7 +343,12 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdateEmptyPatchRejected() {
 	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
 	s.Require().NoError(err)
 
-	_, _, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{})
+	// a request without a decoded patch (the handler never produces one,
+	// this is the store's defensive backstop) is rejected as a bad request
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, params.OfflinePoolSettingsUpdateRequest{
+		PayloadHash: offlineHash("empty"),
+		IfMatch:     rev0,
+	})
 	s.Require().ErrorIs(err, runnerErrors.ErrBadRequest)
 }
 
@@ -316,9 +357,9 @@ func (s *OfflinePoolSettingsTestSuite) TestUpdatePoolNotMemberOfEntity() {
 	s.Require().NoError(err)
 
 	priority := uint(1)
-	_, _, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.entityOf(s.otherOrg), s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.entityOf(s.otherOrg), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().ErrorIs(err, dbCommon.ErrPoolNotMemberOfEntity)
 	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
 }
@@ -347,9 +388,9 @@ func (s *OfflinePoolSettingsTestSuite) TestConcurrentUpdatesFromTwoHandles() {
 			go func(val uint) {
 				defer wg.Done()
 				priority := val
-				_, _, err := secondHandle.UpdateOfflinePoolSettings(context.Background(), entity, s.pool.ID, curRev, params.OfflinePoolSettingsPatch{
+				_, err := secondHandle.UpdateOfflinePoolSettings(context.Background(), entity, s.pool.ID, offlineUpdateReq(curRev, params.OfflinePoolSettingsPatch{
 					Priority: &priority,
-				})
+				}))
 				results <- result{priority: val, err: err}
 			}(val)
 		}
@@ -406,11 +447,11 @@ func (s *OfflinePoolSettingsTestSuite) TestFailedCommitInvariance() {
 	s.Require().NoError(err)
 
 	priority := uint(42)
-	settings, _, err := handle.UpdateOfflinePoolSettings(context.Background(), entity, s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	result, err := handle.UpdateOfflinePoolSettings(context.Background(), entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().Error(err)
-	s.Require().Equal(params.OfflinePoolSettings{}, settings)
+	s.Require().Equal(params.OfflinePoolSettingsUpdateResult{}, result)
 
 	// byte-for-byte invariance
 	s.Require().Equal(beforePool.Priority, s.currentPoolRow(s.pool.ID).Priority)
@@ -422,18 +463,19 @@ func (s *OfflinePoolSettingsTestSuite) TestFailedCommitInvariance() {
 	s.Require().NoError(err)
 
 	// once the lock is released, the same update succeeds
-	_, rev1, err := handle.UpdateOfflinePoolSettings(context.Background(), entity, s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	result, err = handle.UpdateOfflinePoolSettings(context.Background(), entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
 	s.Require().NoError(err)
-	s.Require().Equal(rev0.Seq+1, rev1.Seq)
+	s.Require().Equal(rev0.Seq+1, result.Revision.Seq)
 	s.Require().Equal(uint(42), s.currentPoolRow(s.pool.ID).Priority)
 }
 
-// TestLegacyWriterDoesNotBumpRevision documents the known limitation:
-// stock writers update the same pools columns without advancing the
-// offline revision.
-func (s *OfflinePoolSettingsTestSuite) TestLegacyWriterDoesNotBumpRevision() {
+// TestLegacyWriterBumpsRevision verifies that the stock pool update path
+// participates in the revision scheme: a stock write advances the
+// experimental revision of the pool atomically, so a client holding an old
+// ETag observes the legacy write as a conflict.
+func (s *OfflinePoolSettingsTestSuite) TestLegacyWriterBumpsRevision() {
 	entity := s.orgEntity()
 
 	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
@@ -449,19 +491,412 @@ func (s *OfflinePoolSettingsTestSuite) TestLegacyWriterDoesNotBumpRevision() {
 
 	// content changed...
 	s.Require().Equal(uint(10), s.currentPoolRow(s.pool.ID).MaxRunners)
-	// ... but the offline revision did not move
-	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+	// ... and the offline revision moved with it
+	s.Require().Equal(rev0.Seq+1, s.currentRevision(s.pool.ID).Seq)
 
-	// and a client holding the old ETag can still commit on top
+	// a client holding the old ETag loses the race now
 	priority := uint(2)
-	_, rev1, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, rev0, params.OfflinePoolSettingsPatch{
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
 		Priority: &priority,
-	})
+	}))
+	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsStaleRevision)
+	s.Require().Equal(uint(10), s.currentPoolRow(s.pool.ID).MaxRunners)
+	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
+
+	// a fresh ETag can still patch
+	_, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
 	s.Require().NoError(err)
-	s.Require().Equal(rev0.Seq+1, rev1.Seq)
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev1, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().NoError(err)
+	s.Require().Equal(rev1.Seq+1, result.Revision.Seq)
 	s.Require().Equal(uint(10), s.currentPoolRow(s.pool.ID).MaxRunners)
 	s.Require().Equal(uint(2), s.currentPoolRow(s.pool.ID).Priority)
 }
+
+// TestLegacyWriteWithoutRevisionTable verifies that a stock write on a
+// database where the experimental path never ran (no side tables) is
+// unchanged: no error, no table creation, revision starts at zero once the
+// experimental API is used for the first time.
+func (s *OfflinePoolSettingsTestSuite) TestLegacyWriteWithoutRevisionTable() {
+	entity := s.orgEntity()
+	s.Require().False(s.revisionExists())
+
+	priority := uint(11)
+	_, err := s.Store.UpdateEntityPool(s.adminCtx, entity, s.pool.ID, params.UpdatePoolParams{
+		Priority: &priority,
+	})
+	s.Require().NoError(err)
+	s.Require().Equal(uint(11), s.currentPoolRow(s.pool.ID).Priority)
+
+	// still no experimental schema
+	s.Require().False(s.revisionExists())
+	s.Require().False(s.receiptsExist())
+
+	// the first experimental read sees the legacy change at seq 0
+	settings, rev, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(uint(11), settings.Priority)
+	s.Require().Zero(rev.Seq)
+}
+
+// TestUpdateAdvancesSeqExactlyOnce guards the no-double-bump guarantee: one
+// PATCH through the experimental API advances the revision exactly once,
+// even though the stock update path now also bumps revisions.
+func (s *OfflinePoolSettingsTestSuite) TestUpdateAdvancesSeqExactlyOnce() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().NoError(err)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, result.Outcome)
+	s.Require().Equal(rev0.Seq+1, result.Revision.Seq)
+	s.Require().Equal(rev0.Seq+1, s.currentRevision(s.pool.ID).Seq)
+
+	// a legacy write on top advances exactly once more
+	otherPriority := uint(9)
+	_, err = s.Store.UpdateEntityPool(s.adminCtx, s.orgEntity(), s.pool.ID, params.UpdatePoolParams{
+		Priority: &otherPriority,
+	})
+	s.Require().NoError(err)
+	s.Require().Equal(rev0.Seq+2, s.currentRevision(s.pool.ID).Seq)
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptAppliedChanged() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-applied",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().False(result.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, result.Outcome)
+
+	receipt := s.getReceipt("req-applied")
+	s.Require().Equal(offlineHash(`{"priority":7}`), receipt.PayloadHash)
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeAppliedChanged), receipt.Outcome)
+	s.Require().NotNil(receipt.PresentedETag)
+	s.Require().Equal(rev0.ETag(), *receipt.PresentedETag)
+	s.Require().NotNil(receipt.ResultingETag)
+	s.Require().Equal(result.Revision.ETag(), *receipt.ResultingETag)
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptReplayHasNoAdditionalEffect() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-replay",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().Equal(rev0.Seq+1, result.Revision.Seq)
+
+	// simulated client restart: identical retry (same key and payload; the
+	// precondition is stale now, which must not matter for a replay)
+	replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().True(replayed.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, replayed.Outcome)
+	s.Require().Equal(result.Revision.ETag(), replayed.ResultingETag)
+
+	// zero additional effect
+	s.Require().Equal(result.Revision, s.currentRevision(s.pool.ID))
+	s.Require().Equal(uint(7), s.currentPoolRow(s.pool.ID).Priority)
+	s.Require().Equal(int64(1), s.receiptCount())
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptIDReuseWithDifferentPayload() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-reuse",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+
+	// same key, different payload -> id reuse error, no state change
+	_, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+	otherPriority := uint(8)
+	reused := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-reuse",
+		PayloadHash: offlineHash(`{"priority":8}`),
+		IfMatch:     rev1,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &otherPriority},
+	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, reused)
+	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsRequestIDReuse)
+
+	// original receipt untouched, original retry still replays
+	receipt := s.getReceipt("req-reuse")
+	s.Require().Equal(offlineHash(`{"priority":7}`), receipt.PayloadHash)
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeAppliedChanged), receipt.Outcome)
+
+	replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().True(replayed.Replayed)
+	s.Require().Equal(rev1.ETag(), replayed.ResultingETag)
+	s.Require().Equal(rev1, s.currentRevision(s.pool.ID))
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptIDReuseWithDifferentScope() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-scope",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+
+	// same key and payload, but a different pool
+	repoEntity := s.entityOf(s.repo)
+	repoPool, err := s.Store.CreateEntityPool(s.adminCtx, repoEntity, params.CreatePoolParams{
+		ProviderName:   "test-provider",
+		MaxRunners:     4,
+		MinIdleRunners: 1,
+		Image:          "test-image-2",
+		Flavor:         "test-flavor",
+		OSType:         "linux",
+		Tags:           []string{"amd64-linux-runner"},
+	})
+	s.Require().NoError(err)
+	_, repoRev, err := s.Store.GetOfflinePoolSettings(s.adminCtx, repoEntity, repoPool.ID)
+	s.Require().NoError(err)
+
+	reused := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-scope",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     repoRev,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, repoEntity, repoPool.ID, reused)
+	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsRequestIDReuse)
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptAppliedNoop() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	// the suite pool already has priority 0
+	priority := uint(0)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-noop",
+		PayloadHash: offlineHash(`{"priority":0}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedNoop, result.Outcome)
+	s.Require().Equal(rev0, result.Revision)
+	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+
+	receipt := s.getReceipt("req-noop")
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeAppliedNoop), receipt.Outcome)
+	s.Require().NotNil(receipt.ResultingETag)
+	s.Require().Equal(rev0.ETag(), *receipt.ResultingETag)
+
+	replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().True(replayed.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedNoop, replayed.Outcome)
+	s.Require().Equal(rev0.ETag(), replayed.ResultingETag)
+	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptRejectedStaleCarriesObservedETag() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(3)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().NoError(err)
+	_, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	// stale request with its own key
+	priority = uint(9)
+	staleReq := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-stale",
+		PayloadHash: offlineHash(`{"priority":9}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, staleReq)
+	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsStaleRevision)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedStale, result.Outcome)
+
+	receipt := s.getReceipt("req-stale")
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeRejectedStale), receipt.Outcome)
+	s.Require().NotNil(receipt.ResultingETag)
+	s.Require().Equal(rev1.ETag(), *receipt.ResultingETag)
+	s.Require().NotNil(receipt.PresentedETag)
+	s.Require().Equal(rev0.ETag(), *receipt.PresentedETag)
+
+	// replaying the stale request returns the stored outcome and etag
+	replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, staleReq)
+	s.Require().NoError(err)
+	s.Require().True(replayed.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedStale, replayed.Outcome)
+	s.Require().Equal(rev1.ETag(), replayed.ResultingETag)
+	s.Require().Equal(rev1, s.currentRevision(s.pool.ID))
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptRejectedPolicy() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	// min_idle_runners (6) > max_runners (5)
+	minIdle := uint(6)
+	policyReq := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-policy",
+		PayloadHash: offlineHash(`{"min_idle_runners":6}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{MinIdleRunners: &minIdle},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, policyReq)
+	s.Require().ErrorIs(err, runnerErrors.ErrUnprocessable)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedPolicy, result.Outcome)
+
+	receipt := s.getReceipt("req-policy")
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeRejectedPolicy), receipt.Outcome)
+	s.Require().Nil(receipt.ResultingETag)
+
+	// nothing changed
+	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+	s.Require().Equal(uint(2), s.currentPoolRow(s.pool.ID).MinIdleRunners)
+
+	replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, policyReq)
+	s.Require().NoError(err)
+	s.Require().True(replayed.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedPolicy, replayed.Outcome)
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptRejectedMalformed() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	bodyErr := fmt.Errorf("unknown field %q: %w", "bogus", errOfflineTestMalformed)
+	malformedReq := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-malformed",
+		PayloadHash: offlineHash(`{"bogus":1}`),
+		IfMatch:     rev0,
+		BodyErr:     bodyErr,
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, malformedReq)
+	s.Require().ErrorIs(err, errOfflineTestMalformed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedMalformed, result.Outcome)
+
+	receipt := s.getReceipt("req-malformed")
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeRejectedMalformed), receipt.Outcome)
+	s.Require().NotNil(receipt.PresentedETag)
+	s.Require().Equal(rev0.ETag(), *receipt.PresentedETag)
+	s.Require().Nil(receipt.ResultingETag)
+
+	// the row is untouched
+	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+
+	replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, malformedReq)
+	s.Require().NoError(err)
+	s.Require().True(replayed.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedMalformed, replayed.Outcome)
+}
+
+func (s *OfflinePoolSettingsTestSuite) TestReceiptRejectedMalformedIfMatch() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	ifMatchErr := fmt.Errorf("expected a single quoted etag: %w", errOfflineTestMalformed)
+	malformedReq := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-malformed-ifmatch",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatchErr:  ifMatchErr,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, malformedReq)
+	s.Require().ErrorIs(err, errOfflineTestMalformed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedMalformed, result.Outcome)
+
+	receipt := s.getReceipt("req-malformed-ifmatch")
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeRejectedMalformed), receipt.Outcome)
+	s.Require().Nil(receipt.PresentedETag)
+	s.Require().Nil(receipt.ResultingETag)
+	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+}
+
+// TestNoReceiptFor403And404 verifies that requests rejected before the
+// write transaction (pool missing, pool not a member of the path entity)
+// never persist a receipt.
+func (s *OfflinePoolSettingsTestSuite) TestNoReceiptFor403And404() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	notFoundReq := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-404",
+		PayloadHash: offlineHash("404"),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), "00000000-0000-0000-0000-000000000000", notFoundReq)
+	s.Require().ErrorIs(err, runnerErrors.ErrNotFound)
+
+	forbiddenReq := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-403",
+		PayloadHash: offlineHash("403"),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.entityOf(s.otherOrg), s.pool.ID, forbiddenReq)
+	s.Require().ErrorIs(err, dbCommon.ErrPoolNotMemberOfEntity)
+
+	s.Require().Zero(s.receiptCount())
+}
+
+// TestReceiptWithoutKeyIsDurableButNotReplayable verifies that a PATCH
+// without an Idempotency-Key still persists a receipt (addressable only by
+// its generated id).
+func (s *OfflinePoolSettingsTestSuite) TestReceiptWithoutKeyIsDurableButNotReplayable() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), s.receiptCount())
+}
+
+var errOfflineTestMalformed = fmt.Errorf("malformed settings document")
 
 func TestOfflinePoolSettingsTestSuite(t *testing.T) {
 	suite.Run(t, new(OfflinePoolSettingsTestSuite))

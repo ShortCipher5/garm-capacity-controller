@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -231,7 +232,7 @@ type offlineResponse struct {
 	body   []byte
 }
 
-func (e *offlinePoolSettingsEnv) do(t *testing.T, method, path, token, ifMatch string, body string) offlineResponse {
+func (e *offlinePoolSettingsEnv) do(t *testing.T, method, path, token, ifMatch string, body string, idemKey ...string) offlineResponse {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
@@ -250,6 +251,9 @@ func (e *offlinePoolSettingsEnv) do(t *testing.T, method, path, token, ifMatch s
 	if ifMatch != "" {
 		req.Header.Set("If-Match", ifMatch)
 	}
+	if len(idemKey) > 0 && idemKey[0] != "" {
+		req.Header.Set("Idempotency-Key", idemKey[0])
+	}
 	resp, err := e.server.Client().Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %s", err)
@@ -264,6 +268,62 @@ func (e *offlinePoolSettingsEnv) do(t *testing.T, method, path, token, ifMatch s
 		etag:   resp.Header.Get("ETag"),
 		body:   respBody,
 	}
+}
+
+// receiptCount asks the database directly how many request receipts exist.
+func (e *offlinePoolSettingsEnv) receiptCount(t *testing.T) int64 {
+	t.Helper()
+	checkDB, err := gorm.Open(sqlite.Open(e.dbCfg.SQLite.DBFile), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open check db: %s", err)
+	}
+	sqlDB, err := checkDB.DB()
+	if err != nil {
+		t.Fatalf("failed to get check db handle: %s", err)
+	}
+	defer sqlDB.Close()
+
+	var count int64
+	if err := checkDB.Raw("SELECT count(1) FROM offline_pool_settings_request_receipts").Scan(&count).Error; err != nil {
+		t.Fatalf("failed to count receipts: %s", err)
+	}
+	return count
+}
+
+// receiptCountFor asks the database directly how many request receipts
+// exist for one request id.
+func (e *offlinePoolSettingsEnv) receiptCountFor(t *testing.T, requestID string) int64 {
+	t.Helper()
+	checkDB, err := gorm.Open(sqlite.Open(e.dbCfg.SQLite.DBFile), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open check db: %s", err)
+	}
+	sqlDB, err := checkDB.DB()
+	if err != nil {
+		t.Fatalf("failed to get check db handle: %s", err)
+	}
+	defer sqlDB.Close()
+
+	var count int64
+	if err := checkDB.Raw("SELECT count(1) FROM offline_pool_settings_request_receipts WHERE request_id = ?", requestID).
+		Scan(&count).Error; err != nil {
+		t.Fatalf("failed to count receipts: %s", err)
+	}
+	return count
+}
+
+// etagSeq extracts the seq component of a quoted "<epoch>:<seq>" ETag.
+func etagSeq(t *testing.T, etag string) uint64 {
+	t.Helper()
+	parts := strings.Split(strings.Trim(etag, `"`), ":")
+	if len(parts) != 2 {
+		t.Fatalf("malformed etag %q", etag)
+	}
+	seq, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		t.Fatalf("malformed etag %q: %s", etag, err)
+	}
+	return seq
 }
 
 // getETag fetches the current ETag of a pool settings resource.
@@ -561,6 +621,229 @@ func (s *OfflinePoolSettingsHTTPSuite) TestConcurrentPatchWithSameETag() {
 	s.Require().Equal(winnerETag, getResp.etag)
 }
 
+func (s *OfflinePoolSettingsHTTPSuite) TestStockPutBumpsRevision() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	// legacy writer through the store layer (the path used by
+	// PUT /api/v1/pools/{poolID} and the nested entity pool PUTs)
+	entity, err := s.env.org.GetEntity()
+	s.Require().NoError(err)
+	priority := uint(33)
+	_, err = s.env.db.UpdateEntityPool(s.T().Context(), entity, s.env.orgPool.ID, params.UpdatePoolParams{
+		Priority: &priority,
+	})
+	s.Require().NoError(err)
+
+	// the experimental API now exposes a new ETag...
+	newETag := s.env.getETag(s.T(), path)
+	s.Require().NotEqual(etag, newETag)
+	s.Require().Equal(etagSeq(s.T(), etag)+1, etagSeq(s.T(), newETag))
+
+	// ... and a client still holding the old ETag loses the race
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":44}`)
+	s.Require().Equal(http.StatusPreconditionFailed, resp.status)
+	s.Require().Equal(newETag, resp.etag)
+
+	// the fresh ETag patches fine
+	resp = s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, newETag, `{"priority":44}`)
+	s.Require().Equal(http.StatusOK, resp.status)
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchAdvancesSeqExactlyOnce() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`)
+	s.Require().Equal(http.StatusOK, resp.status)
+
+	// the response, a subsequent GET and the revision row all agree on
+	// exactly one increment
+	s.Require().Equal(etagSeq(s.T(), etag)+1, etagSeq(s.T(), resp.etag))
+	s.Require().Equal(resp.etag, s.env.getETag(s.T(), path))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchIdempotentReplayAfterClientRestart() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+	body := `{"priority":9}`
+
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, body, "key-replay")
+	s.Require().Equal(http.StatusOK, resp.status, "body: %s", resp.body)
+	s.Require().NotEqual(etag, resp.etag)
+
+	// simulated client restart: byte-identical retry, stale If-Match and
+	// all. The stored receipt answers it; nothing is re-applied.
+	replay := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, body, "key-replay")
+	s.Require().Equal(http.StatusOK, replay.status, "body: %s", replay.body)
+	s.Require().Equal(resp.etag, replay.etag)
+
+	var replayDoc params.OfflinePoolSettingsRequestReplay
+	s.Require().NoError(json.Unmarshal(replay.body, &replayDoc))
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, replayDoc.Outcome)
+	s.Require().Equal(resp.etag, replayDoc.ResultingETag)
+
+	// zero additional effect: the resource still carries the original etag
+	s.Require().Equal(resp.etag, s.env.getETag(s.T(), path))
+	s.Require().Equal(int64(1), s.env.receiptCount(s.T()))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchIdempotencyKeyReuseConflict() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, "key-reuse")
+	s.Require().Equal(http.StatusOK, resp.status, "body: %s", resp.body)
+
+	// same key, different payload -> 409 and no state change
+	conflict := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":10}`, "key-reuse")
+	s.Require().Equal(http.StatusConflict, conflict.status)
+	s.Require().Contains(string(conflict.body), "Idempotency-Key")
+	s.Require().Equal(resp.etag, s.env.getETag(s.T(), path))
+
+	// the original receipt is intact: the original retry still replays
+	replay := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, "key-reuse")
+	s.Require().Equal(http.StatusOK, replay.status)
+	s.Require().Equal(resp.etag, replay.etag)
+	s.Require().Equal(resp.etag, s.env.getETag(s.T(), path))
+	s.Require().Equal(int64(1), s.env.receiptCount(s.T()))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchIdempotencyKeyReuseAcrossPools() {
+	etag := s.env.getETag(s.T(), s.orgPoolPath())
+	body := `{"priority":9}`
+
+	resp := s.env.do(s.T(), http.MethodPatch, s.orgPoolPath(), s.env.adminToken, etag, body, "key-scope")
+	s.Require().Equal(http.StatusOK, resp.status, "body: %s", resp.body)
+
+	// same key and payload, different pool (scope)
+	repoPath := offlineSettingsPath("repository", s.env.repo.ID, s.env.repoPool.ID)
+	conflict := s.env.do(s.T(), http.MethodPatch, repoPath, s.env.adminToken, s.env.getETag(s.T(), repoPath), body, "key-scope")
+	s.Require().Equal(http.StatusConflict, conflict.status)
+	s.Require().Equal(int64(1), s.env.receiptCount(s.T()))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchRejectedStaleReceiptReplay() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	// consume the etag (no key)
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":8}`)
+	s.Require().Equal(http.StatusOK, resp.status)
+
+	// stale attempt with its own key
+	stale := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, "key-stale")
+	s.Require().Equal(http.StatusPreconditionFailed, stale.status)
+	s.Require().Equal(resp.etag, stale.etag)
+
+	// replaying the stale request replays the 412 with the observed etag
+	replay := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, "key-stale")
+	s.Require().Equal(http.StatusPreconditionFailed, replay.status)
+	s.Require().Equal(resp.etag, replay.etag)
+	s.Require().Contains(string(replay.body), strings.Trim(resp.etag, `"`))
+
+	// still zero additional effect (the keyless first PATCH also persisted
+	// a durable, unaddressable receipt with a generated id; the keyed
+	// receipt is exactly one row)
+	s.Require().Equal(resp.etag, s.env.getETag(s.T(), path))
+	s.Require().Equal(int64(1), s.env.receiptCountFor(s.T(), "key-stale"))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchRejectedPolicyReceiptReplay() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"min_idle_runners":6}`, "key-policy")
+	s.Require().Equal(http.StatusUnprocessableEntity, resp.status)
+	s.Require().Equal(etag, s.env.getETag(s.T(), path))
+
+	replay := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"min_idle_runners":6}`, "key-policy")
+	s.Require().Equal(http.StatusUnprocessableEntity, replay.status)
+	s.Require().Equal(etag, s.env.getETag(s.T(), path))
+	s.Require().Equal(int64(1), s.env.receiptCount(s.T()))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchRejectedMalformedReceiptReplay() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"bogus":1}`, "key-malformed")
+	s.Require().Equal(http.StatusBadRequest, resp.status)
+
+	// the detailed decoding error is preserved on the fresh rejection
+	s.Require().Contains(string(resp.body), "unknown field")
+
+	replay := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"bogus":1}`, "key-malformed")
+	s.Require().Equal(http.StatusBadRequest, replay.status)
+	s.Require().Equal(etag, s.env.getETag(s.T(), path))
+	s.Require().Equal(int64(1), s.env.receiptCount(s.T()))
+}
+
+// TestPatchNoReceiptsBeforeWriteTransaction verifies that 403/404/428
+// rejections never persist a receipt: the database must stay empty, and a
+// retried 428 request with a now-valid precondition must be processed
+// fresh (no replay).
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchNoReceiptsBeforeWriteTransaction() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+	s.Require().Equal(int64(0), s.env.receiptCount(s.T()))
+
+	// 403: wrong entity
+	wrongPath := offlineSettingsPath("organization", s.env.org2.ID, s.env.orgPool.ID)
+	resp := s.env.do(s.T(), http.MethodPatch, wrongPath, s.env.adminToken, etag, `{"priority":9}`, "key-403")
+	s.Require().Equal(http.StatusForbidden, resp.status)
+
+	// 403: non-admin
+	resp = s.env.do(s.T(), http.MethodPatch, path, s.env.userToken, etag, `{"priority":9}`, "key-403b")
+	s.Require().Equal(http.StatusForbidden, resp.status)
+
+	// 404: nonexistent pool
+	missingPath := offlineSettingsPath("organization", s.env.org.ID, "00000000-0000-0000-0000-000000000000")
+	resp = s.env.do(s.T(), http.MethodPatch, missingPath, s.env.adminToken, etag, `{"priority":9}`, "key-404")
+	s.Require().Equal(http.StatusNotFound, resp.status)
+
+	// 428: missing If-Match
+	resp = s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, "", `{"priority":9}`, "key-428")
+	s.Require().Equal(http.StatusPreconditionRequired, resp.status)
+
+	s.Require().Equal(int64(0), s.env.receiptCount(s.T()))
+
+	// the 428'd request retried with a valid precondition is fresh work
+	resp = s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, "key-428")
+	s.Require().Equal(http.StatusOK, resp.status)
+	s.Require().Equal(int64(1), s.env.receiptCount(s.T()))
+}
+
+func (s *OfflinePoolSettingsHTTPSuite) TestPatchMalformedIdempotencyKey() {
+	path := s.orgPoolPath()
+	etag := s.env.getETag(s.T(), path)
+
+	for _, key := range []string{
+		strings.Repeat("a", 129), // too long
+		"key with spaces",        // whitespace
+		"key\twith\ttabs",        // control characters
+		"schlüssel",              // non-ASCII
+	} {
+		resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, key)
+		s.Require().Equal(http.StatusBadRequest, resp.status, "key: %q", key)
+	}
+	s.Require().Equal(etag, s.env.getETag(s.T(), path))
+	s.Require().Equal(int64(0), s.env.receiptCount(s.T()))
+
+	// boundary: exactly 128 chars is accepted
+	resp := s.env.do(s.T(), http.MethodPatch, path, s.env.adminToken, etag, `{"priority":9}`, strings.Repeat("b", 128))
+	s.Require().Equal(http.StatusOK, resp.status)
+}
+
+// TestGetIgnoresIdempotencyKey documents that GET does not participate in
+// idempotency at all: the header is ignored and no receipt is written.
+func (s *OfflinePoolSettingsHTTPSuite) TestGetIgnoresIdempotencyKey() {
+	path := s.orgPoolPath()
+	resp := s.env.do(s.T(), http.MethodGet, path, s.env.adminToken, "", "", "key-get")
+	s.Require().Equal(http.StatusOK, resp.status)
+	s.Require().Equal(int64(0), s.env.receiptCount(s.T()))
+}
+
 func TestOfflinePoolSettingsHTTPSuite(t *testing.T) {
 	suite.Run(t, new(OfflinePoolSettingsHTTPSuite))
 }
@@ -589,7 +872,7 @@ func (s *OfflinePoolSettingsFlagOffSuite) TestRoutesAreNotFound() {
 }
 
 func (s *OfflinePoolSettingsFlagOffSuite) TestNoSchemaSideEffects() {
-	// ask the database directly; the experimental table must not exist
+	// ask the database directly; the experimental tables must not exist
 	checkDB, err := gorm.Open(sqlite.Open(s.env.dbCfg.SQLite.DBFile), &gorm.Config{})
 	s.Require().NoError(err)
 	sqlDB, err := checkDB.DB()
@@ -598,7 +881,7 @@ func (s *OfflinePoolSettingsFlagOffSuite) TestNoSchemaSideEffects() {
 
 	var count int64
 	s.Require().NoError(checkDB.Raw(
-		"SELECT count(1) FROM sqlite_master WHERE type='table' AND name='offline_pool_settings_revisions'").
+		"SELECT count(1) FROM sqlite_master WHERE type='table' AND name IN ('offline_pool_settings_revisions', 'offline_pool_settings_request_receipts')").
 		Scan(&count).Error)
 	s.Require().Zero(count)
 }
