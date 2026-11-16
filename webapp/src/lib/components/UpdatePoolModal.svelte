@@ -10,8 +10,15 @@
 	import UpdateRepositoryModal from './UpdateRepositoryModal.svelte';
 	import UpdateOrganizationModal from './UpdateOrganizationModal.svelte';
 	import UpdateEnterpriseModal from './UpdateEnterpriseModal.svelte';
+	import ExperimentalPoolSettingsEditor from './ExperimentalPoolSettingsEditor.svelte';
+	import { isPoolSettingsExperimentEnabled } from '$lib/experimental/flags.js';
 
 	export let pool: Pool;
+
+	// Opt-in experimental pool-settings editor. Resolved at render time so the
+	// build-time variable stays the single source of truth; when the experiment
+	// is disabled this is always false and the stock modal renders unchanged.
+	$: experimentalPoolSettingsEnabled = isPoolSettingsExperimentEnabled();
 
 	const dispatch = createEventDispatcher<{
 		close: void;
@@ -288,6 +295,12 @@
 </script>
 
 <Modal on:close={() => dispatch('close')}>
+	{#if experimentalPoolSettingsEnabled}
+		<ExperimentalPoolSettingsEditor
+			{pool}
+			on:close={() => dispatch('close')}
+		/>
+	{:else}
 	<div class="max-w-6xl w-full max-h-[90vh] overflow-y-auto">
 		<div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
 			<h2 class="text-xl font-semibold text-gray-900 dark:text-white">
@@ -658,6 +671,7 @@
 			</div>
 		</form>
 	</div>
+	{/if}
 </Modal>
 
 <!-- Nested Entity Update Modals -->

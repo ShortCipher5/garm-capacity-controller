@@ -1,0 +1,179 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+	getPoolSettings,
+	patchPoolSettings,
+	PoolSettingsError,
+	poolSettingsPath,
+	type PoolSettingsRef
+} from './pool-settings.js';
+import { garmApi } from '$lib/api/client.js';
+
+const ref: PoolSettingsRef = { entityType: 'repository', entityID: 'repo-1', poolID: 'pool-9' };
+const settingsURL = '/api/v1/offline/entities/repository/repo-1/pools/pool-9/settings';
+
+function jsonResponse(status: number, body: unknown, etag?: string): Response {
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	if (etag) headers['ETag'] = etag;
+	return new Response(JSON.stringify(body), { status, headers });
+}
+
+describe('pool-settings client', () => {
+	beforeEach(() => {
+		garmApi.setToken('tok-123');
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		garmApi.setToken('');
+	});
+
+	it('builds the provisional settings path per entity kind', () => {
+		expect(poolSettingsPath(ref)).toBe(settingsURL);
+		expect(poolSettingsPath({ entityType: 'organization', entityID: 'o1', poolID: 'p1' })).toBe(
+			'/api/v1/offline/entities/organization/o1/pools/p1/settings'
+		);
+		expect(poolSettingsPath({ entityType: 'enterprise', entityID: 'e1', poolID: 'p1' })).toBe(
+			'/api/v1/offline/entities/enterprise/e1/pools/p1/settings'
+		);
+	});
+
+	it('GET keeps the exact ETag and carries the bearer token', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { priority: 10, max_runners: 5, min_idle_runners: 1 }, '"42:7"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await getPoolSettings(ref);
+
+		expect(result.settings).toEqual({ priority: 10, max_runners: 5, min_idle_runners: 1 });
+		expect(result.etag).toBe('"42:7"');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe(settingsURL);
+		expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer tok-123');
+	});
+
+	it('PATCH sends If-Match verbatim with a strict body', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { priority: 20, max_runners: 8, min_idle_runners: 2 }, '"43:1"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await patchPoolSettings(ref, '"42:7"', { priority: 20, max_runners: 8 });
+
+		expect(result.etag).toBe('"43:1"');
+		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(init.method).toBe('PATCH');
+		expect((init.headers as Record<string, string>)['If-Match']).toBe('"42:7"');
+		expect(JSON.parse(init.body as string)).toEqual({ priority: 20, max_runners: 8 });
+	});
+
+	it('412 surfaces the fresh ETag, leaves the caller draft untouched and keeps the token', async () => {
+		const seenAuth: Array<string | null> = [];
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(
+				jsonResponse(200, { priority: 10, max_runners: 5, min_idle_runners: 1 }, '"42:7"')
+			)
+			.mockResolvedValueOnce(jsonResponse(412, { detail: 'stale' }, '"99:1"'))
+			.mockResolvedValueOnce(
+				jsonResponse(200, { priority: 21, max_runners: 5, min_idle_runners: 1 }, '"99:2"')
+			);
+		vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+			seenAuth.push(((init?.headers as Record<string, string>) ?? {})['Authorization'] ?? null);
+			return fetchMock(url, init);
+		});
+
+		const getResult = await getPoolSettings(ref);
+		const draft = { priority: 21 };
+		const draftBefore = { ...draft };
+
+		let conflict: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, getResult.etag!, { ...draft });
+		} catch (err) {
+			conflict = err as PoolSettingsError;
+		}
+		expect(conflict).toBeInstanceOf(PoolSettingsError);
+		expect(conflict!.kind).toBe('conflict');
+		expect(conflict!.etag).toBe('"99:1"');
+		// the operator's draft object is untouched by the conflict
+		expect(draft).toEqual(draftBefore);
+
+		// operator reviews, saves again against the fresh ETag
+		const retried = await patchPoolSettings(ref, conflict!.etag!, { ...draft });
+		expect(retried.etag).toBe('"99:2"');
+		const lastInit = fetchMock.mock.calls[2][1] as RequestInit;
+		expect((lastInit.headers as Record<string, string>)['If-Match']).toBe('"99:1"');
+
+		// the auth token was preserved on every request, including after 412
+		expect(seenAuth).toEqual(['Bearer tok-123', 'Bearer tok-123', 'Bearer tok-123']);
+	});
+
+	it('holds UNKNOWN with no retry when the response is lost', async () => {
+		const fetchMock = vi.fn().mockRejectedValue(new TypeError('network down'));
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('unknown');
+		expect(err!.message).toContain('lost or ambiguous');
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('treats 503 after dispatch as UNKNOWN and does not retry', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(jsonResponse(503, {}));
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err!.kind).toBe('unknown');
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('classifies 400/403/422/428 as definitive rejections', async () => {
+		for (const status of [400, 403, 422, 428]) {
+			const fetchMock = vi.fn().mockResolvedValue(jsonResponse(status, { detail: 'no' }));
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err!.kind).toBe('rejected');
+			expect(err!.status).toBe(status);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('never dispatches without a strong ETag', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(patchPoolSettings(ref, '', { priority: 3 })).rejects.toBeInstanceOf(PoolSettingsError);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('rejects empty or non-strict patches before dispatch', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(patchPoolSettings(ref, '"42:7"', {})).rejects.toBeInstanceOf(PoolSettingsError);
+		await expect(
+			patchPoolSettings(ref, '"42:7"', { priority: 1, flavor: 'big' } as never)
+		).rejects.toBeInstanceOf(PoolSettingsError);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
