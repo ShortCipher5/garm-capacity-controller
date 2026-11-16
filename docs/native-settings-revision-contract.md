@@ -1,11 +1,17 @@
 # Native settings revision contract (Agent 1 deliverable)
 
-Status: draft/provisional, 2026-11-16 revision 10 (controller client
-reconciled with landed server). Local commits only; not pushed; not merged to any remote; not
-deployed. Experimental features remain disabled by default and are offline
-work, not deployable. Local commit only; not pushed; review copies attached to
-handoff messages because the branch is not visible remotely. Not merged, not
-deployed, no authority granted.
+Status: draft/provisional, 2026-11-16 revision 10, with factual review
+corrections. Native settings and hold-register review copies are now
+published at the refs in `current-state-and-next-plan.md`; they are not
+merge proposals or production integration. Controller-client reconciliation
+and test results below remain workstream-reported unless explicitly marked
+independently verified. Experimental features remain disabled by default,
+not deployed and not deployable. No authority is granted.
+
+The historical instructions, pins and ownership map below record the
+workstream's earlier context, not current execution authorization. The
+current owner direction is repository cleanup only, with no new feature work.
+Real UI-to-server testing and lost-response fault injection remain outstanding.
 
 **HOLD, REVISED (owner instruction, 2026-11-16, latest):** Agents 2, 3 and 5
 MAY implement OFFLINE EXPERIMENTAL vertical slices in per-agent worktrees of
@@ -139,8 +145,9 @@ schema side effects, stock behavior unchanged):
   do not bump the revision (DEC-10).
 - Revision mechanism (per-pool column vs global epoch/sequence) is Agent 2's
   documented choice for the slice — an input to DEC-2, not a resolution.
-- Receipts (§4.1) are deliberately OUT of the slice; UNKNOWN after a lost
-  response is held client-side with no retry and no unconditional fallback.
+- Receipts were deliberately OUT of the initial slice; the later slice in
+  §9 adds them. UNKNOWN after a lost response remains held client-side;
+  durable end-to-end recovery is not yet proven.
 
 Flagged differences (to verify against the landed branches, not assumed):
 route shape deliberately mirrors CJ's prototype namespace for comparability
@@ -187,8 +194,9 @@ Owner round-2 corrections sharpen this further:
   true no-ops off the revision (DEC-10), and treat permanent observe-only
   recovery as the fallback that can block the controller indefinitely. A
   verifiable per-request stale response remains the only existing native
-  signal that releases; a receipt settles an UNKNOWN to a known outcome and
-  finalizes a consumed charge — it is not a release signal by itself.
+  signal of conditional-write non-effect; it does not by itself release a
+  capacity charge. Receipts can establish a settings outcome, but ledger
+  settlement requires the explicit handoff and evidence chain described in §5.
 
 ### 4.1 Request-correlated receipt semantics (paper design, target interface)
 
@@ -214,12 +222,12 @@ the implementation hold is unchanged):
   a database restore (same-database storage shares DEC-7's rollback
   exposure), fencing of old binaries or direct DB writers, or any physical
   effect.
-- Capacity consequence: an `applied_*` receipt lets the controller settle the
-  journal intent and finalize a consumed charge; it never justifies
-  releasing one. Release still requires proven non-effect (a verifiable
-  per-request stale response) or operator reconciliation. Rollback-resistant
-  receipt authority (DEC-7) and physical fencing (Agents 4/5) remain separate
-  prerequisites.
+- Capacity consequence (target design, not current integration): an
+  `applied_*` receipt may establish the settings outcome, but does not itself
+  settle a ledger charge or prove physical non-effect. A settings stale
+  response is likewise insufficient by itself. The explicit journal/API/
+  ledger handoff, authoritative physical evidence, rollback-resistant
+  authority (DEC-7) and physical fencing remain separate prerequisites (§5).
 - Open details: reuse-conflict status (Q11 — **decided for v1: 409**),
   receipt retention/purging (Q12 — **v1: none, no GC, documented**), whether
   reads participate (Q13 — **v1: writes only, GET ignores the header**).
@@ -329,15 +337,14 @@ directions above):
   destination or move potentially denied material.
 - **Q7** (open; owner round 3) No verified Chris-owned native fork exists;
   destination remains unselected.
-- **Q11** Exact status code/refusal shape for idempotency-key reuse with
-  different content (§4.1).
-- **Q12** Receipt retention/purging policy (§4.1).
-- **Q13** Do reads participate in idempotency/receipts, or writes only (§4.1)?
+- **Q11–Q13** Provisionally answered for the experimental slice in §4.1:
+  409 for reuse, no receipt GC, writes only. Production choices still require
+  review; these are not unanswered experimental implementation questions.
 
 ## 9. Experimental branch comparison and proposed integration path
 
 Reference implementation of wire v0, landed 2026-11-16 (all based on
-`15463844`, local worktrees, unpushed):
+`15463844`; native review refs are now published as recorded in the ledger):
 
 | Branch | Commit | What landed |
 |---|---|---|
@@ -375,7 +382,9 @@ Flagged differences (prototype facts §3.2 vs landed v0):
 Proposed integration path (one):
 
 1. **Now (experimental, done):** v0 server + clients + hold register,
-   flag/env-gated, nothing stock changed.
+   new interfaces flag/env-gated. Existing native code also changes,
+   including the stock update helper's best-effort revision bump; it ignores
+   bump errors and is not proof of fail-closed all-writer participation.
 2. **Next native slice (still flag-gated) — DONE 2026-11-16 (commit
    `a895ba25`):** (a) legacy-writer participation (stock pool update path
    bumps the revision in the same transaction, closing the stale-ETag hazard
@@ -406,9 +415,10 @@ Proposed integration path (one):
    on id reuse, typed 412 with fresh ETag, typed 422 on min>max, and a
    stock legacy PUT advancing the revision so a stale-ETag patch was
    refused. The pass exposed and fixed the two client-side mismatches
-   recorded in the branch table (replay envelope; typed 409). CLI/webapp
-   (agent3) were already validated against this server in step 2;
-   re-run their suites only if the server tree changes.
+   recorded in the branch table (replay envelope; typed 409). Step 2 reports
+   real CLI/curl coverage, not real UI-to-server coverage. The latter and
+   lost-response fault injection remain outstanding, even on an unchanged
+   server tree.
 4. **Production path (blocked):** only after Q1 checkpoint comparison and
    DEC-8 destination resolution — fold the namespace into the real routes
    behind rollout modes (DEC-6), with entity/controller settings coverage
@@ -422,5 +432,6 @@ Proposed integration path (one):
 Repo gates per agent before handoff: `go test -race -count=1 ./...`,
 `go vet ./...`, clean `gofmt -l .`; web `npm ci && npm test && npm run
 build`; pinned-GARM opt-in gates for touched integration paths. Docs-only
-changes run no Go gates. The hold in the header overrides all Agent 2/3
-implementation until CJ lifts it.
+changes do not themselves require new Go execution. Historical agent holds
+above do not override the owner's current cleanup-only direction; no new
+implementation or deployment is authorized by this document.
