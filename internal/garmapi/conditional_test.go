@@ -2,9 +2,11 @@ package garmapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,13 +24,20 @@ type conditionalFixture struct {
 	seq         uint64
 	gets        int
 	patches     int
+	replays     int
 	ifMatches   []string
 	idempotency []string
 	bodies      []map[string]json.RawMessage
+	appliedByID map[string]conditionalApplied
 	patchStatus int // nonzero: PATCH answers this status with the current ETag instead of applying
 	omitETag    bool
 	badETag     bool
 	badBody     bool
+}
+
+type conditionalApplied struct {
+	payloadHash string
+	etag        string
 }
 
 func (f *conditionalFixture) etag() string {
@@ -69,13 +78,33 @@ func (f *conditionalFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPatch:
 		f.patches++
 		f.ifMatches = append(f.ifMatches, r.Header.Get("If-Match"))
-		f.idempotency = append(f.idempotency, r.Header.Get("Idempotency-Key"))
+		key := r.Header.Get("Idempotency-Key")
+		f.idempotency = append(f.idempotency, key)
 		if r.Header.Get("Content-Type") != "application/json" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		rawPayload, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		payloadHash := fmt.Sprintf("%x", sha256.Sum256(rawPayload))
+		if stored, ok := f.appliedByID[key]; ok {
+			if stored.payloadHash == payloadHash {
+				// Replay: answer from the stored outcome without applying
+				// or advancing, mirroring the native receipt journal.
+				f.replays++
+				w.Header().Set("ETag", stored.etag)
+				_ = json.NewEncoder(w).Encode(map[string]any{"outcome": "applied_changed", "resulting_etag": stored.etag})
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "Idempotency-Key already used with a different payload or pool"})
+			return
+		}
 		body := map[string]json.RawMessage{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(rawPayload, &body); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -97,6 +126,12 @@ func (f *conditionalFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = json.Unmarshal(raw, &f.minIdle)
 		}
 		f.seq++
+		if key != "" {
+			if f.appliedByID == nil {
+				f.appliedByID = map[string]conditionalApplied{}
+			}
+			f.appliedByID[key] = conditionalApplied{payloadHash: payloadHash, etag: strconv.Quote(f.etag())}
+		}
 		f.writeLocked(w)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -408,6 +443,82 @@ func TestConditionalManagementInvalidConfiguration(t *testing.T) {
 	gated.PoolIDs = []string{"invalid"}
 	if _, err := NewConditionalManagement(gated); !errors.Is(err, ErrConditionalManagementDisabled) {
 		t.Fatalf("gate ordering wrong: %v", err)
+	}
+}
+
+func TestConditionalSettingsReplayUsesStoredOutcome(t *testing.T) {
+	c, f := conditionalServer(t, nil)
+	ref := EntityRef{Kind: EntityKindRepository, ID: managedRepoID}
+	got, err := c.GetConditionalSettings(context.Background(), ref, managedPoolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := got.Settings.Priority + 1
+	first, err := c.PatchConditionalSettings(context.Background(), ref, managedPoolID, got.ETag, "replay-key-1", PoolSettingsPatch{Priority: &want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Re-presenting the same (key, payload) — even with the now-stale
+	// original ETag — is answered from the durable receipt, not re-applied.
+	replay, err := c.PatchConditionalSettings(context.Background(), ref, managedPoolID, got.ETag, "replay-key-1", PoolSettingsPatch{Priority: &want})
+	if err != nil {
+		t.Fatalf("replay held as failure: %v", err)
+	}
+	if replay.ETag != first.ETag {
+		t.Fatalf("replay advanced the revision: %q vs %q", replay.ETag, first.ETag)
+	}
+	if replay.Settings != (PoolSettings{}) {
+		t.Fatalf("replay invented a settings tuple: %+v", replay.Settings)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.replays != 1 {
+		t.Fatalf("fixture did not serve from receipt: replays=%d", f.replays)
+	}
+	if strconv.Quote(f.etag()) != first.ETag {
+		t.Fatalf("replay mutated state: etag now %q", f.etag())
+	}
+}
+
+func TestConditionalSettingsRequestIDReuseIsTyped(t *testing.T) {
+	c, f := conditionalServer(t, nil)
+	ref := EntityRef{Kind: EntityKindRepository, ID: managedRepoID}
+	got, err := c.GetConditionalSettings(context.Background(), ref, managedPoolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := got.Settings.Priority + 1
+	if _, err = c.PatchConditionalSettings(context.Background(), ref, managedPoolID, got.ETag, "reuse-key-1", PoolSettingsPatch{Priority: &one}); err != nil {
+		t.Fatal(err)
+	}
+	two := one + 1
+	_, err = c.PatchConditionalSettings(context.Background(), ref, managedPoolID, got.ETag, "reuse-key-1", PoolSettingsPatch{Priority: &two})
+	if !errors.Is(err, ErrConditionalSettingsRequestIDReuse) {
+		t.Fatalf("id reuse is not typed: %v", err)
+	}
+	if errors.Is(err, ErrManagementOutcomeUnknown) || errors.Is(err, ErrManagementConflict) {
+		t.Fatalf("definitive refusal masquerading as ambiguous/conflict: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.patches != 2 {
+		t.Fatalf("reuse accounting wrong: patches=%d", f.patches)
+	}
+	if current := strconv.Quote(f.etag()); current != `"7:4"` {
+		t.Fatalf("refused request mutated the revision: %s", current)
+	}
+}
+
+func TestConditionalReplayDecodeRejectsNonAppliedOutcomes(t *testing.T) {
+	if _, ok := decodeConditionalReplay([]byte(`{"outcome":"rejected_stale","resulting_etag":"\"7:4\""}`), `"7:4"`); ok {
+		t.Fatal("rejected replay accepted on 200")
+	}
+	if _, ok := decodeConditionalReplay([]byte(`{"outcome":"applied_changed","resulting_etag":"W/\"7:4\""}`), ""); ok {
+		t.Fatal("weak resulting ETag accepted")
+	}
+	res, ok := decodeConditionalReplay([]byte(`{"outcome":"applied_noop","resulting_etag":"\"7:4\""}`), `"7:4"`)
+	if !ok || res.ETag != `"7:4"` || res.Settings != (PoolSettings{}) {
+		t.Fatalf("valid noop replay rejected: %+v", res)
 	}
 }
 

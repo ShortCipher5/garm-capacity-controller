@@ -33,6 +33,11 @@ var (
 	// ErrConditionalSettingsPreconditionRequired maps HTTP 428: a fresh strong
 	// ETag precondition is required.
 	ErrConditionalSettingsPreconditionRequired = errors.New("conditional settings rejected: fresh ETag precondition required")
+	// ErrConditionalSettingsRequestIDReuse maps HTTP 409: the Idempotency-Key
+	// was already used with a different payload or pool. The request was
+	// refused and nothing was written, so this is definitive, never
+	// ErrManagementOutcomeUnknown.
+	ErrConditionalSettingsRequestIDReuse = errors.New("conditional settings rejected: request id already used with different content")
 )
 
 // SettingsConflictError maps HTTP 412: the If-Match ETag precondition failed,
@@ -193,12 +198,41 @@ func conditionalRejection(status int) error {
 		return ErrConditionalSettingsForbidden
 	case http.StatusNotFound:
 		return ErrConditionalSettingsNotFound
+	case http.StatusConflict:
+		return ErrConditionalSettingsRequestIDReuse
 	case http.StatusUnprocessableEntity:
 		return ErrConditionalSettingsUnprocessable
 	case http.StatusPreconditionRequired:
 		return ErrConditionalSettingsPreconditionRequired
 	}
 	return nil
+}
+
+// conditionalReplay is the wire document a PATCH answered from a stored
+// request receipt carries on HTTP 200 instead of the plain settings tuple
+// (the server does not store the original settings body).
+type conditionalReplay struct {
+	Outcome       string `json:"outcome"`
+	ResultingETag string `json:"resulting_etag"`
+}
+
+// decodeConditionalReplay recognises a 200 replay envelope. Applied replays
+// carry only the durable outcome and the resulting ETag; the settings tuple
+// is left to a deliberate re-GET by the caller (Settings is the zero value).
+func decodeConditionalReplay(data []byte, etag string) (SettingsResult, bool) {
+	var replay conditionalReplay
+	if err := json.Unmarshal(data, &replay); err != nil {
+		return SettingsResult{}, false
+	}
+	switch replay.Outcome {
+	case "applied_changed", "applied_noop":
+	default:
+		return SettingsResult{}, false
+	}
+	if !conditionalETag(replay.ResultingETag) {
+		return SettingsResult{}, false
+	}
+	return SettingsResult{ETag: replay.ResultingETag}, true
 }
 
 // conditionalDispatch sends exactly one request over the shared transport: no
@@ -299,7 +333,14 @@ func (m *ConditionalManagementClient) GetConditionalSettings(ctx context.Context
 // after dispatch return ErrManagementOutcomeUnknown: the write may have
 // committed, so never auto-retry and never fall back to an unconditional
 // write; read authoritative state and reconcile first. A 412 returns a
-// *SettingsConflictError carrying the fresh ETag for a deliberate rebase.
+// *SettingsConflictError carrying the fresh ETag for a deliberate rebase. A
+// 409 returns ErrConditionalSettingsRequestIDReuse: the Idempotency-Key was
+// already used with different content and nothing was written, so the outcome
+// is known and must not be held as UNKNOWN. Re-presenting a successful
+// (key, payload) pair is answered from the server's durable request receipt:
+// the result carries the resulting ETag with a zero Settings tuple (the
+// server does not store the settings body); re-GET deliberately if the tuple
+// is needed.
 func (m *ConditionalManagementClient) PatchConditionalSettings(ctx context.Context, ref EntityRef, poolID, etag, requestID string, patch PoolSettingsPatch) (SettingsResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -331,7 +372,18 @@ func (m *ConditionalManagementClient) PatchConditionalSettings(ctx context.Conte
 	}
 	if status == http.StatusOK {
 		settings, err := decodeConditionalSettings(data)
-		if err != nil || !conditionalETag(newETag) {
+		if err != nil {
+			// A PATCH answered from a stored request receipt (same
+			// Idempotency-Key and payload) returns 200 with an outcome
+			// envelope instead of the settings tuple. That outcome is
+			// durable and known; it must not surface as UNKNOWN.
+			if replay, ok := decodeConditionalReplay(data, newETag); ok {
+				return replay, nil
+			}
+			// The write may have committed but the response cannot be trusted.
+			return SettingsResult{}, ErrManagementOutcomeUnknown
+		}
+		if !conditionalETag(newETag) {
 			// The write may have committed but the response cannot be trusted.
 			return SettingsResult{}, ErrManagementOutcomeUnknown
 		}
