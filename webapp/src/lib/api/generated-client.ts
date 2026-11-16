@@ -203,6 +203,13 @@ export class GeneratedGarmApiClient {
     this.hooksApi = new HooksApi(this.config);
   }
 
+  // Return the current authentication token, if any. Experimental clients
+  // that speak provisional interfaces outside the generated OpenAPI surface
+  // use this to send the same credentials.
+  getToken(): string | undefined {
+    return this.token;
+  }
+
   // Authentication
   async login(credentials: LoginRequest): Promise<LoginResponse> {
     const params: PasswordLoginParams = {
