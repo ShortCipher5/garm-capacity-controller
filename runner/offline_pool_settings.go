@@ -38,17 +38,17 @@ func (r *Runner) GetOfflinePoolSettings(ctx context.Context, entity params.Forge
 	return settings, rev, nil
 }
 
-// UpdateOfflinePoolSettings applies a partial update to the offline
-// settings of a pool, guarded by the caller supplied revision. It is part
-// of the experimental, opt-in offline pool settings API.
-func (r *Runner) UpdateOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string, expected params.OfflinePoolSettingsRevision, patch params.OfflinePoolSettingsPatch) (params.OfflinePoolSettings, params.OfflinePoolSettingsRevision, error) {
+// UpdateOfflinePoolSettings classifies, applies and receipts one
+// experimental PATCH request, guarded by the caller's admin rights. It is
+// part of the experimental, opt-in offline pool settings API.
+func (r *Runner) UpdateOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string, req params.OfflinePoolSettingsUpdateRequest) (params.OfflinePoolSettingsUpdateResult, error) {
 	if !auth.IsAdmin(ctx) {
-		return params.OfflinePoolSettings{}, params.OfflinePoolSettingsRevision{}, runnerErrors.ErrUnauthorized
+		return params.OfflinePoolSettingsUpdateResult{}, runnerErrors.ErrUnauthorized
 	}
 
-	settings, rev, err := r.store.UpdateOfflinePoolSettings(ctx, entity, poolID, expected, patch)
+	result, err := r.store.UpdateOfflinePoolSettings(ctx, entity, poolID, req)
 	if err != nil {
-		return params.OfflinePoolSettings{}, params.OfflinePoolSettingsRevision{}, fmt.Errorf("error updating offline pool settings: %w", err)
+		return params.OfflinePoolSettingsUpdateResult{}, fmt.Errorf("error updating offline pool settings: %w", err)
 	}
-	return settings, rev, nil
+	return result, nil
 }

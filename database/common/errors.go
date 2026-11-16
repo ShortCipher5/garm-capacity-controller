@@ -37,6 +37,11 @@ var (
 	// ErrOfflinePoolSettingsStaleRevision is matched (via Is) by
 	// *OfflinePoolSettingsStaleRevisionError.
 	ErrOfflinePoolSettingsStaleRevision = fmt.Errorf("stale offline pool settings revision")
+	// ErrOfflinePoolSettingsRequestIDReuse is returned by the experimental
+	// offline pool settings store when a client reuses an Idempotency-Key
+	// with a payload hash or pool scope different from the stored receipt.
+	// The original receipt is left untouched.
+	ErrOfflinePoolSettingsRequestIDReuse = fmt.Errorf("request id was already used with a different payload or scope")
 )
 
 // OfflinePoolSettingsStaleRevisionError is returned by the experimental

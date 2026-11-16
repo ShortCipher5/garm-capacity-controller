@@ -15,6 +15,8 @@
 package controllers
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,10 @@ import (
 
 // offlinePoolSettingsMaxBodyBytes bounds the size of a settings document.
 const offlinePoolSettingsMaxBodyBytes = 4096
+
+// offlinePoolSettingsMaxRequestIDLen bounds the length of the client
+// supplied Idempotency-Key header.
+const offlinePoolSettingsMaxRequestIDLen = 128
 
 var (
 	errOfflineSettingsMalformed = errors.New("malformed settings document")
@@ -126,15 +132,14 @@ func parseOfflineSettingsValue(key, lit string) (uint, error) {
 	return uint(val), nil
 }
 
-// decodeOfflinePoolSettingsPatch strictly decodes the request body as a
+// decodeOfflinePoolSettingsPatch strictly decodes a settings document as a
 // JSON object containing exactly the known settings fields, with at least
 // one field present, no duplicates, no unknown keys and canonical integer
 // values.
-func decodeOfflinePoolSettingsPatch(w http.ResponseWriter, r *http.Request) (runnerParams.OfflinePoolSettingsPatch, error) {
+func decodeOfflinePoolSettingsPatch(data []byte) (runnerParams.OfflinePoolSettingsPatch, error) {
 	var patch runnerParams.OfflinePoolSettingsPatch
-	defer r.Body.Close()
 
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, offlinePoolSettingsMaxBodyBytes))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	tok, err := dec.Token()
 	if err != nil {
@@ -310,6 +315,62 @@ func writeOfflineClientError(w http.ResponseWriter, status int, err error) {
 	}
 }
 
+// isValidOfflineRequestID reports whether id is usable as an
+// Idempotency-Key: a non-empty printable ASCII string of bounded length.
+func isValidOfflineRequestID(id string) bool {
+	if len(id) == 0 || len(id) > offlinePoolSettingsMaxRequestIDLen {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x21 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// writeOfflinePoolSettingsReplay answers a PATCH that was served from a
+// stored request receipt: the original outcome is reported again, without
+// having re-applied anything. Applied replays return the resulting ETag and
+// a small outcome document (the original settings body is not stored);
+// rejected replays return the original status with a reconstructed body.
+func writeOfflinePoolSettingsReplay(w http.ResponseWriter, result runnerParams.OfflinePoolSettingsUpdateResult) {
+	w.Header().Set("Content-Type", "application/json")
+
+	switch result.Outcome {
+	case runnerParams.OfflinePoolSettingsOutcomeAppliedChanged, runnerParams.OfflinePoolSettingsOutcomeAppliedNoop:
+		w.Header().Set("ETag", result.ResultingETag)
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(runnerParams.OfflinePoolSettingsRequestReplay{
+			Outcome:       result.Outcome,
+			ResultingETag: result.ResultingETag,
+		}); err != nil {
+			slog.With(slog.Any("error", err)).Error("failed to encode response")
+		}
+		return
+	}
+
+	apiErr := params.APIErrorResponse{}
+	switch result.Outcome {
+	case runnerParams.OfflinePoolSettingsOutcomeRejectedStale:
+		w.Header().Set("ETag", result.ResultingETag)
+		w.WriteHeader(http.StatusPreconditionFailed)
+		apiErr.Error = "Precondition Failed"
+		apiErr.Details = fmt.Sprintf("stale revision; current ETag is %s", result.ResultingETag)
+	case runnerParams.OfflinePoolSettingsOutcomeRejectedPolicy:
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		apiErr.Error = "Unprocessable Entity"
+		apiErr.Details = "min_idle_runners cannot exceed max_runners"
+	default: // rejected_malformed, and the reserved rejected_invalid
+		w.WriteHeader(http.StatusBadRequest)
+		apiErr.Error = "Bad Request"
+		apiErr.Details = "the stored request was rejected as malformed"
+	}
+	if err := json.NewEncoder(w).Encode(apiErr); err != nil {
+		slog.With(slog.Any("error", err)).Error("failed to encode response")
+	}
+}
+
 // GetOfflinePoolSettingsHandler handles GET requests for the experimental
 // offline pool settings.
 func (a *APIController) GetOfflinePoolSettingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -346,26 +407,67 @@ func (a *APIController) UpdateOfflinePoolSettingsHandler(w http.ResponseWriter, 
 		return
 	}
 
-	patch, err := decodeOfflinePoolSettingsPatch(w, r)
-	if err != nil {
-		writeOfflineClientError(w, http.StatusBadRequest, err)
+	payload, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, offlinePoolSettingsMaxBodyBytes))
+	r.Body.Close()
+	payloadHash := fmt.Sprintf("%x", sha256.Sum256(payload))
+
+	// The Idempotency-Key is optional. A malformed key is rejected right
+	// away: it cannot act as a durable receipt identifier, so no receipt
+	// is persisted for it.
+	requestID := r.Header.Get("Idempotency-Key")
+	if requestID != "" && !isValidOfflineRequestID(requestID) {
+		writeOfflineClientError(w, http.StatusBadRequest,
+			fmt.Errorf("invalid Idempotency-Key header: must be a printable ASCII string of at most %d characters", offlinePoolSettingsMaxRequestIDLen))
 		return
 	}
 
-	expected, err := parseOfflineIfMatch(r)
-	if errors.Is(err, errOfflineIfMatchMissing) {
-		writeOfflineClientError(w, http.StatusPreconditionRequired, err)
-		return
+	var bodyErr error
+	var patch *runnerParams.OfflinePoolSettingsPatch
+	if readErr != nil {
+		bodyErr = fmt.Errorf("invalid body: %w", errOfflineSettingsMalformed)
+	} else {
+		decoded, err := decodeOfflinePoolSettingsPatch(payload)
+		if err != nil {
+			bodyErr = err
+		} else {
+			patch = &decoded
+		}
 	}
-	if err != nil {
-		writeOfflineClientError(w, http.StatusBadRequest, err)
+
+	expected, ifMatchErr := parseOfflineIfMatch(r)
+	if errors.Is(ifMatchErr, errOfflineIfMatchMissing) {
+		// 428 is rejected before the store transaction and never persists
+		// a receipt, even if the body was malformed too.
+		writeOfflineClientError(w, http.StatusPreconditionRequired, ifMatchErr)
 		return
 	}
 
-	settings, newRev, err := a.r.UpdateOfflinePoolSettings(r.Context(), entity, poolID, expected, patch)
+	result, err := a.r.UpdateOfflinePoolSettings(r.Context(), entity, poolID, runnerParams.OfflinePoolSettingsUpdateRequest{
+		RequestID:   requestID,
+		PayloadHash: payloadHash,
+		IfMatchErr:  ifMatchErr,
+		IfMatch:     expected,
+		BodyErr:     bodyErr,
+		Patch:       patch,
+	})
 	if err != nil {
-		writeOfflinePoolSettingsHTTPError(w, err)
+		switch {
+		case errors.Is(err, common.ErrOfflinePoolSettingsRequestIDReuse):
+			writeOfflineClientError(w, http.StatusConflict, err)
+		case bodyErr != nil && errors.Is(err, errOfflineSettingsMalformed):
+			// The store persisted (or replayed) the rejection; respond
+			// with the detailed decoding error.
+			writeOfflineClientError(w, http.StatusBadRequest, bodyErr)
+		case ifMatchErr != nil && errors.Is(err, errOfflineIfMatchMalformed):
+			writeOfflineClientError(w, http.StatusBadRequest, ifMatchErr)
+		default:
+			writeOfflinePoolSettingsHTTPError(w, err)
+		}
 		return
 	}
-	writeOfflinePoolSettings(w, settings, newRev)
+	if result.Replayed {
+		writeOfflinePoolSettingsReplay(w, result)
+		return
+	}
+	writeOfflinePoolSettings(w, result.Settings, result.Revision)
 }

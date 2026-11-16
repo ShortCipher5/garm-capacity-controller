@@ -23,9 +23,10 @@ other nonexistent route — GET gets the normal not-found handler (404),
 PATCH gets the stock router's method-not-allowed response (405, since the
 catch-all not-found route does not list PATCH) — and **no database schema
 change of any kind occurs**. When
-the flag is enabled, the single supporting table
-(`offline_pool_settings_revisions`) is created lazily, on first use by the
-experimental code path — never at startup, and never by the stock
+the flag is enabled, the two supporting tables
+(`offline_pool_settings_revisions`,
+`offline_pool_settings_request_receipts`) are created lazily, on first use
+by the experimental code path — never at startup, and never by the stock
 migration. Stock tables (including `pools`) are never altered; the stock
 schema and all existing routes behave exactly as before, flag on or off.
 
@@ -77,6 +78,7 @@ Preconditions and outcomes:
 | pool exists but is not a member of the path entity (including a nonexistent path entity) | 403 |
 | pool does not exist | 404 |
 | `min_idle_runners` > `max_runners` (checked against the current row inside the transaction, whenever either count is supplied) | 422 |
+| `Idempotency-Key` reused with a different payload or pool (see below) | 409 |
 | generic failure | 503 |
 
 `If-Match` accepts exactly one strong tag: `"<epoch>:<seq>"`. Tag lists,
@@ -85,6 +87,15 @@ weak tags and wildcards are rejected as malformed (400).
 A successful PATCH (200) returns the full settings document and the new
 `ETag`, exactly like GET. A no-op PATCH (all supplied values equal the
 current values) succeeds (200) and does **not** advance the revision.
+
+#### Optional idempotency
+
+A PATCH may carry an `Idempotency-Key: <request-id>` header: an opaque
+printable-ASCII string of at most 128 characters (longer or otherwise
+malformed values are rejected with **400** and never persist a receipt).
+The key makes the request safely retryable via a durable request receipt
+(see below). GET does **not** participate in idempotency: the header is
+ignored and no receipt is written.
 
 ## Revision mechanism (design choice)
 
@@ -112,34 +123,150 @@ PATCH. The ETag is `"<epoch>:<seq>"`, quoted.
 
 ## Atomicity
 
-For PATCH, the revision check, the entity-membership check, the settings
-update and the revision advance happen in **one database transaction**
-(BEGIN IMMEDIATE on SQLite). A stale precondition or any failure leaves
-both the settings and the revision byte-for-byte unchanged — including a
-race detected at revision-advance time, which rolls back an already
-executed settings update.
+For PATCH, the revision check, the entity-membership check, the
+idempotency replay check, the settings update, the revision advance and
+the request receipt all happen in **one database transaction** (BEGIN
+IMMEDIATE on SQLite). A stale precondition or a policy rejection rolls
+back the settings write but still commits its receipt, so the rejection
+itself is durable; a race detected at revision-advance time rolls back the
+already executed settings update and is reported as a stale rejection.
+Only generic failures persist nothing at all (see the receipts section).
 
 Entity-scoped authorization is enforced in the same transaction: the pool
 row is fetched keyed by both the pool ID and the path entity
 (`id = ? AND <entity>_id = ?`), so a pool can never be updated through the
 wrong entity path.
 
-## Legacy writers
+## Legacy writers participate in the revision scheme
 
-Stock writers (e.g. `PUT /api/v1/pools/{poolID}`) update the same
-`pools` columns but do **not** bump the revision, and this is a known,
-explicit limitation of the provisional wire v0: after a legacy write, the
-ETag does not reflect the new content, so a client holding an old ETag
-can still "successfully" PATCH on top of changes it never saw. Clients
-that intermix legacy and offline writers must re-GET before patching;
-the GET response is always a self-consistent (content, ETag) pair. Making
-legacy writers participate in the revision scheme would require touching
-the stock update path, which this slice deliberately avoids.
+Stock writers (e.g. `PUT /api/v1/pools/{poolID}` and the nested entity
+pool PUTs) go through `UpdateEntityPool`, which now advances the
+experimental revision of the pool **in the same transaction** as the
+settings write: an inline, best-effort `UPDATE offline_pool_settings_revisions
+SET seq = seq + 1 WHERE pool_id = ?`. A client holding an ETag therefore
+observes legacy writes as conflicts (412) instead of silently overwriting
+them.
+
+Properties of the legacy bump:
+
+- It is **best-effort**: when the experimental side table does not exist
+  (flag never enabled, or the pool simply has no revision row yet), the
+  `UPDATE` matches zero rows or fails with "no such table", and either
+  way the stock write is unaffected and unaltered. The stock path never
+  creates the table and never fails because of it.
+- It is **coarse**: any stock write that changes the `pools` row advances
+  the revision, including writes that only touch columns outside the
+  offline settings document (e.g. `image`). This errs on the side of
+  over-invalidation: a client may be forced to re-GET after an irrelevant
+  legacy write, but it can never miss a relevant one.
+- It never double-bumps: the experimental PATCH path does not share code
+  with the stock update path; it advances `seq` exactly once through its
+  own conditional `UPDATE`.
+
+## Durable request receipts
+
+Every experimental PATCH persists a **request receipt** in its own
+lazily created side table:
+
+```sql
+CREATE TABLE offline_pool_settings_request_receipts (
+    request_id      TEXT PRIMARY KEY,  -- the Idempotency-Key (or a generated UUID)
+    pool_id         uuid NOT NULL,     -- the pool the request targeted
+    payload_hash    TEXT NOT NULL,     -- hex SHA-256 of the exact payload bytes
+    presented_etag  TEXT,              -- the quoted If-Match value, NULL if malformed
+    outcome         TEXT NOT NULL CHECK (outcome IN
+                      ('applied_changed', 'applied_noop', 'rejected_stale',
+                       'rejected_invalid', 'rejected_policy', 'rejected_malformed')),
+    resulting_etag  TEXT,              -- observed (412) or produced (200) ETag, else NULL
+    created_at      datetime NOT NULL
+);
+```
+
+`rejected_invalid` is reserved and not produced by any code path in this
+version. There is **no garbage collection or expiration**: rows accumulate
+for as long as the table exists.
+
+The receipt row is written in the **same transaction** as the settings
+effect; rejected outcomes (which never touch the settings) commit their
+receipt alone:
+
+| HTTP outcome | persisted outcome | `resulting_etag` |
+|---|---|---|
+| 200 changed | `applied_changed` | new ETag |
+| 200 no-op | `applied_noop` | current (unchanged) ETag |
+| 412 stale | `rejected_stale` | observed current ETag |
+| 400 body/precondition | `rejected_malformed` | NULL |
+| 422 coupled limits | `rejected_policy` | NULL |
+| 403 / 404 / 428 | no receipt at all | — |
+| 503 | no receipt at all | — |
+
+Requests rejected before the write transaction (403 non-admin or wrong
+entity, 404 nonexistent pool, 428 missing `If-Match`) and generic
+failures (503) never persist a receipt: the client cannot usefully retry
+them blind. Note the 503 case is still **not** an outcome-unknown receipt
+— no "unknown" outcome exists or is ever written; the atomicity guarantee
+means no partial state can exist either.
+
+A PATCH without an `Idempotency-Key` also persists a receipt, addressed by
+a server-generated UUID: the receipt is durable but not replayable.
+
+### Replay and id reuse
+
+On a keyed request, the stored receipt for the key is consulted **before**
+anything is applied:
+
+- **Same `request_id`, same `pool_id`, same `payload_hash`**: the stored
+  outcome is returned as the response, without re-applying anything and
+  without writing anything. Applied outcomes are answered with **200** and
+  the stored `resulting_etag`; rejected outcomes replay their original
+  status (412 carries the stored observed ETag in the header and body).
+  Because the replay document cannot reconstruct the original settings
+  body (which is not stored, and the resource may have drifted since), a
+  replayed applied outcome returns a small JSON document
+  `{"outcome": "...", "resulting_etag": "\"<epoch>:<seq>\""}` instead of
+  the settings document.
+- **Same `request_id` but a different `payload_hash` or pool**: **409
+  Conflict**. The error body explains the id reuse; no state changes and
+  the original receipt is left untouched.
+
+Identity is byte-based: two semantically identical payloads that differ
+in any byte (e.g. whitespace) hash differently and therefore count as id
+reuse.
 
 ## Nothing here is an outcome-unknown receipt
 
 Every non-2xx response is a definite outcome: the request either did not
 match the current revision (412), violated a documented constraint
-(400/403/404/422/428), or the server failed definitively (503). The 503
-case means the transaction failed; per the atomicity guarantee above, no
-partial state can exist.
+(400/403/404/409/422/428), or the server failed definitively (503). The
+503 case means the transaction failed; per the atomicity guarantee above,
+no partial state — and no receipt — can exist.
+
+## What is still not proven (explicit limitations)
+
+- **Restore/rollback exposure.** Receipts and revisions live in the same
+  database as everything else, with no fencing. Restoring an older
+  database snapshot resurrects old revisions and old receipts; a client
+  could then replay against resurrected state. Snapshot/restore fencing
+  is out of scope for this slice.
+- **No GC.** Receipts accumulate forever; there is no expiration,
+  retention or pruning. Operational handling of the growth is an open
+  question.
+- **Receipt identity is byte-based.** `payload_hash` covers the raw body
+  bytes only (not the `If-Match`), so a retry must be byte-identical to
+  replay; a changed precondition with the same key and payload replays
+  the stored outcome instead of re-evaluating it.
+- **Replayed applied outcomes do not return the settings document.**
+  Only the outcome metadata is stored; the current document is available
+  via GET.
+- **Two racing keyed submissions** may both observe the stored outcome of
+  whichever committed first; this is the intended at-most-once-apply
+  behavior and not a conflict.
+- **Legacy participation is coarse** (see above): over-invalidation is
+  possible, under-invalidation is not.
+- **Multi-dialect receipts.** The receipts and revisions tables are
+  created through the ORM migrator and exercised on SQLite (CI); MySQL
+  behavior is unverified in this slice.
+- **The stock bump is silent.** A stock write that fails to bump the
+  revision because of an unexpected side-table error does not report the
+  error; the stock write still succeeds, and the ETag may lag until the
+  next successful bump.
