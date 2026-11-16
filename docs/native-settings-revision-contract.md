@@ -29,7 +29,7 @@ code review, and its relationship to the earlier denied route/dispatch/schema
 publication is unresolved. Do not port it, and do not recreate denied
 material under another name.
 
-## 1. Verified pins
+## 1. Historical verified pins
 
 | Item | Pin | Verified |
 |---|---|---|
@@ -343,6 +343,10 @@ directions above):
 
 ## 9. Experimental branch comparison and proposed integration path
 
+Implementation/test claims in this section are workstream-reported, not
+independent qualification, except the source-review limitations explicitly
+recorded in the current-state ledger.
+
 Reference implementation of wire v0, landed 2026-11-16 (all based on
 `15463844`; native review refs are now published as recorded in the ledger):
 
@@ -387,8 +391,9 @@ Proposed integration path (one):
    bump errors and is not proof of fail-closed all-writer participation.
 2. **Next native slice (still flag-gated) — DONE 2026-11-16 (commit
    `a895ba25`):** (a) legacy-writer participation (stock pool update path
-   bumps the revision in the same transaction, closing the stale-ETag hazard
-   without triggers); (b) request-correlated receipts per §4.1 (v1 slice
+   attempts to bump the revision in the same transaction, providing
+   normal-path participation without triggers; ignored bump errors leave
+   the stale-ETag hazard unresolved); (b) request-correlated receipts per §4.1 (v1 slice
    decisions: reuse-with-different-payload -> 409; no expiration/GC yet;
    writes only). Combined client/server integration merge `a9d7b0a3`
    (agent2 + agent3) verified with full Go race suites and the 558-test
