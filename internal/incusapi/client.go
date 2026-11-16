@@ -593,6 +593,20 @@ func parseInstance(row json.RawMessage) (Instance, error) {
 	if err != nil {
 		return Instance{}, err
 	}
+	// Low-level LXC/QEMU overrides can change the generated runtime resource
+	// configuration independently of limits.cpu and limits.memory. We do not
+	// interpret these programs, so nonempty overrides cannot be bounded from
+	// this snapshot. This conservatively rejects benign overrides as well.
+	// https://linuxcontainers.org/incus/docs/main/reference/instance_options/#raw-instance-configuration
+	for key := range config {
+		if key != "raw.lxc" && key != "raw.qemu" && !strings.HasPrefix(key, "raw.qemu.") {
+			continue
+		}
+		value, err := field[string](config, key)
+		if err != nil || value != "" {
+			return Instance{}, ErrUnbounded
+		}
+	}
 	cpu, err := field[string](config, "limits.cpu")
 	if err != nil {
 		return Instance{}, ErrUnbounded
@@ -604,6 +618,18 @@ func parseInstance(row json.RawMessage) (Instance, error) {
 	memory, err := field[string](config, "limits.memory")
 	if err != nil {
 		return Instance{}, ErrUnbounded
+	}
+	// Incus defaults to hard enforcement, but a soft container limit may be
+	// exceeded when host memory is available. It is not an allocation bound.
+	// This container-only setting is rejected conservatively if supplied as
+	// non-hard on a VM too; that may over-reject a misconfigured VM snapshot.
+	// Accepting a VM row here is not proof of hypervisor enforcement or overhead.
+	// https://linuxcontainers.org/incus/docs/main/reference/instance_options/#limits-memory-enforce
+	if _, present := config["limits.memory.enforce"]; present {
+		enforcement, err := field[string](config, "limits.memory.enforce")
+		if err != nil || (enforcement != "" && enforcement != "hard") {
+			return Instance{}, ErrUnbounded
+		}
 	}
 	instance.RAMMiB, err = parseMemory(memory)
 	if err != nil {
