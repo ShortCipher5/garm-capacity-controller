@@ -169,6 +169,14 @@ from them and they are not a merge proposal):
   status" below). Prior refs remain intact. Verify with
   `git rev-parse origin/review/native-settings-494899b8` expecting
   `494899b8b77331a7b52e5d7a12c263082dda5f19`.
+- `review/native-settings-8407d624` — tip
+  `8407d6243401f99c1928529749c730798c9e1159`: Workstream A completion
+  (per-pool pending storage, fail-closed persistence, CLI resolve,
+  conflict latch, strict validation, schema-loss detection) on top of
+  `494899b8` (details in "Workstream A status" below). Prior refs remain
+  intact. Verify with `git rev-parse
+  origin/review/native-settings-8407d624` expecting
+  `8407d6243401f99c1928529749c730798c9e1159`.
 
 Integrity checks a reviewer can run:
 
@@ -257,6 +265,36 @@ Reported gates: gofmt/vet/build clean; Go race suites for `database/sql`,
 563/563 with build. Orchestrator-reported, not independently re-reviewed.
 The controller editor/journal binding remains blocked on the previously
 denied dispatch-envelope scope; nothing here bypasses it.
+
+## Workstream A status (orchestrator-reported, 2026-11-16)
+
+Commit `8407d624` (review ref `review/native-settings-8407d624`)
+completes the host-free items of Workstream A:
+
+1. Web editor: per-pool pending storage; fail-closed persistence (no
+   journal write, no dispatch); per-pool multi-tab lock; full-draft
+   restart recovery; conflict latch after 412 requiring an explicit
+   "Mark reconciled".
+2. Web client: strict bounds and same-patch min/max validation;
+   corrupt or ambiguous server documents fail closed.
+3. CLI: read-before-write refusal while a request is unresolved;
+   `patch --resolve` re-presents exactly the journaled request;
+   atomic journal writes; journaling failure aborts pre-dispatch.
+4. Server: install marker distinguishes "never enabled" from "revision
+   table lost after use" (hard refusal); reinstall after loss moves to a
+   fresh epoch, invalidating outstanding ETags.
+5. Loopback evidence (real server+CLI from this tree, temp SQLite):
+   seeded UNKNOWN refuses a new write with the revision unmoved;
+   `--resolve` applies idempotently without a receipt and replays with
+   no re-application when one exists.
+
+Reported gates: Go race suites (database/sql, routers, config, garm-cli,
+runner) pass; webapp 574/574 with build. Field-scope decision recorded:
+v0 covers priority/max/min-idle only; tags, enabled and repository
+balancing stay on stock routes or require an explicit contract
+extension. Still open: live MySQL/PostgreSQL qualification, browser and
+network-kill fault injection, independent re-review, and the
+destination/denial-scope decisions.
 
 ## Evidence rules (unchanged)
 
