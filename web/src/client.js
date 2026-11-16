@@ -15,6 +15,8 @@ export function validateOverview(value) {
   const time = (v) => typeof v === "string" && Number.isFinite(Date.parse(v));
   const bool = (v) => typeof v === "boolean";
   const string = (v) => typeof v === "string";
+  const id = (v) => string(v) && v.trim().length > 0;
+  const uniqueIDs = (items) => new Set(items.map((item) => item.id)).size === items.length;
   if (
     !object(value) ||
     value.mode !== "experimental-ledger" ||
@@ -33,22 +35,25 @@ export function validateOverview(value) {
     !value.hosts.every(
       (h) =>
         allocation(h) &&
-        string(h.id) &&
-        string(h.mode) &&
+        id(h.id) &&
+        ["enabled", "draining", "disabled"].includes(h.mode) &&
         ["bound_observation", "legacy_scope_import_required", "unbound"].includes(h.backend_binding_status) &&
         (h.backend_binding_status === "bound_observation" || h.new_claims_paused === true) &&
         bool(h.last_observed_healthy) &&
         bool(h.observation_fresh) &&
         bool(h.new_claims_paused) &&
+        (h.new_claims_paused || (h.mode === "enabled" && h.last_observed_healthy && h.observation_fresh && value.admission_ready && value.experimental_provisioning_enabled)) &&
         time(h.observed_at),
     ) ||
+    !uniqueIDs(value.hosts) ||
     !Array.isArray(value.pools) ||
     !value.pools.every(
       (p) =>
         allocation(p) &&
-        string(p.id) &&
+        id(p.id) &&
         (p.hosts === null || (Array.isArray(p.hosts) && p.hosts.every(string))),
     ) ||
+    !uniqueIDs(value.pools) ||
     !object(value.states) ||
     !Object.values(value.states).every(integer) ||
     !Array.isArray(value.events) ||

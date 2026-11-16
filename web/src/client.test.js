@@ -184,3 +184,29 @@ test("unbound or legacy status cannot advertise new claims allowed",()=>{
 test("immutable execution-plan counters are explicit and cannot invent migration", () => {
  for(const field of ["immutable_execution_plans","legacy_unplanned_reservations","legacy_source_preparations"]){for(const invalid of [undefined,-1,NaN,"0"]){const candidate=structuredClone(view);candidate[field]=invalid;assert.throws(()=>validateOverview(candidate));}}
 });
+
+
+test("overview rejects ambiguous host and pool identities", () => {
+  const host = { id: "host-a", mode: "disabled", backend_binding_status: "bound_observation", last_observed_healthy: true, observation_fresh: true, new_claims_paused: true, observed_at: view.observed_at, budget: resource, allocated: resource };
+  const pool = { id: "pool-a", hosts: null, budget: resource, allocated: resource };
+  for (const invalid of ["", "   "]) {
+    assert.throws(() => validateOverview({ ...view, hosts: [{ ...host, id: invalid }] }));
+    assert.throws(() => validateOverview({ ...view, pools: [{ ...pool, id: invalid }] }));
+  }
+  assert.throws(() => validateOverview({ ...view, hosts: [host, { ...host }] }));
+  assert.throws(() => validateOverview({ ...view, pools: [pool, { ...pool }] }));
+  assert.doesNotThrow(() => validateOverview({ ...view, hosts: [host], pools: [pool] }));
+});
+
+test("overview does not advertise claims allowed against known admission gates", () => {
+  const host = { id: "host-a", mode: "enabled", backend_binding_status: "bound_observation", last_observed_healthy: true, observation_fresh: true, new_claims_paused: false, observed_at: view.observed_at, budget: resource, allocated: resource };
+  const ready = { ...view, admission_ready: true, experimental_provisioning_enabled: true, hosts: [host] };
+  assert.doesNotThrow(() => validateOverview(ready));
+  for (const changed of [{ mode: "disabled" }, { mode: "draining" }, { mode: "unexpected" }, { observation_fresh: false }, { last_observed_healthy: false }]) {
+    assert.throws(() => validateOverview({ ...ready, hosts: [{ ...host, ...changed }] }));
+  }
+  for (const changed of [{ admission_ready: false }, { experimental_provisioning_enabled: false }]) {
+    assert.throws(() => validateOverview({ ...ready, ...changed }));
+    assert.doesNotThrow(() => validateOverview({ ...ready, ...changed, hosts: [{ ...host, new_claims_paused: true }] }));
+  }
+});
