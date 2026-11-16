@@ -156,7 +156,9 @@ func (m *ManagementClient) exchange(ctx context.Context, method, path string, va
 		return nil, failure
 	}
 	data, err := io.ReadAll(io.LimitReader(res.Body, (2<<20)+1))
-	if err != nil || len(data) > 2<<20 || !utf8.Valid(data) {
+	// Cancellation may race with a successful body EOF. A dispatched write
+	// remains unknown, not confirmed success; reads must not return stale proof.
+	if err != nil || ctx.Err() != nil || len(data) > 2<<20 || !utf8.Valid(data) {
 		return nil, failure
 	}
 	fields, err := row(data)

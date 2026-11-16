@@ -29,10 +29,14 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	command := getenv("GARM_COMMAND")
 	switch command {
 	case "GetVersion":
-		fmt.Fprintln(output, "garm-capacity-controller-experimental")
+		if _, err := fmt.Fprintln(output, "garm-capacity-controller-experimental"); err != nil {
+			return 1
+		}
 		return 0
 	case "GetSupportedInterfaceVersions":
-		fmt.Fprintln(output, `["v0.1.1"]`)
+		if _, err := fmt.Fprintln(output, `["v0.1.1"]`); err != nil {
+			return 1
+		}
 		return 0
 	case "GetConfigJSONSchema":
 		schema := map[string]any{"type": "object", "required": []string{"gateway", "controller", "tls"}, "additionalProperties": false}
@@ -43,7 +47,9 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 		}
 		return 0
 	case "GetExtraSpecsJSONSchema":
-		fmt.Fprintln(output, `{"type":"object","additionalProperties":false}`)
+		if _, err := fmt.Fprintln(output, `{"type":"object","additionalProperties":false}`); err != nil {
+			return 1
+		}
 		return 0
 	}
 	if getenv("GARM_INTERFACE_VERSION") != "v0.1.1" {

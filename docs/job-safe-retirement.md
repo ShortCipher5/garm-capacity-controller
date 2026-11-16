@@ -60,6 +60,8 @@ I/O or writes. It reports:
 - whether the ledger presently blocks NEW claims, distinctly from job dispatch;
 - host observation freshness and last-observed allocation-state counts;
 - reservations absent from inventory, still counted and charged;
+- separate counts and blockers for unobserved reservations and unreserved
+  inventory resources, without exposing raw allocation identities;
 - linked reservations and inventory counted once, rejecting ambiguous identity;
 - explicit outstanding job-assignment-fence and confirmed-retirement gates,
   even for an empty host.

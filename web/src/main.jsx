@@ -6,6 +6,7 @@ import "./style.css";
 import { OnboardingPreflight } from "./onboarding.jsx";
 import { GarmManagement } from "./garm-management.jsx";
 import { filterHosts } from "./host-filter.js";
+import { poolPlacementSummary } from "./pool-placement.js";
 import { AuditEvents } from "./audit-events.jsx";
 import { Management } from "./management.jsx";
 
@@ -248,7 +249,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
                     <td>
                       <strong>{p.id}</strong>
                     </td>
-                    <td>{p.hosts?.join(", ") || "None"}</td>
+                    <td>{p.hosts?.join(", ") || "None"}<p className="muted">{poolPlacementSummary(p, data.hosts)}</p></td>
                     {dimensions.map(([k]) => (
                       <td key={k}>
                         {fmt(p.allocated[k])} / {fmt(p.budget[k])}
@@ -262,6 +263,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
               <p className="empty">No pools configured in this ledger.</p>
             )}
             <p className="table-note">
+              Placement diagnostics use this recorded snapshot only, not live health, available budget, pool admission or a permission to provision.
               Priority, labels and idle-target controls are not exposed by this
               read-only API.
             </p>

@@ -38,6 +38,9 @@ test("initial application renders login without an authenticated snapshot", asyn
     const dashboard = renderToStaticMarkup(
       React.createElement(Dashboard, { data }),
     );
+    const placement = renderToStaticMarkup(React.createElement(Dashboard, { data: { ...data, pools: [{id:"pool-a", hosts:["missing-host"], budget:resources, allocated:resources}] } }));
+    assert.match(placement, /0 host gates not paused · 0 paused · 1 unavailable in this snapshot/);
+    assert.match(placement, /not live health, available budget, pool admission or a permission to provision/);
     assert.match(dashboard, /Historical execution plans unavailable/);
     assert.match(dashboard, /<label for="host-attention">Show hosts<\/label>/);
     assert.match(dashboard, /Showing 0 of 0 hosts in this snapshot/);

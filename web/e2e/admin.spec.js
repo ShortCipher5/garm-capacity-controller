@@ -410,23 +410,24 @@ test("host attention filters use recorded flags without requests or changing bud
   let freshOnly = false;
   const hosts = [
     { ...original, id: "paused-fresh", new_claims_paused: true, observation_fresh: true, last_observed_healthy: true },
-    { ...original, id: "allowed-stale", backend_binding_status: "bound_observation", new_claims_paused: false, observation_fresh: false, last_observed_healthy: true },
+    { ...original, id: "paused-stale", backend_binding_status: "bound_observation", new_claims_paused: true, observation_fresh: false, last_observed_healthy: true },
     { ...original, id: "paused-unhealthy", new_claims_paused: true, observation_fresh: true, last_observed_healthy: false },
   ];
-  // UI-only varied snapshot. The other browser cases exercise unmodified data.
+  // UI-only varied snapshot. Stale observations must remain paused, matching
+  // the real overview contract. Other browser cases exercise unmodified data.
   await page.route("**/admin/api/v1/overview", route => route.fulfill({ status: 200, contentType: "application/json", json: { ...body, hosts: empty ? [] : freshOnly ? [hosts[0]] : hosts } }));
   await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
   const section = page.locator("#hosts");
-  await expect(section.locator("h3")).toHaveText(["paused-fresh", "allowed-stale", "paused-unhealthy"]);
+  await expect(section.locator("h3")).toHaveText(["paused-fresh", "paused-stale", "paused-unhealthy"]);
   const budgets = await page.locator(".metrics").innerText();
   const pools = await page.locator("#pools").innerText();
   const requests = [];
   page.on("request", request => requests.push(request.url()));
   await page.getByLabel("Show hosts", { exact: true }).selectOption("paused");
-  await expect(section.locator("h3")).toHaveText(["paused-fresh", "paused-unhealthy"]);
-  await expect(section).toContainText("Showing 2 of 3 hosts in this snapshot");
+  await expect(section.locator("h3")).toHaveText(["paused-fresh", "paused-stale", "paused-unhealthy"]);
+  await expect(section).toContainText("Showing 3 of 3 hosts in this snapshot");
   await page.getByLabel("Show hosts", { exact: true }).selectOption("stale");
-  await expect(section.locator("h3")).toHaveText(["allowed-stale"]);
+  await expect(section.locator("h3")).toHaveText(["paused-stale"]);
   await page.getByLabel("Show hosts", { exact: true }).selectOption("unhealthy");
   await expect(section.locator("h3")).toHaveText(["paused-unhealthy"]);
   expect(await page.locator(".metrics").innerText()).toBe(budgets);
