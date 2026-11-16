@@ -92,14 +92,15 @@ func NewConfig(cfgFile string) (*Config, error) {
 }
 
 type Config struct {
-	Default   Default    `toml:"default" json:"default"`
-	APIServer APIServer  `toml:"apiserver,omitempty" json:"apiserver,omitempty"`
-	Metrics   Metrics    `toml:"metrics,omitempty" json:"metrics,omitempty"`
-	Database  Database   `toml:"database,omitempty" json:"database,omitempty"`
-	Providers []Provider `toml:"provider,omitempty" json:"provider,omitempty"`
-	Github    []Github   `toml:"github,omitempty"`
-	JWTAuth   JWTAuth    `toml:"jwt_auth" json:"jwt-auth"`
-	Logging   Logging    `toml:"logging" json:"logging"`
+	Default      Default      `toml:"default" json:"default"`
+	APIServer    APIServer    `toml:"apiserver,omitempty" json:"apiserver,omitempty"`
+	Metrics      Metrics      `toml:"metrics,omitempty" json:"metrics,omitempty"`
+	Database     Database     `toml:"database,omitempty" json:"database,omitempty"`
+	Providers    []Provider   `toml:"provider,omitempty" json:"provider,omitempty"`
+	Github       []Github     `toml:"github,omitempty"`
+	JWTAuth      JWTAuth      `toml:"jwt_auth" json:"jwt-auth"`
+	Logging      Logging      `toml:"logging" json:"logging"`
+	Experimental Experimental `toml:"experimental,omitempty" json:"experimental,omitempty"`
 }
 
 // Validate validates the config
@@ -127,6 +128,10 @@ func (c *Config) Validate() error {
 
 	if err := c.Logging.Validate(); err != nil {
 		return fmt.Errorf("error validating logging config: %w", err)
+	}
+
+	if err := c.Experimental.Validate(); err != nil {
+		return fmt.Errorf("error validating experimental config: %w", err)
 	}
 
 	providerNames := map[string]int{}
@@ -814,5 +819,21 @@ func (j *JWTAuth) Validate() error {
 	if passwordStenght.Score < 4 {
 		return fmt.Errorf("jwt_secret is too weak")
 	}
+	return nil
+}
+
+// Experimental holds configuration for opt-in, unsupported experimental
+// features. Everything in this section may change or be removed without
+// notice and is disabled by default.
+type Experimental struct {
+	// EnableOfflinePoolSettings enables the experimental, offline-first
+	// pool settings API (/api/v1/offline/entities/...). When disabled (the
+	// default), the routes are not registered at all and behave as if they
+	// did not exist.
+	EnableOfflinePoolSettings bool `toml:"enable_offline_pool_settings" json:"enable-offline-pool-settings"`
+}
+
+// Validate validates the experimental config section.
+func (e *Experimental) Validate() error {
 	return nil
 }

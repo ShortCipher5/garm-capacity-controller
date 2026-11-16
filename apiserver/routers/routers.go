@@ -138,7 +138,7 @@ func requestLogger(h http.Handler) http.Handler {
 	})
 }
 
-func NewAPIRouter(han *controllers.APIController, authMiddleware, initMiddleware, urlsRequiredMiddleware, instanceMiddleware auth.Middleware, manageWebhooks bool) *mux.Router {
+func NewAPIRouter(han *controllers.APIController, authMiddleware, initMiddleware, urlsRequiredMiddleware, instanceMiddleware auth.Middleware, manageWebhooks, enableOfflinePoolSettings bool) *mux.Router {
 	router := mux.NewRouter()
 	router.Use(requestLogger)
 
@@ -222,6 +222,25 @@ func NewAPIRouter(han *controllers.APIController, authMiddleware, initMiddleware
 	// Force tools sync
 	controllerRouter.Handle("/tools/sync/", http.HandlerFunc(han.ForceToolsSyncHandler)).Methods("POST", "OPTIONS")
 	controllerRouter.Handle("/tools/sync", http.HandlerFunc(han.ForceToolsSyncHandler)).Methods("POST", "OPTIONS")
+
+	if enableOfflinePoolSettings {
+		slog.Info("experimental offline pool settings API is enabled")
+		// The experimental offline pool settings API. Deliberately not
+		// guarded by the admin middleware; the handlers themselves return
+		// 403 for callers lacking access, so non admin callers get 403
+		// instead of the 401 returned by every other API route.
+		// This must be registered before the catch-all apiRouter below,
+		// otherwise the apiRouter not-found handler would shadow it.
+		offlineRouter := apiSubRouter.PathPrefix("/offline").Subrouter()
+		offlineRouter.Use(initMiddleware.Middleware)
+		offlineRouter.Use(urlsRequiredMiddleware.Middleware)
+		offlineRouter.Use(authMiddleware.Middleware)
+		offlineSettingsPath := "/entities/{entityType:organization|repository|enterprise}/{entityID}/pools/{poolID}/settings"
+		offlineRouter.Handle(offlineSettingsPath+"/", http.HandlerFunc(han.GetOfflinePoolSettingsHandler)).Methods("GET", "OPTIONS")
+		offlineRouter.Handle(offlineSettingsPath, http.HandlerFunc(han.GetOfflinePoolSettingsHandler)).Methods("GET", "OPTIONS")
+		offlineRouter.Handle(offlineSettingsPath+"/", http.HandlerFunc(han.UpdateOfflinePoolSettingsHandler)).Methods("PATCH", "OPTIONS")
+		offlineRouter.Handle(offlineSettingsPath, http.HandlerFunc(han.UpdateOfflinePoolSettingsHandler)).Methods("PATCH", "OPTIONS")
+	}
 
 	////////////////////////////////////
 	// API router for everything else //

@@ -14,7 +14,11 @@
 
 package common
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/cloudbase/garm/params"
+)
 
 var (
 	ErrProducerClosed            = fmt.Errorf("producer is closed")
@@ -26,4 +30,28 @@ var (
 	ErrInvalidOperationType      = fmt.Errorf("invalid operation")
 	ErrInvalidEntityType         = fmt.Errorf("invalid entity type")
 	ErrNoFiltersProvided         = fmt.Errorf("no filters provided")
+	// ErrPoolNotMemberOfEntity is returned by the experimental offline pool
+	// settings store when the requested pool exists but does not belong to
+	// the entity in the request path.
+	ErrPoolNotMemberOfEntity = fmt.Errorf("pool is not a member of the path entity")
+	// ErrOfflinePoolSettingsStaleRevision is matched (via Is) by
+	// *OfflinePoolSettingsStaleRevisionError.
+	ErrOfflinePoolSettingsStaleRevision = fmt.Errorf("stale offline pool settings revision")
 )
+
+// OfflinePoolSettingsStaleRevisionError is returned by the experimental
+// offline pool settings store when the caller supplied revision does not
+// match the current revision of the pool settings. The current revision is
+// included so callers can surface it (e.g. as an ETag on a 412 response).
+type OfflinePoolSettingsStaleRevisionError struct {
+	Current params.OfflinePoolSettingsRevision
+}
+
+func (e *OfflinePoolSettingsStaleRevisionError) Error() string {
+	return fmt.Sprintf("stale offline pool settings revision: current %q", e.Current.String())
+}
+
+// Is matches ErrOfflinePoolSettingsStaleRevision.
+func (e *OfflinePoolSettingsStaleRevisionError) Is(target error) bool {
+	return target == ErrOfflinePoolSettingsStaleRevision
+}

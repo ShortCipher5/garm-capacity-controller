@@ -330,7 +330,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	router := routers.NewAPIRouter(controller, jwtMiddleware, initMiddleware, urlsRequiredMiddleware, instanceMiddleware, cfg.Default.EnableWebhookManagement)
+	router := routers.NewAPIRouter(controller, jwtMiddleware, initMiddleware, urlsRequiredMiddleware, instanceMiddleware, cfg.Default.EnableWebhookManagement, cfg.Experimental.EnableOfflinePoolSettings)
 
 	// Add WebUI routes
 	router = routers.WithWebUI(router, cfg.APIServer)

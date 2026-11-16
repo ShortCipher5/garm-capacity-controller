@@ -560,6 +560,43 @@ func TestNewConfig(t *testing.T) {
 	require.Equal(t, "garm", cfg.Database.MySQL.DatabaseName)
 	require.Equal(t, "bocyasicgatEtenOubwonIbsudNutDom", cfg.JWTAuth.Secret)
 	require.Equal(t, timeToLive("48h"), cfg.JWTAuth.TimeToLive)
+	// experimental features are opt-in and disabled by default
+	require.False(t, cfg.Experimental.EnableOfflinePoolSettings)
+}
+
+func TestExperimentalConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfgContent := `
+[default]
+  callback_url = "https://garm.example.com/"
+  metadata_url = "https://garm.example.com/"
+
+[apiserver]
+  bind = "0.0.0.0"
+  port = 9998
+
+[database]
+  backend = "sqlite3"
+  passphrase = "bocyasicgatEtenOubwonIbsudNutDom"
+
+  [database.sqlite3]
+    db_file = "/tmp/garm.db"
+
+[jwt_auth]
+  secret = "bocyasicgatEtenOubwonIbsudNutDom"
+  time_to_live = "48h"
+
+[experimental]
+  enable_offline_pool_settings = true
+`
+	require.NoError(t, os.WriteFile(cfgFile, []byte(cfgContent), 0o600))
+
+	cfg, err := NewConfig(cfgFile)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.True(t, cfg.Experimental.EnableOfflinePoolSettings)
+	require.NoError(t, cfg.Experimental.Validate())
 }
 
 func TestNewConfigInvalidTomlPath(t *testing.T) {

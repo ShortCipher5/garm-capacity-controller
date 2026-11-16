@@ -202,6 +202,26 @@ type FileObjectStore interface {
 	OpenFileObjectContent(ctx context.Context, objID uint) (io.ReadCloser, error)
 }
 
+// OfflinePoolSettingsStore is the experimental, opt-in store backing the
+// offline pool settings API. It is only reachable when the
+// experimental.enable_offline_pool_settings config flag is enabled and it
+// lazily creates its own schema the first time it is used. No stock table
+// is modified by any of these methods.
+type OfflinePoolSettingsStore interface {
+	// GetOfflinePoolSettings fetches the current settings of a pool,
+	// verifying that the pool is a member of the given entity. The
+	// returned revision maps 1:1 to the strong ETag exposed by the API.
+	GetOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string) (params.OfflinePoolSettings, params.OfflinePoolSettingsRevision, error)
+	// UpdateOfflinePoolSettings applies a partial update to the pool
+	// settings. The revision check, the entity membership check, the
+	// update itself and the revision advance all happen in one database
+	// transaction. If the expected revision does not match the current
+	// one, an *OfflinePoolSettingsStaleRevisionError carrying the current
+	// revision is returned. A patch that would not change any field is a
+	// no-op and does not advance the revision.
+	UpdateOfflinePoolSettings(ctx context.Context, entity params.ForgeEntity, poolID string, expected params.OfflinePoolSettingsRevision, patch params.OfflinePoolSettingsPatch) (params.OfflinePoolSettings, params.OfflinePoolSettingsRevision, error)
+}
+
 //go:generate go run github.com/vektra/mockery/v2@latest
 type Store interface {
 	RepoStore
@@ -221,6 +241,7 @@ type Store interface {
 	GiteaCredentialsStore
 	TemplateStore
 	FileObjectStore
+	OfflinePoolSettingsStore
 
 	ControllerInfo() (params.ControllerInfo, error)
 	InitController() (params.ControllerInfo, error)
