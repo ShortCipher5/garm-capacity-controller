@@ -27,8 +27,11 @@ type Assessment struct {
 	ObservationFresh      bool      `json:"observation_fresh"`
 	ObservedAt            time.Time `json:"observed_at"`
 	TrackedAllocations    int       `json:"tracked_allocations"`
-	States                Counts    `json:"last_observed_states"`
-	Blockers              []string  `json:"blockers"`
+	// Observation gaps remain charged and must not become absence evidence.
+	UnobservedReservations int      `json:"unobserved_reservations"`
+	UnreservedResources    int      `json:"unreserved_resources"`
+	States                 Counts   `json:"last_observed_states"`
+	Blockers               []string `json:"blockers"`
 }
 
 // Assess reads one transactionally consistent ledger snapshot. Counts are last
@@ -75,7 +78,14 @@ func Assess(snapshot admission.SQLiteSnapshot, hostID string, now time.Time) (As
 		}
 	}
 	for _, resource := range snapshot.Inventory {
+		// Validate links into this host before filtering foreign inventory. A
+		// reservation cannot be treated as merely absent from inventory when
+		// another host claims its identity. Neither conflicting observation is
+		// retirement authority, even if the foreign resource is reported idle.
 		if resource.Host != hostID {
+			if reservation, exists := snapshot.Reservations[resource.ReservationKey]; resource.ReservationKey != "" && exists && reservation.Request.Host == hostID {
+				return Assessment{}, ErrSnapshot
+			}
 			continue
 		}
 		if resource.ID == "" || seen[resource.ID] {
@@ -88,6 +98,8 @@ func Assess(snapshot admission.SQLiteSnapshot, hostID string, now time.Time) (As
 				return Assessment{}, ErrSnapshot
 			}
 			linked[resource.ReservationKey] = true
+		} else {
+			result.UnreservedResources++
 		}
 		count(resource.State)
 	}
@@ -99,11 +111,18 @@ func Assess(snapshot admission.SQLiteSnapshot, hostID string, now time.Time) (As
 			return Assessment{}, ErrSnapshot
 		}
 		if !linked[key] {
+			result.UnobservedReservations++
 			count(reservation.State)
 		}
 	}
 	if result.TrackedAllocations != 0 {
 		result.Blockers = append(result.Blockers, "tracked_allocations_remain_charged")
+	}
+	if result.UnobservedReservations != 0 {
+		result.Blockers = append(result.Blockers, "reservations_without_inventory_remain_charged")
+	}
+	if result.UnreservedResources != 0 {
+		result.Blockers = append(result.Blockers, "inventory_without_reservation_requires_reconciliation")
 	}
 	// These are capability gates, not booleans inferred from counts or modes.
 	// Never make them disappear merely because a row, operation or runner is absent.
