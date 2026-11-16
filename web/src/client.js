@@ -116,10 +116,12 @@ export class ReadSession {
     try {
       const response = await this.fetcher("/admin/api/v1/onboarding", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
       if (generation !== this.#onboardingGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
       if (!response.ok) throw new OnboardingResponseError("Onboarding preflight profiles are unavailable.");
       const result = validateOnboardingDiscovery(await response.json());
       if (generation !== this.#onboardingGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       return result;
     } catch (error) {
       if (generation !== this.#onboardingGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
@@ -156,10 +158,12 @@ export class ReadSession {
     try {
       const response = await this.fetcher("/admin/api/v1/garm", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
       if (generation !== this.#remoteGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
       if (!response.ok) throw new Error("Garm settings are unavailable. No settings were changed by this read.");
       const result = validateGarm(await response.json());
       if (generation !== this.#remoteGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       return result;
     } catch (error) {
       if (generation !== this.#remoteGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
@@ -187,6 +191,7 @@ export class ReadSession {
         signal: controller.signal,
       });
       if (generation !== this.#generation) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       if (response.status === 401)
         throw new Error(
           "Read token rejected or expired. Reconnect with a valid token.",
@@ -197,6 +202,7 @@ export class ReadSession {
         );
       const data = validateOverview(await response.json());
       if (generation !== this.#generation) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
       return data;
     } catch (error) {
       if (generation !== this.#generation) throw new SessionEnded();
