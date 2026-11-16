@@ -163,6 +163,12 @@ from them and they are not a merge proposal):
   `git rev-parse origin/review/native-settings-a1ff1716` expecting
   `a1ff171691edf803f4421e4337b33c6dc8dca139`, and the same ancestry and
   diff commands against that ref.
+- `review/native-settings-494899b8` — tip
+  `494899b8b77331a7b52e5d7a12c263082dda5f19`: request-ID/UNKNOWN-gating/
+  client-recovery slice on top of `a1ff1716` (details in "Recovery slice
+  status" below). Prior refs remain intact. Verify with
+  `git rev-parse origin/review/native-settings-494899b8` expecting
+  `494899b8b77331a7b52e5d7a12c263082dda5f19`.
 
 Integrity checks a reviewer can run:
 
@@ -224,6 +230,33 @@ pass; webapp 562/562 with build. These fixes are reported by the
 orchestrator, NOT independently re-reviewed; the experiments remain not
 ready to merge or deploy, and the destination/denial-scope decisions
 still gate any product path.
+
+## Recovery slice status (orchestrator-reported, 2026-11-16)
+
+Commit `494899b8` (review ref `review/native-settings-494899b8`)
+implements the no-host-access recovery slice from the task list:
+
+1. The native CLI and webapp editor now send a persistent request
+   identity (`Idempotency-Key`) on every settings write — `--request-id`
+   or an auto-generated UUID in the CLI, a per-save UUID in the editor.
+2. Both clients journal the exact request (id, scope, precondition,
+   payload, time) before dispatch and clear it on definitive outcomes;
+   a browser or process restart re-enters the UNKNOWN hold with the
+   draft intact, and re-presenting the id resolves the outcome from the
+   server's durable receipt.
+3. The editor's UNKNOWN state now actually blocks: Save and the draft
+   inputs are disabled, a re-read no longer clears it, and a deliberate
+   "Resolve outcome" action settles it via the receipt. The CLI no
+   longer treats any HTTP 200 as success (applied bodies must validate).
+4. The legacy revision bump's benign absence check is dialect-aware
+   (SQLite/MySQL/PostgreSQL forms), unit-tested per dialect; live
+   MySQL/PostgreSQL qualification remains open (no such databases here).
+
+Reported gates: gofmt/vet/build clean; Go race suites for `database/sql`,
+`cmd/garm-cli/cmd`, `apiserver/routers`, `config`, `runner` pass; webapp
+563/563 with build. Orchestrator-reported, not independently re-reviewed.
+The controller editor/journal binding remains blocked on the previously
+denied dispatch-envelope scope; nothing here bypasses it.
 
 ## Evidence rules (unchanged)
 
