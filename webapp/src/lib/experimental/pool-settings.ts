@@ -79,6 +79,18 @@ export interface PoolSettingsPatchResult {
 
 const SETTINGS_FIELDS: Array<keyof PoolSettings> = ['priority', 'max_runners', 'min_idle_runners'];
 
+// Bounds mirror the provisional server contract: priority 0..1000000,
+// max_runners 1..1000000, min_idle_runners 0..1000000.
+const SETTINGS_BOUNDS: Record<keyof PoolSettings, { min: number; max: number }> = {
+	priority: { min: 0, max: 1_000_000 },
+	max_runners: { min: 1, max: 1_000_000 },
+	min_idle_runners: { min: 0, max: 1_000_000 }
+};
+
+function hasOwnKey(data: object, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(data, key);
+}
+
 export function poolSettingsPath(ref: PoolSettingsRef): string {
 	if (!ref.entityID) {
 		throw new Error('entity ID must not be empty');
@@ -100,17 +112,41 @@ function messageFromBody(data: unknown, fallback: string): string {
 	return fallback;
 }
 
+// asSettings reads a settings tuple for GET and applied-200 responses. It
+// fails closed: a value outside the bounds above, a non-integer, a negative,
+// or min_idle_runners above max_runners means the server document is corrupt
+// evidence and reads as null (UNKNOWN on PATCH, the existing 'unknown' throw
+// from getPoolSettings on GET). A document that also carries a replay outcome
+// marker is ambiguous, not a readable settings document.
 function asSettings(data: unknown): PoolSettings | null {
-	if (
-		data &&
-		typeof data === 'object' &&
-		typeof (data as PoolSettings).priority === 'number' &&
-		typeof (data as PoolSettings).max_runners === 'number' &&
-		typeof (data as PoolSettings).min_idle_runners === 'number'
-	) {
-		return data as PoolSettings;
+	if (!data || typeof data !== 'object') {
+		return null;
 	}
-	return null;
+	if (hasOwnKey(data, 'outcome')) {
+		return null;
+	}
+	const doc = data as Record<string, unknown>;
+	const priority = doc.priority;
+	const maxRunners = doc.max_runners;
+	const minIdleRunners = doc.min_idle_runners;
+	if (
+		typeof priority !== 'number' ||
+		!Number.isInteger(priority) ||
+		priority < SETTINGS_BOUNDS.priority.min ||
+		priority > SETTINGS_BOUNDS.priority.max ||
+		typeof maxRunners !== 'number' ||
+		!Number.isInteger(maxRunners) ||
+		maxRunners < SETTINGS_BOUNDS.max_runners.min ||
+		maxRunners > SETTINGS_BOUNDS.max_runners.max ||
+		typeof minIdleRunners !== 'number' ||
+		!Number.isInteger(minIdleRunners) ||
+		minIdleRunners < SETTINGS_BOUNDS.min_idle_runners.min ||
+		minIdleRunners > SETTINGS_BOUNDS.min_idle_runners.max ||
+		minIdleRunners > maxRunners
+	) {
+		return null;
+	}
+	return { priority, max_runners: maxRunners, min_idle_runners: minIdleRunners };
 }
 
 // asReplay recognises the wire document a PATCH answered from a stored
@@ -126,6 +162,11 @@ function asReplay(data: unknown): { resultingETag: string } | null {
 		return null;
 	}
 	if (typeof doc.resulting_etag !== 'string' || !/^"\d+:\d+"$/.test(doc.resulting_etag)) {
+		return null;
+	}
+	// An envelope that also carries settings fields is an ambiguous document,
+	// not an applied outcome; both parsers must decline it.
+	if (SETTINGS_FIELDS.some((field) => hasOwnKey(data, field))) {
 		return null;
 	}
 	return { resultingETag: doc.resulting_etag };
@@ -145,9 +186,21 @@ function validatePatch(patch: PoolSettingsPatch): void {
 			);
 		}
 		const value = (patch as Record<string, unknown>)[key];
-		if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
-			throw new PoolSettingsError('rejected', 0, null, `patch field ${JSON.stringify(key)} must be a non-negative integer`);
+		const bounds = SETTINGS_BOUNDS[key as keyof PoolSettings];
+		if (typeof value !== 'number' || !Number.isInteger(value) || value < bounds.min || value > bounds.max) {
+			throw new PoolSettingsError(
+				'rejected',
+				0,
+				null,
+				`patch field ${JSON.stringify(key)} must be an integer between ${bounds.min} and ${bounds.max}`
+			);
 		}
+	}
+	// Same-patch runner bounds must satisfy the server contract's invariant
+	// before dispatch; min must never exceed max.
+	const { max_runners: maxRunners, min_idle_runners: minIdleRunners } = patch;
+	if (maxRunners !== undefined && minIdleRunners !== undefined && minIdleRunners > maxRunners) {
+		throw new PoolSettingsError('rejected', 0, null, 'patch field "min_idle_runners" must not exceed "max_runners"');
 	}
 }
 

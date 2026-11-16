@@ -4,6 +4,7 @@ import {
 	patchPoolSettings,
 	PoolSettingsError,
 	poolSettingsPath,
+	type PoolSettingsPatch,
 	type PoolSettingsRef
 } from './pool-settings.js';
 import { garmApi } from '$lib/api/client.js';
@@ -235,5 +236,136 @@ describe('pool-settings client', () => {
 		expect(err).toBeInstanceOf(PoolSettingsError);
 		expect(err!.kind).toBe('unknown');
 		expect(err!.status).toBe(200);
+	});
+
+	it('rejects out-of-bounds patch values before dispatch', async () => {
+		const cases: Array<PoolSettingsPatch> = [
+			{ priority: 1_000_001 },
+			{ priority: -1 },
+			{ max_runners: 0 },
+			{ max_runners: 1_000_001 },
+			{ min_idle_runners: 1_000_001 }
+		];
+		for (const patch of cases) {
+			const fetchMock = vi.fn();
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', patch);
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('rejected');
+			expect(fetchMock).not.toHaveBeenCalled();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('rejects min_idle_runners above max_runners in the same patch before dispatch', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { max_runners: 2, min_idle_runners: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('rejected');
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('accepts patch values on the contract bounds and min_idle equal to max_runners', async () => {
+		const fetchMock = vi.fn().mockImplementation(() =>
+			Promise.resolve(jsonResponse(200, { priority: 1_000_000, max_runners: 1, min_idle_runners: 0 }, '"43:6"'))
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const onBounds = await patchPoolSettings(ref, '"42:7"', { priority: 1_000_000 });
+		expect(onBounds.etag).toBe('"43:6"');
+
+		const equalBounds = await patchPoolSettings(ref, '"43:6"', { max_runners: 1_000_000, min_idle_runners: 1_000_000 });
+		expect(equalBounds.etag).toBe('"43:6"');
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	it('holds UNKNOWN when an applied-200 document has min_idle_runners above max_runners', async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValue(jsonResponse(200, { priority: 10, max_runners: 5, min_idle_runners: 6 }, '"43:7"'));
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('unknown');
+		expect(err!.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('holds UNKNOWN when an applied-200 document carries an out-of-range value', async () => {
+		const documents = [
+			{ priority: 1_000_001, max_runners: 5, min_idle_runners: 1 },
+			{ priority: 10, max_runners: 0, min_idle_runners: 1 },
+			{ priority: 10, max_runners: 5, min_idle_runners: 1_000_001 }
+		];
+		for (const document of documents) {
+			const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, document, '"43:8"'));
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('GET with a corrupt settings document throws the UNKNOWN error', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { priority: -1, max_runners: 5, min_idle_runners: 1 }, '"42:7"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await getPoolSettings(ref);
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('unknown');
+		expect(err!.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('treats a 200 carrying both a replay outcome and settings fields as UNKNOWN', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { outcome: 'applied_changed', resulting_etag: '"43:9"', priority: 20 }, '"43:9"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('unknown');
+		expect(err!.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 });

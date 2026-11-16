@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -372,6 +373,12 @@ func validateAppliedSettingsDocument(body []byte, etag string) error {
 // written before dispatch and cleared on any definitive outcome, so a process
 // restart can recover the pending request and resolve it via the server's
 // durable receipt (re-presenting the same request id and payload).
+//
+// The pending file holds exactly one record: the CLI journal is single-slot
+// by design, one in-flight conditional write per CLI instance. Operators
+// reconciling several pools at once (for example after a controller
+// incident) use the web client, which handles multi-pool recovery; the CLI
+// deliberately refuses to queue or overwrite a second pending request.
 type experimentalPendingRecord struct {
 	RequestID  string `json:"request_id"`
 	EntityType string `json:"entity_type"`
@@ -397,19 +404,75 @@ func experimentalPendingPath() string {
 	return filepath.Join(dir, "garm-cli", "experimental-pending.json")
 }
 
+// writeExperimentalPending durably persists the pending request. It is
+// fail-closed and atomic: the record is staged as a temp file in the same
+// directory, fsynced, then renamed over the target (0600), so the journal is
+// never observed torn and a failure here must abort the write before
+// dispatch.
 func writeExperimentalPending(rec experimentalPendingRecord) error {
 	path := experimentalPendingPath()
 	if path == "" {
 		return fmt.Errorf("no user configuration directory available for the pending-request journal")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("could not prepare the pending-request journal directory: %w", err)
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	tmp, err := os.CreateTemp(dir, ".experimental-pending-*.tmp")
+	if err != nil {
+		return fmt.Errorf("could not stage the pending-request journal: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// Best effort: a no-op once the rename has committed the record.
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("could not write the pending-request journal: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("could not fsync the pending-request journal: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("could not close the pending-request journal: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("could not commit the pending-request journal: %w", err)
+	}
+	// Make the rename itself durable where the platform allows it.
+	if dirHandle, err := os.Open(dir); err == nil {
+		_ = dirHandle.Sync()
+		_ = dirHandle.Close()
+	}
+	return nil
+}
+
+// loadExperimentalPending returns the journaled unresolved request, if any. A
+// path that cannot name a regular journal file (absent, a directory in its
+// ancestry, or a directory at the path itself) reports no record. An
+// unreadable or corrupt journal is an error: the operator must decide what
+// to do with it, never have it silently overwritten by a fresh write.
+func loadExperimentalPending() (*experimentalPendingRecord, bool, error) {
+	path := experimentalPendingPath()
+	if path == "" {
+		return nil, false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("could not read the pending-request journal: %w", err)
+	}
+	var rec experimentalPendingRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, false, fmt.Errorf("the pending-request journal exists but is corrupt: %w", err)
+	}
+	return &rec, true, nil
 }
 
 func clearExperimentalPending() {
@@ -439,6 +502,7 @@ var (
 	expPoolSettingsETag      string
 	expPoolSettingsDraftFile string
 	expPoolSettingsRequestID string
+	expPoolSettingsResolve   bool
 	expPriority              uint
 	expMaxRunners            uint
 	expMinIdleRunners        uint
@@ -498,9 +562,37 @@ set in the environment. They never fall back to stock unconditional writes.`,
 			if needsInit {
 				return errNeedsInitError
 			}
+
+			// Read-before-write: any existing pending record is loaded
+			// before anything is built or sent. A normal patch invocation
+			// never overwrites an unresolved journaled request.
+			pending, hasPending, err := loadExperimentalPending()
+			if err != nil {
+				return err
+			}
+
+			client := cli
+			if client == nil {
+				client = rawHTTPClient
+			}
+
+			if expPoolSettingsResolve {
+				return runPoolSettingsResolve(cmd, client, pending, hasPending)
+			}
+
+			if hasPending {
+				return fmt.Errorf(`refusing to send a new write: unresolved request %q for %s %s pool %s, dispatched at %s, is still pending.
+The pending-request journal holds exactly one record and is never overwritten silently.
+Resolve it first: re-run this command with --resolve to re-present that exact request against the server's durable receipt; only clear the journal by hand once you have confirmed out-of-band that the request had no effect`,
+					pending.RequestID, pending.EntityType, pending.EntityID, pending.PoolID, pending.At)
+			}
+
 			ref, err := experimentalPoolSettingsRefFromFlags()
 			if err != nil {
 				return err
+			}
+			if ref.poolID == "" {
+				return fmt.Errorf("pool ID must not be empty (set --pool)")
 			}
 
 			// Never dispatch an unconditional write: a strong ETag is mandatory.
@@ -511,11 +603,6 @@ set in the environment. They never fall back to stock unconditional writes.`,
 			patch, draft, err := experimentalPoolSettingsPatchFromFlags(cmd)
 			if err != nil {
 				return err
-			}
-
-			client := cli
-			if client == nil {
-				client = rawHTTPClient
 			}
 
 			payload, err := json.Marshal(patch)
@@ -533,7 +620,8 @@ set in the environment. They never fall back to stock unconditional writes.`,
 			}
 
 			// Journal the exact request before dispatch so an UNKNOWN
-			// outcome survives process restart.
+			// outcome survives process restart. Fail closed: the write is
+			// never sent unjournaled.
 			if err := writeExperimentalPending(experimentalPendingRecord{
 				RequestID:  requestID,
 				EntityType: ref.entityType,
@@ -543,7 +631,7 @@ set in the environment. They never fall back to stock unconditional writes.`,
 				Payload:    string(payload),
 				At:         time.Now().UTC().Format(time.RFC3339),
 			}); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not persist the pending-request journal: %v\n", err)
+				return fmt.Errorf("refusing to send the request unjournaled: the pending-request journal could not be written: %w", err)
 			}
 
 			_, body, newETag, err := doPoolSettings(cmd.Context(), client, http.MethodPatch, ref, expPoolSettingsETag, requestID, strings.NewReader(string(payload)))
@@ -555,49 +643,7 @@ set in the environment. They never fall back to stock unconditional writes.`,
 				}
 				return wrapPoolSettingsError(err, draft)
 			}
-			if replayOutcome, resultingETag, ok := parsePoolSettingsReplay(body); ok {
-				// The server answered from a durable request receipt: this
-				// exact request already applied earlier and nothing was
-				// re-applied. Report the recorded outcome; the operator can
-				// re-read deliberately if the document is needed.
-				clearExperimentalPending()
-				if outputFormat == common.OutputFormatJSON {
-					printAsJSON(map[string]interface{}{
-						"request_id": requestID,
-						"outcome":    replayOutcome,
-						"etag":       resultingETag,
-						"replayed":   true,
-					})
-				} else {
-					fmt.Printf("request-id: %s\n", requestID)
-					fmt.Printf("already applied earlier (replayed from stored request receipt, outcome %s). resulting ETag: %s\n", replayOutcome, resultingETag)
-				}
-				return nil
-			}
-			if err := validateAppliedSettingsDocument(body, newETag); err != nil {
-				// The write may have committed but the response cannot be
-				// trusted. Keep the pending journal: the recorded request id
-				// resolves the outcome from the server's durable receipt.
-				return wrapPoolSettingsError(&poolSettingsError{
-					outcome: outcomeUnknown,
-					status:  http.StatusOK,
-					etag:    newETag,
-					msg:     fmt.Sprintf("%v; the write may have committed and request id %s can resolve it from the server's durable receipt (re-run with --request-id %s)", err, requestID, requestID),
-				}, draft)
-			}
-			clearExperimentalPending()
-			if outputFormat == common.OutputFormatJSON {
-				printAsJSON(map[string]interface{}{
-					"request_id": requestID,
-					"outcome":    outcomeApplied.String(),
-					"etag":       newETag,
-					"settings":   json.RawMessage(body),
-				})
-			} else {
-				fmt.Printf("request-id: %s\n", requestID)
-				fmt.Printf("applied. new ETag: %s\n", newETag)
-			}
-			return nil
+			return reportPoolSettingsPatchOutcome(cmd, requestID, body, newETag, draft)
 		},
 	}
 
@@ -606,21 +652,111 @@ set in the environment. They never fall back to stock unconditional writes.`,
 		c.Flags().StringVarP(&expPoolEntityOrg, "org", "o", "", "Organization entity ID.")
 		c.Flags().StringVarP(&expPoolEntityEnterprise, "enterprise", "e", "", "Enterprise entity ID.")
 		c.Flags().StringVar(&expPoolID, "pool", "", "Pool ID.")
-		c.MarkFlagRequired("pool") //nolint
 		c.MarkFlagsMutuallyExclusive("repo", "org", "enterprise")
-		c.MarkFlagsOneRequired("repo", "org", "enterprise")
 	}
+	// get validates its target via annotations. patch cannot: --resolve must
+	// run with no entity or pool flags at all, since the pending journal
+	// supplies the target, so patch validates its target inside RunE.
+	getCmd.MarkFlagRequired("pool") //nolint
+	getCmd.MarkFlagsOneRequired("repo", "org", "enterprise")
 
-	patchCmd.Flags().StringVar(&expPoolSettingsETag, "etag", "", "Strong quoted ETag from a previous GET (sent as If-Match). Required; unconditional writes are never sent.")
-	patchCmd.Flags().StringVar(&expPoolSettingsRequestID, "request-id", "", "Persistent request identity sent as Idempotency-Key. Generated when omitted; pass the printed id again to re-present an earlier request and resolve an UNKNOWN outcome from the server's durable receipt.")
+	patchCmd.Flags().StringVar(&expPoolSettingsETag, "etag", "", "Strong quoted ETag from a previous GET (sent as If-Match). Required; unconditional writes are never sent. Ignored by --resolve.")
+	patchCmd.Flags().StringVar(&expPoolSettingsRequestID, "request-id", "", "Persistent request identity sent as Idempotency-Key. Generated when omitted. Allowed on a fresh write; rejected with --resolve, which reuses the journaled request id.")
 	patchCmd.Flags().StringVar(&expPoolSettingsDraftFile, "file", "", "JSON draft file with the desired settings (keys: priority, max_runners, min_idle_runners).")
 	patchCmd.Flags().UintVar(&expPriority, "priority", 0, "Desired priority.")
 	patchCmd.Flags().UintVar(&expMaxRunners, "max-runners", 0, "Desired max runners.")
 	patchCmd.Flags().UintVar(&expMinIdleRunners, "min-idle-runners", 0, "Desired min idle runners.")
+	patchCmd.Flags().BoolVar(&expPoolSettingsResolve, "resolve", false, `Resolve the pending request held in the client journal: re-send exactly the journaled payload, ETag precondition and request id against its recorded entity/pool, so the server answers from its durable request receipt. Use this after an UNKNOWN outcome. The CLI journal holds at most one pending request (single slot per CLI instance; the web client handles multi-pool recovery). Ignores payload flags, --etag and entity flags; an error to combine with payload flags or --request-id.`)
 
 	poolSettingsCmd.AddCommand(getCmd, patchCmd)
 	experimentalCmd.AddCommand(poolSettingsCmd)
 	return experimentalCmd
+}
+
+// runPoolSettingsResolve is the deliberate resolution path for an UNKNOWN
+// outcome: it re-sends exactly the journaled request (payload, ETag
+// precondition, request id) against the recorded entity/pool and lets the
+// server answer from its durable request receipt. A definitive outcome
+// clears the journal; a fresh UNKNOWN keeps it and is reported again. The
+// journaled request is authoritative, so payload flags, --etag and
+// entity/pool flags are ignored here; combining --resolve with payload flags
+// or --request-id is ambiguous and refused.
+func runPoolSettingsResolve(cmd *cobra.Command, client *rawClient, pending *experimentalPendingRecord, hasPending bool) error {
+	for _, f := range []string{"priority", "max-runners", "min-idle-runners", "file", "request-id"} {
+		if cmd.Flags().Changed(f) {
+			return fmt.Errorf("--resolve cannot be combined with --%s: it re-sends exactly the journaled request; remove the flag to resolve the ambiguity", f)
+		}
+	}
+	if !hasPending {
+		return fmt.Errorf("nothing to resolve: the pending-request journal holds no unresolved request")
+	}
+	rec := *pending
+	ref := poolSettingsRef{entityType: rec.EntityType, entityID: rec.EntityID, poolID: rec.PoolID}
+	if _, err := ref.path(); err != nil {
+		return fmt.Errorf("the pending-request journal records an invalid target: %w", err)
+	}
+
+	_, body, newETag, err := doPoolSettings(cmd.Context(), client, http.MethodPatch, ref, rec.ETag, rec.RequestID, strings.NewReader(rec.Payload))
+	if err != nil {
+		var pse *poolSettingsError
+		if errors.As(err, &pse) && pse.outcome != outcomeUnknown {
+			// Definitive outcome: nothing left to resolve.
+			clearExperimentalPending()
+		}
+		return wrapPoolSettingsError(err, rec.Payload)
+	}
+	return reportPoolSettingsPatchOutcome(cmd, rec.RequestID, body, newETag, rec.Payload)
+}
+
+// reportPoolSettingsPatchOutcome handles the HTTP 200 path of a dispatched
+// PATCH, shared by fresh writes and --resolve: recognise a replay answer
+// served from the server's durable request receipt, validate a true applied
+// tuple, clear the journal on any definitive outcome, and print the result.
+// A 200 body that cannot be trusted keeps the journal held as UNKNOWN.
+func reportPoolSettingsPatchOutcome(cmd *cobra.Command, requestID string, body []byte, newETag, draft string) error {
+	if replayOutcome, resultingETag, ok := parsePoolSettingsReplay(body); ok {
+		// The server answered from a durable request receipt: this exact
+		// request already applied earlier and nothing was re-applied.
+		// Report the recorded outcome; the operator can re-read
+		// deliberately if the document is needed.
+		clearExperimentalPending()
+		if outputFormat == common.OutputFormatJSON {
+			printAsJSON(map[string]interface{}{
+				"request_id": requestID,
+				"outcome":    replayOutcome,
+				"etag":       resultingETag,
+				"replayed":   true,
+			})
+		} else {
+			fmt.Printf("request-id: %s\n", requestID)
+			fmt.Printf("already applied earlier (replayed from stored request receipt, outcome %s). resulting ETag: %s\n", replayOutcome, resultingETag)
+		}
+		return nil
+	}
+	if err := validateAppliedSettingsDocument(body, newETag); err != nil {
+		// The write may have committed but the response cannot be
+		// trusted. Keep the pending journal: re-running with --resolve
+		// settles the outcome from the server's durable receipt.
+		return wrapPoolSettingsError(&poolSettingsError{
+			outcome: outcomeUnknown,
+			status:  http.StatusOK,
+			etag:    newETag,
+			msg:     fmt.Sprintf("%v; the write may have committed and request id %s can resolve it from the server's durable receipt (re-run with --resolve)", err, requestID),
+		}, draft)
+	}
+	clearExperimentalPending()
+	if outputFormat == common.OutputFormatJSON {
+		printAsJSON(map[string]interface{}{
+			"request_id": requestID,
+			"outcome":    outcomeApplied.String(),
+			"etag":       newETag,
+			"settings":   json.RawMessage(body),
+		})
+	} else {
+		fmt.Printf("request-id: %s\n", requestID)
+		fmt.Printf("applied. new ETag: %s\n", newETag)
+	}
+	return nil
 }
 
 func experimentalPoolSettingsRefFromFlags() (poolSettingsRef, error) {

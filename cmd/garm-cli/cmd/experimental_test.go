@@ -58,6 +58,7 @@ func resetExpFlags() {
 	expPoolSettingsETag = ""
 	expPoolSettingsDraftFile = ""
 	expPoolSettingsRequestID = ""
+	expPoolSettingsResolve = false
 	expPriority = 0
 	expMaxRunners = 0
 	expMinIdleRunners = 0
@@ -79,6 +80,7 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestPoolSettingsGetCarriesAuthAndPath(t *testing.T) {
+	clearExperimentalPending()
 	var gotAuth, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -104,6 +106,7 @@ func TestPoolSettingsGetCarriesAuthAndPath(t *testing.T) {
 }
 
 func TestPoolSettingsPatchApplied(t *testing.T) {
+	clearExperimentalPending()
 	var gotIfMatch, gotContentType string
 	var gotBody map[string]uint
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +148,7 @@ func TestPoolSettingsPatchApplied(t *testing.T) {
 }
 
 func TestPoolSettingsPatchConflictPreservesDraftAndProvesNonEffect(t *testing.T) {
+	clearExperimentalPending()
 	var patchCalls atomic.Int32
 	var appliedPatches []map[string]uint
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +199,7 @@ func TestPoolSettingsPatchConflictPreservesDraftAndProvesNonEffect(t *testing.T)
 }
 
 func TestPoolSettingsPatchIDReuseIsRejectedNotUnknown(t *testing.T) {
+	clearExperimentalPending()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -225,6 +230,7 @@ func TestPoolSettingsPatchIDReuseIsRejectedNotUnknown(t *testing.T) {
 }
 
 func TestPoolSettingsPatchReplayEnvelopeReportsStoredOutcome(t *testing.T) {
+	clearExperimentalPending()
 	var patchCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
@@ -252,6 +258,7 @@ func TestPoolSettingsPatchReplayEnvelopeReportsStoredOutcome(t *testing.T) {
 }
 
 func TestPoolSettingsPatchUnknownHoldOnLostResponse(t *testing.T) {
+	clearExperimentalPending()
 	var dispatches atomic.Int32
 	cli := &rawClient{
 		BaseURL: "http://offline.invalid/api/v1",
@@ -281,6 +288,7 @@ func TestPoolSettingsPatchUnknownHoldOnLostResponse(t *testing.T) {
 }
 
 func TestPoolSettingsPatchUnknownHoldOnAmbiguousStatus(t *testing.T) {
+	clearExperimentalPending()
 	var patchCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		patchCalls.Add(1)
@@ -304,6 +312,7 @@ func TestPoolSettingsPatchUnknownHoldOnAmbiguousStatus(t *testing.T) {
 }
 
 func TestPoolSettingsPatchRejectedWithoutETagSendsNothing(t *testing.T) {
+	clearExperimentalPending()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -325,6 +334,7 @@ func TestPoolSettingsPatchRejectedWithoutETagSendsNothing(t *testing.T) {
 }
 
 func TestPoolSettingsGetRejectedIsNotUnknown(t *testing.T) {
+	clearExperimentalPending()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"error":"not allowed"}`)
@@ -345,6 +355,7 @@ func TestPoolSettingsGetRejectedIsNotUnknown(t *testing.T) {
 }
 
 func TestPoolSettingsPatchSendsIdempotencyKey(t *testing.T) {
+	clearExperimentalPending()
 	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
@@ -509,6 +520,199 @@ func TestParsePoolSettingsDraftStrict(t *testing.T) {
 	}
 	if patch.MinIdleRunners != nil {
 		t.Errorf("min_idle_runners should be unset, got %v", *patch.MinIdleRunners)
+	}
+}
+
+// seedPendingRecord writes a pending journal record through the production
+// path so tests exercise the same serialization the CLI relies on.
+func seedPendingRecord(t *testing.T, rec experimentalPendingRecord) {
+	t.Helper()
+	clearExperimentalPending()
+	if err := writeExperimentalPending(rec); err != nil {
+		t.Fatalf("seed pending journal: %v", err)
+	}
+}
+
+func TestPoolSettingsPatchRefusesWhenPendingExists(t *testing.T) {
+	seedPendingRecord(t, experimentalPendingRecord{
+		RequestID:  "rec-1",
+		EntityType: "repository",
+		EntityID:   "repo-1",
+		PoolID:     "pool-1",
+		ETag:       `"100:8"`,
+		Payload:    `{"priority":7}`,
+		At:         "2026-11-16T10:00:00Z",
+	})
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:9"`, "--priority", "9")
+	if err == nil {
+		t.Fatal("expected refusal to send a new write while a request is pending")
+	}
+	msg := err.Error()
+	for _, want := range []string{"unresolved request", "rec-1", "repository repo-1", "pool-1", "2026-11-16T10:00:00Z", "--resolve"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected refusal to mention %q, got: %v", want, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected zero HTTP requests when a pending journal exists, got %d", calls.Load())
+	}
+
+	// The refusal must not overwrite the pending journal.
+	data, readErr := os.ReadFile(experimentalPendingPath())
+	if readErr != nil {
+		t.Fatalf("pending journal must survive the refusal: %v", readErr)
+	}
+	var kept experimentalPendingRecord
+	if err := json.Unmarshal(data, &kept); err != nil {
+		t.Fatalf("pending journal is no longer readable: %v", err)
+	}
+	if kept.RequestID != "rec-1" || kept.Payload != `{"priority":7}` || kept.ETag != `"100:8"` {
+		t.Fatalf("pending journal was overwritten by the refused invocation: %+v", kept)
+	}
+}
+
+func TestPoolSettingsPatchResolveResendsJournaledRequest(t *testing.T) {
+	seedPendingRecord(t, experimentalPendingRecord{
+		RequestID:  "rec-1",
+		EntityType: "repository",
+		EntityID:   "repo-1",
+		PoolID:     "pool-1",
+		ETag:       `"100:8"`,
+		Payload:    `{"priority":7}`,
+		At:         "2026-11-16T10:00:00Z",
+	})
+
+	var calls atomic.Int32
+	var gotKey, gotIfMatch, gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		gotKey = r.Header.Get("Idempotency-Key")
+		gotIfMatch = r.Header.Get("If-Match")
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":7,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	// Deliberately no entity/pool/payload flags: the journal is authoritative.
+	_, err := executeExperimental(cli, "patch", "--resolve")
+	if err != nil {
+		t.Fatalf("expected --resolve to succeed, got: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected exactly one PATCH, got %d", calls.Load())
+	}
+	if gotKey != "rec-1" {
+		t.Errorf("expected Idempotency-Key %q, got %q", "rec-1", gotKey)
+	}
+	if gotIfMatch != `"100:8"` {
+		t.Errorf("expected If-Match %q, got %q", `"100:8"`, gotIfMatch)
+	}
+	if gotBody != `{"priority":7}` {
+		t.Errorf("expected the exact journaled payload, got %q", gotBody)
+	}
+	wantPath := "/api/v1/offline/entities/repository/repo-1/pools/pool-1/settings"
+	if gotPath != wantPath {
+		t.Errorf("expected resolution against %q, got %q", wantPath, gotPath)
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); !os.IsNotExist(statErr) {
+		t.Fatalf("definitive outcome must clear the pending journal, stat err: %v", statErr)
+	}
+}
+
+func TestPoolSettingsPatchResolveWithoutPending(t *testing.T) {
+	clearExperimentalPending()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--resolve")
+	if err == nil {
+		t.Fatal("expected an error when there is nothing to resolve")
+	}
+	if !strings.Contains(err.Error(), "nothing to resolve") {
+		t.Errorf("expected a clear no-pending error, got: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected zero HTTP requests, got %d", calls.Load())
+	}
+}
+
+func TestPoolSettingsPatchResolveRejectsAmbiguousFlags(t *testing.T) {
+	clearExperimentalPending()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--resolve", "--priority", "7")
+	if err == nil {
+		t.Fatal("expected an error for ambiguous --resolve usage")
+	}
+	if !strings.Contains(err.Error(), "--resolve") || !strings.Contains(err.Error(), "--priority") {
+		t.Errorf("expected the error to explain the --resolve/--priority ambiguity, got: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected zero HTTP requests, got %d", calls.Load())
+	}
+}
+
+func TestPoolSettingsPatchJournaledAbort(t *testing.T) {
+	clearExperimentalPending()
+
+	// Point the journal at a path that names an existing directory: staging
+	// succeeds, but the temp file cannot be renamed over the directory, so
+	// journaling fails and the write must abort unjournaled.
+	blocked := filepath.Join(t.TempDir(), "pending.json")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatalf("setup blocked journal path: %v", err)
+	}
+	oldOverride := experimentalPendingPathOverride
+	experimentalPendingPathOverride = blocked
+	t.Cleanup(func() { experimentalPendingPathOverride = oldOverride })
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("expected the patch to abort when the journal cannot be written")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "journal") || !strings.Contains(msg, "unjournaled") {
+		t.Errorf("expected a journaling failure abort, got: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected zero HTTP requests when journaling fails, got %d", calls.Load())
 	}
 }
 

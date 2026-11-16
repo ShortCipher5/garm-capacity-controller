@@ -30,32 +30,50 @@
 	// Outcome states.
 	let applied = false;
 	let conflictEtag: string | null = null;
+	let conflictLatched = false;
 	let unknownHeld = false;
 	let errorMessage = '';
 
 	// Client-side durable journal of a dispatched-but-unresolved write. The
-	// exact request id, payload and precondition are persisted before
-	// dispatch and cleared on any definitive outcome, so a browser restart
-	// recovers the UNKNOWN state instead of silently dropping it.
+	// exact request id, payload, full draft and precondition are persisted
+	// before dispatch and cleared on any definitive outcome, so a browser
+	// restart recovers the UNKNOWN state instead of silently dropping it.
+	// The journal is kept per pool so concurrent editors of different pools
+	// can never overwrite or clear each other's pending request. The full
+	// draft is journaled alongside the patch so recovery restores every
+	// field the operator saw, not just the changed ones.
 	interface PendingRequest {
 		requestId: string;
 		payload: Partial<PoolSettings>;
+		draft: PoolSettings;
 		etag: string;
 		poolID: string;
 		at: string;
 	}
 	let pendingRequest: PendingRequest | null = null;
 
+	// The request id currently holding this tab's multi-tab lock, if any.
+	// Tracked so the beforeunload handler (and only the owner) can release
+	// the lock without touching a lock another tab holds.
+	let heldLockRequestId: string | null = null;
+
 	function pendingStorageKey(): string {
-		return 'garm.expPoolSettings.pending';
+		return `garm.expPoolSettings.pending.${pool.id}`;
 	}
 
-	function persistPending(rec: PendingRequest) {
+	function lockStorageKey(): string {
+		return `garm.expPoolSettings.lock.${pool.id}`;
+	}
+
+	// persistPending is fail-closed: it reports whether the journal actually
+	// reached localStorage so save() can abort BEFORE dispatching when the
+	// pending record would otherwise be lost (and the UNKNOWN hold with it).
+	function persistPending(rec: PendingRequest): boolean {
 		try {
 			localStorage.setItem(pendingStorageKey(), JSON.stringify(rec));
+			return true;
 		} catch {
-			// Storage unavailable: the UNKNOWN state still holds for this
-			// session; only cross-restart recovery is lost.
+			return false;
 		}
 	}
 
@@ -68,12 +86,70 @@
 		}
 	}
 
+	// acquireLock is the multi-tab guard around a write to this pool. An
+	// existing lock with a DIFFERENT request id means another tab has an
+	// unresolved write here; the save is refused. Re-entering with the SAME
+	// request id (a deliberate resolve after UNKNOWN) refreshes the lock
+	// instead of deadlocking against it.
+	function acquireLock(requestId: string): boolean {
+		try {
+			const raw = localStorage.getItem(lockStorageKey());
+			if (raw) {
+				const existing = JSON.parse(raw) as { requestId?: string } | null;
+				if (existing && existing.requestId && existing.requestId !== requestId) {
+					return false;
+				}
+			}
+			localStorage.setItem(lockStorageKey(), JSON.stringify({ requestId, at: new Date().toISOString() }));
+			heldLockRequestId = requestId;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	// releaseLock removes the lock only when it still belongs to the given
+	// request, so an outcome here can never clear another tab's lock.
+	function releaseLock(requestId: string) {
+		try {
+			const raw = localStorage.getItem(lockStorageKey());
+			if (raw) {
+				const existing = JSON.parse(raw) as { requestId?: string } | null;
+				if (!existing || !existing.requestId || existing.requestId === requestId) {
+					localStorage.removeItem(lockStorageKey());
+				}
+			}
+		} catch {
+			// ignore
+		}
+		if (heldLockRequestId === requestId) {
+			heldLockRequestId = null;
+		}
+	}
+
+	// releaseHeldLock is the best-effort beforeunload cleanup: it drops the
+	// lock only if this tab owns one. The pending journal survives either
+	// way, so recovery after a restart is unaffected.
+	function releaseHeldLock() {
+		if (heldLockRequestId) {
+			releaseLock(heldLockRequestId);
+		}
+	}
+
 	function restorePending(): PendingRequest | null {
 		try {
 			const raw = localStorage.getItem(pendingStorageKey());
 			if (!raw) return null;
 			const rec = JSON.parse(raw) as PendingRequest;
 			if (!rec || !rec.requestId || !rec.payload || rec.poolID !== pool.id) return null;
+			if (
+				!rec.draft ||
+				typeof rec.draft.priority !== 'number' ||
+				typeof rec.draft.max_runners !== 'number' ||
+				typeof rec.draft.min_idle_runners !== 'number'
+			) {
+				return null;
+			}
 			return rec;
 		} catch {
 			return null;
@@ -112,7 +188,8 @@
 			conflictEtag = null;
 			// unknownHeld is intentionally NOT cleared here: a refresh does
 			// not resolve an unresolved write. It clears only through
-			// resolve() after a definitive outcome.
+			// resolve() after a definitive outcome. conflictLatched is also
+			// NOT cleared: only the operator's "Mark reconciled" does.
 			errorMessage = '';
 		} catch (err) {
 			loadError = describeError(err);
@@ -137,6 +214,13 @@
 			errorMessage = 'An earlier save is still unresolved. Use "Resolve outcome" before saving again.';
 			return;
 		}
+		if (conflictLatched) {
+			// A recorded conflict blocks saving until the operator has
+			// deliberately reconciled against the read-only current values.
+			errorMessage =
+				'Saving is blocked until the recorded conflict is reconciled. Review the read-only current values, then press "Mark reconciled".';
+			return;
+		}
 		const patch: Partial<PoolSettings> = {};
 		if (draft.priority !== serverValues.priority) patch.priority = draft.priority;
 		if (draft.max_runners !== serverValues.max_runners) patch.max_runners = draft.max_runners;
@@ -146,9 +230,17 @@
 			return;
 		}
 
-		// Persistent request identity, journaled before dispatch so an
-		// UNKNOWN outcome survives a browser restart.
+		// Persistent request identity. The multi-tab lock is taken first so
+		// a refused save never clobbers another tab's journaled request for
+		// this pool, then the pending record (request id, payload AND full
+		// draft) is journaled before dispatch so an UNKNOWN outcome survives
+		// a browser restart.
 		const requestId = crypto.randomUUID();
+		if (!acquireLock(requestId)) {
+			errorMessage =
+				'Another tab has an unresolved write for this pool; resolve it there first. Your change was NOT sent.';
+			return;
+		}
 		saving = true;
 		applied = false;
 		conflictEtag = null;
@@ -156,12 +248,23 @@
 		const rec: PendingRequest = {
 			requestId,
 			payload: patch,
+			draft: { ...draft },
 			etag,
 			poolID: pool.id,
 			at: new Date().toISOString()
 		};
 		pendingRequest = rec;
-		persistPending(rec);
+		if (!persistPending(rec)) {
+			// Fail closed: nothing was dispatched, the in-memory hold is
+			// dropped and the lock is released; the operator must fix
+			// storage and try again.
+			pendingRequest = null;
+			releaseLock(requestId);
+			saving = false;
+			errorMessage =
+				'Your change was NOT sent: the pending-request journal could not be saved to browser storage. Fix the storage problem (e.g. free quota) and try again.';
+			return;
+		}
 		try {
 			await dispatchPatch(requestId, patch, etag);
 		} finally {
@@ -171,7 +274,9 @@
 
 	// dispatchPatch issues exactly one PATCH and routes every outcome class.
 	// Shared by save() and by the deliberate resolve of an unresolved
-	// request; it never retries on its own.
+	// request; it never retries on its own. The multi-tab lock is released
+	// on every definitive outcome; UNKNOWN keeps it (recovery re-enters
+	// under the same request id).
 	async function dispatchPatch(requestId: string, patch: Partial<PoolSettings>, precondition: string) {
 		if (!ref) return;
 		try {
@@ -181,6 +286,7 @@
 				// request already applied earlier. The outcome is now known;
 				// adopt the recorded ETag and re-read deliberately.
 				clearPending();
+				releaseLock(requestId);
 				unknownHeld = false;
 				etag = res.etag;
 				await load(true);
@@ -191,6 +297,7 @@
 				throw new Error('applied response carried no settings document');
 			}
 			clearPending();
+			releaseLock(requestId);
 			unknownHeld = false;
 			// Applied: the server document is the new baseline and the draft is
 			// cleared (it equals the applied document).
@@ -205,21 +312,24 @@
 				// commit (a committed request would have left a durable
 				// receipt and been answered by replay). Definitive either way.
 				clearPending();
+				releaseLock(requestId);
 				unknownHeld = false;
 				// Keep the draft exactly as the operator typed it, and adopt
 				// the fresh ETag so a deliberate re-save is preconditioned on
 				// it (a manual re-read still precedes a truly reconciled save).
 				conflictEtag = err.etag;
+				conflictLatched = true;
 				if (err.etag) {
 					etag = err.etag;
 				}
 			} else if (err instanceof PoolSettingsError && err.kind === 'rejected') {
 				clearPending();
+				releaseLock(requestId);
 				unknownHeld = false;
 				errorMessage = describeError(err);
 			} else if (err instanceof PoolSettingsError && err.kind === 'unknown') {
 				// Lost or ambiguous response after dispatch: keep the journal
-				// and the hold. Never auto-retry.
+				// and the hold (and the lock). Never auto-retry.
 				unknownHeld = true;
 			} else {
 				errorMessage = describeError(err);
@@ -229,9 +339,17 @@
 
 	// resolve deliberately re-presents the journaled request so the
 	// server's durable receipt turns the UNKNOWN into a definitive outcome.
-	// It never submits new content.
+	// It never submits new content. It re-enters under the journaled request
+	// id, so a lock still held from the original dispatch does not
+	// self-deadlock; only a lock owned by a different request (another tab)
+	// refuses the resolve.
 	async function resolve() {
 		if (!ref || !pendingRequest || saving || refreshing) return;
+		if (!acquireLock(pendingRequest.requestId)) {
+			errorMessage =
+				'Another tab has an unresolved write for this pool; resolve it there first. Your change was NOT sent.';
+			return;
+		}
 		saving = true;
 		applied = false;
 		conflictEtag = null;
@@ -248,16 +366,26 @@
 		await load(true);
 	}
 
+	function markReconciled() {
+		// Deliberate operator action: only this clears the conflict latch.
+		conflictLatched = false;
+	}
+
 	onMount(() => {
 		const rec = restorePending();
 		if (rec) {
 			// Recover an unresolved write from before the restart: re-enter
-			// the UNKNOWN hold and restore the operator's draft.
+			// the UNKNOWN hold and restore the operator's full journaled
+			// draft (every field, not only the patched ones).
 			pendingRequest = rec;
 			unknownHeld = true;
-			draft = { ...draft, ...rec.payload };
+			draft = { ...rec.draft };
 		}
 		load(false);
+		window.addEventListener('beforeunload', releaseHeldLock);
+		return () => {
+			window.removeEventListener('beforeunload', releaseHeldLock);
+		};
 	});
 </script>
 
@@ -309,7 +437,7 @@
 						Conflict (412): the settings changed elsewhere. Your edits below are preserved and were not applied.
 					</p>
 					<p class="text-sm text-yellow-800 dark:text-yellow-200 mt-1">
-						Fresh ETag: {conflictEtag}. Re-read the current settings, reconcile, then save again.
+						Fresh ETag: {conflictEtag}. Review the read-only current values below, reconcile your draft, then press "Mark reconciled" to re-enable saving.
 					</p>
 				</div>
 			{/if}
@@ -436,6 +564,15 @@
 						Re-read settings
 					{/if}
 				</button>
+				{#if conflictLatched}
+					<button
+						type="button"
+						on:click={markReconciled}
+						class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 cursor-pointer"
+					>
+						Mark reconciled
+					</button>
+				{/if}
 				{#if unknownHeld}
 					<button
 						type="button"
@@ -449,7 +586,7 @@
 				<button
 					type="button"
 					on:click={save}
-					disabled={saving || refreshing || !etag || unknownHeld}
+					disabled={saving || refreshing || !etag || unknownHeld || conflictLatched}
 					class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
 				>
 					{#if saving}

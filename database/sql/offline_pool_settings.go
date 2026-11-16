@@ -87,17 +87,61 @@ func (OfflinePoolSettingsRequestReceipt) TableName() string {
 	return "offline_pool_settings_request_receipts"
 }
 
+// OfflinePoolSettingsMeta is the durable installation marker of the
+// experimental offline pool settings schema. It is created in the same
+// transaction as the revision and receipts tables and seeded with a
+// single row (key "schema", installed flag set), so the presence of this
+// table proves the revision table existed at install time. The legacy
+// pool update path relies on that implication to tell "feature never
+// enabled against this database" (marker absent: benign skip) apart from
+// "revision schema lost after the feature was used" (marker present: the
+// legacy write must fail closed).
+type OfflinePoolSettingsMeta struct {
+	// Key is the marker key; "schema" is the only row this table holds.
+	Key string `gorm:"type:text;primaryKey"`
+	// Installed is true once the experimental schema is installed.
+	Installed bool `gorm:"not null"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// TableName returns the table of the installation marker.
+func (OfflinePoolSettingsMeta) TableName() string {
+	return "offline_pool_settings_meta"
+}
+
+// offlineSettingsMetaSchemaKey is the singleton key of the installation
+// marker row.
+const offlineSettingsMetaSchemaKey = "schema"
+
 // ensureOfflinePoolSettingsSchema lazily creates the experimental schema.
 // It is a no-op once the tables exist. This function is the only place
 // where the experimental schema is created; it is only reachable through
 // the experimental store methods, which in turn are only reachable when
 // the experimental.enable_offline_pool_settings config flag is enabled.
+//
+// All three tables (revision, receipts, marker) are created in a single
+// transaction together with the marker row, so the presence of the marker
+// table atomically implies that the revision table existed at install
+// time.
 func (s *sqlDatabase) ensureOfflinePoolSettingsSchema() error {
 	if s.conn.Migrator().HasTable(&OfflinePoolSettingsRevision{}) &&
-		s.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{}) {
+		s.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{}) &&
+		s.conn.Migrator().HasTable(&OfflinePoolSettingsMeta{}) {
 		return nil
 	}
-	if err := s.conn.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}); err != nil {
+	err := s.conn.Transaction(func(tx *gorm.DB) error {
+		if err := tx.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}, &OfflinePoolSettingsMeta{}); err != nil {
+			return err
+		}
+		// Record the installation durably, in the same transaction as the
+		// table creation. The marker row is write-once; on a reinstall
+		// after table loss the existing row is kept.
+		meta := OfflinePoolSettingsMeta{Key: offlineSettingsMetaSchemaKey, Installed: true}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&meta).Error
+	})
+	if err != nil {
 		return fmt.Errorf("error creating offline pool settings schema: %w", err)
 	}
 	return nil
@@ -124,18 +168,29 @@ func absentRevisionTableError(err error) bool {
 	return false
 }
 
+// errOfflineRevisionSchemaMissing is returned by the legacy revision bump
+// when the revision table is absent but the installation marker is
+// present: the experimental schema was lost after the feature was used,
+// and the legacy write must fail rather than commit with a silently
+// stale revision.
+var errOfflineRevisionSchemaMissing = errors.New("experimental revision schema is missing after being installed; refusing the legacy write")
+
 // bumpOfflineRevisionForLegacyWrite advances the experimental offline pool
 // settings revision of a pool from the stock (legacy) pool update path, so
 // that a client holding a strong ETag from the experimental API observes
 // stock settings writes as conflicts.
 //
 // The bump is deliberately inline: it runs inside the same transaction as
-// the stock settings write, it never creates the experimental side table and
-// it never alters the stock schema. It returns nil without doing anything
-// when the experimental feature was never enabled (the side table does not
-// exist). Any other error is returned: the legacy write then fails and rolls
-// back, because committing the settings change without the revision advance
-// would leave every conditional client with a stale, undetectable view.
+// the stock settings write and it never alters the stock schema. It
+// returns nil without doing anything when the experimental feature was
+// never enabled against this database — the revision table is absent and
+// the installation marker table is absent too. When the revision table is
+// absent but the marker is present, the schema was lost after the feature
+// was used, and the bump returns errOfflineRevisionSchemaMissing: the
+// legacy write then fails and rolls back, because committing the settings
+// change without the revision advance would leave every conditional
+// client with a stale, undetectable view. Any other error is returned for
+// the same reason.
 func (s *sqlDatabase) bumpOfflineRevisionForLegacyWrite(tx *gorm.DB, poolID uuid.UUID) error {
 	err := tx.Model(&OfflinePoolSettingsRevision{}).
 		Where("pool_id = ?", poolID).
@@ -144,6 +199,15 @@ func (s *sqlDatabase) bumpOfflineRevisionForLegacyWrite(tx *gorm.DB, poolID uuid
 		return nil
 	}
 	if absentRevisionTableError(err) {
+		// The revision table is gone. That is only benign when the feature
+		// was never enabled; the marker table tells the two apart. It was
+		// created in the same transaction as the revision table, so its
+		// presence proves the revision table existed at install time and
+		// was lost afterwards. Fail closed: never commit a legacy write on
+		// top of a silently stale revision.
+		if tx.Migrator().HasTable(&OfflinePoolSettingsMeta{}) {
+			return fmt.Errorf("%w: %v", errOfflineRevisionSchemaMissing, err)
+		}
 		return nil
 	}
 	return fmt.Errorf("error advancing offline pool settings revision for legacy write: %w", err)

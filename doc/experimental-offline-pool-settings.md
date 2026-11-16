@@ -23,10 +23,12 @@ other nonexistent route — GET gets the normal not-found handler (404),
 PATCH gets the stock router's method-not-allowed response (405, since the
 catch-all not-found route does not list PATCH) — and **no database schema
 change of any kind occurs**. When
-the flag is enabled, the two supporting tables
+the flag is enabled, the three supporting tables
 (`offline_pool_settings_revisions`,
-`offline_pool_settings_request_receipts`) are created lazily, on first use
-by the experimental code path — never at startup, and never by the stock
+`offline_pool_settings_request_receipts` and the installation marker
+`offline_pool_settings_meta`) are created lazily, on first use
+by the experimental code path — all three in a single transaction, never
+at startup, and never by the stock
 migration. Stock tables (including `pools`) are never altered; the stock
 schema and all existing routes behave exactly as before, flag on or off.
 
@@ -149,11 +151,19 @@ them.
 
 Properties of the legacy bump:
 
-- It is **best-effort**: when the experimental side table does not exist
+- It **never creates experimental schema** and is silent only when the
+  feature was never enabled: when the revision table does not exist
   (flag never enabled, or the pool simply has no revision row yet), the
   `UPDATE` matches zero rows or fails with "no such table", and either
-  way the stock write is unaffected and unaltered. The stock path never
-  creates the table and never fails because of it.
+  way the stock write is unaffected. A third table,
+  `offline_pool_settings_meta`, is the durable install marker (see
+  below): created in the same transaction as the revision table, its
+  presence proves the revision table existed at install time. If the
+  revision table is missing **while the marker is present**, the schema
+  was lost after the feature was used, and the legacy write **fails and
+  rolls back** ("experimental revision schema is missing after being
+  installed; refusing the legacy write") rather than committing a change
+  no conditional client can detect.
 - It is **coarse**: any stock write that changes the `pools` row advances
   the revision, including writes that only touch columns outside the
   offline settings document (e.g. `image`). This errs on the side of
@@ -162,6 +172,40 @@ Properties of the legacy bump:
 - It never double-bumps: the experimental PATCH path does not share code
   with the stock update path; it advances `seq` exactly once through its
   own conditional `UPDATE`.
+
+## Installation marker, schema loss and reinstall
+
+The lazy installer creates the revision table, the receipts table and a
+marker table (`offline_pool_settings_meta`: a single row, key `schema`,
+with an installed flag and timestamps) **in one transaction**, and the
+marker row is written in that same transaction. The marker therefore
+witnesses the installation: wherever the marker table is present, the
+revision table existed at install time.
+
+The legacy bump uses exactly that witness. Revision table absent and
+marker absent → the feature was never enabled against this database, a
+benign skip. Revision table absent and marker present → the schema was
+lost after the feature was used, and the legacy write fails closed (the
+whole stock transaction rolls back), because committing the settings
+change without the revision advance would leave every conditional client
+with a stale, undetectable view.
+
+The experimental GET/PATCH paths are deliberately unaffected by such a
+loss: they call the same lazy installer first, which recreates any
+missing table. A GET or PATCH after a lost revision table therefore
+**silently reinstalls** the schema — acceptable for this experiment, with
+one important consequence: **revision history restarts at a fresh
+epoch.** `getOrCreateOfflineRevision` creates a brand new revision row
+(new `epoch`, `seq` back at 0) whenever none exists, and the epoch
+change is exactly what makes the reinstall safe: every strong ETag is
+`"<epoch>:<seq>"`, so a tag minted against the lost history can never
+match the reinstalled revision and is rejected stale (412). No client can
+write against revision state the server no longer holds.
+
+One hole is documented rather than fixed: if the marker table itself is
+lost together with the revision table, the next legacy write sees "both
+absent" and stays benign. The marker is only a witness; losing the
+witness silently weakens the guarantee.
 
 ## Durable request receipts
 
@@ -266,7 +310,9 @@ no partial state — and no receipt — can exist.
 - **Multi-dialect receipts.** The receipts and revisions tables are
   created through the ORM migrator and exercised on SQLite (CI); MySQL
   behavior is unverified in this slice.
-- **The stock bump is silent.** A stock write that fails to bump the
-  revision because of an unexpected side-table error does not report the
-  error; the stock write still succeeds, and the ETag may lag until the
-  next successful bump.
+- **The stock bump fails closed.** An unexpected side-table error aborts
+  the stock write and rolls it back, and so does a revision table that is
+  missing while the install marker is present (see "Installation marker,
+  schema loss and reinstall" above). The only case in which the stock
+  write proceeds without a bump is the feature never having been enabled
+  against this database.

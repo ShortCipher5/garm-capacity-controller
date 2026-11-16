@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 
@@ -150,6 +151,20 @@ func (s *OfflinePoolSettingsTestSuite) revisionExists() bool {
 func (s *OfflinePoolSettingsTestSuite) receiptsExist() bool {
 	sqlDB := s.Store.(*sqlDatabase)
 	return sqlDB.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{})
+}
+
+func (s *OfflinePoolSettingsTestSuite) metaExists() bool {
+	sqlDB := s.Store.(*sqlDatabase)
+	return sqlDB.conn.Migrator().HasTable(&OfflinePoolSettingsMeta{})
+}
+
+// installedMetaRow returns the installation marker row; it requires the
+// experimental schema to be installed.
+func (s *OfflinePoolSettingsTestSuite) installedMetaRow() OfflinePoolSettingsMeta {
+	sqlDB := s.Store.(*sqlDatabase)
+	var meta OfflinePoolSettingsMeta
+	s.Require().NoError(sqlDB.conn.Where("key = ?", offlineSettingsMetaSchemaKey).First(&meta).Error)
+	return meta
 }
 
 func (s *OfflinePoolSettingsTestSuite) receiptCount() int64 {
@@ -540,6 +555,110 @@ func (s *OfflinePoolSettingsTestSuite) TestLegacyWriteWithoutRevisionTable() {
 	s.Require().NoError(err)
 	s.Require().Equal(uint(11), settings.Priority)
 	s.Require().Zero(rev.Seq)
+}
+
+// TestLegacyWriteAfterRevisionTableLossFailsClosed drives the experimental
+// path once (installing the schema), then simulates a schema loss by
+// dropping the revision table while the installation marker stays behind.
+// A stock pool write must now fail closed — the whole transaction rolls
+// back — instead of committing a change no conditional client can detect.
+func (s *OfflinePoolSettingsTestSuite) TestLegacyWriteAfterRevisionTableLossFailsClosed() {
+	entity := s.orgEntity()
+
+	_, _, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().True(s.revisionExists())
+	s.Require().True(s.receiptsExist())
+	s.Require().True(s.metaExists())
+	s.Require().True(s.installedMetaRow().Installed)
+
+	beforePool := s.currentPoolRow(s.pool.ID)
+
+	// lose the revision table; the marker (and the receipts table) survive
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_revisions").Error)
+	s.Require().False(s.revisionExists())
+	s.Require().True(s.metaExists())
+
+	priority := uint(21)
+	_, err = s.Store.UpdateEntityPool(s.adminCtx, entity, s.pool.ID, params.UpdatePoolParams{
+		Priority: &priority,
+	})
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineRevisionSchemaMissing)
+	s.Require().Contains(err.Error(), "experimental revision schema is missing after being installed")
+	s.Require().Contains(err.Error(), "refusing the legacy write")
+
+	// the stock write rolled back: the pool row is unchanged
+	s.Require().Equal(beforePool.Priority, s.currentPoolRow(s.pool.ID).Priority)
+	s.Require().Equal(beforePool.MaxRunners, s.currentPoolRow(s.pool.ID).MaxRunners)
+	s.Require().Equal(beforePool.MinIdleRunners, s.currentPoolRow(s.pool.ID).MinIdleRunners)
+	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
+
+	// the stock path never recreates the experimental schema, and the
+	// surviving marker/receipts tables are untouched
+	s.Require().False(s.revisionExists())
+	s.Require().True(s.metaExists())
+	s.Require().True(s.receiptsExist())
+	s.Require().True(s.installedMetaRow().Installed)
+}
+
+// TestExperimentalPathReinstallsSchemaAfterLoss drops the revision and
+// receipts tables after the feature was used and verifies that the
+// experimental GET path recreates them (the marker survives), restarting
+// revision history at a fresh epoch. A fresh epoch invalidates every
+// pre-loss ETag: a conditional PATCH holding one is rejected stale.
+func (s *OfflinePoolSettingsTestSuite) TestExperimentalPathReinstallsSchemaAfterLoss() {
+	entity := s.orgEntity()
+
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().NotZero(rev0.Epoch)
+
+	// revision epochs have one-second granularity; make sure the reinstall
+	// below happens in a later Unix second so a fresh epoch is provable
+	for uint64(time.Now().Unix()) <= rev0.Epoch {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// lose both data tables; the installation marker survives
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_revisions").Error)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_request_receipts").Error)
+	s.Require().False(s.revisionExists())
+	s.Require().False(s.receiptsExist())
+	s.Require().True(s.metaExists())
+
+	// the experimental path reinstalls the schema and restarts at a fresh
+	// epoch with seq back at 0
+	settings, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().True(s.revisionExists())
+	s.Require().True(s.receiptsExist())
+	s.Require().True(s.metaExists())
+	s.Require().True(s.installedMetaRow().Installed)
+	s.Require().NotEqual(rev0.Epoch, rev1.Epoch)
+	s.Require().Greater(rev1.Epoch, rev0.Epoch)
+	s.Require().Zero(rev1.Seq)
+	// the pool row itself survived the table loss untouched
+	s.Require().Equal(uint(5), settings.MaxRunners)
+	s.Require().Equal(uint(2), settings.MinIdleRunners)
+
+	// a conditional PATCH holding a pre-loss ETag is rejected stale: the
+	// fresh epoch invalidates every outstanding ETag
+	priority := uint(7)
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsStaleRevision)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedStale, result.Outcome)
+	var staleErr *dbCommon.OfflinePoolSettingsStaleRevisionError
+	s.Require().ErrorAs(err, &staleErr)
+	s.Require().Equal(rev1, staleErr.Current)
+
+	// the stale rejection changed nothing
+	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
+	s.Require().Equal(rev1, s.currentRevision(s.pool.ID))
 }
 
 // TestUpdateAdvancesSeqExactlyOnce guards the no-double-bump guarantee: one
