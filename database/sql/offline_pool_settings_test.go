@@ -898,6 +898,61 @@ func (s *OfflinePoolSettingsTestSuite) TestReceiptWithoutKeyIsDurableButNotRepla
 
 var errOfflineTestMalformed = fmt.Errorf("malformed settings document")
 
+// TestConcurrentConditionalUpdatesExactlyOneApplies races N conditional
+// updates, all holding the same observed revision, against one real SQLite
+// database. Exactly one update may commit; every loser must come back as a
+// typed stale rejection and, critically, must not leave its settings write
+// behind: the pool row must reflect only the winner even when the race is
+// detected at revision-advance time (after the early stale check passed).
+func (s *OfflinePoolSettingsTestSuite) TestConcurrentConditionalUpdatesExactlyOneApplies() {
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+
+	const racers = 8
+	type outcome struct {
+		priority uint
+		result   params.OfflinePoolSettingsUpdateResult
+		err      error
+	}
+	results := make(chan outcome, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			priority := uint(100 + i)
+			req := offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{Priority: &priority})
+			req.RequestID = fmt.Sprintf("race-%d", i)
+			result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, req)
+			results <- outcome{priority: priority, result: result, err: err}
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	var winners []uint
+	losers := 0
+	for res := range results {
+		if res.err == nil {
+			s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, res.result.Outcome)
+			winners = append(winners, res.priority)
+			continue
+		}
+		s.Require().ErrorIs(res.err, dbCommon.ErrOfflinePoolSettingsStaleRevision)
+		losers++
+	}
+	s.Require().Len(winners, 1, "exactly one racing conditional update may commit")
+	s.Require().Equal(racers-1, losers)
+
+	// The revision moved exactly once and the row carries only the winner's
+	// value: a rejection never commits its settings change, no matter where
+	// the race was detected.
+	s.Require().Equal(rev0.Seq+1, s.currentRevision(s.pool.ID).Seq)
+	s.Require().Equal(winners[0], s.currentPoolRow(s.pool.ID).Priority)
+	// Every racer persisted a durable request receipt.
+	s.Require().Equal(int64(racers), s.receiptCount())
+}
+
 func TestOfflinePoolSettingsTestSuite(t *testing.T) {
 	suite.Run(t, new(OfflinePoolSettingsTestSuite))
 }

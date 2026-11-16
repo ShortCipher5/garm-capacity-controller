@@ -176,4 +176,64 @@ describe('pool-settings client', () => {
 		).rejects.toBeInstanceOf(PoolSettingsError);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
+
+	it('PATCH answered from a stored request receipt reports replayed with the resulting ETag', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { outcome: 'applied_changed', resulting_etag: '"43:2"' }, '"43:2"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await patchPoolSettings(ref, '"42:7"', { priority: 20 });
+
+		expect(result.replayed).toBe(true);
+		expect(result.settings).toBeNull();
+		expect(result.etag).toBe('"43:2"');
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('PATCH answered from a stored noop receipt replays without a settings tuple', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(200, { outcome: 'applied_noop', resulting_etag: '"43:3"' }, '"43:3"')
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await patchPoolSettings(ref, '"43:3"', { priority: 20 });
+
+		expect(result.replayed).toBe(true);
+		expect(result.settings).toBeNull();
+		expect(result.etag).toBe('"43:3"');
+	});
+
+	it('409 request-id reuse is a definitive rejection, never UNKNOWN', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			jsonResponse(409, { error: 'Idempotency-Key was already used with a different payload or pool' })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('rejected');
+		expect(err!.status).toBe(409);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('a 200 that is neither settings nor a replay outcome stays UNKNOWN', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { hello: 'world' }, '"43:4"'));
+		vi.stubGlobal('fetch', fetchMock);
+
+		let err: PoolSettingsError | undefined;
+		try {
+			await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+		} catch (e) {
+			err = e as PoolSettingsError;
+		}
+		expect(err).toBeInstanceOf(PoolSettingsError);
+		expect(err!.kind).toBe('unknown');
+		expect(err!.status).toBe(200);
+	});
 });

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,16 +108,26 @@ func (s *sqlDatabase) ensureOfflinePoolSettingsSchema() error {
 // that a client holding a strong ETag from the experimental API observes
 // stock settings writes as conflicts.
 //
-// The bump is deliberately best-effort and inline: it runs inside the same
-// transaction as the stock settings write, but it never creates the
-// experimental side table, never alters the stock schema and never fails
-// the stock write. When the experimental feature was never enabled (or the
-// pool has no revision row yet), the UPDATE either errors with "no such
-// table" (ignored) or matches zero rows (normal).
-func (s *sqlDatabase) bumpOfflineRevisionForLegacyWrite(tx *gorm.DB, poolID uuid.UUID) {
-	_ = tx.Model(&OfflinePoolSettingsRevision{}).
+// The bump is deliberately inline: it runs inside the same transaction as
+// the stock settings write, it never creates the experimental side table and
+// it never alters the stock schema. It returns nil without doing anything
+// when the experimental feature was never enabled (the side table does not
+// exist). Any other error is returned: the legacy write then fails and rolls
+// back, because committing the settings change without the revision advance
+// would leave every conditional client with a stale, undetectable view.
+func (s *sqlDatabase) bumpOfflineRevisionForLegacyWrite(tx *gorm.DB, poolID uuid.UUID) error {
+	err := tx.Model(&OfflinePoolSettingsRevision{}).
 		Where("pool_id = ?", poolID).
 		Update("seq", gorm.Expr("seq + 1")).Error
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "no such table") {
+		// Experimental feature never enabled (or schema not yet
+		// installed): nothing to bump, by design.
+		return nil
+	}
+	return fmt.Errorf("error advancing offline pool settings revision for legacy write: %w", err)
 }
 
 // getOrCreateOfflineRevision returns the revision row of a pool, creating
@@ -216,8 +227,10 @@ func (s *sqlDatabase) GetOfflinePoolSettings(_ context.Context, entity params.Fo
 // failures (which map to 503) leave no trace at all.
 //
 // The revision advance remains the single conditional UPDATE also used to
-// detect lost races; the stock update path never calls this method, so one
-// PATCH through the experimental API advances seq exactly once.
+// detect lost races; it runs before the pool settings write, so a lost race
+// detected at advance time commits only the rejection receipt and no settings
+// change. The stock update path never calls this method, so one PATCH through
+// the experimental API advances seq exactly once.
 func (s *sqlDatabase) UpdateOfflinePoolSettings(_ context.Context, entity params.ForgeEntity, poolID string, req params.OfflinePoolSettingsUpdateRequest) (params.OfflinePoolSettingsUpdateResult, error) {
 	var result params.OfflinePoolSettingsUpdateResult
 
@@ -408,19 +421,13 @@ func (s *sqlDatabase) applyOfflineSettingsPatch(tx *gorm.DB, pool Pool, req para
 		return nil
 	}
 
-	updates := map[string]interface{}{
-		"priority":         newPriority,
-		"max_runners":      newMaxRunners,
-		"min_idle_runners": newMinIdleRunners,
-	}
-	if err := tx.Model(&Pool{}).Where("id = ?", pool.ID).Updates(updates).Error; err != nil {
-		return fmt.Errorf("error updating pool settings: %w", err)
-	}
-
-	// Conditional revision advance. If this UPDATE matches no row, the
-	// revision changed under us after the check above; report the fresh
-	// revision as a stale rejection and let the transaction rollback undo
-	// the pool update.
+	// Conditional revision advance BEFORE mutating the pool row. The
+	// conditional UPDATE is the race detector for the window between the
+	// stale check above and the write: if it matches no row, the revision
+	// changed under us and nothing has been written yet, so the rejection
+	// receipt commits with no settings side effect. A generic failure of
+	// the settings UPDATE after this point aborts the transaction, rolling
+	// back the advance too (settings and revision unchanged).
 	newRev := params.OfflinePoolSettingsRevision{Epoch: current.Epoch, Seq: current.Seq + 1}
 	res := tx.Model(&OfflinePoolSettingsRevision{}).
 		Where("pool_id = ? AND epoch = ? AND seq = ?", pool.ID, current.Epoch, current.Seq).
@@ -438,6 +445,15 @@ func (s *sqlDatabase) applyOfflineSettingsPatch(tx *gorm.DB, pool Pool, req para
 		*outcome = params.OfflinePoolSettingsOutcomeRejectedStale
 		*resultingETag = &freshETag
 		return &common.OfflinePoolSettingsStaleRevisionError{Current: freshRev}
+	}
+
+	updates := map[string]interface{}{
+		"priority":         newPriority,
+		"max_runners":      newMaxRunners,
+		"min_idle_runners": newMinIdleRunners,
+	}
+	if err := tx.Model(&Pool{}).Where("id = ?", pool.ID).Updates(updates).Error; err != nil {
+		return fmt.Errorf("error updating pool settings: %w", err)
 	}
 
 	newRevETag := newRev.ETag()

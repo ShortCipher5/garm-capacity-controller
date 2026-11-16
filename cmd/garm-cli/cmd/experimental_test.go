@@ -183,6 +183,63 @@ func TestPoolSettingsPatchConflictPreservesDraftAndProvesNonEffect(t *testing.T)
 	}
 }
 
+func TestPoolSettingsPatchIDReuseIsRejectedNotUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error":"Idempotency-Key \"k\" was already used with a different payload or pool"}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("expected rejection, got nil")
+	}
+	var pse *poolSettingsError
+	if !errors.As(err, &pse) {
+		t.Fatalf("expected classified error, got: %v", err)
+	}
+	if pse.outcome != outcomeRejected {
+		t.Errorf("409 must classify as rejected, got %v", pse.outcome)
+	}
+	if pse.outcome == outcomeUnknown || strings.Contains(err.Error(), unknownHoldMessage) {
+		t.Errorf("definitive 409 refusal must not be held as UNKNOWN: %v", err)
+	}
+}
+
+func TestPoolSettingsPatchReplayEnvelopeReportsStoredOutcome(t *testing.T) {
+	var patchCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		patchCalls.Add(1)
+		// Answered from a durable request receipt: the settings tuple is
+		// not stored server-side, only the outcome and resulting ETag.
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"outcome":"applied_changed","resulting_etag":"\"100:9\""}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err != nil {
+		t.Fatalf("replay of a known-applied request must not be an error: %v", err)
+	}
+	if patchCalls.Load() != 1 {
+		t.Errorf("expected exactly one PATCH dispatch, got %d", patchCalls.Load())
+	}
+}
+
 func TestPoolSettingsPatchUnknownHoldOnLostResponse(t *testing.T) {
 	var dispatches atomic.Int32
 	cli := &rawClient{

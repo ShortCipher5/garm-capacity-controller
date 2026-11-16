@@ -183,6 +183,15 @@ func doPoolSettings(ctx context.Context, cli *rawClient, method string, ref pool
 			etag:    resp.Header.Get("ETag"),
 			msg:     "conflict: settings changed since the ETag was issued; your patch was NOT applied",
 		}
+	case http.StatusConflict:
+		// The request identity was already used with different content:
+		// definitive refusal, nothing was written. Never an UNKNOWN hold.
+		return resp.StatusCode, data, resp.Header.Get("ETag"), &poolSettingsError{
+			outcome: outcomeRejected,
+			status:  resp.StatusCode,
+			etag:    resp.Header.Get("ETag"),
+			msg:     fmt.Sprintf("request rejected (status %d): request identity already used with different content; this request was refused and nothing was written: %s", resp.StatusCode, strings.TrimSpace(string(data))),
+		}
 	case http.StatusBadRequest, http.StatusForbidden, http.StatusPreconditionRequired, http.StatusUnprocessableEntity:
 		// Definitive, non-ambiguous rejections.
 		return resp.StatusCode, data, resp.Header.Get("ETag"), &poolSettingsError{
@@ -306,6 +315,28 @@ func printPoolSettingsGet(body []byte, etag string) {
 	fmt.Println(string(body))
 }
 
+// parsePoolSettingsReplay recognises the wire document a PATCH answered
+// from a stored request receipt carries on HTTP 200 instead of the
+// settings tuple (the server does not store the original settings body).
+// Only applied outcomes arrive with status 200.
+func parsePoolSettingsReplay(body []byte) (outcome string, resultingETag string, ok bool) {
+	var doc struct {
+		Outcome       string `json:"outcome"`
+		ResultingETag string `json:"resulting_etag"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return "", "", false
+	}
+	if doc.Outcome != "applied_changed" && doc.Outcome != "applied_noop" {
+		return "", "", false
+	}
+	etag := doc.ResultingETag
+	if len(etag) < len(`"0:0"`) || etag[0] != '"' || etag[len(etag)-1] != '"' || !strings.Contains(etag, ":") {
+		return "", "", false
+	}
+	return doc.Outcome, etag, true
+}
+
 func init() {
 	registerExperimental(rootCmd)
 }
@@ -412,6 +443,23 @@ set in the environment. They never fall back to stock unconditional writes.`,
 			_, body, newETag, err := doPoolSettings(cmd.Context(), client, http.MethodPatch, ref, expPoolSettingsETag, strings.NewReader(string(payload)))
 			if err != nil {
 				return wrapPoolSettingsError(err, draft)
+			}
+			if replayOutcome, resultingETag, ok := parsePoolSettingsReplay(body); ok {
+				// The server answered from a durable request receipt: this
+				// exact request already applied earlier and nothing was
+				// re-applied. Report the recorded outcome; the operator can
+				// re-read deliberately if the document is needed.
+				if outputFormat == common.OutputFormatJSON {
+					printAsJSON(map[string]interface{}{
+						"outcome":         replayOutcome,
+						"etag":            resultingETag,
+						"replayed":        true,
+						"request_outcome": "applied",
+					})
+				} else {
+					fmt.Printf("already applied earlier (replayed from stored request receipt, outcome %s). resulting ETag: %s\n", replayOutcome, resultingETag)
+				}
+				return nil
 			}
 			if outputFormat == common.OutputFormatJSON {
 				printAsJSON(map[string]interface{}{

@@ -8,11 +8,18 @@
 // from GET in an If-Match header.
 //
 // Outcome semantics (never an auto-retry, never an unconditional write):
-//   - 200:             applied; the response carries the new ETag.
+//   - 200:             applied; the response carries the new ETag and the
+//                      settings tuple. If the same request identity and
+//                      payload are presented again the server answers from
+//                      its durable request receipt instead: the result has
+//                      settings null, the resulting ETag, and replayed=true.
 //   - 412:             PoolSettingsError kind 'conflict'. A 412 proves our
 //                      write had no effect; the fresh ETag from the response
 //                      is on the error so a draft can be rebased after a
 //                      manual re-read.
+//   - 409:             PoolSettingsError kind 'rejected'. The request
+//                      identity was already used with different content;
+//                      nothing was written. Definitive, never UNKNOWN.
 //   - 400/403/422/428: PoolSettingsError kind 'rejected' (definitive,
 //                      non-ambiguous).
 //   - anything else, or a lost/ambiguous response after dispatch:
@@ -59,6 +66,17 @@ export interface PoolSettingsResult {
 	etag: string | null;
 }
 
+// PoolSettingsPatchResult is the PATCH outcome. When the server answers from
+// a durable request receipt instead of re-applying (same request identity and
+// payload presented again), settings is null and etag is the resulting ETag
+// recorded by the original request; the caller re-reads deliberately if it
+// needs the document.
+export interface PoolSettingsPatchResult {
+	settings: PoolSettings | null;
+	etag: string | null;
+	replayed: boolean;
+}
+
 const SETTINGS_FIELDS: Array<keyof PoolSettings> = ['priority', 'max_runners', 'min_idle_runners'];
 
 export function poolSettingsPath(ref: PoolSettingsRef): string {
@@ -95,6 +113,24 @@ function asSettings(data: unknown): PoolSettings | null {
 	return null;
 }
 
+// asReplay recognises the wire document a PATCH answered from a stored
+// request receipt carries on HTTP 200 instead of the settings tuple: the
+// server does not store the original settings body. Only applied outcomes
+// arrive with status 200; rejected replays re-use their original status.
+function asReplay(data: unknown): { resultingETag: string } | null {
+	if (!data || typeof data !== 'object') {
+		return null;
+	}
+	const doc = data as { outcome?: unknown; resulting_etag?: unknown };
+	if (doc.outcome !== 'applied_changed' && doc.outcome !== 'applied_noop') {
+		return null;
+	}
+	if (typeof doc.resulting_etag !== 'string' || !/^"\d+:\d+"$/.test(doc.resulting_etag)) {
+		return null;
+	}
+	return { resultingETag: doc.resulting_etag };
+}
+
 function validatePatch(patch: PoolSettingsPatch): void {
 	if (!patch || typeof patch !== 'object' || Object.keys(patch).length === 0) {
 		throw new PoolSettingsError('rejected', 0, null, 'patch must set at least one of priority, max_runners, min_idle_runners');
@@ -119,7 +155,7 @@ async function requestPoolSettings(
 	method: 'GET' | 'PATCH',
 	ref: PoolSettingsRef,
 	opts: { ifMatch?: string; patch?: PoolSettingsPatch } = {}
-): Promise<PoolSettingsResult> {
+): Promise<PoolSettingsPatchResult> {
 	const headers: Record<string, string> = { Accept: 'application/json' };
 	const token = garmApi.getToken();
 	if (token) {
@@ -169,15 +205,22 @@ async function requestPoolSettings(
 	switch (resp.status) {
 		case 200: {
 			const settings = asSettings(data);
-			if (!settings) {
-				throw new PoolSettingsError(
-					'unknown',
-					resp.status,
-					etag,
-					'response was 200 but the body is not a readable settings document; outcome of the write is unknown'
-				);
+			if (settings) {
+				return { settings, etag, replayed: false };
 			}
-			return { settings, etag };
+			// A PATCH answered from a stored request receipt returns an
+			// outcome envelope instead of the settings tuple. That outcome
+			// is durable and known; it must not surface as UNKNOWN.
+			const replay = asReplay(data);
+			if (replay) {
+				return { settings: null, etag: replay.resultingETag, replayed: true };
+			}
+			throw new PoolSettingsError(
+				'unknown',
+				resp.status,
+				etag,
+				'response was 200 but the body is neither a readable settings document nor a readable replay outcome; outcome of the write is unknown'
+			);
 		}
 		case 412:
 			// 412 proves non-effect. Surface the fresh ETag so a preserved
@@ -187,6 +230,15 @@ async function requestPoolSettings(
 				resp.status,
 				etag,
 				messageFromBody(data, 'settings changed since this ETag was issued; your changes were NOT applied')
+			);
+		case 409:
+			// Request identity reused with different content: definitive
+			// refusal, nothing was written. Never an UNKNOWN hold.
+			throw new PoolSettingsError(
+				'rejected',
+				resp.status,
+				etag,
+				messageFromBody(data, 'request identity was already used with different content; this request was refused and nothing was written')
 			);
 		case 400:
 		case 403:
@@ -208,14 +260,18 @@ async function requestPoolSettings(
 	}
 }
 
-export function getPoolSettings(ref: PoolSettingsRef): Promise<PoolSettingsResult> {
-	return requestPoolSettings('GET', ref);
+export async function getPoolSettings(ref: PoolSettingsRef): Promise<PoolSettingsResult> {
+	const res = await requestPoolSettings('GET', ref);
+	if (!res.settings) {
+		throw new PoolSettingsError('unknown', 200, res.etag, 'GET returned no readable settings document');
+	}
+	return { settings: res.settings, etag: res.etag };
 }
 
 export function patchPoolSettings(
 	ref: PoolSettingsRef,
 	ifMatch: string,
 	patch: PoolSettingsPatch
-): Promise<PoolSettingsResult> {
+): Promise<PoolSettingsPatchResult> {
 	return requestPoolSettings('PATCH', ref, { ifMatch, patch });
 }

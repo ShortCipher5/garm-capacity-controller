@@ -659,9 +659,12 @@ func (s *sqlDatabase) updatePool(tx *gorm.DB, pool Pool, param params.UpdatePool
 			// Every stock write that changes the pool row participates in
 			// the experimental revision scheme: a client holding a strong
 			// ETag from the offline API must observe this write as a
-			// conflict. Best-effort by design (see the helper): a no-op
-			// when the experimental side table does not exist.
-			s.bumpOfflineRevisionForLegacyWrite(tx, pool.ID)
+			// conflict. A silent no-op only when the experimental side
+			// table does not exist; a real bump error fails this write so
+			// the revision can never be left stale silently.
+			if err := s.bumpOfflineRevisionForLegacyWrite(tx, pool.ID); err != nil {
+				return params.Pool{}, 0, err
+			}
 		}
 	}
 

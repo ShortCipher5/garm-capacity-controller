@@ -96,8 +96,22 @@
 		errorMessage = '';
 		try {
 			const res = await patchPoolSettings(ref, etag, patch);
+			if (res.replayed) {
+				// The server answered from a durable request receipt: this
+				// exact request already applied earlier. Adopt the recorded
+				// resulting ETag, then re-read the document deliberately
+				// (preserving the draft) so the editor bases itself on
+				// current server state without ever auto-retrying the write.
+				etag = res.etag;
+				await load(true);
+				applied = true;
+				return;
+			}
 			// Applied: the server document is the new baseline and the draft is
 			// cleared (it equals the applied document).
+			if (!res.settings) {
+				throw new Error('applied response carried no settings document');
+			}
 			serverValues = res.settings;
 			etag = res.etag;
 			draft = { ...res.settings };
