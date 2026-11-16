@@ -2,8 +2,9 @@
 
 Status date: 2026-11-16 (UTC). Verified `main`:
 `0e24cbdc8a798338acacb213d3fe256a804c7477` (merge of #82 atop
-`76bcc628`, which merged #75–#81). All 13 exact-head CI checks pass on
-that tree.
+`76bcc628`, which merged #75–#81). Earlier workflow evidence belongs to
+its tested PR heads; it must not be described as a separate verification
+of the merge tree without exact-tree evidence.
 
 This document is the current status ledger for the project. It
 supersedes the stale snapshot sections of issue #53 (use #53 for
@@ -47,8 +48,10 @@ pool-settings reads/writes for native GARM (base
 `cloudbase/garm@15463844`, v0.2.1) plus matching CLI/webapp/controller
 clients. State as of this writing:
 
-- Code exists only as **local, unpushed branches**. No PRs, nothing
-  merged anywhere, no native fork destination selected.
+- Native settings and hold-register review copies are now published at
+  the refs listed below. These are not merge proposals or production
+  integration. The production native destination remains unselected;
+  controller-client work is separately reported, not included in those refs.
 - Wire shape (provisional, "wire v0"): `GET`/`PATCH` on an opt-in,
   flag-disabled experimental endpoint under
   `/api/v1/offline/entities/{organization|repository|enterprise}/{id}/pools/{id}/settings`;
@@ -111,9 +114,26 @@ or assert deployability.
 - Closed unmerged: #2 (synthetic web demo superseded by the real UI),
   #22 (replaced by this document), #74 (test-only permission check,
   purpose served).
-- Still open as drafts, needing owner decisions: #70, #71
-  (test/qualification-support material) and the older streams #52,
-  #51, #48, #42, #41, #40, #39, #37.
+- Historical research drafts are recorded below for archival closure,
+  not merger. Closing them preserves their review history and does not
+  mean the underlying production requirements are implemented. Reuse of
+  selected evidence remains conditional on the physical-authority design.
+
+| PR | Reviewed head prefix | Preserved research / deferred purpose |
+|---|---|---|
+| [#37](https://github.com/ShortCipher5/garm-capacity-controller/pull/37) | `71cc18c3` | Runner lifecycle evidence; not qualified retirement |
+| [#39](https://github.com/ShortCipher5/garm-capacity-controller/pull/39) | `f3a1f956` | Local drain-gate counterexample; polling suppression can block control/cancellation |
+| [#40](https://github.com/ShortCipher5/garm-capacity-controller/pull/40) | `98d2bbc6` | Runner control/restart evidence |
+| [#41](https://github.com/ShortCipher5/garm-capacity-controller/pull/41) | `617c8dd8` | Isolation tests/threat model |
+| [#42](https://github.com/ShortCipher5/garm-capacity-controller/pull/42) | `1f70b8ac` | Local audit-history research, not production authority |
+| [#48](https://github.com/ShortCipher5/garm-capacity-controller/pull/48) | `e5954652` | Conditional finite create-only pilot evidence, not sustained retirement |
+| [#51](https://github.com/ShortCipher5/garm-capacity-controller/pull/51) | `e3289459` | Unix transport research; authority/integration deferred |
+| [#52](https://github.com/ShortCipher5/garm-capacity-controller/pull/52) | `bc8ceab4` | Local client research; authority/integration deferred |
+| [#70](https://github.com/ShortCipher5/garm-capacity-controller/pull/70) | `c39d42d9` | Compile-only native-parent experiment |
+| [#71](https://github.com/ShortCipher5/garm-capacity-controller/pull/71) | `f989a1db` | Read-only capability survey; depends on historical audit stack |
+
+The table records preservation targets, not proof that closure has already
+succeeded. The linked PR state is authoritative for the cleanup outcome.
 - This integration cannot comment on issue #53 (`addComment` is denied
   at the platform level), so this file and its PR serve as the fresh
   status ledger until that restriction changes.
@@ -130,7 +150,9 @@ from them and they are not a merge proposal):
   integration merge. Base is upstream
   `154638445c3949c1958b01812f69d9a1e4d82684` (v0.2.1), an ancestor of
   the tip. 25 files, +5222/-11: experimental additive files plus
-  flag-gated registration only.
+  changes to existing native paths, including the stock pool-update
+  helper's best-effort revision bump. The new endpoint is flag-gated;
+  this does not mean every changed stock path is flag-gated.
 - `review/capacity-hold-2971b0b6` — tip
   `2971b0b6e9a5e667c8c11abb1139f34a4078e1ca`: the separate offline
   hold-register leaf package (`experimental/capacityhold`), same base.
@@ -148,12 +170,24 @@ git merge-base --is-ancestor 154638445c3949c1958b01812f69d9a1e4d82684 \
 git diff 154638445c3949c1958b01812f69d9a1e4d82684..origin/review/native-settings-a9d7b0a3
 ```
 
-Commit-level SHA-1 verification is stronger than the transmitted-patch
-SHA-256 in the bundle manifest; the manifest (`BUNDLE.txt`,
-`files.stat`, `SHA256SUMS`) remains available from the orchestrator for
-cross-checking file-level scope. No credentials and no previously
-denied controller route-guard/dispatch/schema material are in either
-ref.
+Git commit IDs identify the exact committed tree and ancestry; the patch
+SHA-256 checks the transmitted patch bytes. These are complementary checks,
+not a claim that SHA-1 is cryptographically stronger than SHA-256. The
+manifest (`BUNDLE.txt`, `files.stat`, `SHA256SUMS`) remains available from
+the orchestrator for cross-checking scope. Its report that the refs exclude
+credentials and previously denied material still requires an independent
+full-content/provenance review; availability alone does not establish it.
+
+## Independent source-review limitations (2026-11-16)
+
+At native review tip `a9d7b0a3`, the stock update helper calls a legacy
+revision bump that discards database errors. This is not fail-closed
+all-writer revision participation. The native CLI and web client do not
+send `Idempotency-Key` or implement typed 409/replay handling in their
+experimental request code. The reported replay-envelope/409 fixes belong
+to the separate controller client, not these native clients. Complete
+native review and fault tests remain open; this cleanup does not fix or
+qualify the experimental implementation.
 
 ## Evidence rules (unchanged)
 
