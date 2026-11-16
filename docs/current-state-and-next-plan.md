@@ -156,6 +156,13 @@ from them and they are not a merge proposal):
 - `review/capacity-hold-2971b0b6` — tip
   `2971b0b6e9a5e667c8c11abb1139f34a4078e1ca`: the separate offline
   hold-register leaf package (`experimental/capacityhold`), same base.
+- `review/native-settings-a1ff1716` — tip
+  `a1ff171691edf803f4421e4337b33c6dc8dca139`: review-finding fixes on
+  top of `a9d7b0a3` (details in "Fix status" below). The `a9d7b0a3` ref
+  above remains intact as the reviewed snapshot. Verify with
+  `git rev-parse origin/review/native-settings-a1ff1716` expecting
+  `a1ff171691edf803f4421e4337b33c6dc8dca139`, and the same ancestry and
+  diff commands against that ref.
 
 Integrity checks a reviewer can run:
 
@@ -188,6 +195,35 @@ experimental request code. The reported replay-envelope/409 fixes belong
 to the separate controller client, not these native clients. Complete
 native review and fault tests remain open; this cleanup does not fix or
 qualify the experimental implementation.
+
+## Review-finding fix status (orchestrator-reported, 2026-11-16)
+
+The findings summarized above, plus the two reported separately (a late
+revision rejection committing a preceding settings change; no
+concurrency reachability testing), are addressed offline by native
+commit `a1ff1716` on top of `a9d7b0a3`, published as review ref
+`review/native-settings-a1ff1716`:
+
+1. The conditional revision advance now runs before the pool settings
+   write, so a race detected at advance time commits only the rejection
+   receipt and a generic settings-write failure rolls back both.
+2. The legacy revision bump ignores only the absent-side-table case; any
+   other error fails the legacy write's transaction instead of leaving a
+   stale revision.
+3. The native CLI and webapp now mirror the controller client's replay
+   and 409 handling (stored outcome with resulting ETag; 409 as a
+   definitive rejection, never UNKNOWN). Neither native client sends a
+   request id yet.
+4. A new real-SQLite concurrency test races 8 conditional updates on
+   one observed revision: exactly one commits, losers are typed stale,
+   the revision moves once, the row carries only the winner.
+
+Reported gates on the fixed tree: gofmt/vet/build clean; Go race suites
+for `database/sql`, `apiserver/routers`, `config`, `cmd/garm-cli/cmd`
+pass; webapp 562/562 with build. These fixes are reported by the
+orchestrator, NOT independently re-reviewed; the experiments remain not
+ready to merge or deploy, and the destination/denial-scope decisions
+still gate any product path.
 
 ## Evidence rules (unchanged)
 
