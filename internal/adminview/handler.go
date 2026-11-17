@@ -146,6 +146,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveGarm(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/broker-policy" {
+		h.serveBrokerPolicy(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/policy" {
 		h.servePolicy(w, r)
 		return

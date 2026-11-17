@@ -1,3 +1,4 @@
+import { validateBrokerView } from "./broker-policy-client.js";
 import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboarding-client.js";
 import { validateGarm } from "./garm-client.js";
 import { validateProfilesList } from "./profiles-client.js";
@@ -92,6 +93,8 @@ export class ReadSession {
   #entityGeneration = 0;
   #remoteRequest;
   #remoteGeneration = 0;
+  #brokerRequest;
+  #brokerGeneration = 0;
   #profilesRequest;
   #profilesGeneration = 0;
   #usageInFlight = new Set();
@@ -111,6 +114,9 @@ export class ReadSession {
     this.#remoteGeneration++;
     this.#remoteRequest?.abort();
     this.#remoteRequest = undefined;
+    this.#brokerGeneration++;
+    this.#brokerRequest?.abort();
+    this.#brokerRequest = undefined;
     this.#profilesGeneration++;
     this.#profilesRequest?.abort();
     this.#profilesRequest = undefined;
@@ -213,6 +219,28 @@ export class ReadSession {
       if (generation !== this.#profilesGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
       if (error instanceof SessionEnded) throw error;
       throw new Error("Runner-size profiles could not be read. Refresh before reviewing fits.");
+    } finally { clearTimeout(timeout); }
+  }
+  async brokerPolicySnapshot() {
+    if (!this.#token) throw new SessionEnded();
+    this.#brokerRequest?.abort();
+    const generation = ++this.#brokerGeneration;
+    const controller = new AbortController(); this.#brokerRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await this.fetcher("/admin/api/v1/broker-policy", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (generation !== this.#brokerGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error("Advisory policies are unavailable. No policy was rendered.");
+      const result = validateBrokerView(await response.json());
+      if (generation !== this.#brokerGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      return result;
+    } catch (error) {
+      if (generation !== this.#brokerGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
+      if (error instanceof SessionEnded) throw error;
+      throw new Error("Advisory policies could not be read. Refresh before editing policy.");
     } finally { clearTimeout(timeout); }
   }
   async usageHistory(host, { since, limit, signal } = {}) {
