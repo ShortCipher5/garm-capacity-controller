@@ -324,11 +324,20 @@ func printPoolSettingsGet(body []byte, etag string) {
 	fmt.Println(string(body))
 }
 
+// isStrongQuotedETag reports whether etag is a strong, quoted validator of
+// the shape the settings interface issues ("<generation>:<version>").
+func isStrongQuotedETag(etag string) bool {
+	return len(etag) >= len(`"0:0"`) && etag[0] == '"' && etag[len(etag)-1] == '"' && strings.Contains(etag, ":")
+}
+
 // parsePoolSettingsReplay recognises the wire document a PATCH answered
 // from a stored request receipt carries on HTTP 200 instead of the
 // settings tuple (the server does not store the original settings body).
-// Only applied outcomes arrive with status 200.
-func parsePoolSettingsReplay(body []byte) (outcome string, resultingETag string, ok bool) {
+// Only applied outcomes arrive with status 200. Mirroring the web client,
+// the envelope is trusted only when it is well formed AND its resulting ETag
+// matches the response's own ETag header; any mismatch or corruption keeps
+// the outcome UNKNOWN and the journal intact.
+func parsePoolSettingsReplay(body []byte, responseETag string) (outcome string, resultingETag string, ok bool) {
 	var doc struct {
 		Outcome       string `json:"outcome"`
 		ResultingETag string `json:"resulting_etag"`
@@ -340,7 +349,10 @@ func parsePoolSettingsReplay(body []byte) (outcome string, resultingETag string,
 		return "", "", false
 	}
 	etag := doc.ResultingETag
-	if len(etag) < len(`"0:0"`) || etag[0] != '"' || etag[len(etag)-1] != '"' || !strings.Contains(etag, ":") {
+	if !isStrongQuotedETag(etag) {
+		return "", "", false
+	}
+	if responseETag == "" || etag != responseETag {
 		return "", "", false
 	}
 	return doc.Outcome, etag, true
@@ -362,7 +374,7 @@ func validateAppliedSettingsDocument(body []byte, etag string) error {
 	if doc.Priority == nil || doc.MaxRunners == nil || doc.MinIdleRunners == nil {
 		return fmt.Errorf("applied response is missing settings fields")
 	}
-	if len(etag) < len(`"0:0"`) || etag[0] != '"' || etag[len(etag)-1] != '"' || !strings.Contains(etag, ":") {
+	if !isStrongQuotedETag(etag) {
 		return fmt.Errorf("applied response carried no strong quoted ETag")
 	}
 	return nil
@@ -410,11 +422,26 @@ func experimentalPendingPath() string {
 	return filepath.Join(dir, "garm-cli", "experimental-pending.json")
 }
 
+// experimentalSyncDir makes a directory update (a rename into it) durable.
+// It is a variable so tests can simulate a directory fsync failure.
+var experimentalSyncDir = func(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+	return dirHandle.Sync()
+}
+
 // writeExperimentalPending durably persists the pending request. It is
 // fail-closed and atomic: the record is staged as a temp file in the same
 // directory, fsynced, then renamed over the target (0600), so the journal is
 // never observed torn and a failure here must abort the write before
-// dispatch.
+// dispatch. The parent directory is fsynced after the rename and a dirsync
+// failure is treated exactly like a journal-write failure: the write aborts
+// unjournaled, fail closed. (The renamed record stays on disk: it was never
+// dispatched, so a later --resolve re-presents it deliberately and the
+// server answers from its durable receipt — nothing is auto-retried.)
 func writeExperimentalPending(rec experimentalPendingRecord) error {
 	path := experimentalPendingPath()
 	if path == "" {
@@ -449,19 +476,18 @@ func writeExperimentalPending(rec experimentalPendingRecord) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("could not commit the pending-request journal: %w", err)
 	}
-	// Make the rename itself durable where the platform allows it.
-	if dirHandle, err := os.Open(dir); err == nil {
-		_ = dirHandle.Sync()
-		_ = dirHandle.Close()
+	if err := experimentalSyncDir(dir); err != nil {
+		return fmt.Errorf("could not fsync the pending-request journal directory: %w", err)
 	}
 	return nil
 }
 
 // loadExperimentalPending returns the journaled unresolved request, if any. A
 // path that cannot name a regular journal file (absent, a directory in its
-// ancestry, or a directory at the path itself) reports no record. An
-// unreadable or corrupt journal is an error: the operator must decide what
-// to do with it, never have it silently overwritten by a fresh write.
+// ancestry, or a directory at the path itself) reports no record. Anything
+// else — an unreadable file or a record that fails strict validation — is an
+// error: the operator must decide what to do with it, never have it silently
+// overwritten by a fresh write.
 func loadExperimentalPending() (*experimentalPendingRecord, bool, error) {
 	path := experimentalPendingPath()
 	if path == "" {
@@ -476,15 +502,78 @@ func loadExperimentalPending() (*experimentalPendingRecord, bool, error) {
 	}
 	var rec experimentalPendingRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, false, fmt.Errorf("the pending-request journal exists but is corrupt: %w", err)
+		return nil, false, experimentalPendingCorruptError(err)
+	}
+	if err := validateExperimentalPendingRecord(&rec); err != nil {
+		return nil, false, experimentalPendingCorruptError(err)
 	}
 	return &rec, true, nil
 }
 
-func clearExperimentalPending() {
-	if path := experimentalPendingPath(); path != "" {
-		_ = os.Remove(path)
+// experimentalPendingCorruptError renders the single fail-closed recovery
+// message for a journal that exists but cannot be trusted, pointing at both
+// deliberate resolutions. The record is always kept.
+func experimentalPendingCorruptError(cause error) error {
+	return fmt.Errorf(`the pending-request journal exists but does not record a complete, valid request: %v
+the record is kept and nothing was dispatched. Recover by hand only: re-run with --resolve to settle it from the server's durable request receipt, or clear it with 'experimental pool-settings pending clear --confirmed-ineffective' once you have confirmed out-of-band that the request had no effect`, cause)
+}
+
+// validateExperimentalPendingRecord enforces the strict shape of a journal
+// record written by this version: every field must be present and well
+// formed — the target a known entity type, the ETag a strong quoted
+// validator, the payload a strict settings patch, the timestamp RFC 3339,
+// and the profile/server binding fields non-empty, because a record this
+// version wrote can never have an empty binding. Anything else means the
+// journal is corrupt and must fail closed.
+func validateExperimentalPendingRecord(rec *experimentalPendingRecord) error {
+	if rec.RequestID == "" {
+		return fmt.Errorf("request_id is missing")
 	}
+	if _, ok := poolSettingsEntityTypes[rec.EntityType]; !ok {
+		return fmt.Errorf("entity_type %q is not a known entity type", rec.EntityType)
+	}
+	if rec.EntityID == "" {
+		return fmt.Errorf("entity_id is missing")
+	}
+	if rec.PoolID == "" {
+		return fmt.Errorf("pool_id is missing")
+	}
+	if !isStrongQuotedETag(rec.ETag) {
+		return fmt.Errorf("etag %q is not a strong quoted ETag", rec.ETag)
+	}
+	if _, err := parsePoolSettingsDraft([]byte(rec.Payload)); err != nil {
+		return fmt.Errorf("payload is not a valid settings patch: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, rec.At); err != nil {
+		return fmt.Errorf("at %q is not a valid RFC 3339 timestamp: %v", rec.At, err)
+	}
+	if rec.Profile == "" {
+		return fmt.Errorf("profile binding is missing")
+	}
+	if rec.Server == "" {
+		return fmt.Errorf("server binding is missing")
+	}
+	return nil
+}
+
+// experimentalRemovePending unlinks the pending-request journal. It is a
+// variable so tests can simulate an unlink failure.
+var experimentalRemovePending = func(path string) error { return os.Remove(path) }
+
+// clearExperimentalPending removes the journal after a definitive outcome.
+// An unlink failure is surfaced loudly and the record is deliberately kept:
+// re-running with --resolve re-asks the server and the durable request
+// receipt makes that idempotent, so a stuck unlink must never be silently
+// ignored.
+func clearExperimentalPending() error {
+	path := experimentalPendingPath()
+	if path == "" {
+		return nil
+	}
+	if err := experimentalRemovePending(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("the request reached a definitive outcome, but the pending-request journal could not be cleared: %w; the record is kept on purpose — re-run with --resolve to settle it safely from the server's durable request receipt", err)
+	}
+	return nil
 }
 
 func init() {
@@ -501,17 +590,18 @@ func registerExperimental(root *cobra.Command) {
 }
 
 var (
-	expPoolEntityRepo        string
-	expPoolEntityOrg         string
-	expPoolEntityEnterprise  string
-	expPoolID                string
-	expPoolSettingsETag      string
-	expPoolSettingsDraftFile string
-	expPoolSettingsRequestID string
-	expPoolSettingsResolve   bool
-	expPriority              uint
-	expMaxRunners            uint
-	expMinIdleRunners        uint
+	expPoolEntityRepo                  string
+	expPoolEntityOrg                   string
+	expPoolEntityEnterprise            string
+	expPoolID                          string
+	expPoolSettingsETag                string
+	expPoolSettingsDraftFile           string
+	expPoolSettingsRequestID           string
+	expPoolSettingsResolve             bool
+	expPoolSettingsPendingClearConfirm bool
+	expPriority                        uint
+	expMaxRunners                      uint
+	expMinIdleRunners                  uint
 )
 
 // newExperimentalCmd builds the experimental command tree. A nil cli means the
@@ -665,7 +755,9 @@ Resolve it first: re-run this command with --resolve to re-present that exact re
 				var pse *poolSettingsError
 				if errors.As(err, &pse) && pse.outcome != outcomeUnknown {
 					// Definitive outcome: nothing to recover.
-					clearExperimentalPending()
+					if cerr := clearExperimentalPending(); cerr != nil {
+						return fmt.Errorf("%w\n%v", wrapPoolSettingsError(err, draft), cerr)
+					}
 				}
 				return wrapPoolSettingsError(err, draft)
 			}
@@ -694,7 +786,79 @@ Resolve it first: re-run this command with --resolve to re-present that exact re
 	patchCmd.Flags().UintVar(&expMinIdleRunners, "min-idle-runners", 0, "Desired min idle runners.")
 	patchCmd.Flags().BoolVar(&expPoolSettingsResolve, "resolve", false, `Resolve the pending request held in the client journal: re-send exactly the journaled payload, ETag precondition and request id against its recorded entity/pool, so the server answers from its durable request receipt. Use this after an UNKNOWN outcome. The CLI journal holds at most one pending request (single slot per CLI instance; the web client handles multi-pool recovery). Ignores payload flags, --etag and entity flags; an error to combine with payload flags or --request-id.`)
 
-	poolSettingsCmd.AddCommand(getCmd, patchCmd)
+	pendingCmd := &cobra.Command{
+		Use:          "pending",
+		Short:        "Manage the client-side pending-request journal",
+		SilenceUsage: true,
+	}
+
+	pendingClearCmd := &cobra.Command{
+		Use:          "clear",
+		Short:        "Clear the pending-request journal after manually confirming the request had no effect",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if needsInit {
+				return errNeedsInitError
+			}
+
+			// Journal mutation: same exclusive lock as patch/--resolve.
+			release, err := acquireExperimentalJournalLock()
+			if err != nil {
+				return err
+			}
+			defer release()
+
+			pending, hasPending, err := loadExperimentalPending()
+			if err != nil {
+				return err
+			}
+			if !hasPending {
+				return fmt.Errorf("nothing to clear: the pending-request journal holds no unresolved request")
+			}
+
+			client := cli
+			if client == nil {
+				client = rawHTTPClient
+			}
+			profile, server := experimentalCurrentBinding(client)
+			if mismatch := pendingBindingMismatchResolve(pending, profile, server); mismatch != "" {
+				return fmt.Errorf("refusing to clear: the pending request belongs to %s — switch to that profile/server before clearing it", mismatch)
+			}
+
+			if !expPoolSettingsPendingClearConfirm {
+				return fmt.Errorf(`refusing to clear pending request %q without --confirmed-ineffective
+this asserts, WITHOUT server proof, that the request had no effect — the durable design keeps the journal precisely because a lost response cannot be disproven. Re-read the settings, confirm the journaled change is absent, then re-run with --confirmed-ineffective`, pending.RequestID)
+			}
+
+			// A successful fresh read first: clearing against an
+			// unreachable or non-answering server would assert non-effect
+			// blind, so any read failure refuses and keeps the journal.
+			ref := poolSettingsRef{entityType: pending.EntityType, entityID: pending.EntityID, poolID: pending.PoolID}
+			_, body, etag, err := doPoolSettings(cmd.Context(), client, http.MethodGet, ref, "", "", nil)
+			if err != nil {
+				return fmt.Errorf("refusing to clear pending request %q: the fresh read of the current settings failed (%v); clearing without a successful read would assert non-effect blind, so the journal is kept", pending.RequestID, err)
+			}
+
+			fmt.Fprintf(os.Stderr, "WARNING: clearing the pending-request journal for request %s asserts MANUALLY that the request had no effect; a lost response can never be disproven by the server. The current settings were read successfully (ETag %s):\n%s\n", pending.RequestID, etag, body)
+			if err := clearExperimentalPending(); err != nil {
+				return err
+			}
+			if outputFormat == common.OutputFormatJSON {
+				printAsJSON(map[string]interface{}{
+					"request_id": pending.RequestID,
+					"etag":       etag,
+					"cleared":    true,
+				})
+			} else {
+				fmt.Printf("pending-request journal cleared (request %s)\n", pending.RequestID)
+			}
+			return nil
+		},
+	}
+	pendingClearCmd.Flags().BoolVar(&expPoolSettingsPendingClearConfirm, "confirmed-ineffective", false, "Assert that you confirmed out-of-band (e.g. via 'get') that the journaled request had no effect. Required; without it the command refuses.")
+	pendingCmd.AddCommand(pendingClearCmd)
+
+	poolSettingsCmd.AddCommand(getCmd, patchCmd, pendingCmd)
 	experimentalCmd.AddCommand(poolSettingsCmd)
 	return experimentalCmd
 }
@@ -731,9 +895,32 @@ func runPoolSettingsResolve(cmd *cobra.Command, client *rawClient, pending *expe
 	_, body, newETag, err := doPoolSettings(cmd.Context(), client, http.MethodPatch, ref, rec.ETag, rec.RequestID, strings.NewReader(rec.Payload))
 	if err != nil {
 		var pse *poolSettingsError
-		if errors.As(err, &pse) && pse.outcome != outcomeUnknown {
-			// Definitive outcome: nothing left to resolve.
-			clearExperimentalPending()
+		if errors.As(err, &pse) {
+			if pse.outcome == outcomeConflict {
+				// A 412 while resolving is NOT proof of non-effect. After a
+				// server-side loss of the durable request-receipt table
+				// (restore/reinstall), the original write may have committed
+				// even though the server can no longer recognise this request
+				// id, so the precondition failure is ambiguous about effect.
+				// Keep the outcome UNKNOWN and the journal intact, exactly
+				// like the web client; the operator re-reads the settings and
+				// only clears manually once non-effect is confirmed.
+				return wrapPoolSettingsError(&poolSettingsError{
+					outcome: outcomeUnknown,
+					status:  pse.status,
+					etag:    pse.etag,
+					msg: fmt.Sprintf(`the server refused the journaled precondition (412) while resolving request %s; this can coexist with a committed original write after a server-side request-receipt loss, so the outcome stays UNKNOWN and the journal is kept
+re-read the settings (experimental pool-settings get): if the journaled change is absent, the write never took effect and you can clear the journal with 'experimental pool-settings pending clear --confirmed-ineffective'; if it is present, the write committed — reconcile against the current state instead`, rec.RequestID),
+				}, rec.Payload)
+			}
+			if pse.outcome != outcomeUnknown {
+				// Any other definitive outcome (rejection, idempotency
+				// conflict) proves the request was not applied: nothing left
+				// to resolve.
+				if cerr := clearExperimentalPending(); cerr != nil {
+					return fmt.Errorf("%w\n%v", wrapPoolSettingsError(err, rec.Payload), cerr)
+				}
+			}
 		}
 		return wrapPoolSettingsError(err, rec.Payload)
 	}
@@ -743,15 +930,18 @@ func runPoolSettingsResolve(cmd *cobra.Command, client *rawClient, pending *expe
 // reportPoolSettingsPatchOutcome handles the HTTP 200 path of a dispatched
 // PATCH, shared by fresh writes and --resolve: recognise a replay answer
 // served from the server's durable request receipt, validate a true applied
-// tuple, clear the journal on any definitive outcome, and print the result.
-// A 200 body that cannot be trusted keeps the journal held as UNKNOWN.
+// tuple, clear the journal on any validated definitive outcome, and print
+// the result. A 200 body that cannot be trusted keeps the journal held as
+// UNKNOWN. If the journal cannot be cleared after a validated outcome, the
+// outcome is still printed, the unlink failure is returned loudly and the
+// record is kept — a later --resolve settles it safely from the server's
+// durable receipt.
 func reportPoolSettingsPatchOutcome(cmd *cobra.Command, requestID string, body []byte, newETag, draft string) error {
-	if replayOutcome, resultingETag, ok := parsePoolSettingsReplay(body); ok {
+	if replayOutcome, resultingETag, ok := parsePoolSettingsReplay(body, newETag); ok {
 		// The server answered from a durable request receipt: this exact
 		// request already applied earlier and nothing was re-applied.
 		// Report the recorded outcome; the operator can re-read
 		// deliberately if the document is needed.
-		clearExperimentalPending()
 		if outputFormat == common.OutputFormatJSON {
 			printAsJSON(map[string]interface{}{
 				"request_id": requestID,
@@ -763,7 +953,7 @@ func reportPoolSettingsPatchOutcome(cmd *cobra.Command, requestID string, body [
 			fmt.Printf("request-id: %s\n", requestID)
 			fmt.Printf("already applied earlier (replayed from stored request receipt, outcome %s). resulting ETag: %s\n", replayOutcome, resultingETag)
 		}
-		return nil
+		return clearExperimentalPending()
 	}
 	if err := validateAppliedSettingsDocument(body, newETag); err != nil {
 		// The write may have committed but the response cannot be
@@ -776,7 +966,6 @@ func reportPoolSettingsPatchOutcome(cmd *cobra.Command, requestID string, body [
 			msg:     fmt.Sprintf("%v; the write may have committed and request id %s can resolve it from the server's durable receipt (re-run with --resolve)", err, requestID),
 		}, draft)
 	}
-	clearExperimentalPending()
 	if outputFormat == common.OutputFormatJSON {
 		printAsJSON(map[string]interface{}{
 			"request_id": requestID,
@@ -788,7 +977,7 @@ func reportPoolSettingsPatchOutcome(cmd *cobra.Command, requestID string, body [
 		fmt.Printf("request-id: %s\n", requestID)
 		fmt.Printf("applied. new ETag: %s\n", newETag)
 	}
-	return nil
+	return clearExperimentalPending()
 }
 
 func experimentalPoolSettingsRefFromFlags() (poolSettingsRef, error) {

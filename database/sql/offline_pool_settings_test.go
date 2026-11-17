@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
@@ -680,6 +682,237 @@ func (s *OfflinePoolSettingsTestSuite) TestExperimentalPathsFailHardAfterReceipt
 	s.Require().False(s.receiptsExist())
 	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
 	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+}
+
+// TestSchemaAuditFreshInstallWhenNothingSurvives covers the benign audit
+// quadrant: no experimental table exists at all (true pre-feature state),
+// so first use installs the schema at generation 1.
+func (s *OfflinePoolSettingsTestSuite) TestSchemaAuditFreshInstallWhenNothingSurvives() {
+	s.Require().False(s.revisionExists())
+	s.Require().False(s.receiptsExist())
+	s.Require().False(s.metaExists())
+
+	_, rev, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Zero(rev.Seq)
+	s.Require().NotZero(rev.Epoch)
+
+	meta := s.installedMetaRow()
+	s.Require().True(meta.Installed)
+	s.Require().Equal(uint64(1), meta.Generation)
+	s.Require().Equal(rev.Epoch, meta.LastEpoch)
+}
+
+// TestSchemaAuditFailsHardWhenMarkerLostButRevisionTableSurvives covers the
+// witness-lost quadrant: the marker table is gone but the revision table
+// survives with rows. First use must fail hard — silently reinstalling
+// would restart generation at 1 and last_epoch at 0 over rows that still
+// serve ETags — and must leave the surviving rows untouched.
+func (s *OfflinePoolSettingsTestSuite) TestSchemaAuditFailsHardWhenMarkerLostButRevisionTableSurvives() {
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.AutoMigrate(&OfflinePoolSettingsRevision{}))
+
+	// a surviving revision row, as left behind by a lost marker
+	survivorID := uuid.New()
+	s.Require().NoError(sqlDB.conn.Create(&OfflinePoolSettingsRevision{PoolID: survivorID, Epoch: 100}).Error)
+
+	_, _, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().Contains(err.Error(), "installation marker is missing")
+	s.Require().Contains(err.Error(), "refusing to install over surviving rows")
+
+	priority := uint(7)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(
+		params.OfflinePoolSettingsRevision{Epoch: 1}, params.OfflinePoolSettingsPatch{Priority: &priority}))
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+
+	// nothing was installed or recreated, the surviving row is untouched
+	s.Require().False(s.metaExists())
+	s.Require().False(s.receiptsExist())
+	var count int64
+	s.Require().NoError(sqlDB.conn.Model(&OfflinePoolSettingsRevision{}).Count(&count).Error)
+	s.Require().Equal(int64(1), count)
+	var survivor OfflinePoolSettingsRevision
+	s.Require().NoError(sqlDB.conn.Where("pool_id = ?", survivorID).First(&survivor).Error)
+	s.Require().Equal(uint64(100), survivor.Epoch)
+
+	// the explicit reinstall is the recovery: it recreates the marker and
+	// the missing receipts table at generation 1 and leaves the surviving
+	// revision row authoritative for its pool
+	s.Require().NoError(sqlDB.ReinstallOfflinePoolSettingsSchema())
+	s.Require().True(s.metaExists())
+	s.Require().True(s.receiptsExist())
+	s.Require().True(s.revisionExists())
+	s.Require().Equal(uint64(1), s.installedMetaRow().Generation)
+	s.Require().NoError(sqlDB.conn.Where("pool_id = ?", survivorID).First(&survivor).Error)
+	s.Require().Equal(uint64(100), survivor.Epoch)
+}
+
+// TestSchemaAuditFailsHardWhenMarkerLostButReceiptsTableSurvives covers the
+// mirror witness-lost quadrant: only the receipts table survives. The
+// replay record may still hold unanswered requests, so first use must fail
+// hard and leave the surviving rows untouched.
+func (s *OfflinePoolSettingsTestSuite) TestSchemaAuditFailsHardWhenMarkerLostButReceiptsTableSurvives() {
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.AutoMigrate(&OfflinePoolSettingsRequestReceipt{}))
+
+	// a surviving receipt, as left behind by a lost marker
+	s.Require().NoError(sqlDB.conn.Create(&OfflinePoolSettingsRequestReceipt{
+		RequestID:   "req-survivor",
+		PoolID:      uuid.MustParse(s.pool.ID),
+		PayloadHash: offlineHash(`{"priority":7}`),
+		Outcome:     string(params.OfflinePoolSettingsOutcomeRejectedMalformed),
+		CreatedAt:   time.Now().UTC(),
+	}).Error)
+
+	_, _, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().Contains(err.Error(), "installation marker is missing")
+
+	priority := uint(7)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(
+		params.OfflinePoolSettingsRevision{Epoch: 1}, params.OfflinePoolSettingsPatch{Priority: &priority}))
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+
+	// nothing was installed or recreated, the surviving receipt is untouched
+	s.Require().False(s.metaExists())
+	s.Require().False(s.revisionExists())
+	s.Require().Equal(int64(1), s.receiptCount())
+	s.Require().Equal("req-survivor", s.getReceipt("req-survivor").RequestID)
+}
+
+// TestSchemaAuditFailsHardWhenMarkerLostAfterUse covers the restore-over-
+// used-schema case: the schema was fully installed and used, then the
+// marker table was lost (or a restored file predates it) while both data
+// tables survive with rows. First use must fail hard rather than
+// reinstalling over surviving rows, and the explicit reinstall restores
+// service.
+func (s *OfflinePoolSettingsTestSuite) TestSchemaAuditFailsHardWhenMarkerLostAfterUse() {
+	entity := s.orgEntity()
+
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	priority := uint(3)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0,
+		params.OfflinePoolSettingsPatch{Priority: &priority}))
+	s.Require().NoError(err)
+	survivingRev := s.currentRevision(s.pool.ID)
+	s.Require().Equal(rev0.Seq+1, survivingRev.Seq)
+
+	// lose only the marker table; the data tables survive with rows
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_meta").Error)
+	s.Require().False(s.metaExists())
+	s.Require().True(s.revisionExists())
+	s.Require().True(s.receiptsExist())
+
+	// GET and PATCH fail hard with the schema-missing surface
+	_, _, err = s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().Contains(err.Error(), "refusing to install over surviving rows")
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(survivingRev,
+		params.OfflinePoolSettingsPatch{Priority: &priority}))
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+
+	// no silent reinstall happened: rows, settings and receipts are as before
+	s.Require().False(s.metaExists())
+	s.Require().Equal(survivingRev, s.currentRevision(s.pool.ID))
+	s.Require().Equal(uint(3), s.currentPoolRow(s.pool.ID).Priority)
+	s.Require().Equal(int64(1), s.receiptCount())
+
+	// the explicit reinstall recreates the marker; the lost marker is
+	// unrecoverable, so generation restarts at 1, and the surviving
+	// revision row stays authoritative for its pool
+	s.Require().NoError(sqlDB.ReinstallOfflinePoolSettingsSchema())
+	meta := s.installedMetaRow()
+	s.Require().True(meta.Installed)
+	s.Require().Equal(uint64(1), meta.Generation)
+
+	_, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(survivingRev, rev1)
+}
+
+// TestLegacyPreGenerationMarkerIsUpgradedDeterministically covers the
+// marker migration: a database installed by code that predates the
+// generation/last_epoch columns carries a marker row with only key,
+// installed and the timestamps (the columns are missing from the table
+// entirely). First use must add the columns, set generation to 1 and set
+// last_epoch to the highest epoch of the surviving revision rows, so every
+// epoch minted afterwards strictly exceeds every epoch a surviving row
+// carries.
+func (s *OfflinePoolSettingsTestSuite) TestLegacyPreGenerationMarkerIsUpgradedDeterministically() {
+	sqlDB := s.Store.(*sqlDatabase)
+
+	// The data tables never changed shape; only the marker predates the
+	// generation/last_epoch columns.
+	s.Require().NoError(sqlDB.conn.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}))
+	s.Require().NoError(sqlDB.conn.Exec(
+		`CREATE TABLE offline_pool_settings_meta (key text PRIMARY KEY, installed boolean NOT NULL, created_at datetime, updated_at datetime)`).Error)
+	now := time.Now().UTC()
+	s.Require().NoError(sqlDB.conn.Exec(
+		`INSERT INTO offline_pool_settings_meta (key, installed, created_at, updated_at) VALUES (?, 1, ?, ?)`,
+		offlineSettingsMetaSchemaKey, now, now).Error)
+
+	// Surviving revision rows from the pre-generation era, including one
+	// for the suite pool so the first GET mints no new epoch.
+	poolUUID := uuid.MustParse(s.pool.ID)
+	s.Require().NoError(sqlDB.conn.Create(&OfflinePoolSettingsRevision{PoolID: poolUUID, Epoch: 100}).Error)
+	otherUUID := uuid.New()
+	s.Require().NoError(sqlDB.conn.Create(&OfflinePoolSettingsRevision{PoolID: otherUUID, Epoch: 150}).Error)
+
+	// GET upgrades the marker in place: generation 1, last_epoch equal to
+	// the highest surviving epoch; the existing revision row is returned
+	// as-is.
+	_, rev, err := s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(params.OfflinePoolSettingsRevision{Epoch: 100, Seq: 0}, rev)
+	meta := s.installedMetaRow()
+	s.Require().True(meta.Installed)
+	s.Require().Equal(uint64(1), meta.Generation)
+	s.Require().Equal(uint64(150), meta.LastEpoch)
+
+	// the upgrade is idempotent: repeated reads change nothing
+	_, _, err = s.Store.GetOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(uint64(1), s.installedMetaRow().Generation)
+	s.Require().Equal(uint64(150), s.installedMetaRow().LastEpoch)
+
+	// a PATCH against the surviving revision advances seq on the existing
+	// epoch; the surviving rows keep their epochs
+	priority := uint(7)
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, s.orgEntity(), s.pool.ID, offlineUpdateReq(rev,
+		params.OfflinePoolSettingsPatch{Priority: &priority}))
+	s.Require().NoError(err)
+	s.Require().Equal(uint64(100), result.Revision.Epoch)
+	s.Require().Equal(uint64(1), result.Revision.Seq)
+	s.Require().Equal(uint(7), result.Settings.Priority)
+	s.Require().Equal(uint(7), s.currentPoolRow(s.pool.ID).Priority)
+
+	// a revision row minted after the upgrade strictly exceeds every
+	// pre-existing epoch
+	repoEntity := s.entityOf(s.repo)
+	secondPool, err := s.Store.CreateEntityPool(s.adminCtx, repoEntity, params.CreatePoolParams{
+		ProviderName:   "test-provider",
+		MaxRunners:     4,
+		MinIdleRunners: 1,
+		Image:          "test-image-2",
+		Flavor:         "test-flavor",
+		OSType:         "linux",
+		Tags:           []string{"amd64-linux-runner"},
+	})
+	s.Require().NoError(err)
+	_, freshRev, err := s.Store.GetOfflinePoolSettings(s.adminCtx, repoEntity, secondPool.ID)
+	s.Require().NoError(err)
+	s.Require().Greater(freshRev.Epoch, uint64(150))
+	s.Require().GreaterOrEqual(freshRev.Epoch, uint64(151))
+	s.Require().Equal(s.installedMetaRow().LastEpoch, freshRev.Epoch)
+
+	// the pre-existing rows are untouched
+	s.Require().Equal(uint64(100), s.currentRevision(s.pool.ID).Epoch)
+	s.Require().Equal(uint64(150), s.currentRevision(otherUUID.String()).Epoch)
 }
 
 // TestReinstallAfterLossBumpsGenerationAndInvalidatesOldETags exercises the

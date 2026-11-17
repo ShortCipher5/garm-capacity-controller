@@ -357,7 +357,11 @@ describe('ExperimentalPoolSettingsEditor', () => {
 	it('refuses to save while another tab holds the per-pool lock', async () => {
 		localStorage.setItem(
 			LOCK_KEY,
-			JSON.stringify({ tabId: 'tab-other-tab', acquiredAt: new Date().toISOString() })
+			JSON.stringify({
+				tabId: 'tab-other-tab',
+				nonce: 'nonce-other-tab',
+				acquiredAt: new Date().toISOString()
+			})
 		);
 		const fetchMock = vi.fn().mockResolvedValue(
 			jsonResponse(200, { priority: 10, max_runners: 5, min_idle_runners: 1 }, '"42:7"')
@@ -468,9 +472,10 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		// claimant); tab A journaled its pending request under the same tab
 		// identity.
 		expect(lockSets).toHaveLength(1);
-		const ownerLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { tabId?: string };
+		const ownerLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { tabId?: string; nonce?: string };
 		const journaled = JSON.parse(shared.getItem(PENDING_KEY) ?? 'null') as { tabId?: string };
 		expect(ownerLock.tabId).toBe(journaled.tabId);
+		expect(typeof ownerLock.nonce).toBe('string');
 		expect(patchCount).toBe(1);
 
 		// Tab B was refused with the blocked state: another tab holds the
@@ -513,8 +518,13 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		// Tab A claims the lock; its PATCH stays in flight.
 		await fireEvent.input(priorityInputIn(a.container), { target: { value: '30' } });
 		await fireEvent.click(qa.getByRole('button', { name: 'Save changes' }));
-		const aLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { tabId: string; acquiredAt: string };
+		const aLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as {
+			tabId: string;
+			nonce: string;
+			acquiredAt: string;
+		};
 		expect(aLock.tabId).toBeTruthy();
+		expect(aLock.nonce).toBeTruthy();
 
 		// Age A's lock past the TTL (models a dead tab) and let tab B take it
 		// over explicitly while A's write is still in flight.
@@ -526,8 +536,13 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		await fireEvent.click(qb.getByRole('button', { name: 'Save changes' }));
 		const takeOver = await qb.findByRole('button', { name: 'Take over lock' });
 		await fireEvent.click(takeOver);
-		const bLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { tabId: string; acquiredAt: string };
+		const bLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as {
+			tabId: string;
+			nonce: string;
+			acquiredAt: string;
+		};
 		expect(bLock.tabId).not.toBe(aLock.tabId);
+		expect(bLock.nonce).not.toBe(aLock.nonce);
 
 		// The storage event reaches the former owner (it fires in the other
 		// document in production); A blocks editing with the explanatory state.
@@ -542,12 +557,22 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		).toBe(true);
 		expect(priorityInputIn(a.container).disabled).toBe(true);
 
-		// A's in-flight write now returns definitively. A is no longer the
-		// owner, so its release attempt must leave B's lock intact.
+		// A's in-flight write now returns definitively, but A no longer owns
+		// the lock or the journal: the pre-mutation guard refuses every clear
+		// and release, routes A to the lockLost state, and leaves B's lock
+		// and A's journaled request untouched.
 		resolvePatch!(jsonResponse(200, { priority: 30, max_runners: 5, min_idle_runners: 1 }, '"43:1"'));
-		await waitFor(() => expect(qa.getByText('Settings applied. Draft cleared.')).toBeInTheDocument());
-		const after = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { tabId?: string } | null;
+		await waitFor(() =>
+			expect(qa.getByText(/This tab lost the multi-tab write lock while a write was in flight/)).toBeInTheDocument()
+		);
+		expect(qa.queryByText('Settings applied. Draft cleared.')).toBeNull();
+		expect(shared.getItem(PENDING_KEY)).not.toBeNull();
+		const after = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as {
+			tabId?: string;
+			nonce?: string;
+		} | null;
 		expect(after?.tabId).toBe(bLock.tabId);
+		expect(after?.nonce).toBe(bLock.nonce);
 	});
 
 	it('stale-lock takeover lets another tab write, and the takeover cannot orphan the other tab silently', async () => {
@@ -709,5 +734,197 @@ describe('ExperimentalPoolSettingsEditor', () => {
 		await fireEvent.click(comp.getByRole('button', { name: 'Save changes' }));
 		await waitFor(() => expect(comp.getByText('Settings applied. Draft cleared.')).toBeInTheDocument());
 		expect(ifMatchHeaders).toEqual(['"42:7"', '"99:10"']);
+	});
+
+	it('duplicated tabs share one tabId over one storage but keep exactly one owner: the non-owner is refused, and a takeover blocks the displaced context', async () => {
+		const shared = new MemoryStorage();
+		let patchCount = 0;
+		let resolvePatch: ((r: Response) => void) | null = null;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: unknown, init?: RequestInit) => {
+				if ((init?.method ?? 'GET') === 'PATCH') {
+					patchCount += 1;
+					return new Promise<Response>((resolve) => {
+						resolvePatch = resolve;
+					});
+				}
+				return jsonResponse(200, { priority: 10, max_runners: 5, min_idle_runners: 1 }, '"42:7"');
+			})
+		);
+
+		// The original context saves; its PATCH stays in flight. The journal
+		// and lock it wrote are exactly what a duplicated tab inherits.
+		const a = await renderEditor({ storage: shared });
+		const qa = within(a.container);
+		await fireEvent.input(priorityInputIn(a.container), { target: { value: '30' } });
+		await fireEvent.click(qa.getByRole('button', { name: 'Save changes' }));
+		expect(patchCount).toBe(1);
+		const aLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as {
+			tabId: string;
+			nonce: string;
+			acquiredAt: string;
+		};
+		const aJournal = JSON.parse(shared.getItem(PENDING_KEY) ?? 'null') as {
+			requestId: string;
+			tabId: string;
+		};
+		expect(aLock.tabId).toBe(aJournal.tabId);
+
+		// The duplicate mounts over the copied storage: it adopts the
+		// journaled tabId (same lineage) but mounts with a fresh nonce, so it
+		// must NOT own the lock even though every stored byte matches.
+		const b = await renderEditor({ storage: shared });
+		const qb = within(b.container);
+		await waitFor(() => expect(qb.getByText(/UNKNOWN:/)).toBeInTheDocument());
+		expect(qb.getByRole('button', { name: 'Resolve outcome' })).toBeInTheDocument();
+
+		// Exactly one owner: the non-owner's resolve is refused, no second
+		// PATCH is dispatched, and the shared lock + journal are untouched.
+		await fireEvent.click(qb.getByRole('button', { name: 'Resolve outcome' }));
+		await waitFor(() =>
+			expect(
+				qb.getByText(/Another tab has an unresolved write for this pool; resolve it there first/)
+			).toBeInTheDocument()
+		);
+		expect(patchCount).toBe(1);
+		const refusedLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { nonce?: string };
+		expect(refusedLock.nonce).toBe(aLock.nonce);
+		expect(
+			(JSON.parse(shared.getItem(PENDING_KEY) ?? 'null') as { requestId?: string }).requestId
+		).toBe(aJournal.requestId);
+
+		// The non-owner's clear is refused too: the manual discard stays
+		// gated (nothing here proved non-effect), and the journal survives
+		// the attempt.
+		const discard = qb.getByRole('button', { name: 'Discard pending request' }) as HTMLButtonElement;
+		expect(discard.disabled).toBe(true);
+		await fireEvent.click(discard);
+		expect(shared.getItem(PENDING_KEY)).not.toBeNull();
+		expect(qb.queryByText(/Manual non-effect assertion/)).toBeNull();
+
+		// Age the lock: the duplicate may now explicitly take over, writing
+		// ITS nonce under the same journaled tabId.
+		shared.setItem(
+			LOCK_KEY,
+			JSON.stringify({ ...aLock, acquiredAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() })
+		);
+		await fireEvent.click(qb.getByRole('button', { name: 'Resolve outcome' }));
+		const takeOver = await qb.findByRole('button', { name: 'Take over lock' });
+		await fireEvent.click(takeOver);
+		const bLock = JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { tabId: string; nonce: string };
+		expect(bLock.tabId).toBe(aLock.tabId);
+		expect(bLock.nonce).not.toBe(aLock.nonce);
+
+		// The storage event reaches the displaced original: it blocks editing.
+		window.dispatchEvent(
+			new StorageEvent('storage', { key: LOCK_KEY, newValue: shared.getItem(LOCK_KEY) })
+		);
+		await waitFor(() => expect(qa.getByText(/lost the multi-tab write lock/)).toBeInTheDocument());
+		expect(priorityInputIn(a.container).disabled).toBe(true);
+
+		// The displaced context's in-flight write returns definitively: the
+		// guard refuses its clear and release — B's lock and the journal
+		// survive, and A shows no applied state.
+		resolvePatch!(jsonResponse(200, { priority: 30, max_runners: 5, min_idle_runners: 1 }, '"43:1"'));
+		await waitFor(() =>
+			expect(
+				qa.getByText(/This tab lost the multi-tab write lock while a write was in flight/)
+			).toBeInTheDocument()
+		);
+		expect(qa.queryByText('Settings applied. Draft cleared.')).toBeNull();
+		expect((JSON.parse(shared.getItem(LOCK_KEY) ?? 'null') as { nonce?: string }).nonce).toBe(
+			bLock.nonce
+		);
+		expect(shared.getItem(PENDING_KEY)).not.toBeNull();
+
+		// The new owner resolves normally: dispatch, definitive outcome,
+		// journal + lock cleared.
+		await fireEvent.click(qb.getByRole('button', { name: 'Resolve outcome' }));
+		await waitFor(() => expect(patchCount).toBe(2));
+		resolvePatch!(jsonResponse(200, { priority: 30, max_runners: 5, min_idle_runners: 1 }, '"43:2"'));
+		await waitFor(() => expect(qb.getByText('Settings applied. Draft cleared.')).toBeInTheDocument());
+		expect(shared.getItem(PENDING_KEY)).toBeNull();
+		expect(shared.getItem(LOCK_KEY)).toBeNull();
+	});
+
+	it('a 412 on resolve holds UNKNOWN (journal, lock and latch intact) and gates the manual discard on a fresh read', async () => {
+		const shared = new MemoryStorage();
+		let patchCount = 0;
+		let getCount = 0;
+		vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+			const method = init?.method ?? 'GET';
+			if (method === 'PATCH') {
+				patchCount += 1;
+				if (patchCount === 1) {
+					throw new TypeError('connection dropped after dispatch');
+				}
+				// The resolve re-presentation answers 412 — as it can after a
+				// receipts-table loss even though the original write committed.
+				return jsonResponse(412, { detail: 'stale' }, '"70:1"');
+			}
+			getCount += 1;
+			return jsonResponse(
+				200,
+				{ priority: 10, max_runners: 5, min_idle_runners: 1 },
+				getCount === 1 ? '"42:7"' : '"71:1"'
+			);
+		});
+
+		const comp = await renderEditor({ storage: shared });
+		await fireEvent.input(priorityInputIn(comp.container), { target: { value: '44' } });
+		await fireEvent.click(comp.getByRole('button', { name: 'Save changes' }));
+		await waitFor(() => expect(comp.getByText(/UNKNOWN:/)).toBeInTheDocument());
+
+		// Resolve re-presents the SAME request id and answers 412. The OLD
+		// behavior cleared the pending request and latched a conflict; the
+		// hold must now survive intact.
+		await fireEvent.click(comp.getByRole('button', { name: 'Resolve outcome' }));
+		await waitFor(() => expect(comp.getByText(/Resolve answered 412/)).toBeInTheDocument());
+		expect(comp.getByText(/UNKNOWN:/)).toBeInTheDocument();
+		expect(shared.getItem(PENDING_KEY)).not.toBeNull();
+		expect(shared.getItem(LOCK_KEY)).not.toBeNull();
+		expect(patchCount).toBe(2);
+		// No conflict latch: no "Mark reconciled", no conflict banner, Save
+		// stays disabled, and the operator's draft is still held.
+		expect(comp.queryByRole('button', { name: 'Mark reconciled' })).toBeNull();
+		expect(comp.queryByText(/Conflict \(412\)/)).toBeNull();
+		await waitFor(() =>
+			expect((comp.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled).toBe(
+				true
+			)
+		);
+		expect(priorityInputIn(comp.container).value).toBe('44');
+
+		// The manual discard is gated: before any fresh GET since the 412 it
+		// is disabled and refuses to clear.
+		let discard = comp.getByRole('button', { name: 'Discard pending request' }) as HTMLButtonElement;
+		expect(discard.disabled).toBe(true);
+		await fireEvent.click(discard);
+		expect(shared.getItem(PENDING_KEY)).not.toBeNull();
+		expect(comp.queryByText(/Manual non-effect assertion/)).toBeNull();
+
+		// A fresh successful GET after the 412 arms it.
+		await fireEvent.click(comp.getByRole('button', { name: 'Re-read settings' }));
+		await waitFor(() => expect(comp.getByText('"71:1"')).toBeInTheDocument());
+		discard = comp.getByRole('button', { name: 'Discard pending request' }) as HTMLButtonElement;
+		expect(discard.disabled).toBe(false);
+
+		// The first press shows the manual non-effect warning; nothing is
+		// cleared yet.
+		await fireEvent.click(discard);
+		expect(comp.getByText(/Manual non-effect assertion/)).toBeInTheDocument();
+		expect(shared.getItem(PENDING_KEY)).not.toBeNull();
+		expect(shared.getItem(LOCK_KEY)).not.toBeNull();
+
+		// The confirm clears journal + lock and unblocks the editor.
+		await fireEvent.click(comp.getByRole('button', { name: /Confirm discard/ }));
+		expect(shared.getItem(PENDING_KEY)).toBeNull();
+		expect(shared.getItem(LOCK_KEY)).toBeNull();
+		await waitFor(() => expect(comp.queryByText(/UNKNOWN:/)).toBeNull());
+		expect((comp.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled).toBe(
+			false
+		);
+		expect(priorityInputIn(comp.container).disabled).toBe(false);
 	});
 });

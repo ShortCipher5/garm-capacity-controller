@@ -46,6 +46,19 @@
 	// values; a new conflict disarms it again.
 	let reconcileFreshRead = false;
 	let unknownHeld = false;
+	// resolveConflictSeen latches when a resolve re-presentation answered
+	// 412. While the server's receipt schema is intact a 412 on re-presentation
+	// proves the request never committed — but after a receipts-table loss
+	// and reinstall the same 412 occurs even though the original write
+	// committed before the loss, so the pending request must be HELD, never
+	// auto-cleared.
+	let resolveConflictSeen = false;
+	// discardFreshRead arms only when a GET completes AFTER that 412, so
+	// "Discard pending request" always asserts non-effect against freshly
+	// read values. discardWarned is the first press of the discard action:
+	// it shows the manual non-effect warning and demands a confirm click.
+	let discardFreshRead = false;
+	let discardWarned = false;
 	let errorMessage = '';
 
 	// Client-side durable journal of a dispatched-but-unresolved write. The
@@ -68,14 +81,19 @@
 	}
 	let pendingRequest: PendingRequest | null = null;
 
-	// Multi-tab write lock. The stored value is JSON {tabId, acquiredAt}; a
-	// tab may claim only a free lock or refresh its own, and may release
-	// only a lock it owns. claimLock reads and writes with NO await between
-	// the two steps: storage access is synchronous and JS runs to
-	// completion, so against other tabs the read-check-write is one atomic
-	// step — a second tab's claim cannot interleave and double-claim.
+	// Multi-tab write lock. The stored value is JSON {tabId, nonce,
+	// acquiredAt}; a context may claim only a free lock or refresh its own,
+	// and may release only a lock it owns. claimLock reads and writes with
+	// NO await between the steps: storage access is synchronous and JS runs
+	// to completion, so against other tabs the read-check-write is one
+	// atomic step — a second tab's claim cannot interleave and double-claim.
+	// Ownership requires BOTH tabId and nonce: the nonce is generated fresh
+	// on every mount and never journaled, so a duplicated tab (or a second
+	// window restored from the same localStorage) that copies the journaled
+	// tabId and the lock record wholesale can never impersonate the owner.
 	interface PoolSettingsLock {
 		tabId: string;
+		nonce: string;
 		acquiredAt: string;
 	}
 
@@ -83,11 +101,18 @@
 	// but only through the operator's explicit "Take over lock" action.
 	const LOCK_STALE_MS = 5 * 60 * 1000;
 
-	// tabId identifies THIS tab/editor instance for lock ownership. On
-	// journal recovery the editor adopts the journaled tabId so a deliberate
-	// resolve after a restart re-enters the lock held before the restart
-	// instead of deadlocking against it.
+	// tabId identifies THIS tab/editor lineage for lock records. On journal
+	// recovery the editor adopts the journaled tabId so a restarted editor
+	// keeps one observable identity per pending request — but identity alone
+	// no longer grants ownership (see nonce below).
 	let tabId: string = crypto.randomUUID();
+
+	// nonce is the per-context ownership proof: fresh on every mount, NEVER
+	// journaled. A browser restart or a duplicated tab therefore re-enters
+	// with the journaled tabId but a nonce the stored lock cannot match, so
+	// two live JS contexts can never both believe they own the lock even
+	// when localStorage was copied wholesale.
+	let nonce: string = crypto.randomUUID();
 
 	// This tab currently owns the multi-tab lock.
 	let heldLock = false;
@@ -112,10 +137,14 @@
 	// persistPending is fail-closed: it reports whether the journal actually
 	// reached storage so save() can abort BEFORE dispatching when the
 	// pending record would otherwise be lost (and the UNKNOWN hold with it).
+	// The write is verified by an immediate synchronous re-read: a journal
+	// that is not byte-for-byte on disk was never durably recorded.
 	function persistPending(rec: PendingRequest): boolean {
 		try {
-			store().setItem(pendingStorageKey(), JSON.stringify(rec));
-			return true;
+			const key = pendingStorageKey();
+			const raw = JSON.stringify(rec);
+			store().setItem(key, raw);
+			return store().getItem(key) === raw;
 		} catch {
 			return false;
 		}
@@ -132,14 +161,18 @@
 
 	// parseLock reads one lock record. It throws on unparseable JSON and
 	// returns null on a wrong-shaped record; readLock maps both to 'corrupt'
-	// so callers can fail closed instead of misreading the lock as free.
+	// so callers can fail closed instead of misreading the lock as free. A
+	// legacy {tabId, acquiredAt} record without a nonce is treated as
+	// wrong-shaped: ownership cannot be established from tabId alone, and
+	// silently trusting it would reopen the duplicated-tab hole.
 	function parseLock(raw: string): PoolSettingsLock | null {
 		const parsed = JSON.parse(raw) as unknown;
 		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
 		const rec = parsed as Record<string, unknown>;
 		if (typeof rec.tabId !== 'string' || rec.tabId === '') return null;
+		if (typeof rec.nonce !== 'string' || rec.nonce === '') return null;
 		if (typeof rec.acquiredAt !== 'string' || rec.acquiredAt === '') return null;
-		return { tabId: rec.tabId, acquiredAt: rec.acquiredAt };
+		return { tabId: rec.tabId, nonce: rec.nonce, acquiredAt: rec.acquiredAt };
 	}
 
 	function readLock(): PoolSettingsLock | null | 'corrupt' {
@@ -158,12 +191,23 @@
 		return Date.now() - acquiredAt > LOCK_STALE_MS;
 	}
 
+	// ownsLock is the ownership test: BOTH the journaled-tab lineage (tabId)
+	// AND the per-context proof (nonce) must match. tabId alone is exactly
+	// what a duplicated tab copies, so it can never suffice.
+	function ownsLock(lock: PoolSettingsLock): boolean {
+		return lock.tabId === tabId && lock.nonce === nonce;
+	}
+
 	// claimLock is the multi-tab guard around a write to this pool. A lock
-	// held by another tab refuses the claim ('blocked'); a lock held by a
-	// likely-dead tab (acquiredAt past LOCK_STALE_MS) reports 'stale' so the
-	// operator can explicitly take it over. Re-entering under this tab's own
-	// tabId (a deliberate resolve after UNKNOWN or restart) refreshes the
-	// lock instead of deadlocking against it.
+	// held by another context refuses the claim ('blocked'); a lock held by
+	// a likely-dead tab (acquiredAt past LOCK_STALE_MS) reports 'stale' so
+	// the operator can explicitly take it over. Re-entering under this
+	// context's own {tabId, nonce} (a deliberate resolve) refreshes the lock
+	// instead of deadlocking against it. Every write is followed by an
+	// immediate synchronous re-read: if the value on disk is not the nonce
+	// we just wrote, another context holds the lock and this claim reads as
+	// 'blocked' — that closes the check/set interleave as far as
+	// localStorage allows.
 	function claimLock(): 'claimed' | 'blocked' | 'stale' | 'corrupt' | 'error' {
 		let existing: PoolSettingsLock | null | 'corrupt';
 		try {
@@ -172,26 +216,42 @@
 			return 'error';
 		}
 		if (existing === 'corrupt') return 'corrupt';
-		if (existing && existing.tabId !== tabId) {
+		if (existing && !ownsLock(existing)) {
 			return lockIsStale(existing) ? 'stale' : 'blocked';
 		}
 		try {
-			store().setItem(lockStorageKey(), JSON.stringify({ tabId, acquiredAt: new Date().toISOString() }));
+			const rec: PoolSettingsLock = { tabId, nonce, acquiredAt: new Date().toISOString() };
+			store().setItem(lockStorageKey(), JSON.stringify(rec));
+			const verify = readLock();
+			if (verify === 'corrupt' || !verify || verify.nonce !== nonce) {
+				return 'blocked';
+			}
 		} catch {
 			return 'error';
 		}
 		heldLock = true;
+		// A successful (re)claim is positive proof of ownership.
+		lockLost = false;
 		return 'claimed';
 	}
 
-	// releaseLock removes the lock only when it still belongs to this tab,
-	// so an outcome here can never clear a lock another tab took over. A
-	// corrupt record is left untouched: nothing is silently discarded.
+	// releaseLock removes the lock only when it still belongs to THIS
+	// context (tabId AND nonce), so an outcome here can never clear a lock
+	// another context took over. Finding a foreign live lock means this
+	// context was displaced mid-flight: it blocks editing instead of
+	// mutating shared state it no longer owns. A corrupt record is left
+	// untouched: nothing is silently discarded.
 	function releaseLock() {
 		try {
 			const existing = readLock();
-			if (existing && existing !== 'corrupt' && existing.tabId === tabId) {
-				store().removeItem(lockStorageKey());
+			if (existing && existing !== 'corrupt') {
+				if (ownsLock(existing)) {
+					store().removeItem(lockStorageKey());
+				} else {
+					heldLock = false;
+					lockLost = true;
+					return;
+				}
 			}
 		} catch {
 			// ignore
@@ -209,10 +269,12 @@
 	}
 
 	// takeOverLock is the explicit operator action that claims a STALE lock
-	// held by another tab. It re-validates staleness immediately before
-	// writing so a live lock can never be stolen. The tab that held the lock
-	// is not orphaned silently: it learns about the loss through the
-	// storage event and blocks editing with an explanatory state.
+	// held by another context. It re-validates staleness immediately before
+	// writing so a live lock can never be stolen, writes THIS context's
+	// {tabId, nonce, acquiredAt}, and verifies the write landed. The context
+	// that held the lock is not orphaned silently: it learns about the loss
+	// through the storage event and blocks editing with an explanatory
+	// state.
 	function takeOverLock() {
 		lockTakeoverOffered = false;
 		let existing: PoolSettingsLock | null | 'corrupt';
@@ -226,15 +288,21 @@
 				'Recovery data unreadable: the multi-tab lock record for this pool is corrupt. Your change was NOT sent. Nothing has been deleted; clear this pool\u2019s experimental site data to recover.';
 			return;
 		}
-		if (!existing || existing.tabId === tabId || !lockIsStale(existing)) {
+		if (!existing || ownsLock(existing) || !lockIsStale(existing)) {
 			return;
 		}
 		try {
-			store().setItem(lockStorageKey(), JSON.stringify({ tabId, acquiredAt: new Date().toISOString() }));
+			const rec: PoolSettingsLock = { tabId, nonce, acquiredAt: new Date().toISOString() };
+			store().setItem(lockStorageKey(), JSON.stringify(rec));
+			const verify = readLock();
+			if (verify === 'corrupt' || !verify || verify.nonce !== nonce) {
+				return;
+			}
 		} catch {
 			return;
 		}
 		heldLock = true;
+		lockLost = false;
 	}
 
 	// onLockStorageEvent lets a tab detect that its lock was removed or
@@ -253,10 +321,74 @@
 				next = 'corrupt';
 			}
 		}
-		if (next === 'corrupt' || !next || next.tabId !== tabId) {
+		if (next === 'corrupt' || !next || !ownsLock(next)) {
 			heldLock = false;
 			lockLost = true;
 		}
+	}
+
+	// guardMutation revalidates, immediately before any mutating action
+	// (save dispatch, resolve dispatch, journal clear, lock release), that
+	// this context still owns the lock (tabId AND nonce) and that the
+	// journaled pending record still matches the in-memory hold (re-read +
+	// strict validation). Any mismatch means a duplicated tab, a takeover
+	// elsewhere or tampering displaced this context: the caller must not
+	// mutate shared state and must enter the blocked/lockLost state instead.
+	function guardMutation(): 'ok' | 'lost' | 'corrupt' | 'error' {
+		let existing: PoolSettingsLock | null | 'corrupt';
+		try {
+			existing = readLock();
+		} catch {
+			return 'error';
+		}
+		if (existing === 'corrupt') return 'corrupt';
+		if (!existing || !ownsLock(existing)) return 'lost';
+		if (pendingRequest) {
+			let raw: string | null;
+			try {
+				raw = store().getItem(pendingStorageKey());
+			} catch {
+				return 'error';
+			}
+			if (!raw) return 'lost';
+			let rec: unknown;
+			try {
+				rec = JSON.parse(raw);
+			} catch {
+				return 'corrupt';
+			}
+			if (!isPendingRequest(rec)) return 'corrupt';
+			if (rec.requestId !== pendingRequest.requestId) return 'lost';
+		}
+		return 'ok';
+	}
+
+	// refuseGuard routes a failed pre-mutation guard: a displaced context
+	// blocks editing with the lockLost state; corrupt evidence latches the
+	// persistent fail-closed recovery error; nothing is discarded on any path.
+	function refuseGuard(guard: 'lost' | 'corrupt' | 'error') {
+		heldLock = false;
+		if (guard === 'lost') {
+			lockLost = true;
+			errorMessage =
+				'This tab lost the multi-tab write lock while a write was in flight (another tab took over). Nothing was discarded or released. Close this editor and use the tab that took over.';
+			return;
+		}
+		if (guard === 'corrupt') {
+			recoveryError =
+				'Recovery data unreadable: the durable recovery data for this pool (lock or pending journal) is corrupt or has the wrong shape. Saving is disabled. Nothing has been deleted; clear this pool’s experimental site data to recover.';
+			return;
+		}
+		errorMessage = 'Browser storage rejected a recovery-data access; nothing was discarded or released.';
+	}
+
+	// clearResolveHold resets the resolve-412 recovery state. It runs on every
+	// definitive outcome and on discard; only a resolve that answers 412 sets
+	// it again.
+	function clearResolveHold() {
+		resolveConflictSeen = false;
+		discardFreshRead = false;
+		discardWarned = false;
 	}
 
 	// refuseClaim routes a failed lock claim: a live foreign lock blocks the
@@ -349,6 +481,12 @@
 			if (conflictLatched) {
 				reconcileFreshRead = true;
 			}
+			// The same arming pattern gates the manual discard after a resolve
+			// answered 412: the operator must assert non-effect against values
+			// from a GET that completed after that 412.
+			if (resolveConflictSeen) {
+				discardFreshRead = true;
+			}
 			// unknownHeld is intentionally NOT cleared here: a refresh does
 			// not resolve an unresolved write. It clears only through
 			// resolve() after a definitive outcome. conflictLatched is also
@@ -440,21 +578,37 @@
 			return;
 		}
 		try {
-			await dispatchPatch(rec.requestId, patch, etag);
+			await dispatchPatch(rec.requestId, patch, etag, false);
 		} finally {
 			saving = false;
 		}
 	}
 
 	// dispatchPatch issues exactly one PATCH and routes every outcome class.
-	// Shared by save() and by the deliberate resolve of an unresolved
-	// request; it never retries on its own. The multi-tab lock is released
-	// on every definitive outcome; UNKNOWN keeps it (recovery re-enters
-	// under the same request id).
-	async function dispatchPatch(requestId: string, patch: Partial<PoolSettings>, precondition: string) {
+	// Shared by save() (resolving=false) and by the deliberate resolve of an
+	// unresolved request (resolving=true); it never retries on its own. The
+	// multi-tab lock is released on every definitive outcome; UNKNOWN keeps
+	// it (recovery re-enters under the same request id). Every path that
+	// would clear the journal or release the lock first re-runs
+	// guardMutation: a context displaced by a duplicated tab or a stale
+	// takeover must never mutate shared per-pool state it no longer owns.
+	async function dispatchPatch(
+		requestId: string,
+		patch: Partial<PoolSettings>,
+		precondition: string,
+		resolving: boolean
+	) {
 		if (!ref) return;
 		try {
 			const res = await patchPoolSettings(ref, precondition, patch, requestId);
+			// The response is authoritative for the request itself, but the
+			// journal and lock are shared per-pool state: revalidate ownership
+			// and record integrity before touching them.
+			const guard = guardMutation();
+			if (guard !== 'ok') {
+				refuseGuard(guard);
+				return;
+			}
 			if (res.replayed) {
 				// The server answered from its durable receipt: this exact
 				// request already applied earlier. The outcome is now known;
@@ -462,6 +616,7 @@
 				clearPending();
 				releaseLock();
 				unknownHeld = false;
+				clearResolveHold();
 				etag = res.etag;
 				await load(true);
 				applied = true;
@@ -473,6 +628,7 @@
 			clearPending();
 			releaseLock();
 			unknownHeld = false;
+			clearResolveHold();
 			// Applied: the server document is the new baseline and the draft is
 			// cleared (it equals the applied document).
 			serverValues = res.settings;
@@ -481,13 +637,35 @@
 			applied = true;
 		} catch (err) {
 			if (err instanceof PoolSettingsError && err.kind === 'conflict') {
-				// 412 proves non-effect. For a resolve() re-presentation it
-				// additionally proves the original unresolved request did not
-				// commit (a committed request would have left a durable
-				// receipt and been answered by replay). Definitive either way.
+				if (resolving) {
+					// 412 on a resolve re-presentation. While the receipt
+					// schema is intact this would prove the original request
+					// never committed — but after a receipts-table loss and
+					// reinstall the same 412 occurs even though the original
+					// write committed before the loss. So the pending request
+					// is HELD: journal, lock and UNKNOWN latch all stay
+					// intact, no conflict latch is raised, and recovery
+					// guidance plus a fresh-read-gated manual discard are
+					// offered instead.
+					resolveConflictSeen = true;
+					discardFreshRead = false;
+					discardWarned = false;
+					if (err.etag) {
+						etag = err.etag;
+					}
+					return;
+				}
+				// A 412 on a fresh save proves non-effect: the ETag
+				// precondition failed, so this request wrote nothing.
+				const guard = guardMutation();
+				if (guard !== 'ok') {
+					refuseGuard(guard);
+					return;
+				}
 				clearPending();
 				releaseLock();
 				unknownHeld = false;
+				clearResolveHold();
 				// Keep the draft exactly as the operator typed it, and adopt
 				// the fresh ETag so a deliberate re-save is preconditioned on
 				// it (a manual re-read still precedes a truly reconciled save).
@@ -499,9 +677,15 @@
 					etag = err.etag;
 				}
 			} else if (err instanceof PoolSettingsError && err.kind === 'rejected') {
+				const guard = guardMutation();
+				if (guard !== 'ok') {
+					refuseGuard(guard);
+					return;
+				}
 				clearPending();
 				releaseLock();
 				unknownHeld = false;
+				clearResolveHold();
 				errorMessage = describeError(err);
 			} else if (err instanceof PoolSettingsError && err.kind === 'unknown') {
 				// Lost or ambiguous response after dispatch: keep the journal
@@ -515,10 +699,10 @@
 
 	// resolve deliberately re-presents the journaled request so the
 	// server's durable receipt turns the UNKNOWN into a definitive outcome.
-	// It never submits new content. It re-enters under the journaled tab
-	// identity, so a lock still held from the original dispatch does not
-	// self-deadlock; only a lock owned by a different tab refuses the
-	// resolve.
+	// It never submits new content. The lock claim revalidates ownership;
+	// guardMutation then re-reads and strict-validates the journaled record
+	// so a replaced or vanished record can never be silently acted on. Only
+	// a lock owned by a different context refuses the resolve.
 	async function resolve() {
 		if (!ref || !pendingRequest || saving || refreshing) return;
 		const claim = claimLock();
@@ -527,15 +711,53 @@
 			return;
 		}
 		lockTakeoverOffered = false;
+		const guard = guardMutation();
+		if (guard !== 'ok') {
+			refuseGuard(guard);
+			return;
+		}
 		saving = true;
 		applied = false;
 		conflictEtag = null;
 		errorMessage = '';
+		discardWarned = false;
 		try {
-			await dispatchPatch(pendingRequest.requestId, pendingRequest.payload, pendingRequest.etag);
+			await dispatchPatch(pendingRequest.requestId, pendingRequest.payload, pendingRequest.etag, true);
 		} finally {
 			saving = false;
 		}
+	}
+
+	// discardPending is the explicit operator escape after a resolve answered
+	// 412: the operator asserts — manually, after verifying against freshly
+	// read values — that the pending request had no effect on the server.
+	// The first press only shows the manual non-effect warning; the clear
+	// itself demands a confirm click.
+	function discardPending() {
+		if (!pendingRequest || !discardFreshRead || saving || refreshing) return;
+		discardWarned = true;
+	}
+
+	function cancelDiscardPending() {
+		discardWarned = false;
+	}
+
+	function confirmDiscardPending() {
+		if (!pendingRequest || !discardFreshRead || !discardWarned) return;
+		// The journal clear and lock release are mutating actions:
+		// revalidate ownership and record integrity one last time. A
+		// displaced context must never clear shared state it no longer owns.
+		const guard = guardMutation();
+		discardWarned = false;
+		if (guard !== 'ok') {
+			refuseGuard(guard);
+			return;
+		}
+		clearPending();
+		releaseLock();
+		unknownHeld = false;
+		clearResolveHold();
+		errorMessage = '';
 	}
 
 	// refresh re-reads the settings document. It never auto-submits a patch.
@@ -558,8 +780,10 @@
 				// Recover an unresolved write from before the restart: re-enter
 				// the UNKNOWN hold, restore the operator's full journaled
 				// draft (every field, not only the patched ones) and adopt
-				// the journaled tab identity so resolving re-enters the lock
-				// this tab held before the restart.
+				// the journaled tab identity for continuity. Ownership is
+				// NOT inherited: the nonce is fresh, so a lock left behind by
+				// the dead session reads as foreign here and only the stale
+				// takeover path (or its release) can reclaim it.
 				pendingRequest = rec;
 				unknownHeld = true;
 				draft = { ...rec.draft };
@@ -654,6 +878,44 @@
 					<p class="text-sm text-orange-800 dark:text-orange-200 mt-1">
 						Your edits below are held and have not been confirmed applied. Saving is blocked until the outcome is resolved: use "Resolve outcome" to re-present the exact journaled request (id {pendingRequest?.requestId ?? 'unknown'}) and read the server's durable receipt. A re-read alone does not clear this state.
 					</p>
+				</div>
+			{/if}
+
+			{#if resolveConflictSeen}
+				<div class="rounded-md bg-yellow-50 dark:bg-yellow-900 p-4" role="alert">
+					<p class="text-sm font-medium text-yellow-800 dark:text-yellow-200">
+						Resolve answered 412 (precondition failed). While the server's receipt store is intact a 412 here would prove this request never committed — but after a receipts loss and reinstall the same 412 can occur even though the original write committed before the loss.
+					</p>
+					<p class="text-sm text-yellow-800 dark:text-yellow-200 mt-1">
+						The pending request is therefore kept and saving stays blocked. Re-read the current values and check whether your change is present. If — and only if — you verified against the freshly read values that the request had no effect, use "Discard pending request" below.{#if etag} Current server revision: {etag}.{/if}
+					</p>
+				</div>
+			{/if}
+
+			{#if discardWarned}
+				<div class="rounded-md bg-red-50 dark:bg-red-900 p-4" role="alert">
+					<p class="text-sm font-medium text-red-800 dark:text-red-200">
+						Manual non-effect assertion: you are declaring that pending request {pendingRequest?.requestId ?? 'unknown'} NEVER took effect on the server.
+					</p>
+					<p class="text-sm text-red-800 dark:text-red-200 mt-1">
+						The server did not prove this — you assert it from your own verification against the freshly read values above. This clears the durable journal and the multi-tab lock and cannot be undone.
+					</p>
+					<div class="mt-3 flex space-x-3">
+						<button
+							type="button"
+							on:click={confirmDiscardPending}
+							class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 cursor-pointer"
+						>
+							Confirm discard — I verified no effect
+						</button>
+						<button
+							type="button"
+							on:click={cancelDiscardPending}
+							class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 cursor-pointer"
+						>
+							Keep pending request
+						</button>
+					</div>
 				</div>
 			{/if}
 
@@ -817,6 +1079,14 @@
 						class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
 					>
 						Resolve outcome
+					</button>
+					<button
+						type="button"
+						on:click={discardPending}
+						disabled={saving || refreshing || !pendingRequest || !discardFreshRead}
+						class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+					>
+						Discard pending request
 					</button>
 				{/if}
 				<button

@@ -133,63 +133,138 @@ func (OfflinePoolSettingsMeta) TableName() string {
 const offlineSettingsMetaSchemaKey = "schema"
 
 // errOfflineSettingsSchemaMissing is returned by the experimental
-// GET/PATCH paths when the installation marker is present but the revision
-// table or the receipts table is missing: the schema was lost after the
-// feature was used, and silently recreating the tables would destroy
-// revision or replay history (old ETags could match a restarted revision
-// sequence, old request ids could be re-applied). The paths fail hard
-// instead; the operator must run the explicit reinstall, which starts a
-// new epoch and invalidates every outstanding ETag and receipt.
+// GET/PATCH paths when the installation state is inconsistent: either the
+// marker is present but the revision table or the receipts table is
+// missing (the schema was lost after the feature was used), or the marker
+// is missing while one of the data tables survives (the marker was lost
+// after the feature was used, or a pre-feature backup was restored over a
+// used schema). Silently recreating or reinstalling the schema in either
+// state would destroy revision or replay history — old ETags could match
+// a restarted revision sequence, old request ids could be re-applied — so
+// the paths fail hard instead; the operator must run the explicit
+// reinstall, which starts a new epoch and invalidates every outstanding
+// ETag and receipt.
 var errOfflineSettingsSchemaMissing = errors.New("experimental offline pool settings schema is missing after being installed; refusing to recreate it silently; run the explicit reinstall")
 
-// ensureOfflinePoolSettingsSchema verifies the experimental schema and
-// installs it when the feature was never enabled against this database.
+// ensureOfflinePoolSettingsSchema audits the experimental schema in one
+// transaction and applies one of four rules:
+//
+//   - marker absent, revision and receipts tables absent: the feature was
+//     never enabled against this database; install all three tables plus
+//     the marker row in that transaction (a fresh install starts at
+//     generation 1 with no epoch floor);
+//   - marker absent, revision or receipts table present: the witness was
+//     lost after the feature was used (or a pre-feature backup was
+//     restored over a used schema) while rows survived; reinstalling over
+//     surviving rows would restart generation at 1 and last_epoch at 0,
+//     re-opening epoch collision hazards — fail hard instead, with the
+//     same errOfflineSettingsSchemaMissing surface; recovery is the
+//     explicit reinstall;
+//   - marker present, revision or receipts table missing: the schema was
+//     lost after the feature was used — fail hard, same error;
+//   - all three present: proceed, upgrading a legacy (pre-generation)
+//     marker row in the same transaction when one survives.
+//
 // This function is the only place where the experimental schema is
 // created; it is only reachable through the experimental store methods,
 // which in turn are only reachable when the
-// experimental.enable_offline_pool_settings config flag is enabled.
-//
-// Table creation is deliberately restricted: it may only run while the
-// installation marker table is ABSENT (a genuine first enable). If the
-// marker is present but the revision table or the receipts table is
-// missing, the schema was lost after the feature was used, and this
-// function fails with errOfflineSettingsSchemaMissing instead of
-// recreating anything. Both experimental paths (GET and PATCH) call it
-// before touching the schema.
+// experimental.enable_offline_pool_settings config flag is enabled. Both
+// experimental paths (GET and PATCH) call it before touching the schema.
 func (s *sqlDatabase) ensureOfflinePoolSettingsSchema() error {
-	hasRevisions := s.conn.Migrator().HasTable(&OfflinePoolSettingsRevision{})
-	hasReceipts := s.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{})
-	hasMeta := s.conn.Migrator().HasTable(&OfflinePoolSettingsMeta{})
-	if hasRevisions && hasReceipts && hasMeta {
+	return s.conn.Transaction(func(tx *gorm.DB) error {
+		hasRevisions := tx.Migrator().HasTable(&OfflinePoolSettingsRevision{})
+		hasReceipts := tx.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{})
+		hasMeta := tx.Migrator().HasTable(&OfflinePoolSettingsMeta{})
+		if hasRevisions && hasReceipts && hasMeta {
+			return s.upgradeLegacyOfflinePoolSettingsMeta(tx)
+		}
+		if hasMeta {
+			// Installed before, partially lost since: recreating the missing
+			// table here would silently restart revision history at a fresh
+			// epoch or drop the replay record of in-flight requests. Fail
+			// hard; recovery is the explicit reinstall.
+			return fmt.Errorf("%w: revision table present: %t, receipts table present: %t", errOfflineSettingsSchemaMissing, hasRevisions, hasReceipts)
+		}
+		if hasRevisions || hasReceipts {
+			// The witness is gone but data survives: the marker table was
+			// lost after the feature was used, or a pre-feature backup was
+			// restored over a used schema. The surviving rows may still
+			// serve ETags, and a lazy reinstall would reset generation to 1
+			// and last_epoch to 0 underneath them. Fail hard; recovery is
+			// the explicit reinstall.
+			return fmt.Errorf("%w: installation marker is missing but data tables survive (revision table present: %t, receipts table present: %t); refusing to install over surviving rows; run the explicit reinstall", errOfflineSettingsSchemaMissing, hasRevisions, hasReceipts)
+		}
+		if err := installOfflinePoolSettingsSchema(tx); err != nil {
+			return fmt.Errorf("error creating offline pool settings schema: %w", err)
+		}
+		return nil
+	})
+}
+
+// upgradeLegacyOfflinePoolSettingsMeta deterministically upgrades a
+// pre-generation installation marker row. Older code installed the marker
+// with only key, installed and the timestamps; the generation and
+// last_epoch columns are either missing from the table entirely or hold
+// zero values. A marker at generation 0 is upgraded, in the same
+// transaction, to generation 1 with last_epoch set to the highest epoch
+// of the surviving revision rows, so every epoch minted from then on
+// strictly exceeds every epoch a surviving row carries. Must be called
+// inside a transaction, after the presence check confirmed all three
+// tables exist. A no-op when the marker is already at generation >= 1.
+func (s *sqlDatabase) upgradeLegacyOfflinePoolSettingsMeta(tx *gorm.DB) error {
+	// Add the columns with an explicit zero default when they are missing:
+	// SQLite rejects adding a NOT NULL column without a default to a table
+	// that has rows, and the ORM migrator emits no default.
+	if !tx.Migrator().HasColumn(&OfflinePoolSettingsMeta{}, "Generation") {
+		if err := tx.Exec("ALTER TABLE offline_pool_settings_meta ADD COLUMN generation integer NOT NULL DEFAULT 0").Error; err != nil {
+			return fmt.Errorf("error adding generation column to offline pool settings installation marker: %w", err)
+		}
+	}
+	if !tx.Migrator().HasColumn(&OfflinePoolSettingsMeta{}, "LastEpoch") {
+		if err := tx.Exec("ALTER TABLE offline_pool_settings_meta ADD COLUMN last_epoch integer NOT NULL DEFAULT 0").Error; err != nil {
+			return fmt.Errorf("error adding last_epoch column to offline pool settings installation marker: %w", err)
+		}
+	}
+
+	var meta OfflinePoolSettingsMeta
+	err := tx.Where("key = ?", offlineSettingsMetaSchemaKey).First(&meta).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// A marker table without its row is inconsistent; the write paths
+		// fail at mint time with a clear message. Keep that behavior.
 		return nil
 	}
-	if hasMeta {
-		// Installed before, partially lost since: recreating the missing
-		// table here would silently restart revision history at a fresh
-		// epoch or drop the replay record of in-flight requests. Fail
-		// hard; recovery is the explicit reinstall.
-		return fmt.Errorf("%w: revision table present: %t, receipts table present: %t", errOfflineSettingsSchemaMissing, hasRevisions, hasReceipts)
-	}
-	// The marker is absent: the feature was never enabled against this
-	// database. Install all three tables plus the marker row in one
-	// transaction; a fresh install starts at generation 1 with no epoch
-	// floor. (A surviving revision table without its marker — the
-	// documented witness-lost hole — is left untouched; AutoMigrate only
-	// creates missing tables, and per-pool ETag scoping keeps the
-	// surviving rows authoritative for their pools.)
-	err := s.conn.Transaction(func(tx *gorm.DB) error {
-		return installOfflinePoolSettingsSchema(tx)
-	})
 	if err != nil {
-		return fmt.Errorf("error creating offline pool settings schema: %w", err)
+		return fmt.Errorf("error fetching offline pool settings installation marker: %w", err)
+	}
+	if meta.Generation != 0 {
+		return nil
+	}
+
+	var lastEpoch uint64
+	if err := tx.Model(&OfflinePoolSettingsRevision{}).
+		Select("COALESCE(MAX(epoch), 0)").
+		Scan(&lastEpoch).Error; err != nil {
+		return fmt.Errorf("error computing highest surviving offline pool settings epoch: %w", err)
+	}
+	res := tx.Model(&OfflinePoolSettingsMeta{}).
+		Where("key = ?", offlineSettingsMetaSchemaKey).
+		Updates(map[string]interface{}{
+			"generation": 1,
+			"last_epoch": lastEpoch,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("error upgrading offline pool settings installation marker: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return errors.New("offline pool settings installation marker row is missing")
 	}
 	return nil
 }
 
 // installOfflinePoolSettingsSchema creates the three experimental tables
 // (whichever are missing) and seeds the marker row at generation 1. Must
-// be called inside a transaction, only when the marker table does not
-// exist.
+// be called inside a transaction, only when no experimental table exists
+// (a genuine first enable; enforced by ensureOfflinePoolSettingsSchema).
 func installOfflinePoolSettingsSchema(tx *gorm.DB) error {
 	if err := tx.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}, &OfflinePoolSettingsMeta{}); err != nil {
 		return err

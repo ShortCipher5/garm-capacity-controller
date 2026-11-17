@@ -1,8 +1,8 @@
 // Copyright 2025 Cloudbase Solutions SRL
 //
 //	Licensed under the Apache License, Version 2.0 (the "License"); you may
-//	not use this file except in compliance with the License. You may obtain
-//	a copy of the License at
+//	not use this file except in compliance with the License. You may obtain a
+//	copy of the License at
 //
 //	     http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -16,24 +16,28 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"time"
 )
 
 // This file holds the cross-process safety gear for the single-slot
-// pending-request journal: an exclusive advisory lock file adjacent to the
-// journal, plus the profile/server/entity/pool binding check that keeps a
-// journaled request tied to the exact invocation context that dispatched it.
+// pending-request journal: an exclusive advisory lock on a persistent lock
+// file adjacent to the journal (platform implementation in
+// experimental_journal_lock_unix.go / experimental_journal_lock_other.go),
+// plus the profile/server/entity/pool binding check that keeps a journaled
+// request tied to the exact invocation context that dispatched it.
+//
+// The lock file itself is never deleted, by design: where the platform
+// offers a kernel advisory lock, the kernel releases it when the holding
+// process dies — even on kill -9 — so there is no stale lock to reap and
+// no window in which one process could delete a lock another live process
+// legitimately acquired. The pid record embedded in the file is diagnostics
+// for the refusal message only; the kernel lock is authoritative.
 
 // experimentalJournalLockPath names the advisory lock file adjacent to the
-// pending-request journal. The lock is acquired with O_CREATE|O_EXCL, so at
-// most one live process can hold it; its body records who does.
+// pending-request journal.
 func experimentalJournalLockPath() string {
 	path := experimentalPendingPath()
 	if path == "" {
@@ -43,82 +47,42 @@ func experimentalJournalLockPath() string {
 }
 
 // experimentalJournalLockRecord is the lock file body: enough to tell a
-// contender which process holds the journal and since when, so it can decide
-// between waiting and reclaiming a provably stale lock.
+// contender which process holds the journal and since when. It is written
+// for diagnostics only; acquisition is enforced by the platform lock, never
+// by interpreting this record.
 type experimentalJournalLockRecord struct {
 	PID        int    `json:"pid"`
 	AcquiredAt string `json:"acquired_at"`
 }
 
-// acquireExperimentalJournalLock exclusively locks the pending-request
-// journal for the calling process and returns a release func. Every
-// read-modify-write of the journal (load, binding decision, journal write
-// and the dispatch it guards, including --resolve) runs while holding this
-// lock, so two garm-cli processes can never both journal or both resolve.
-//
-// It fails closed: any state that cannot be proven safe results in an error
-// and no journal access at all. On contention the holder record is read; a
-// lock held by a process that no longer exists is reclaimed and the
-// acquisition is retried exactly once, anything else is refused.
-func acquireExperimentalJournalLock() (release func(), err error) {
-	lockPath := experimentalJournalLockPath()
-	if lockPath == "" {
-		return nil, fmt.Errorf("no user configuration directory available for the pending-request journal lock")
+// writeExperimentalJournalLockRecord refreshes the diagnostics record of a
+// lock file this process has already acquired.
+func writeExperimentalJournalLockRecord(f *os.File) {
+	rec := experimentalJournalLockRecord{
+		PID:        os.Getpid(),
+		AcquiredAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		return nil, fmt.Errorf("could not prepare the pending-request journal directory: %w", err)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			rec := experimentalJournalLockRecord{
-				PID:        os.Getpid(),
-				AcquiredAt: time.Now().UTC().Format(time.RFC3339),
-			}
-			if data, mErr := json.Marshal(rec); mErr == nil {
-				_, _ = f.Write(data)
-			}
-			_ = f.Sync()
-			_ = f.Close()
-			return func() { _ = os.Remove(lockPath) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("could not lock the pending-request journal: %w", err)
-		}
-
-		data, rErr := os.ReadFile(lockPath)
-		if rErr != nil {
-			if errors.Is(rErr, os.ErrNotExist) {
-				continue // the holder released between attempts; try once more
-			}
-			return nil, fmt.Errorf("the pending-request journal is locked, but the lock record could not be read: %w", rErr)
-		}
-		var holder experimentalJournalLockRecord
-		if jErr := json.Unmarshal(data, &holder); jErr != nil || holder.PID <= 0 {
-			return nil, fmt.Errorf("the pending-request journal is locked, but the lock record %s is unreadable; refusing to guess who holds it (remove it by hand only when no garm-cli process is running)", lockPath)
-		}
-		if experimentalProcessAlive(holder.PID) {
-			return nil, fmt.Errorf("the pending-request journal is locked by garm-cli process %d (lock acquired at %s); another write or resolution is in flight there — wait for it to finish, or resolve that pending request first", holder.PID, holder.AcquiredAt)
-		}
-		// The holder no longer exists: reclaim the stale lock and retry the
-		// acquisition exactly once (loop bound), never more.
-		if dErr := os.Remove(lockPath); dErr != nil && !errors.Is(dErr, os.ErrNotExist) {
-			return nil, fmt.Errorf("the pending-request journal lock held by dead process %d could not be reclaimed: %w", holder.PID, dErr)
-		}
-	}
-	return nil, fmt.Errorf("the pending-request journal lock could not be acquired even after reclaiming a stale lock; refusing to proceed unprotected")
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt(data, 0)
 }
 
-// experimentalProcessAlive reports whether pid currently names a live
-// process. The staleness check is built on /proc and is therefore only
-// meaningful on Linux; anywhere else a contender cannot prove a lock stale,
-// so every holder is treated as alive and contention fails closed.
-func experimentalProcessAlive(pid int) bool {
-	if runtime.GOOS != "linux" {
-		return true
+// experimentalJournalContentionError builds the refusal a contender gets
+// while another live process holds the journal lock. data/readErr are the
+// best-effort read of the holder record; an unreadable record never weakens
+// the refusal, it only loses the holder details.
+func experimentalJournalContentionError(lockPath string, data []byte, readErr error) error {
+	if readErr != nil {
+		return fmt.Errorf("the pending-request journal is locked by another garm-cli process, but the lock record could not be read (%v); refusing to guess who holds it (remove %s by hand only when no garm-cli process is running)", readErr, lockPath)
 	}
-	_, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
-	return err == nil
+	var holder experimentalJournalLockRecord
+	if err := json.Unmarshal(data, &holder); err != nil || holder.PID <= 0 {
+		return fmt.Errorf("the pending-request journal is locked by another garm-cli process, but the lock record %s is unreadable; refusing to guess who holds it (remove it by hand only when no garm-cli process is running)", lockPath)
+	}
+	return fmt.Errorf("the pending-request journal is locked by garm-cli process %d (lock acquired at %s); another write or resolution is in flight there — wait for it to finish, or resolve that pending request first", holder.PID, holder.AcquiredAt)
 }
 
 // experimentalCurrentBinding captures the invocation context a pending

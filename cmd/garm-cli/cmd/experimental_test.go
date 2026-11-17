@@ -14,6 +14,7 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,10 +24,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -63,6 +67,7 @@ func resetExpFlags() {
 	expPoolSettingsDraftFile = ""
 	expPoolSettingsRequestID = ""
 	expPoolSettingsResolve = false
+	expPoolSettingsPendingClearConfirm = false
 	expPriority = 0
 	expMaxRunners = 0
 	expMinIdleRunners = 0
@@ -538,6 +543,7 @@ func seedPendingRecord(t *testing.T, rec experimentalPendingRecord) {
 }
 
 func TestPoolSettingsPatchRefusesWhenPendingExists(t *testing.T) {
+	withProfile(t, "profile-a")
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -588,6 +594,7 @@ func TestPoolSettingsPatchRefusesWhenPendingExists(t *testing.T) {
 }
 
 func TestPoolSettingsPatchResolveResendsJournaledRequest(t *testing.T) {
+	withProfile(t, "profile-a")
 	var calls atomic.Int32
 	var gotKey, gotIfMatch, gotPath, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -723,6 +730,425 @@ func TestPoolSettingsPatchJournaledAbort(t *testing.T) {
 	}
 }
 
+// TestPoolSettingsPatchDirsyncFailureAborts: a parent-directory fsync failure
+// after the atomic rename is exactly as fatal as a journal-write failure —
+// the write aborts before dispatch, fail closed. The renamed record stays on
+// disk, undispatched, so a later --resolve settles it deliberately.
+func TestPoolSettingsPatchDirsyncFailureAborts(t *testing.T) {
+	withProfile(t, "profile-dirsync")
+	clearExperimentalPending()
+	t.Cleanup(func() { clearExperimentalPending() })
+	oldSync := experimentalSyncDir
+	experimentalSyncDir = func(string) error { return errors.New("dirsync boom") }
+	t.Cleanup(func() { experimentalSyncDir = oldSync })
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("expected a dirsync failure to abort the write before dispatch")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "fsync") || !strings.Contains(msg, "pending-request journal") {
+		t.Errorf("expected a dirsync journaling failure, got: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected zero HTTP dispatches when the journal cannot be made durable, got %d", calls.Load())
+	}
+	data, readErr := os.ReadFile(experimentalPendingPath())
+	if readErr != nil {
+		t.Fatalf("the undispatched record must be kept for a deliberate --resolve: %v", readErr)
+	}
+	var rec experimentalPendingRecord
+	if err := json.Unmarshal(data, &rec); err != nil || rec.Payload != `{"priority":7}` {
+		t.Fatalf("the kept record must hold the exact undispatched request: %+v (err %v)", rec, err)
+	}
+}
+
+// TestPoolSettingsPatchClearUnlinkFailureIsLoud: when the journal cannot be
+// unlinked after a definitive outcome, the failure must be surfaced loudly
+// and the record kept — never silently continued — because a later --resolve
+// re-asks the server and the durable receipt makes it idempotent.
+func TestPoolSettingsPatchClearUnlinkFailureIsLoud(t *testing.T) {
+	withProfile(t, "profile-unlink")
+	clearExperimentalPending()
+	t.Cleanup(func() { clearExperimentalPending() })
+	oldRemove := experimentalRemovePending
+	experimentalRemovePending = func(string) error { return errors.New("unlink boom") }
+	t.Cleanup(func() { experimentalRemovePending = oldRemove })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":7,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("an unlink failure after an applied outcome must be surfaced loudly, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"could not be cleared", "kept", "--resolve"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected the loud failure to mention %q, got: %v", want, err)
+		}
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); statErr != nil {
+		t.Fatalf("the record must be kept when the unlink fails: %v", statErr)
+	}
+}
+
+// TestPoolSettingsPatchReplayEnvelopeETagMismatchKeepsJournal: a 200 receipt
+// replay whose resulting_etag disagrees with the response's own ETag header
+// is untrustworthy (mirroring the web client). The outcome stays UNKNOWN and
+// only a fully validated applied replay may clear the journal.
+func TestPoolSettingsPatchReplayEnvelopeETagMismatchKeepsJournal(t *testing.T) {
+	clearExperimentalPending()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"outcome":"applied_changed","resulting_etag":"\"100:10\""}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7")
+	if err == nil {
+		t.Fatal("expected UNKNOWN hold on a replay envelope that disagrees with the response ETag")
+	}
+	var pse *poolSettingsError
+	if !errors.As(err, &pse) || pse.outcome != outcomeUnknown {
+		t.Fatalf("expected UNKNOWN outcome, got: %v", err)
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); statErr != nil {
+		t.Fatalf("a rejected replay must keep the pending journal: %v", statErr)
+	}
+}
+
+// TestPoolSettingsPatchResolvePreconditionFailedKeepsJournal: a 412 while
+// resolving is NOT proof of non-effect. After a server-side loss of the
+// durable request-receipt table (restore/reinstall), the original write may
+// have committed even though the server can no longer recognise the request
+// id, so the outcome stays UNKNOWN, the journal is kept and recovery
+// guidance points at the gated manual clear — the same reasoning as the web
+// client fix.
+func TestPoolSettingsPatchResolvePreconditionFailedKeepsJournal(t *testing.T) {
+	withProfile(t, "profile-a")
+	var patchCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		patchCalls.Add(1)
+		w.Header().Set("ETag", `"100:12"`)
+		w.WriteHeader(http.StatusPreconditionFailed)
+		fmt.Fprint(w, `{"error":"stale"}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	seedPendingRecord(t, boundRecord(cli, "rec-412"))
+
+	_, err := executeExperimental(cli, "patch", "--resolve")
+	if err == nil {
+		t.Fatal("expected a 412 on resolve to hold UNKNOWN, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"UNKNOWN", "receipt", "pending clear --confirmed-ineffective", "rec-412"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected the hold to mention %q, got: %v", want, err)
+		}
+	}
+	var pse *poolSettingsError
+	if !errors.As(err, &pse) || pse.outcome != outcomeUnknown {
+		t.Fatalf("a 412 on resolve must be held as UNKNOWN, got: %v", err)
+	}
+	if patchCalls.Load() != 1 {
+		t.Errorf("expected exactly one resolve dispatch (no retry), got %d", patchCalls.Load())
+	}
+	data, readErr := os.ReadFile(experimentalPendingPath())
+	if readErr != nil {
+		t.Fatalf("the journal must survive a 412 on resolve: %v", readErr)
+	}
+	var kept experimentalPendingRecord
+	if err := json.Unmarshal(data, &kept); err != nil || kept.RequestID != "rec-412" {
+		t.Fatalf("the journal must keep the unresolved request, got %+v (err %v)", kept, err)
+	}
+}
+
+// TestPoolSettingsPatchLostResponseSocketLevel is the socket-level variant of
+// the lost-response UNKNOWN hold: the server hijacks the connection, reads
+// the full request and closes without responding. The CLI must hold UNKNOWN
+// with the journal intact, and a later --resolve must be answered by the
+// server from the durable request receipt.
+func TestPoolSettingsPatchLostResponseSocketLevel(t *testing.T) {
+	withProfile(t, "profile-socket")
+	clearJournalAndLock(t)
+
+	var requests atomic.Int32
+	var gotKey atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		if n == 1 {
+			// Read the request fully, then drop the connection without any
+			// response bytes: the write was dispatched, the answer lost.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("httptest response writer is not a hijacker")
+				return
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack failed: %v", err)
+				return
+			}
+			_, _ = io.ReadAll(r.Body)
+			_ = conn.Close()
+			return
+		}
+		gotKey.Store(r.Header.Get("Idempotency-Key"))
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":7,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "patch", "--repo", "repo-1", "--pool", "pool-1",
+		"--etag", `"100:8"`, "--priority", "7", "--request-id", "socket-req-1")
+	if err == nil {
+		t.Fatal("expected UNKNOWN hold when the response is lost at the socket level")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "UNKNOWN") || !strings.Contains(msg, "Do NOT auto-retry") {
+		t.Errorf("expected UNKNOWN hold message, got: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("expected exactly one dispatched request, got %d", requests.Load())
+	}
+	data, readErr := os.ReadFile(experimentalPendingPath())
+	if readErr != nil {
+		t.Fatalf("UNKNOWN outcome must retain the pending journal: %v", readErr)
+	}
+	var rec experimentalPendingRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("pending journal is not readable: %v", err)
+	}
+	if rec.RequestID != "socket-req-1" || rec.Payload != `{"priority":7}` || rec.ETag != `"100:8"` {
+		t.Fatalf("pending journal does not record the exact dispatched request: %+v", rec)
+	}
+
+	// The server is reachable again: --resolve re-presents the exact
+	// journaled request and the server answers.
+	_, err = executeExperimental(cli, "patch", "--resolve")
+	if err != nil {
+		t.Fatalf("resolve after a lost response must succeed: %v", err)
+	}
+	if got := gotKey.Load(); got != "socket-req-1" {
+		t.Errorf("expected the server to see the journaled request id, got %v", got)
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); !os.IsNotExist(statErr) {
+		t.Fatalf("resolve must clear the journal, stat err: %v", statErr)
+	}
+}
+
+// TestPoolSettingsPendingRecordValidationFailsClosed: strict shape validation
+// on load — a record with an empty binding field can never have been written
+// by this version, so the journal is corrupt, must fail closed with the
+// manual-recovery message and must never dispatch.
+func TestPoolSettingsPendingRecordValidationFailsClosed(t *testing.T) {
+	withProfile(t, "profile-a")
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	cli := newTestRawClient(srv)
+
+	rec := boundRecord(cli, "rec-invalid-1")
+	rec.Profile = ""
+	seedPendingRecord(t, rec)
+
+	_, err := executeExperimental(cli, "patch", "--resolve")
+	if err == nil {
+		t.Fatal("expected a corrupt record to fail closed on load")
+	}
+	msg := err.Error()
+	for _, want := range []string{"profile binding is missing", "kept", "--resolve", "pending clear --confirmed-ineffective"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected the failure to mention %q, got: %v", want, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Errorf("a corrupt journal must refuse before any dispatch, got %d calls", calls.Load())
+	}
+}
+
+func TestPoolSettingsPendingRecordUnreadableFailsClosed(t *testing.T) {
+	clearJournalAndLock(t)
+	if err := os.WriteFile(experimentalPendingPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("could not plant an unreadable journal: %v", err)
+	}
+	_, _, err := loadExperimentalPending()
+	if err == nil {
+		t.Fatal("an unreadable journal must fail closed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "kept") || !strings.Contains(msg, "pending clear --confirmed-ineffective") {
+		t.Errorf("expected the manual-recovery message, got: %v", err)
+	}
+}
+
+func TestPoolSettingsPendingClearRequiresFlag(t *testing.T) {
+	withProfile(t, "profile-a")
+	var getCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		getCalls.Add(1)
+		w.Header().Set("ETag", `"100:9"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":100,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	seedPendingRecord(t, boundRecord(cli, "rec-clear-1"))
+
+	_, err := executeExperimental(cli, "pending", "clear")
+	if err == nil {
+		t.Fatal("expected refusal to clear without --confirmed-ineffective")
+	}
+	msg := err.Error()
+	for _, want := range []string{"refusing", "--confirmed-ineffective"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected refusal to mention %q, got: %v", want, err)
+		}
+	}
+	if getCalls.Load() != 0 {
+		t.Errorf("the refusal must happen before any read, got %d GETs", getCalls.Load())
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); statErr != nil {
+		t.Fatalf("journal must be kept after the refusal: %v", statErr)
+	}
+}
+
+func TestPoolSettingsPendingClearRefusesWhenGetFails(t *testing.T) {
+	withProfile(t, "profile-a")
+	var getCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		getCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":"boom"}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	seedPendingRecord(t, boundRecord(cli, "rec-clear-2"))
+
+	_, err := executeExperimental(cli, "pending", "clear", "--confirmed-ineffective")
+	if err == nil {
+		t.Fatal("expected refusal to clear when the fresh read fails")
+	}
+	msg := err.Error()
+	for _, want := range []string{"refusing to clear", "kept"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected refusal to mention %q, got: %v", want, err)
+		}
+	}
+	if getCalls.Load() != 1 {
+		t.Errorf("expected exactly one GET before the refusal, got %d", getCalls.Load())
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); statErr != nil {
+		t.Fatalf("journal must be kept when the fresh read fails: %v", statErr)
+	}
+}
+
+func TestPoolSettingsPendingClearClearsAfterFreshRead(t *testing.T) {
+	withProfile(t, "profile-a")
+	var getCalls atomic.Int32
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		getCalls.Add(1)
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		gotPath = r.URL.Path
+		w.Header().Set("ETag", `"100:11"`)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"priority":100,"max_runners":10,"min_idle_runners":1}`)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	seedPendingRecord(t, boundRecord(cli, "rec-clear-3"))
+
+	var execErr error
+	stderr := captureStderr(t, func() {
+		_, execErr = executeExperimental(cli, "pending", "clear", "--confirmed-ineffective")
+	})
+	if execErr != nil {
+		t.Fatalf("expected the clear to succeed after a fresh read, got: %v", execErr)
+	}
+	for _, want := range []string{"WARNING", "MANUALLY", "rec-clear-3", `"100:11"`} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("expected the warning to mention %q, got: %s", want, stderr)
+		}
+	}
+	if getCalls.Load() != 1 {
+		t.Errorf("expected exactly one GET, got %d", getCalls.Load())
+	}
+	wantPath := "/api/v1/offline/entities/repository/repo-1/pools/pool-1/settings"
+	if gotPath != wantPath {
+		t.Errorf("expected the fresh read against %q, got %q", wantPath, gotPath)
+	}
+	if _, statErr := os.Stat(experimentalPendingPath()); !os.IsNotExist(statErr) {
+		t.Fatalf("journal must be cleared after a confirmed ineffective request, stat err: %v", statErr)
+	}
+}
+
+func TestPoolSettingsPendingClearNothingPending(t *testing.T) {
+	clearJournalAndLock(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cli := newTestRawClient(srv)
+	_, err := executeExperimental(cli, "pending", "clear", "--confirmed-ineffective")
+	if err == nil {
+		t.Fatal("expected an error when there is nothing to clear")
+	}
+	if !strings.Contains(err.Error(), "nothing to clear") {
+		t.Errorf("expected a clear no-pending error, got: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("expected zero HTTP requests, got %d", calls.Load())
+	}
+}
+
 func writeTempDraft(t *testing.T, content string) string {
 	t.Helper()
 	f := t.TempDir() + "/draft.json"
@@ -751,13 +1177,49 @@ func clearJournalAndLock(t *testing.T) {
 	}
 }
 
+// captureStderr swaps os.Stderr for a pipe while fn runs and returns what was
+// written, so tests can assert loud warnings.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("could not create stderr pipe: %v", err)
+	}
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		done <- string(data)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stderr = old
+	return <-done
+}
+
+// boundRecord builds a fully valid journaled record bound to the current
+// invocation context (active profile + effective server of cli).
+func boundRecord(cli *rawClient, requestID string) experimentalPendingRecord {
+	rec := experimentalPendingRecord{
+		RequestID:  requestID,
+		EntityType: "repository",
+		EntityID:   "repo-1",
+		PoolID:     "pool-1",
+		ETag:       `"100:8"`,
+		Payload:    `{"priority":7}`,
+		At:         "2026-11-16T10:00:00Z",
+	}
+	rec.Profile, rec.Server = experimentalCurrentBinding(cli)
+	return rec
+}
+
 func TestExperimentalJournalLockFailsClosedWhileHeld(t *testing.T) {
 	clearJournalAndLock(t)
 	release, err := acquireExperimentalJournalLock()
 	if err != nil {
 		t.Fatalf("first acquisition failed: %v", err)
 	}
-	defer release()
 
 	_, err = acquireExperimentalJournalLock()
 	if err == nil {
@@ -769,65 +1231,105 @@ func TestExperimentalJournalLockFailsClosedWhileHeld(t *testing.T) {
 			t.Errorf("expected refusal to mention %q, got: %v", want, err)
 		}
 	}
+
+	// The lock file is persistent: releasing closes the kernel lock but
+	// never unlinks the file, and re-acquisition must succeed immediately.
+	release()
+	lockPath := experimentalJournalLockPath()
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("the persistent lock file must survive release: %v", statErr)
+	}
+	release2, err := acquireExperimentalJournalLock()
+	if err != nil {
+		t.Fatalf("re-acquisition right after release failed: %v", err)
+	}
+	release2()
 }
 
-func TestExperimentalJournalLockReclaimsDeadHolderOnce(t *testing.T) {
+// TestExperimentalJournalLockSurvivesKill9 is the stale-lock regression: a
+// holder killed with kill -9 releases the kernel advisory lock with its
+// dying fd, so the survivor acquires immediately — the old pid-probe and
+// lock-file deletion dance (which could delete a lock a third process had
+// legitimately acquired) no longer exists.
+func TestExperimentalJournalLockSurvivesKill9(t *testing.T) {
+	if os.Getenv("GARM_CLI_EXP_LOCK_KILL_CHILD") == "1" {
+		experimentalJournalLockHoldChild()
+		return
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("kill -9 lock-release regression test requires the POSIX signal model")
+	}
 	clearJournalAndLock(t)
 
-	// Reap a throwaway child so we hold a pid that provably no longer exists.
-	dead := exec.Command(os.Args[0], "-test.run=^$")
-	if err := dead.Run(); err != nil {
-		t.Fatalf("could not spawn a throwaway process: %v", err)
+	child := exec.Command(os.Args[0], "-test.run=^TestExperimentalJournalLockSurvivesKill9$")
+	child.Env = append(os.Environ(),
+		"GARM_CLI_EXP_LOCK_KILL_CHILD=1",
+		"GARM_CLI_EXP_PENDING_PATH="+experimentalPendingPath(),
+	)
+	stdout, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatalf("could not capture child stdout: %v", err)
 	}
-	deadPID := dead.Process.Pid
-	if experimentalProcessAlive(deadPID) {
-		t.Fatalf("test setup expected pid %d to be dead", deadPID)
+	if err := child.Start(); err != nil {
+		t.Fatalf("could not start the lock-holder child: %v", err)
 	}
 
-	lockPath := experimentalJournalLockPath()
-	stale := []byte(fmt.Sprintf(`{"pid":%d,"acquired_at":"2026-11-16T10:00:00Z"}`, deadPID))
-	if err := os.WriteFile(lockPath, stale, 0o600); err != nil {
-		t.Fatalf("could not plant stale lock: %v", err)
+	line := make(chan string, 1)
+	go func() {
+		s, _ := bufio.NewReader(stdout).ReadString('\n')
+		line <- s
+	}()
+	select {
+	case got := <-line:
+		if got != "child-holding\n" {
+			t.Fatalf("child did not announce lock ownership, got %q", got)
+		}
+	case <-time.After(30 * time.Second):
+		_ = child.Process.Kill()
+		t.Fatal("timed out waiting for the child to acquire the journal lock")
+	}
+
+	// kill -9: no userspace cleanup is possible. The kernel must release the
+	// advisory lock with the process.
+	if err := child.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("could not kill -9 the lock holder: %v", err)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("child must have been killed")
 	}
 
 	release, err := acquireExperimentalJournalLock()
 	if err != nil {
-		t.Fatalf("stale lock held by dead pid %d must be reclaimed once, got: %v", deadPID, err)
+		t.Fatalf("the lock must be immediately acquirable after kill -9, got: %v", err)
+	}
+	release()
+}
+
+func TestExperimentalJournalLockUnreadableRecordStillRefuses(t *testing.T) {
+	clearJournalAndLock(t)
+	release, err := acquireExperimentalJournalLock()
+	if err != nil {
+		t.Fatalf("first acquisition failed: %v", err)
 	}
 	defer release()
 
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("reclaimed lock must record the new holder: %v", err)
-	}
-	var holder experimentalJournalLockRecord
-	if err := json.Unmarshal(data, &holder); err != nil || holder.PID != os.Getpid() {
-		t.Fatalf("lock record must name this process after reclaim, got pid=%d err=%v", holder.PID, err)
-	}
-
-	// The reclaimed lock is a real lock: a second acquisition fails closed.
-	if _, err := acquireExperimentalJournalLock(); err == nil {
-		t.Fatal("second acquisition must fail closed while the reclaimed lock is held")
-	}
-}
-
-func TestExperimentalJournalLockUnreadableHolderFailsClosed(t *testing.T) {
-	clearJournalAndLock(t)
+	// Corrupt the diagnostics record while this process holds the kernel
+	// lock: acquisition is enforced by the kernel, so a contender must still
+	// be refused — it just cannot report who holds it.
 	lockPath := experimentalJournalLockPath()
-	t.Cleanup(func() { _ = os.Remove(lockPath) })
-
 	if err := os.WriteFile(lockPath, []byte("not-json"), 0o600); err != nil {
-		t.Fatalf("could not plant unreadable lock: %v", err)
+		t.Fatalf("could not corrupt the lock record: %v", err)
 	}
-	_, err := acquireExperimentalJournalLock()
+
+	_, err = acquireExperimentalJournalLock()
 	if err == nil {
-		t.Fatal("an unreadable lock record must fail closed, never be guessed or reclaimed")
+		t.Fatal("a held lock must fail closed even when its record is unreadable")
 	}
 	if !strings.Contains(err.Error(), "unreadable") {
 		t.Errorf("expected the refusal to name the unreadable record, got: %v", err)
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Errorf("unreadable lock must be left for the operator, stat err: %v", statErr)
+		t.Errorf("the lock file must survive a refused acquisition, stat err: %v", statErr)
 	}
 }
 
@@ -1041,10 +1543,13 @@ func TestPoolSettingsPendingRecordSurvivesRestart(t *testing.T) {
 // multi-process check: while the parent (this test process) holds the
 // journal lock, a second, real process — the test binary re-executing itself
 // as a helper child via the standard env-var re-exec pattern — must fail to
-// acquire it, and must not be able to journal.
+// acquire it, and must not be able to journal. Once the parent releases, the
+// same child re-run must acquire immediately (the kernel released the lock;
+// the persistent lock file is not stale state).
 func TestExperimentalJournalLockExcludedAcrossProcesses(t *testing.T) {
-	if os.Getenv("GARM_CLI_EXP_LOCK_CHILD") == "1" {
-		experimentalJournalLockChild()
+	mode := os.Getenv("GARM_CLI_EXP_LOCK_CHILD_MODE")
+	if mode != "" {
+		experimentalJournalLockChild(mode)
 		return
 	}
 
@@ -1053,7 +1558,6 @@ func TestExperimentalJournalLockExcludedAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parent could not acquire the journal lock: %v", err)
 	}
-	defer release()
 
 	if err := writeExperimentalPending(experimentalPendingRecord{
 		RequestID:  "parent-record",
@@ -1069,7 +1573,7 @@ func TestExperimentalJournalLockExcludedAcrossProcesses(t *testing.T) {
 
 	child := exec.Command(os.Args[0], "-test.run=^TestExperimentalJournalLockExcludedAcrossProcesses$")
 	child.Env = append(os.Environ(),
-		"GARM_CLI_EXP_LOCK_CHILD=1",
+		"GARM_CLI_EXP_LOCK_CHILD_MODE=contend",
 		"GARM_CLI_EXP_PENDING_PATH="+experimentalPendingPath(),
 	)
 	out, runErr := child.CombinedOutput()
@@ -1092,20 +1596,55 @@ func TestExperimentalJournalLockExcludedAcrossProcesses(t *testing.T) {
 	if rec.RequestID != "parent-record" {
 		t.Errorf("child overwrote the journal: %+v", rec)
 	}
+
+	// Phase 2: after the parent releases, the lock must be immediately
+	// acquirable by another process.
+	release()
+
+	lockPath := experimentalJournalLockPath()
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("the persistent lock file must survive release: %v", statErr)
+	}
+
+	acquirer := exec.Command(os.Args[0], "-test.run=^TestExperimentalJournalLockExcludedAcrossProcesses$")
+	acquirer.Env = append(os.Environ(),
+		"GARM_CLI_EXP_LOCK_CHILD_MODE=acquire",
+		"GARM_CLI_EXP_PENDING_PATH="+experimentalPendingPath(),
+	)
+	out, runErr = acquirer.CombinedOutput()
+	if runErr != nil {
+		t.Fatalf("child must acquire the lock once the parent released it; child err: %v, output: %s", runErr, out)
+	}
+	if !strings.Contains(string(out), "child-acquired") {
+		t.Errorf("expected the child to report acquisition, got: %s", out)
+	}
+	data, err = os.ReadFile(experimentalPendingPath())
+	if err != nil {
+		t.Fatalf("journal unreadable after the child acquisition: %v", err)
+	}
+	if err := json.Unmarshal(data, &rec); err != nil || rec.RequestID != "child-record" {
+		t.Errorf("child must have journaled its own record after acquiring the lock, got %+v (err %v)", rec, err)
+	}
 }
 
-// experimentalJournalLockChild is the helper-process entry point: it points
-// the journal at the parent's path and tries to take the lock and journal.
-// Exit 0 with the refusal on stderr is the expected outcome; exit 1 means the
-// lock was not exclusive across processes.
-func experimentalJournalLockChild() {
+// experimentalJournalLockChild is the helper-process entry point for
+// TestExperimentalJournalLockExcludedAcrossProcesses. In "contend" mode the
+// lock is expected to be held by the parent: refusal on stderr with exit 0
+// is success, acquiring means the lock was not exclusive across processes.
+// In "acquire" mode the lock is expected to be free: the child acquires,
+// journals a child record, releases and exits 0.
+func experimentalJournalLockChild(mode string) {
 	if p := os.Getenv("GARM_CLI_EXP_PENDING_PATH"); p != "" {
 		experimentalPendingPathOverride = p
 	}
 	release, err := acquireExperimentalJournalLock()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "child refused as expected: %v\n", err)
-		os.Exit(0)
+		if mode == "contend" {
+			fmt.Fprintf(os.Stderr, "child refused as expected: %v\n", err)
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "child could not acquire the released lock: %v\n", err)
+		os.Exit(1)
 	}
 	_ = writeExperimentalPending(experimentalPendingRecord{
 		RequestID:  "child-record",
@@ -1116,6 +1655,37 @@ func experimentalJournalLockChild() {
 		Payload:    `{"priority":9}`,
 	})
 	release()
-	fmt.Fprintln(os.Stderr, "child unexpectedly acquired the journal lock and journaled")
-	os.Exit(1)
+	switch mode {
+	case "contend":
+		fmt.Fprintln(os.Stderr, "child unexpectedly acquired the journal lock and journaled")
+		os.Exit(1)
+	case "acquire":
+		fmt.Fprintln(os.Stderr, "child-acquired")
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown child mode %q\n", mode)
+		os.Exit(1)
+	}
+}
+
+// experimentalJournalLockHoldChild is the helper-process entry point for
+// TestExperimentalJournalLockSurvivesKill9: it acquires the journal lock,
+// announces ownership on stdout and blocks until killed, so the parent can
+// SIGKILL it and prove the kernel released the advisory lock.
+func experimentalJournalLockHoldChild() {
+	if p := os.Getenv("GARM_CLI_EXP_PENDING_PATH"); p != "" {
+		experimentalPendingPathOverride = p
+	}
+	release, err := acquireExperimentalJournalLock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hold-child could not acquire the journal lock: %v\n", err)
+		os.Exit(1)
+	}
+	// Held until the process is killed; release exists only so the fd is
+	// clearly owned for the lifetime of the process.
+	defer release()
+	fmt.Fprintln(os.Stdout, "child-holding")
+	for {
+		time.Sleep(time.Hour)
+	}
 }
