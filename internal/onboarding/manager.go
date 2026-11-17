@@ -27,6 +27,7 @@ type Observer interface {
 }
 type Store interface {
 	RecordOnboardingProbeAudit(context.Context, admission.OnboardingProbeAudit) error
+	RecordOnboardingDiscoveryAudit(context.Context, admission.OnboardingDiscoveryAudit) error
 	ReadOnboardingBindings(context.Context) (map[string]admission.HostBinding, error)
 }
 type Manager struct {

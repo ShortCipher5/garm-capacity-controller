@@ -1,7 +1,9 @@
 package adminview
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 )
 
@@ -59,6 +62,10 @@ func (h *Handler) serveOnboarding(w http.ResponseWriter, r *http.Request) {
 		view := h.onboarding.Discovery()
 		view.ProbeEnabled = h.onboardingProbe && h.onboarding.ProbeEnabled()
 		_ = json.NewEncoder(w).Encode(view)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/admin/api/v1/onboarding/profiles/") {
+		h.serveOnboardingProfileDiscovery(w, r)
 		return
 	}
 	if r.URL.Path != "/admin/api/v1/onboarding/probe" {
@@ -120,4 +127,88 @@ func (h *Handler) serveOnboarding(w http.ResponseWriter, r *http.Request) {
 	default:
 		_ = json.NewEncoder(w).Encode(result)
 	}
+}
+
+// serveOnboardingProfileDiscovery runs read-only discovery on demand for one
+// allowlisted profile. Like the probe, it requires the flag-gated management
+// role and same origin; it never enrolls, activates or qualifies a backend.
+func (h *Handler) serveOnboardingProfileDiscovery(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	fail := func(status int, message string) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	}
+	if !h.onboardingProbe {
+		fail(http.StatusNotFound, "onboarding probes disabled")
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		fail(http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/admin/api/v1/onboarding/profiles/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "discovery" || !admission.ValidOnboardingProfileID(parts[0]) {
+		fail(http.StatusNotFound, "onboarding discovery unavailable")
+		return
+	}
+	if !adminAuthenticated(r, h.onboardingHash) {
+		h.audit("onboarding discovery authentication rejected")
+		fail(http.StatusUnauthorized, "management token rejected")
+		return
+	}
+	if !sameOrigin(r) {
+		fail(http.StatusForbidden, "same origin required")
+		return
+	}
+	requestID, err := discoveryRequestID()
+	if err != nil {
+		h.audit("onboarding discovery correlation unavailable")
+		fail(http.StatusServiceUnavailable, "discovery correlation unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	result, err := h.onboarding.Discover(ctx, onboarding.Request{RequestID: requestID, ProfileID: parts[0], Reason: "on-demand admin discovery view"})
+	switch {
+	case errors.Is(err, onboarding.ErrDisabled):
+		fail(http.StatusNotFound, "onboarding probes disabled")
+	case errors.Is(err, onboarding.ErrDenied):
+		fail(http.StatusNotFound, "unknown onboarding profile")
+	case errors.Is(err, onboarding.ErrBusy):
+		fail(http.StatusConflict, "another onboarding discovery is in progress")
+	case err != nil:
+		h.audit("onboarding discovery or audit unavailable")
+		fail(http.StatusServiceUnavailable, "discovery or its audit unavailable; no enrollment or activation is implemented")
+	default:
+		var body bytes.Buffer
+		if json.NewEncoder(&body).Encode(result) != nil || body.Len() > 2<<20 {
+			fail(http.StatusServiceUnavailable, "discovery view unavailable")
+			return
+		}
+		_, _ = w.Write(body.Bytes())
+	}
+}
+
+// discoveryRequestID mints a canonical lowercase UUID to correlate one
+// on-demand discovery run's audit pair; the browser cannot supply or replay it.
+func discoveryRequestID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
+	var text [36]byte
+	hex.Encode(text[0:8], id[0:4])
+	text[8] = '-'
+	hex.Encode(text[9:13], id[4:6])
+	text[13] = '-'
+	hex.Encode(text[14:18], id[6:8])
+	text[18] = '-'
+	hex.Encode(text[19:23], id[8:10])
+	text[23] = '-'
+	hex.Encode(text[24:36], id[10:16])
+	return string(text[:]), nil
 }

@@ -39,6 +39,11 @@ type Host struct {
 	// unset. It does not constrain admission yet; creation enforcement is a later
 	// slice. When positive it must not exceed the host CPU budget.
 	CPUCapMillis int64 `json:"cpu_cap_millis,omitempty"`
+	// Detected is the last discovered physical capacity for this host, captured
+	// by read-only onboarding discovery. Nil means not discovered. It is advisory
+	// display data only: admission budgets and fits never read it, and a missing
+	// value never implies a confirmed-zero physical capacity.
+	Detected *Resources `json:"detected,omitempty"`
 }
 
 type Pool struct {
@@ -315,7 +320,7 @@ func validateConfig(c Config) error {
 		return errors.New("invalid policy")
 	}
 	for name, h := range c.Hosts {
-		if name == "" || !nonnegative(h.Budget) || h.CPUCapMillis < 0 || (h.Mode != "enabled" && h.Mode != "draining" && h.Mode != "disabled") || h.ObservedAt.IsZero() {
+		if name == "" || !nonnegative(h.Budget) || h.CPUCapMillis < 0 || (h.Mode != "enabled" && h.Mode != "draining" && h.Mode != "disabled") || h.ObservedAt.IsZero() || (h.Detected != nil && !nonnegative(*h.Detected)) {
 			return errors.New("invalid host policy")
 		}
 	}

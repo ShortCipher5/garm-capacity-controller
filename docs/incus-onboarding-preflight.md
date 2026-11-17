@@ -1,11 +1,12 @@
-# Read-only Incus onboarding preflight
+# Read-only Incus onboarding preflight and discovery
 
 This is a real authenticated, audited **read-only transport check**, not server
-enrollment. It cannot register a host, add a ledger budget, bind or activate a
-backend, change placement, clear a legacy exclusion, release capacity or certify
-job-safe drain. Pool creation/deletion and minimum-idle decreases remain absent.
-A successful observation is not physical-hardware, whole-project, foreign-project,
-parent-quota or capacity qualification.
+qualification. Discovery extends the same boundary with read-only host, guest
+and utilization inventory for an allowlisted profile, plus an advisory budget
+suggestion. Separate from both, **enrollment** is an explicit operator write
+that registers a new ledger host; discovery itself never enrolls, binds or
+activates anything, and no successful observation is physical-hardware,
+whole-project, foreign-project, parent-quota or capacity qualification.
 
 ## Configuration and authorization
 
@@ -63,6 +64,63 @@ credential. No automatic startup or polling probe is performed.
   `reason` (1–256 UTF-8 bytes, no controls or edge whitespace). It requires the
   independent management role, same origin and JSON media type. No cookies or
   cross-origin API are enabled.
+- `GET /admin/api/v1/onboarding/profiles/{name}/discovery` runs one read-only
+  discovery sweep on demand for an allowlisted profile. It requires the same
+  flag-gated management role, same origin and `GET`; the browser cannot supply
+  a request ID, endpoint, credentials or any other parameter. The result JSON
+  has stable sections: `profile_id`, `observed_at`, `identity` (sanitized
+  availability/version/binding class only), `totals` (unknown dimensions are
+  omitted, never rendered as confirmed zeros), `guests` (name, status, managed
+  flag and controller/pool/reservation attribution; resource limits omitted
+  when unbounded from view), `utilization`, `suggested_budget`, `warnings` and
+  `blockers`. Every backend call has a fresh 5 second budget; a failed section
+  degrades to a section blocker instead of failing the run. A durable
+  `onboarding_discovery_requested` audit commits before any transport read and
+  a sanitized `onboarding_discovery_completed` audit records only counts and
+  classes afterwards.
+- `POST /admin/api/v1/hosts` is the explicit enrollment write, gated behind the
+  independent management role (same authorization as ledger-policy edits). The
+  body is at most 8192 bytes of exact, duplicate-free JSON:
+  `{"name", "budget", "detected"?, "mode"}`. It fails with 409 when the host
+  already exists: enrollment never silently adopts an existing host. The
+  initial `mode` must be `disabled` or `draining`; `enabled` is always
+  rejected — activation after qualification and authoritative reconciliation
+  is a separate explicit action. When `detected` is present it is recorded as
+  the host's last discovery totals with a fresh observation
+  (`admission.SetHostDetected`: Detected + ObservedAt + Healthy=true, durable
+  audit, one BEGIN IMMEDIATE transaction). Enrolled hosts start in no pool and
+  admission stays blocked for them until ordinary reconciliation observes them.
+
+## Discovery result semantics
+
+- `suggested_budget` is advisory and computed by one documented helper from
+  the detected totals: total minus a fixed headroom reserve of 2 vCPU
+  (2000 millicores), 2 GiB RAM (2048 MiB) and 10% of disk, floored at zero per
+  dimension so it is never negative. Unknown totals yield a zero suggestion,
+  which by itself constrains nothing. Runner count is not derivable from host
+  totals and is left zero.
+- Warnings always include a staleness note (the result is a point-in-time
+  snapshot, never reconciliation evidence), the count of guests without
+  controller attribution (`unmanaged guests: the shared limit may not cover
+  them`), and, whenever any total dimension is zero/unknown, a detection
+  incomplete listing of the unknown dimensions. When the authenticated identity
+  cannot be re-validated during a run, a stale-identity warning states that
+  previously recorded identity and detection data may be stale. Per-guest
+  utilization failures are listed with the guest name and counted as unknown,
+  not zero.
+- `utilization` is measured guest usage reported as-is with `source:
+  guest-state`. Instance-state CPU is cumulative time since guest start, not a
+  rate: deriving a usage rate requires two consecutive samples; one sweep is a
+  snapshot of cumulative time. The aggregated CPU field is JSON-named
+  `cpu_cumulative_millis` precisely so one sweep cannot be misread as a rate.
+- `blockers` always include `physical_capacity_scope_unqualified`. Discovery
+  is read-only: it cannot register a host by itself, change placement, clear a
+  legacy exclusion, release capacity or certify job-safe drain. Pool
+  creation/deletion and minimum-idle decreases remain absent.
+- `GET /admin/api/v1/overview` now includes per-host `detected` totals when
+  discovery recorded them (absent means not discovered; it is display data and
+  never an admission input). Live discovery warnings are available from the
+  discovery endpoint only; the overview does not persist them.
 
 A durable `onboarding_probe_requested` audit must commit before the transport
 read. A fresh bounded authenticated daemon-identity GET is then attempted; no
@@ -92,8 +150,13 @@ immutable legacy exclusions and pool policy remain unchanged; only audit grows.
 Offline tests use fresh disposable mTLS servers and the actual SQLite/admin
 handler. They cover separate roles/flags, strict input rejection before network,
 audit-before-read, cancellation, collision warnings, sanitized output and unchanged
-admission state. Hosted browser tests exercise the built React client against
-that fixture. This is not installed-server, production or lifecycle qualification.
-Safe enrollment still needs an independently qualified full-scope ownership and
-external-writer protocol, durable registration, binding/legacy-import rules and
-reviewed placement integration. There is no enrollment/activation/reset endpoint.
+admission state, plus discovery aggregation, unmanaged-guest warnings, suggestion
+math, fail-closed malformed inventory, per-call read-budget enforcement,
+duplicate-enrollment conflict and the
+disabled-only initial enrollment mode. Hosted browser tests exercise the built
+React client against that fixture. This is not installed-server, production or
+lifecycle qualification. Safe enrollment still needs an independently qualified
+full-scope ownership and external-writer protocol, durable registration,
+binding/legacy-import rules and reviewed placement integration. Enrollment here
+only registers a conservative, initially disabled ledger host; activation,
+drain certification and any reset endpoint remain unimplemented.

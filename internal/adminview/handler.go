@@ -39,6 +39,10 @@ type Host struct {
 	ObservedAt           time.Time             `json:"observed_at"`
 	AdmissionPaused      bool                  `json:"new_claims_paused"`
 	CPUCapMillis         int64                 `json:"cpu_cap_millis,omitempty"`
+	// Detected is the last discovered physical capacity for this host, when
+	// onboarding discovery recorded it. Absent means not discovered; it is
+	// display data and never an admission input.
+	Detected *admission.Resources `json:"detected,omitempty"`
 	Allocation
 }
 type Pool struct {
@@ -144,6 +148,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/policy" {
 		h.servePolicy(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/hosts" {
+		h.serveHosts(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/admin/api/") {
@@ -254,7 +262,7 @@ func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Ov
 		age := now.Sub(host.ObservedAt)
 		fresh := age >= 0 && age <= state.Config.MaxObservationAge
 		bindingStatus := backendBindingStatus(state, id)
-		result.Hosts = append(result.Hosts, Host{BackendBindingStatus: bindingStatus, Drain: drain, ID: id, Mode: host.Mode, Healthy: host.Healthy, Fresh: fresh, ObservedAt: host.ObservedAt, AdmissionPaused: bindingStatus != "bound_observation" || !provision || !state.Ready || host.Mode != "enabled" || !host.Healthy || !fresh, CPUCapMillis: host.CPUCapMillis, Allocation: Allocation{host.Budget, state.Allocated.Hosts[id]}})
+		result.Hosts = append(result.Hosts, Host{BackendBindingStatus: bindingStatus, Drain: drain, ID: id, Mode: host.Mode, Healthy: host.Healthy, Fresh: fresh, ObservedAt: host.ObservedAt, AdmissionPaused: bindingStatus != "bound_observation" || !provision || !state.Ready || host.Mode != "enabled" || !host.Healthy || !fresh, CPUCapMillis: host.CPUCapMillis, Detected: host.Detected, Allocation: Allocation{host.Budget, state.Allocated.Hosts[id]}})
 	}
 	sort.Slice(result.Hosts, func(i, j int) bool { return result.Hosts[i].ID < result.Hosts[j].ID })
 	for id, pool := range state.Config.Pools {
