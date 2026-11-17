@@ -52,7 +52,7 @@ func (j *journalledGarm) Snapshot(ctx context.Context) (GarmOverview, error) {
 			if (pending.Kind == "pool" && !j.pools[target]) || (pending.Kind == "repository" && !j.repositories[target]) {
 				target = "outside current scope"
 			}
-			view.Pending = &GarmPending{RequestID: pending.RequestID, Kind: pending.Kind, Target: target, StartedAt: at}
+			view.Pending = &GarmPending{RequestID: pending.RequestID, Kind: pending.Kind, Target: target, StartedAt: at, ResolutionAvailable: j.writes && j.pools[pending.Target] && j.manager.CanResolvePoolIntent(pending)}
 		}
 		return nil
 	}
@@ -139,6 +139,19 @@ func (j *journalledGarm) UpdatePool(ctx context.Context, request, id, fingerprin
 func (j *journalledGarm) ResolvePool(ctx context.Context, request string) (garmapi.ManagedPool, error) {
 	if !j.writes {
 		return garmapi.ManagedPool{}, garmapi.ErrManagementDisabled
+	}
+	status, err := j.manager.Status(ctx)
+	if err != nil {
+		return garmapi.ManagedPool{}, garmControlError(err)
+	}
+	allowed := false
+	for _, pending := range status.Pending {
+		if pending.RequestID == request && pending.Kind == "pool" && j.pools[pending.Target] {
+			allowed = true
+		}
+	}
+	if !allowed {
+		return garmapi.ManagedPool{}, garmapi.ErrManagementConflict
 	}
 	result, err := j.manager.ResolvePool(ctx, request)
 	return result, garmControlError(err)

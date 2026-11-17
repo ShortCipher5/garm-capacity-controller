@@ -96,6 +96,9 @@ func TestGarmJournalLargeHistoryPreservesStatusAndNarrowedScopePrivacy(t *testin
 	if len(encoded) > 2<<20 || !view.HistoryTruncated || len(view.History) == 0 || len(view.History) >= 25 || !view.WriteBlocked || view.Pending == nil || view.History[0].State != "unknown" {
 		t.Fatalf("large history hid journal safety status: bytes=%d history=%d view=%+v", len(encoded), len(view.History), view)
 	}
+	if view.Pending.ResolutionAvailable {
+		t.Fatal("stock write advertised receipt resolution")
+	}
 	remote.unavailable = true
 	view, err = adapter.Snapshot(ctx)
 	if err != nil || !view.WriteBlocked || view.SettingsAvailable || view.Pending == nil {
@@ -105,6 +108,9 @@ func TestGarmJournalLargeHistoryPreservesStatusAndNarrowedScopePrivacy(t *testin
 	narrowed, err := NewJournalledGarm(manager, true, nil, []string{repoID})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := narrowed.ResolvePool(ctx, request); !errors.Is(err, garmapi.ErrManagementConflict) {
+		t.Fatal("out-of-scope resolution allowed", err)
 	}
 	view, err = narrowed.Snapshot(ctx)
 	if err != nil {

@@ -162,6 +162,16 @@ func (m *Manager) complete(id string, result any, remoteErr error) error {
 	return remoteErr
 }
 
+// CanResolvePoolIntent describes an available receipt-resolution path, not a
+// proof of outcome. Stock/legacy writes must remain blocked on ambiguity.
+func (m *Manager) CanResolvePoolIntent(intent Intent) bool {
+	if m.conditional == nil || intent.Kind != "pool" || (intent.State != "pending" && intent.State != "unknown") {
+		return false
+	}
+	var dispatch poolDispatch
+	return json.Unmarshal(intent.Dispatch, &dispatch) == nil && dispatch.API == "conditional" && dispatch.ETag != "" && dispatch.Fingerprint != ""
+}
+
 // UpdatePool records a durable immutable intent before calling the remote writer.
 // A confirmed request-ID replay returns the recorded observation without reading
 // or writing Garm. The caller must refresh separately to see current settings.
