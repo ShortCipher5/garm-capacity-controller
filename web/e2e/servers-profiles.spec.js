@@ -29,6 +29,14 @@ test("read-only discovery, reviewed enrollment and honest duplicate error", asyn
   await discovery.getByLabel("Discovery management token", { exact: true }).fill(write);
   await discovery.getByRole("button", { name: "Discover candidate-discover", exact: true }).click();
   await discovery.getByRole("button", { name: "Enroll this host", exact: true }).click();
+  await expect(discovery.getByText("Plan shared runner capacity", { exact: true })).toBeVisible();
+  await expect(discovery.getByLabel("Budget memory MiB", { exact: true })).toHaveValue("24371");
+  await discovery.getByLabel("Budget memory MiB", { exact: true }).fill("32000");
+  await expect(discovery.getByText(/only 768 remains outside/)).toBeVisible();
+  await discovery.getByLabel("Budget memory MiB", { exact: true }).fill("24371");
+  await discovery.getByLabel("large planned count", { exact: true }).fill("2");
+  await expect(discovery.getByText(/Exceeds shared budget/)).toBeVisible();
+  await discovery.getByLabel("large planned count", { exact: true }).fill("0");
   await discovery.getByLabel("New host name", { exact: true }).fill("host-b");
   await discovery.getByLabel("Budget runners", { exact: true }).fill("2");
   await discovery.getByLabel("Enrollment management token", { exact: true }).fill(write);
