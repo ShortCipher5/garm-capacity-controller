@@ -174,7 +174,7 @@ func (f *fakeConditionalNative) currentSettings() garmapi.PoolSettings {
 	return f.settings
 }
 
-func conditionalFixture(t *testing.T, native *fakeConditionalNative) (*Manager, *Journal, *fakeRemote, *fakeConditionalNative) {
+func conditionalFixture(t *testing.T, native *fakeConditionalNative) (*Manager, *Journal, *fakeRemote, *fakeConditionalNative, string) {
 	t.Helper()
 	server := httptest.NewTLSServer(native)
 	t.Cleanup(server.Close)
@@ -208,12 +208,12 @@ func conditionalFixture(t *testing.T, native *fakeConditionalNative) (*Manager, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m, j, f, native
+	return m, j, f, native, path
 }
 
 func TestConditionalPoolWriteUsesNativeConditionalAPI(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, j, f, _ := conditionalFixture(t, native)
+	m, j, f, _, _ := conditionalFixture(t, native)
 	priority := uint64(9)
 	pool, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "conditional write")
 	if err != nil {
@@ -244,7 +244,7 @@ func TestConditionalPoolWriteUsesNativeConditionalAPI(t *testing.T) {
 
 func TestConditionalPoolWriteRefusesMinIdleDecreasePreDispatch(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, _, f, nativeRef := conditionalFixture(t, native)
+	m, _, f, nativeRef, _ := conditionalFixture(t, native)
 	zero := uint64(0)
 	_, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{MinIdleRunners: &zero}, "unsafe decrease")
 	if !errors.Is(err, garmapi.ErrManagementUnsafe) {
@@ -263,7 +263,7 @@ func TestConditionalPoolWriteRefusesMinIdleDecreasePreDispatch(t *testing.T) {
 
 func TestPoolWriteWithTagsKeepsLegacyPath(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, _, f, nativeRef := conditionalFixture(t, native)
+	m, _, f, nativeRef, _ := conditionalFixture(t, native)
 	priority := uint64(3)
 	tags := []string{"linux", "gpu"}
 	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority, Tags: &tags}, "tags stay legacy"); err != nil {
@@ -281,7 +281,7 @@ func TestPoolWriteWithTagsKeepsLegacyPath(t *testing.T) {
 
 func TestConditionalPoolWriteConflictIsRejected(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, j, _, _ := conditionalFixture(t, native)
+	m, j, _, _, _ := conditionalFixture(t, native)
 	native.bumpNextPatch = true // a racing writer moves the revision between our GET and PATCH
 	priority := uint64(5)
 	_, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "stale precondition")
@@ -301,7 +301,7 @@ func TestConditionalUnknownResolvesFromDurableReceipt(t *testing.T) {
 	native := newFakeConditionalNative()
 	native.dropResponse = true
 	native.recordOnDrop = true
-	m, j, _, _ := conditionalFixture(t, native)
+	m, j, _, _, _ := conditionalFixture(t, native)
 	priority := uint64(7)
 	_, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "lost response")
 	if !errors.Is(err, ErrOutcomeUnknown) {
@@ -327,7 +327,7 @@ func TestConditionalUnknownResolvesFromDurableReceipt(t *testing.T) {
 func TestResolvePoolAmbiguousOutcomeHoldsUnknown(t *testing.T) {
 	native := newFakeConditionalNative()
 	native.dropResponse = true // original dispatch never arrived (no receipt recorded)
-	m, j, _, _ := conditionalFixture(t, native)
+	m, j, _, _, _ := conditionalFixture(t, native)
 	priority := uint64(7)
 	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "never arrived"); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
@@ -345,7 +345,7 @@ func TestResolvePoolAmbiguousOutcomeHoldsUnknown(t *testing.T) {
 
 func TestResolvePoolWithoutPendingIntentConflicts(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, _, _, _ := conditionalFixture(t, native)
+	m, _, _, _, _ := conditionalFixture(t, native)
 	if _, err := m.ResolvePool(context.Background(), nextID); !errors.Is(err, ErrRequestConflict) {
 		t.Fatalf("err = %v, want ErrRequestConflict", err)
 	}
@@ -353,7 +353,7 @@ func TestResolvePoolWithoutPendingIntentConflicts(t *testing.T) {
 
 func TestConditionalWriteRejectsUnreviewedRevisionSkew(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, _, f, nativeRef := conditionalFixture(t, native)
+	m, _, f, nativeRef, _ := conditionalFixture(t, native)
 	// The native revision carries state the operator never reviewed. Break
 	// the fixture's legacy/native mirror so the reviewed legacy snapshot
 	// (fingerprint-bound) still shows the old tuple while native moved on.
@@ -375,7 +375,7 @@ func TestConditionalWriteRejectsUnreviewedRevisionSkew(t *testing.T) {
 
 func TestResolvePoolRefusesLegacyUnknownWrite(t *testing.T) {
 	native := newFakeConditionalNative()
-	m, _, f, nativeRef := conditionalFixture(t, native)
+	m, _, f, nativeRef, _ := conditionalFixture(t, native)
 	f.writeFail = garmapi.ErrManagementOutcomeUnknown
 	priority := uint64(4)
 	tags := []string{"linux"}
@@ -397,7 +397,7 @@ func TestResolvePoolIdReuseHoldsUnknown(t *testing.T) {
 	native := newFakeConditionalNative()
 	native.dropResponse = true
 	native.recordOnDrop = true
-	m, j, _, _ := conditionalFixture(t, native)
+	m, j, _, _, _ := conditionalFixture(t, native)
 	priority := uint64(7)
 	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "lost response"); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
@@ -421,25 +421,105 @@ func TestResolvePoolIdReuseHoldsUnknown(t *testing.T) {
 
 func TestResolvePoolReappliesMinIdleGuardAgainstCurrentState(t *testing.T) {
 	native := newFakeConditionalNative()
-	native.dropResponse = true // original dispatch never arrived
-	m, _, _, nativeRef := conditionalFixture(t, native)
+	native.dropResponse = true // original dispatch committed without a receipt
+	m, _, _, nativeRef, _ := conditionalFixture(t, native)
 	minIdle := uint64(3)
 	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{MinIdleRunners: &minIdle}, "increase min idle"); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
 	}
 	// While the write was unknown, another writer raised min idle above the
-	// journaled target: re-applying it now would decrease the current
-	// minimum, so resolution must hold UNKNOWN without dispatching.
+	// journaled target and moved the revision. Resolution must hold UNKNOWN:
+	// re-applying the journaled target now would decrease the current
+	// minimum. The original precondition is stale, so the resolution
+	// dispatch is refused with 412 before any settings change; without a
+	// stored receipt there is no authoritative answer either way.
 	native.mu.Lock()
-	native.settings.MinIdleRunners = 8
+	native.settings.MinIdleRunners = 4
 	native.mu.Unlock()
 	if _, err := m.ResolvePool(context.Background(), requestID); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("ResolvePool err = %v, want ErrOutcomeUnknown on safeguard re-check", err)
 	}
 	nativeRef.mu.Lock()
-	defer nativeRef.mu.Unlock()
-	if nativeRef.patchCalls != 1 {
-		t.Fatalf("native PATCH calls = %d, want exactly the original dispatch (no re-application)", nativeRef.patchCalls)
+	calls := nativeRef.patchCalls
+	nativeRef.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("native PATCH calls = %d, want the original dispatch plus the refused resolution attempt", calls)
+	}
+	if got := native.currentSettings().MinIdleRunners; got != 4 {
+		t.Fatalf("native min idle after resolve = %d, want 4 (no re-application)", got)
+	}
+}
+
+// TestResolvePoolConfirmsAppliedReceiptDespiteRaisedMinIdle covers the case
+// where the original write committed (the durable receipt recorded it), the
+// response was lost, and a later writer raised min idle above the journaled
+// target before resolution. Confirming from the receipt changes nothing and
+// must not be blocked by the minimum-idle policy re-check.
+func TestResolvePoolConfirmsAppliedReceiptDespiteRaisedMinIdle(t *testing.T) {
+	native := newFakeConditionalNative()
+	native.dropResponse = true
+	native.recordOnDrop = true
+	m, j, _, _, _ := conditionalFixture(t, native)
+	minIdle := uint64(3)
+	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{MinIdleRunners: &minIdle}, "lost response"); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
+	}
+	// A later writer raises min idle above the journaled target and moves the
+	// revision before anyone resolves the original write.
+	native.mu.Lock()
+	native.settings.MinIdleRunners = 4
+	native.advanceLocked()
+	native.mu.Unlock()
+	pool, err := m.ResolvePool(context.Background(), requestID)
+	if err != nil {
+		t.Fatalf("ResolvePool: %v", err)
+	}
+	if pool.MinIdleRunners != 4 {
+		t.Fatalf("resolved pool min idle = %d, want the current 4 (a replay must not re-apply the journaled 3)", pool.MinIdleRunners)
+	}
+	if got := native.currentSettings().MinIdleRunners; got != 4 {
+		t.Fatalf("native min idle after resolve = %d, want 4 (replay must not overwrite the later writer)", got)
+	}
+	pending, _ := j.Pending(context.Background())
+	if len(pending) != 0 {
+		t.Fatalf("pending after resolve = %v, want none", pending)
+	}
+}
+
+// TestResolvePoolFlagOffAfterRestartHoldsUnknown covers a restart with the
+// experimental conditional client disabled while a conditional write is still
+// pending: resolution has no receipt to consult and must hold UNKNOWN instead
+// of reaching a nil client.
+func TestResolvePoolFlagOffAfterRestartHoldsUnknown(t *testing.T) {
+	native := newFakeConditionalNative()
+	native.dropResponse = true
+	native.recordOnDrop = true
+	m, j, _, _, path := conditionalFixture(t, native)
+	priority := uint64(7)
+	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "lost response"); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
+	}
+	// Restart with the experiment disabled: production startup builds the
+	// manager without a conditional client while the intent is still pending.
+	lineage := j.Lineage()
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenJournal(path, lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted, err := New(remoteFixture(), reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.ResolvePool(context.Background(), requestID); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("ResolvePool err = %v, want ErrOutcomeUnknown with the experimental client disabled", err)
+	}
+	pending, _ := reopened.Pending(context.Background())
+	if len(pending) != 1 || pending[0].RequestID != requestID {
+		t.Fatalf("pending after flag-off resolve = %v, want the intent retained", pending)
 	}
 }
 

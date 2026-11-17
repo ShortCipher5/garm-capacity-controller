@@ -337,13 +337,19 @@ func (m *Manager) writeConditionalPool(ctx context.Context, id string, update ga
 // ResolvePool settles the authoritative outcome of a pending pool write. It
 // re-presents the EXACT journaled dispatch — same supplied fields, same
 // request id, and the ORIGINAL conditional precondition — so the native
-// durable receipt answers definitively. Every non-definitive answer holds
+// durable receipt answers definitively. A replay (already applied) confirms
+// the write regardless of how the current tuple later moved: replaying it
+// changes nothing, and a later writer raising min idle must not block
+// confirming a historical outcome. A fresh apply re-checks the policy guards
+// against the current tuple as a tripwire. Every non-definitive answer holds
 // UNKNOWN: after receipt history may be lost, a 412, an id-reuse refusal or
 // a 4xx is not proof the original write failed, and applying the journaled
 // desire against a freshly obtained revision would overwrite writers nobody
-// reviewed (and can defeat the minimum-idle decrease safeguard). Only
-// conditional settings intents recorded with a dispatch record are
-// resolvable; legacy intents keep observe-only reconciliation semantics.
+// reviewed. Resolution requires the experimental conditional client; if it
+// is disabled (e.g. after a restart with the flag off) the outcome cannot be
+// established and the intent stays UNKNOWN. Only conditional settings intents
+// recorded with a dispatch record are resolvable; legacy intents keep
+// observe-only reconciliation semantics.
 func (m *Manager) ResolvePool(ctx context.Context, requestID string) (garmapi.ManagedPool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -376,6 +382,14 @@ func (m *Manager) ResolvePool(ctx context.Context, requestID string) (garmapi.Ma
 		// write; keep observe-only semantics for it.
 		return garmapi.ManagedPool{}, ErrRequestConflict
 	}
+	if m.conditional == nil {
+		// Restarted with the experimental client disabled (or the native
+		// endpoint removed) while a conditional write is still pending: there
+		// is no receipt to consult and no safe way to re-present the write.
+		// Hold UNKNOWN instead of dereferencing a nil client; re-enable the
+		// experiment or reconcile the intent manually.
+		return garmapi.ManagedPool{}, ErrOutcomeUnknown
+	}
 	var before garmapi.ManagedPool
 	if json.Unmarshal(intent.Before, &before) != nil || before.RepositoryID == "" {
 		return garmapi.ManagedPool{}, ErrJournal
@@ -393,18 +407,32 @@ func (m *Manager) ResolvePool(ctx context.Context, requestID string) (garmapi.Ma
 	currentBase.Priority = current.Settings.Priority
 	currentBase.MaxRunners = current.Settings.MaxRunners
 	currentBase.MinIdleRunners = current.Settings.MinIdleRunners
-	if err := conditionalPoolGuards(dispatch.Update, currentBase); err != nil {
-		return garmapi.ManagedPool{}, ErrOutcomeUnknown
-	}
 	patch := garmapi.PoolSettingsPatch{Priority: dispatch.Update.Priority, MaxRunners: dispatch.Update.MaxRunners, MinIdleRunners: dispatch.Update.MinIdleRunners}
 	// Present the original precondition, never a fresh one: a stored receipt
 	// answers regardless, and without one a stale precondition refuses
 	// instead of applying the journaled desire against an unreviewed revision.
-	if _, err := m.conditional.PatchConditionalSettings(ctx, ref, intent.Target, dispatch.ETag, requestID, patch); err != nil {
+	result, err := m.conditional.PatchConditionalSettings(ctx, ref, intent.Target, dispatch.ETag, requestID, patch)
+	if err != nil {
 		// 412 (stale), 409 (id bound to other content) and every 4xx share a
 		// cause with receipt loss: none of them proves the original write
 		// failed. Hold UNKNOWN; operator reconciliation is the only exit.
 		return garmapi.ManagedPool{}, ErrOutcomeUnknown
+	}
+	if result.Replay == nil && result.Settings != nil {
+		// This call freshly applied the write. Under the wire contract the
+		// original strong ETag precondition guarantees the apply landed on the
+		// reviewed snapshot — a changed revision refuses with 412 above — so
+		// this guard passes identically to the original dispatch. It is kept
+		// as a tripwire against ETag semantics drift: if a server ever applied
+		// against a changed tuple, the policy error surfaces instead of a
+		// false confirmation. The intent stays pending and a later resolve
+		// confirms from the now-stored receipt. A replay (already applied)
+		// skips the guard: replaying a historical write changes nothing, and a
+		// later writer raising min idle must not block confirming the
+		// original outcome.
+		if err := conditionalPoolGuards(dispatch.Update, currentBase); err != nil {
+			return garmapi.ManagedPool{}, err
+		}
 	}
 	desired := before
 	_ = json.Unmarshal(intent.Desired, &desired)
