@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
+import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS } from "./host-budget.js";
 import { Usage } from "./usage-bars.jsx";
 import { UsageChart, USAGE_DIMENSIONS, formatSampleAge } from "./usage-chart.jsx";
 
@@ -113,6 +114,7 @@ export function DiscoveryResultView({ result }) {
         <p className="drain-warning" data-unmanaged={unmanaged}>{unmanaged} unmanaged guest(s) observed without runner-controller attribution: the shared limit may not cover them.</p>
       )}
       <h4>Suggested budget — advisory only, never applied</h4>
+      <p className="muted">This API estimate subtracts fixed headroom only. The enrollment planner below refines the proposal with observed workloads and disk usage; neither estimate proves available capacity.</p>
       <p>CPU {fmt(result.suggested_budget.cpu_millis)} millicores · Memory {fmt(result.suggested_budget.ram_mib)} MiB · Disk {fmt(result.suggested_budget.disk_mib)} MiB · Runners {fmt(result.suggested_budget.runners)} (runner count is not derivable from host totals)</p>
       <h4>Observed guests <small className="muted">{result.guests.length}</small></h4>
       {result.guests.length === 0 ? (
@@ -154,24 +156,43 @@ export function DiscoveryResultView({ result }) {
     </div>
   );
 }
+export function BudgetPlanner({ result, budget, onChange }) {
+  const guidance = hostBudgetGuidance(result);
+  const [counts, setCounts] = useState([0, 0, 0]);
+  const mix = runnerMix(budget, RUNNER_PRESETS, counts);
+  const warnings = assessBudget(result, budget, guidance);
+  return <div className="budget-planner">
+    <h4>Plan shared runner capacity</h4>
+    <p>Starting allowance: 10% per dimension, with minimum headroom of 1 vCPU, 2 GiB RAM and 10 GiB disk (capped at host totals). Observed guest limits are also reserved. Adjust these proposed budgets for your workload.</p>
+    <div className="budget-fields">
+      {[["cpu_millis", "cpu", "Budget CPU millicores"], ["ram_mib", "ram", "Budget memory MiB"], ["disk_mib", "disk", "Budget disk MiB"], ["runners", "runners", "Budget runners"]].map(([key, name, label]) =>
+        <label key={key}>{label}<input aria-label={label} name={name} type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" value={budget[key]} onChange={event => onChange({...budget, [key]:event.target.value})} required /></label>)}
+    </div>
+    <ul className="warning-list">{guidance.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
+    {warnings.length > 0 && <div role="status"><strong>Budget needs review</strong><ul>{warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></div>}
+    <p>Illustrative runner sizes below are planning presets, not saved profiles or provisioned runners. Each maximum is an alternative, not additional capacity. Save custom sizes in Runner-size profiles.</p>
+    <div className="table-wrap"><table><thead><tr><th>Size</th><th>CPU / RAM / disk</th><th>Resource-only maximum if used alone</th><th>Planned count</th></tr></thead><tbody>
+      {RUNNER_PRESETS.map((profile,index) => <tr key={profile.name}><td>{profile.name}</td><td>{profile.cpu_millis / 1000} vCPU / {profile.ram_mib / 1024} GiB / {profile.disk_mib / 1024} GiB</td><td>{mix.fits ? mix.fits[index] : "unknown"}</td><td><input aria-label={`${profile.name} planned count`} type="number" min="0" step="1" value={counts[index]} onChange={event => setCounts(counts.map((count,i) => i === index ? event.target.value : count))} /></td></tr>)}
+    </tbody></table></div>
+    <p role="status">{mix.unknown ? "Mix unavailable: enter explicit positive CPU, RAM and disk budgets." : mix.invalid ? "Enter valid whole-number counts." : `Combined mix: ${mix.totals.cpu_millis} millicores, ${mix.totals.ram_mib} MiB RAM, ${mix.totals.disk_mib} MiB disk. ${mix.exceeds.length ? "Exceeds shared budget: " + mix.exceeds.join(", ") : "Within the entered resource budget; not an admission guarantee."}`}</p>
+    {Number(budget.runners) < counts.reduce((sum,count) => sum + Number(count),0) && <p className="drain-warning">Planned count exceeds the entered runner count limit.</p>}
+    <p>Runner count limit is separate. Set it to cover the desired mix; zero CPU, RAM or runner budget blocks new claims. Planning does not transfer or free existing allocations.</p>
+  </div>;
+}
 function EnrollForm({ result, busy, onSubmit, onCancel }) {
-  const budget = result.suggested_budget;
-  const detected = result.totals && result.totals.complete
-    ? { cpu_millis: result.totals.cpu_millis, ram_mib: result.totals.ram_mib, disk_mib: result.totals.disk_mib, runners: 0 }
-    : undefined;
+  const [budget, setBudget] = useState(() => {
+    const proposed = hostBudgetGuidance(result).budget;
+    return {cpu_millis:proposed.cpu_millis ?? "",ram_mib:proposed.ram_mib ?? "",disk_mib:proposed.disk_mib ?? "",runners:0};
+  });
   return (
-    <form className="enroll-form" onSubmit={(event) => onSubmit(event, result, detected)}>
+    <form className="enroll-form" onSubmit={(event) => onSubmit(event, result)}>
       <h4>Enroll as a new ledger host</h4>
       <p className="drain-warning">Enrollment records a disabled or draining host budget. It never adopts or rewrites an existing host, and it is not activation: enabling stays a separate reviewed action after qualification.</p>
       <label>New host name<input aria-label="New host name" name="name" defaultValue={result.profile_id} required maxLength={256} /></label>
-      <div className="budget-fields">
-        {[["cpu", "Budget CPU millicores", budget.cpu_millis], ["ram", "Budget memory MiB", budget.ram_mib], ["disk", "Budget disk MiB", budget.disk_mib], ["runners", "Budget runners", budget.runners]].map(([key, label, value]) => (
-          <label key={key}>{label}<input aria-label={label} name={key} type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" defaultValue={value} required /></label>
-        ))}
-      </div>
+      <BudgetPlanner result={result} budget={budget} onChange={setBudget} />
       <label>Initial host mode<select aria-label="Initial host mode" name="mode" defaultValue="disabled"><option value="disabled">Disabled: pause new claims</option><option value="draining">Draining</option></select></label>
       <label>Enrollment management token<input aria-label="Enrollment management token" name="token" type="password" autoComplete="off" spellCheck={false} required disabled={busy} /></label>
-      <p className="muted">Used once and cleared on submission. The suggested budget is prefilled from detected totals minus reserved headroom; edit it before enrolling. Detected totals are recorded only when the discovery was complete.</p>
+      <p className="muted">Used once and cleared on submission. Known proposed budgets are prefilled after headroom and observed workload allowance; unknown dimensions remain blank for manual review. The server checks that this discovery review is current, unused and fresh. Complete detected totals are recorded without marking the host healthy.</p>
       <button className="primary" type="submit" disabled={busy}>{busy ? "Enrolling…" : "Enroll host"}</button>
       <button className="quiet" type="button" disabled={busy} onClick={onCancel}>Cancel enrollment</button>
     </form>
@@ -218,7 +239,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh }) {
       if (mounted.current && current === generation.current) setBusy(false);
     }
   }
-  async function enroll(event, result, detected) {
+  async function enroll(event, result) {
     event.preventDefault();
     if (active.current) return;
     const form = new FormData(event.currentTarget);
@@ -230,10 +251,11 @@ export function Servers({ data, readOnboarding, readUsage, refresh }) {
     const timeout = setTimeout(() => controller.abort(), 15000);
     setBusy(true); setMessage("");
     try {
-      await enrollHost(credential, { name, budget, ...(detected ? { detected } : {}), mode: String(form.get("mode")) }, { signal: controller.signal });
+      if (!result.review) throw new Error("Discovery review unavailable. Refresh discovery before enrolling.");
+      await enrollHost(credential, { name, budget, review: result.review, mode: String(form.get("mode")) }, { signal: controller.signal });
       if (mounted.current && current === generation.current) {
         setEnrolling("");
-        setMessage(`Host ${name} enrolled with detected totals recorded. It starts paused: enabling is a separate reviewed action in Ledger policy management.`);
+        setMessage(`Host ${name} enrolled using the reviewed discovery snapshot. It remains paused and unqualified: enabling is a separate reviewed action in Ledger policy management.`);
         await refresh();
       }
     } catch (error) {

@@ -104,17 +104,18 @@ export async function fetchProfileDiscovery(token, profile, { signal, fetcher = 
 // outcomes are rendered as returned. Enrollment never adopts an existing host.
 export async function enrollHost(token, request, { signal, fetcher = globalThis.fetch } = {}) {
   if (!/^[0-9a-f]{64}$/.test(token)) throw new ProfileResponseError("Enter the 64-character lowercase hexadecimal management token.");
-  const { name, budget, detected, mode } = request || {};
+  const { name, budget, review, detected, mode } = request || {};
   if (typeof name !== "string" || name.length < 1 || name.length > 256 || /[\u0000-\u001f\u007f]/.test(name)) throw new ProfileResponseError("Host names use 1–256 characters without control characters.");
   if (!object(budget) || !["cpu_millis", "ram_mib", "disk_mib", "runners"].every((key) => integer(budget[key]))) throw new ProfileResponseError("Budgets must be non-negative safe integers.");
-  if (detected !== undefined && detected !== null && (!object(detected) || !["cpu_millis", "ram_mib", "disk_mib", "runners"].every((key) => integer(detected[key])))) throw new ProfileResponseError("Detected totals must be non-negative safe integers.");
+  if (detected !== undefined) throw new ProfileResponseError("Detected totals must come from a server discovery review.");
+  if (review !== undefined && (!object(review) || !/^[0-9a-f-]{36}$/.test(review.id) || !/^[0-9a-f]{64}$/.test(review.revision) || !profileID(review.profile_id))) throw new ProfileResponseError("Refresh discovery for a valid review.");
   if (mode !== "disabled" && mode !== "draining") throw new ProfileResponseError("Initial mode must be disabled or draining. Enabling is a separate action after qualification.");
   let response;
   try {
     response = await fetcher.call(globalThis, "/admin/api/v1/hosts", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ name, budget, ...(detected ? { detected } : {}), mode }),
+      body: JSON.stringify({ name, budget, ...(review ? { review } : {}), mode }),
       credentials: "omit",
       cache: "no-store",
       redirect: "error",

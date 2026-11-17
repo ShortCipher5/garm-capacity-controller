@@ -86,15 +86,16 @@ type DiscoveryUtilization struct {
 // include physical_capacity_scope_unqualified: no discovery observation is
 // physical-hardware, whole-project, parent-quota or capacity qualification.
 type DiscoveryResult struct {
-	Profile         string                `json:"profile_id"`
-	ObservedAt      time.Time             `json:"observed_at"`
-	Identity        DiscoveryIdentity     `json:"identity"`
-	Totals          *DiscoveryTotals      `json:"totals,omitempty"`
-	Guests          []GuestView           `json:"guests"`
-	Utilization     *DiscoveryUtilization `json:"utilization,omitempty"`
-	SuggestedBudget admission.Resources   `json:"suggested_budget"`
-	Warnings        []string              `json:"warnings"`
-	Blockers        []string              `json:"blockers"`
+	Review          *admission.DiscoveryReview `json:"review,omitempty"`
+	Profile         string                     `json:"profile_id"`
+	ObservedAt      time.Time                  `json:"observed_at"`
+	Identity        DiscoveryIdentity          `json:"identity"`
+	Totals          *DiscoveryTotals           `json:"totals,omitempty"`
+	Guests          []GuestView                `json:"guests"`
+	Utilization     *DiscoveryUtilization      `json:"utilization,omitempty"`
+	SuggestedBudget admission.Resources        `json:"suggested_budget"`
+	Warnings        []string                   `json:"warnings"`
+	Blockers        []string                   `json:"blockers"`
 }
 
 // Headroom reserved from detected physical totals before any runner workload:
@@ -166,7 +167,6 @@ func (m *Manager) Discover(ctx context.Context, request Request) (DiscoveryResul
 	result.Utilization = m.discoverUtilization(ctx, source, &result)
 
 	result.Warnings = append(result.Warnings, "point-in-time snapshot: observations go stale immediately and are not reconciliation evidence")
-	result.ObservedAt = time.Now().UTC()
 	record.Phase = "completed"
 	record.WarningCount = len(result.Warnings)
 	// A canceled HTTP caller cannot erase a completed run's sanitized audit.

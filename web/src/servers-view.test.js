@@ -62,3 +62,17 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     await server.close();
   }
 });
+
+test('enrollment planner presents headroom warnings, distinct alternatives and unknown mix', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
+  try {
+    const { BudgetPlanner } = await server.ssrLoadModule('/src/servers.jsx');
+    const markup = renderToStaticMarkup(React.createElement(BudgetPlanner, {result:discovery, budget:{cpu_millis:8000,ram_mib:32000,disk_mib:0,runners:0},onChange:()=>{}}));
+    assert.match(markup,/Budget needs review/);
+    assert.match(markup,/unconstrained disk/);
+    assert.match(markup,/Maximum|maximum/);
+    assert.match(markup,/Mix unavailable/);
+    assert.match(markup,/small planned count/);
+    assert.match(markup,/not saved profiles/);
+  } finally { await server.close(); }
+});

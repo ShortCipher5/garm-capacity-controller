@@ -7,20 +7,19 @@ import (
 	"mime"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 )
 
 // enrollHostRequest is the explicit operator enrollment action. It is distinct
 // from discovery: nothing here reads a backend, and discovery never enrolls.
-// detected is optional; when present it is recorded as the host's last
-// discovery totals with a fresh observation.
+// A review references server-recorded discovery. Manual enrollment has no
+// detected totals; browser-supplied observations are rejected.
 type enrollHostRequest struct {
-	Name     string               `json:"name"`
-	Budget   admission.Resources  `json:"budget"`
-	Detected *admission.Resources `json:"detected,omitempty"`
-	Mode     string               `json:"mode"`
+	Name   string                     `json:"name"`
+	Budget admission.Resources        `json:"budget"`
+	Review *admission.DiscoveryReview `json:"review,omitempty"`
+	Mode   string                     `json:"mode"`
 }
 
 // serveHosts enrolls a NEW ledger host. It requires the separately authorized
@@ -76,10 +75,16 @@ func (h *Handler) serveHosts(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "invalid host enrollment")
 		return
 	}
-	if err := h.store.EnrollHost(r.Context(), request.Name, request.Budget, request.Mode); err != nil {
+	var enrollErr error
+	if request.Review != nil {
+		enrollErr = h.store.EnrollHostFromReview(r.Context(), request.Name, request.Budget, request.Mode, *request.Review)
+	} else {
+		enrollErr = h.store.EnrollHost(r.Context(), request.Name, request.Budget, request.Mode)
+	}
+	if err := enrollErr; err != nil {
 		switch {
 		case errors.Is(err, admission.ErrConflict):
-			fail(http.StatusConflict, "host already enrolled")
+			fail(http.StatusConflict, "host already enrolled or discovery review expired, superseded, mismatched or consumed; refresh before retrying")
 		case errors.Is(err, admission.ErrDenied):
 			fail(http.StatusBadRequest, "invalid host enrollment")
 		default:
@@ -88,15 +93,6 @@ func (h *Handler) serveHosts(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	detectedRecorded := false
-	if request.Detected != nil {
-		if err := h.store.SetHostDetected(r.Context(), request.Name, request.Detected, time.Now().UTC()); err != nil {
-			h.audit("enrolled host detected totals unavailable")
-			fail(http.StatusServiceUnavailable, "host enrolled but detected totals unavailable")
-			return
-		}
-		detectedRecorded = true
-	}
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]any{"enrolled": true, "name": request.Name, "detected_recorded": detectedRecorded})
+	_ = json.NewEncoder(w).Encode(map[string]any{"enrolled": true, "name": request.Name, "review_recorded": request.Review != nil})
 }

@@ -182,6 +182,23 @@ func (h *Handler) serveOnboardingProfileDiscovery(w http.ResponseWriter, r *http
 		h.audit("onboarding discovery or audit unavailable")
 		fail(http.StatusServiceUnavailable, "discovery or its audit unavailable; no enrollment or activation is implemented")
 	default:
+		// Persist exactly the sanitized view returned to the reviewer. This is
+		// enrollment provenance only, never a backend binding or health proof.
+		snapshot, encodeErr := json.Marshal(result)
+		var detected *admission.Resources
+		if t := result.Totals; t != nil && t.Complete && t.CPUMillis != nil && t.RAMMiB != nil && t.DiskMiB != nil {
+			detected = &admission.Resources{CPU: *t.CPUMillis, RAM: *t.RAMMiB, Disk: *t.DiskMiB}
+		}
+		if encodeErr != nil {
+			fail(http.StatusServiceUnavailable, "discovery review unavailable")
+			return
+		}
+		review, recordErr := h.store.RecordDiscoveryReview(r.Context(), requestID, parts[0], result.ObservedAt, snapshot, detected)
+		if recordErr != nil {
+			fail(http.StatusServiceUnavailable, "discovery review unavailable; no enrollment performed")
+			return
+		}
+		result.Review = &review
 		var body bytes.Buffer
 		if json.NewEncoder(&body).Encode(result) != nil || body.Len() > 2<<20 {
 			fail(http.StatusServiceUnavailable, "discovery view unavailable")

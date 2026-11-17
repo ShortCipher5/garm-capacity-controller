@@ -50,7 +50,7 @@ test("fetchProfileDiscovery requires the management credential on the profile di
 });
 test("enrollHost posts the reviewed enrollment and maps durable outcomes", async () => {
   const calls = [];
-  const request = { name: "host-b", budget: { cpu_millis: 2000, ram_mib: 4096, disk_mib: 51200, runners: 2 }, detected: { cpu_millis: 8000, ram_mib: 32768, disk_mib: 524288, runners: 0 }, mode: "disabled" };
+  const request = { name: "host-b", budget: { cpu_millis: 2000, ram_mib: 4096, disk_mib: 51200, runners: 2 }, review: { id: "11111111-1111-4111-8111-111111111111", revision: "a".repeat(64), profile_id: "candidate-b" }, mode: "disabled" };
   await enrollHost(write, request, { fetcher: async (url, options) => { calls.push([url, options]); return { ok: true, status: 201, json: async () => ({ enrolled: true }) }; } });
   assert.equal(calls[0][0], "/admin/api/v1/hosts");
   assert.equal(calls[0][1].method, "POST");

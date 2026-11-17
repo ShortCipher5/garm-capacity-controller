@@ -125,7 +125,7 @@ func TestDiscoveryEndpointIsScopedAuditedAndNonEnrolling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.Audit) != len(before.Audit)+2 || len(after.HostBindings) != len(before.HostBindings) || after.Ready != before.Ready || after.Epoch != before.Epoch || len(after.Config.Hosts) != len(before.Config.Hosts) {
+	if len(after.Audit) != len(before.Audit)+3 || len(after.HostBindings) != len(before.HostBindings) || after.Ready != before.Ready || after.Epoch != before.Epoch || len(after.Config.Hosts) != len(before.Config.Hosts) {
 		t.Fatal("discovery changed gate/binding/policy or omitted audit")
 	}
 	kinds := map[string]bool{}
@@ -178,9 +178,16 @@ func sendEnroll(t *testing.T, h *Handler, body, token, origin, contentType strin
 }
 
 func TestEnrollHostEndpointRegistersDisabledHostAndOverviewShowsDetected(t *testing.T) {
-	h, _, _, read, write := discoveryHandler(t, false)
+	h, _, _, read, write := discoveryHandler(t, true)
 	detected := admission.Resources{CPU: 8000, RAM: 32768, Disk: 524288}
-	body := `{"name":"host-b","budget":{"cpu_millis":2000,"ram_mib":4096,"disk_mib":51200,"runners":2},"detected":{"cpu_millis":8000,"ram_mib":32768,"disk_mib":524288,"runners":0},"mode":"disabled"}`
+	responseDiscovery := sendDiscovery(t, h, "GET", "/admin/api/v1/onboarding/profiles/candidate-b/discovery", write, "")
+	var discovery onboarding.DiscoveryResult
+	if responseDiscovery.Code != 200 || json.Unmarshal(responseDiscovery.Body.Bytes(), &discovery) != nil || discovery.Review == nil {
+		t.Fatal("review unavailable", responseDiscovery.Body.String())
+	}
+	encoded, _ := json.Marshal(map[string]any{"name": "host-b", "budget": admission.Resources{CPU: 2000, RAM: 4096, Disk: 51200, Runners: 2}, "review": discovery.Review, "mode": "disabled"})
+	body := string(encoded)
+
 	if sendEnroll(t, h, body, write, "", "application/json").Code != 201 {
 		t.Fatal("authorized enrollment rejected")
 	}
@@ -202,7 +209,7 @@ func TestEnrollHostEndpointRegistersDisabledHostAndOverviewShowsDetected(t *test
 			continue
 		}
 		found = true
-		if host.Mode != "disabled" || !host.Healthy || host.Detected == nil || *host.Detected != detected {
+		if host.Mode != "disabled" || host.Healthy || host.Detected == nil || *host.Detected != detected {
 			t.Fatalf("enrolled host view: %+v", host)
 		}
 	}
@@ -268,5 +275,18 @@ func TestEnrollHostEndpointRequiresManagementRole(t *testing.T) {
 	after, _ := store.ReadSnapshot(context.Background())
 	if len(after.Config.Hosts) != len(before.Config.Hosts) || len(after.Audit) != len(before.Audit) {
 		t.Fatal("unmanaged enrollment mutated ledger")
+	}
+}
+
+func TestEnrollmentRejectsBrowserDetectionWithoutMutation(t *testing.T) {
+	h, _, store, _, write := discoveryHandler(t, false)
+	body := `{"name":"host-b","budget":{"cpu_millis":1,"ram_mib":1,"runners":1},"detected":{"cpu_millis":9999,"ram_mib":9999},"mode":"disabled"}`
+	before, _ := store.ReadSnapshot(context.Background())
+	if sendEnroll(t, h, body, write, "", "application/json").Code != 400 {
+		t.Fatal("browser detection accepted")
+	}
+	after, _ := store.ReadSnapshot(context.Background())
+	if len(after.Config.Hosts) != len(before.Config.Hosts) || len(after.Audit) != len(before.Audit) {
+		t.Fatal("rejected detection mutated ledger")
 	}
 }
