@@ -23,7 +23,7 @@ for (const available of [false, true]) {
   }else{
    await page.getByLabel('Resolution management token').fill('c'.repeat(64));
    await page.getByRole('button',{name:'Resolve pending write'}).click();
-   await expect(page.getByRole('status')).toContainText('outcome still unknown');
+   await expect(page.getByRole('status').filter({hasText:'outcome still unknown'})).toBeVisible();
    await expect(page.getByLabel('Resolution management token')).toHaveValue('');
    expect(calls).toBe(1);
    await expect(page.getByRole('button',{name:'Review Garm change'})).toBeDisabled();
