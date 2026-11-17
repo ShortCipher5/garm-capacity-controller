@@ -41,6 +41,10 @@ type ManagementConfig struct {
 	AllowWrites   bool
 	// Independent off-by-default foundation opt-in; not wired to HTTP/UI.
 	AllowDisabledPoolCreation bool
+	// Independent off-by-default experimental opt-in for the native conditional
+	// settings client; not wired to HTTP/UI. See conditional.go. The zero value
+	// leaves all existing management behavior unchanged.
+	ExperimentalConditionalSettings bool
 }
 
 type ManagementClient struct {
