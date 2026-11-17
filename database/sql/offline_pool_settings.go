@@ -96,11 +96,28 @@ func (OfflinePoolSettingsRequestReceipt) TableName() string {
 // enabled against this database" (marker absent: benign skip) apart from
 // "revision schema lost after the feature was used" (marker present: the
 // legacy write must fail closed).
+//
+// The marker also carries the recovery state of the schema:
+//   - Generation counts installations: 1 on a fresh install, bumped on
+//     every explicit reinstall after table loss or after a database
+//     restore. It exists so operators (and future tooling) can observe
+//     epoch resets; ETag validity is enforced by the epoch floor, not by
+//     the generation number itself.
+//   - LastEpoch is the highest epoch ever minted in this database, across
+//     all generations. Revision epochs are minted as
+//     max(unix_now, LastEpoch+1) and the minted value is persisted back
+//     into the marker, so an epoch can never repeat across reinstalls
+//     even when the clock has not moved (see doc/experimental-offline-
+//     pool-settings.md).
 type OfflinePoolSettingsMeta struct {
 	// Key is the marker key; "schema" is the only row this table holds.
 	Key string `gorm:"type:text;primaryKey"`
 	// Installed is true once the experimental schema is installed.
 	Installed bool `gorm:"not null"`
+	// Generation counts installations of the experimental schema.
+	Generation uint64 `gorm:"not null"`
+	// LastEpoch is the highest epoch ever minted in this database.
+	LastEpoch uint64 `gorm:"column:last_epoch;not null"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -115,34 +132,132 @@ func (OfflinePoolSettingsMeta) TableName() string {
 // marker row.
 const offlineSettingsMetaSchemaKey = "schema"
 
-// ensureOfflinePoolSettingsSchema lazily creates the experimental schema.
-// It is a no-op once the tables exist. This function is the only place
-// where the experimental schema is created; it is only reachable through
-// the experimental store methods, which in turn are only reachable when
-// the experimental.enable_offline_pool_settings config flag is enabled.
+// errOfflineSettingsSchemaMissing is returned by the experimental
+// GET/PATCH paths when the installation marker is present but the revision
+// table or the receipts table is missing: the schema was lost after the
+// feature was used, and silently recreating the tables would destroy
+// revision or replay history (old ETags could match a restarted revision
+// sequence, old request ids could be re-applied). The paths fail hard
+// instead; the operator must run the explicit reinstall, which starts a
+// new epoch and invalidates every outstanding ETag and receipt.
+var errOfflineSettingsSchemaMissing = errors.New("experimental offline pool settings schema is missing after being installed; refusing to recreate it silently; run the explicit reinstall")
+
+// ensureOfflinePoolSettingsSchema verifies the experimental schema and
+// installs it when the feature was never enabled against this database.
+// This function is the only place where the experimental schema is
+// created; it is only reachable through the experimental store methods,
+// which in turn are only reachable when the
+// experimental.enable_offline_pool_settings config flag is enabled.
 //
-// All three tables (revision, receipts, marker) are created in a single
-// transaction together with the marker row, so the presence of the marker
-// table atomically implies that the revision table existed at install
-// time.
+// Table creation is deliberately restricted: it may only run while the
+// installation marker table is ABSENT (a genuine first enable). If the
+// marker is present but the revision table or the receipts table is
+// missing, the schema was lost after the feature was used, and this
+// function fails with errOfflineSettingsSchemaMissing instead of
+// recreating anything. Both experimental paths (GET and PATCH) call it
+// before touching the schema.
 func (s *sqlDatabase) ensureOfflinePoolSettingsSchema() error {
-	if s.conn.Migrator().HasTable(&OfflinePoolSettingsRevision{}) &&
-		s.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{}) &&
-		s.conn.Migrator().HasTable(&OfflinePoolSettingsMeta{}) {
+	hasRevisions := s.conn.Migrator().HasTable(&OfflinePoolSettingsRevision{})
+	hasReceipts := s.conn.Migrator().HasTable(&OfflinePoolSettingsRequestReceipt{})
+	hasMeta := s.conn.Migrator().HasTable(&OfflinePoolSettingsMeta{})
+	if hasRevisions && hasReceipts && hasMeta {
 		return nil
 	}
+	if hasMeta {
+		// Installed before, partially lost since: recreating the missing
+		// table here would silently restart revision history at a fresh
+		// epoch or drop the replay record of in-flight requests. Fail
+		// hard; recovery is the explicit reinstall.
+		return fmt.Errorf("%w: revision table present: %t, receipts table present: %t", errOfflineSettingsSchemaMissing, hasRevisions, hasReceipts)
+	}
+	// The marker is absent: the feature was never enabled against this
+	// database. Install all three tables plus the marker row in one
+	// transaction; a fresh install starts at generation 1 with no epoch
+	// floor. (A surviving revision table without its marker — the
+	// documented witness-lost hole — is left untouched; AutoMigrate only
+	// creates missing tables, and per-pool ETag scoping keeps the
+	// surviving rows authoritative for their pools.)
 	err := s.conn.Transaction(func(tx *gorm.DB) error {
-		if err := tx.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}, &OfflinePoolSettingsMeta{}); err != nil {
-			return err
-		}
-		// Record the installation durably, in the same transaction as the
-		// table creation. The marker row is write-once; on a reinstall
-		// after table loss the existing row is kept.
-		meta := OfflinePoolSettingsMeta{Key: offlineSettingsMetaSchemaKey, Installed: true}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&meta).Error
+		return installOfflinePoolSettingsSchema(tx)
 	})
 	if err != nil {
 		return fmt.Errorf("error creating offline pool settings schema: %w", err)
+	}
+	return nil
+}
+
+// installOfflinePoolSettingsSchema creates the three experimental tables
+// (whichever are missing) and seeds the marker row at generation 1. Must
+// be called inside a transaction, only when the marker table does not
+// exist.
+func installOfflinePoolSettingsSchema(tx *gorm.DB) error {
+	if err := tx.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}, &OfflinePoolSettingsMeta{}); err != nil {
+		return err
+	}
+	meta := OfflinePoolSettingsMeta{
+		Key:        offlineSettingsMetaSchemaKey,
+		Installed:  true,
+		Generation: 1,
+	}
+	// Two racing first-time users may both try to insert; only one wins,
+	// the other keeps the existing row.
+	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&meta).Error
+}
+
+// ReinstallOfflinePoolSettingsSchema is the explicit operator-level
+// recovery from experimental schema loss (dropped side tables) or from a
+// database restore that rolled back epochs, sequences and receipts. It is
+// deliberately NOT reachable from the request paths: GET and PATCH fail
+// hard after a loss instead of repairing themselves.
+//
+// The reinstall:
+//   - recreates any missing table;
+//   - bumps the durable generation in the marker (a fresh install is
+//     generation 1, every reinstall generation+1);
+//   - wipes every revision row and every request receipt, so all
+//     outstanding ETags and all replay state are invalidated together;
+//   - preserves LastEpoch, so revision rows minted after the reinstall
+//     get epochs strictly above every epoch ever issued in this database:
+//     no ETag pair from a lost or restored generation can match again.
+//
+// Requests that were in flight across the loss stay UNKNOWN to their
+// clients until a fresh read; see the recovery policy in
+// doc/experimental-offline-pool-settings.md. An operator-facing endpoint
+// for this operation is not part of this experimental slice; the store
+// primitive is the integration point.
+func (s *sqlDatabase) ReinstallOfflinePoolSettingsSchema() error {
+	err := s.conn.Transaction(func(tx *gorm.DB) error {
+		if !tx.Migrator().HasTable(&OfflinePoolSettingsMeta{}) {
+			// Never installed: equivalent to the lazy first enable.
+			return installOfflinePoolSettingsSchema(tx)
+		}
+		if err := tx.AutoMigrate(&OfflinePoolSettingsRevision{}, &OfflinePoolSettingsRequestReceipt{}); err != nil {
+			return err
+		}
+		// A new epoch for every pool: surviving or restored revision rows
+		// must not keep serving ETags from before the reinstall.
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&OfflinePoolSettingsRevision{}).Error; err != nil {
+			return err
+		}
+		// Receipts from the lost or restored generation are invalidated
+		// with the ETags they reference; in-flight clients re-read and
+		// re-decide instead of replaying stale outcomes.
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&OfflinePoolSettingsRequestReceipt{}).Error; err != nil {
+			return err
+		}
+		res := tx.Model(&OfflinePoolSettingsMeta{}).
+			Where("key = ?", offlineSettingsMetaSchemaKey).
+			Update("generation", gorm.Expr("generation + 1"))
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errors.New("offline pool settings installation marker row is missing")
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("error reinstalling offline pool settings schema: %w", err)
 	}
 	return nil
 }
@@ -213,8 +328,42 @@ func (s *sqlDatabase) bumpOfflineRevisionForLegacyWrite(tx *gorm.DB, poolID uuid
 	return fmt.Errorf("error advancing offline pool settings revision for legacy write: %w", err)
 }
 
+// mintOfflineEpoch returns the next epoch usable for a fresh revision
+// row and durably records it in the installation marker. Must be called
+// inside a transaction, after the schema presence check confirmed all
+// three tables exist.
+//
+// The epoch is max(unix_now, marker.LastEpoch+1): a reinstall that
+// happens before the Unix clock advances still mints an epoch no earlier
+// generation ever used, so no "<epoch>:<seq>" pair issued before a loss
+// or restore can match a post-reinstall revision row.
+func (s *sqlDatabase) mintOfflineEpoch(tx *gorm.DB) (uint64, error) {
+	var meta OfflinePoolSettingsMeta
+	if err := tx.Where("key = ?", offlineSettingsMetaSchemaKey).First(&meta).Error; err != nil {
+		return 0, fmt.Errorf("error fetching offline pool settings installation marker: %w", err)
+	}
+	epoch := uint64(time.Now().Unix())
+	if floor := meta.LastEpoch + 1; floor > epoch {
+		epoch = floor
+	}
+	// The floor guard keeps a racing writer (or a backwards clock) from
+	// ever lowering the durable floor; a zero-rows update only means
+	// someone else already recorded an equal or higher floor, which the
+	// freshly minted epoch is still strictly above relative to the row
+	// snapshot this transaction started from.
+	res := tx.Model(&OfflinePoolSettingsMeta{}).
+		Where("key = ? AND last_epoch < ?", offlineSettingsMetaSchemaKey, epoch).
+		Update("last_epoch", epoch)
+	if res.Error != nil {
+		return 0, fmt.Errorf("error recording offline pool settings epoch floor: %w", res.Error)
+	}
+	return epoch, nil
+}
+
 // getOrCreateOfflineRevision returns the revision row of a pool, creating
-// it on first use. Must be called inside a transaction.
+// it on first use. Must be called inside a transaction. A freshly created
+// row gets its epoch from mintOfflineEpoch: monotonic across reinstalls
+// via the marker, never a bare wall-clock value.
 func (s *sqlDatabase) getOrCreateOfflineRevision(tx *gorm.DB, poolID uuid.UUID) (OfflinePoolSettingsRevision, error) {
 	var rev OfflinePoolSettingsRevision
 	err := tx.Where("pool_id = ?", poolID).First(&rev).Error
@@ -225,9 +374,13 @@ func (s *sqlDatabase) getOrCreateOfflineRevision(tx *gorm.DB, poolID uuid.UUID) 
 		return OfflinePoolSettingsRevision{}, fmt.Errorf("error fetching offline pool settings revision: %w", err)
 	}
 
+	epoch, err := s.mintOfflineEpoch(tx)
+	if err != nil {
+		return OfflinePoolSettingsRevision{}, err
+	}
 	rev = OfflinePoolSettingsRevision{
 		PoolID: poolID,
-		Epoch:  uint64(time.Now().Unix()),
+		Epoch:  epoch,
 	}
 	// Two racing first-time users may both try to insert; only one wins,
 	// the other keeps the existing row.

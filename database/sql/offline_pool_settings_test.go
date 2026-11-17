@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/suite"
 
@@ -603,62 +602,264 @@ func (s *OfflinePoolSettingsTestSuite) TestLegacyWriteAfterRevisionTableLossFail
 	s.Require().True(s.installedMetaRow().Installed)
 }
 
-// TestExperimentalPathReinstallsSchemaAfterLoss drops the revision and
-// receipts tables after the feature was used and verifies that the
-// experimental GET path recreates them (the marker survives), restarting
-// revision history at a fresh epoch. A fresh epoch invalidates every
-// pre-loss ETag: a conditional PATCH holding one is rejected stale.
-func (s *OfflinePoolSettingsTestSuite) TestExperimentalPathReinstallsSchemaAfterLoss() {
+// TestExperimentalPathsFailHardAfterRevisionTableLoss drives the
+// experimental path once (installing the schema), then simulates a schema
+// loss by dropping the revision table while the installation marker stays
+// behind. GET and PATCH must both fail hard — no silent recreation, which
+// would restart revision history at a fresh epoch while clients still
+// hold ETags from the lost one. Recovery is the explicit reinstall.
+func (s *OfflinePoolSettingsTestSuite) TestExperimentalPathsFailHardAfterRevisionTableLoss() {
+	entity := s.orgEntity()
+
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().True(s.revisionExists())
+	s.Require().Equal(uint64(1), s.installedMetaRow().Generation)
+
+	// lose the revision table; the marker (and the receipts table) survive
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_revisions").Error)
+	s.Require().False(s.revisionExists())
+	s.Require().True(s.metaExists())
+
+	// GET fails hard and does not recreate the table
+	_, _, err = s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().False(s.revisionExists())
+
+	// PATCH fails hard the same way, before any write or receipt
+	priority := uint(7)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().False(s.revisionExists())
+
+	// nothing changed, no receipt was persisted
+	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
+	s.Require().Equal(int64(0), s.receiptCount())
+	s.Require().True(s.installedMetaRow().Installed)
+	s.Require().Equal(uint64(1), s.installedMetaRow().Generation)
+}
+
+// TestExperimentalPathsFailHardAfterReceiptsTableLoss drops only the
+// receipts table after the feature was used. GET and PATCH must fail hard:
+// recreating the receipts table would erase the replay record of requests
+// whose responses may never have reached their clients.
+func (s *OfflinePoolSettingsTestSuite) TestExperimentalPathsFailHardAfterReceiptsTableLoss() {
+	entity := s.orgEntity()
+
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().True(s.receiptsExist())
+
+	// lose the receipts table; the marker (and the revision table) survive
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_request_receipts").Error)
+	s.Require().False(s.receiptsExist())
+	s.Require().True(s.metaExists())
+	s.Require().True(s.revisionExists())
+
+	// GET fails hard even though it never writes receipts: the loss proves
+	// the installation is damaged and silent repair is exactly what must
+	// not happen
+	_, _, err = s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().False(s.receiptsExist())
+
+	// PATCH fails hard before applying or receipting anything
+	priority := uint(7)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	s.Require().False(s.receiptsExist())
+	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
+	s.Require().Equal(rev0, s.currentRevision(s.pool.ID))
+}
+
+// TestReinstallAfterLossBumpsGenerationAndInvalidatesOldETags exercises the
+// explicit recovery: after the revision and receipts tables are lost, the
+// experimental paths fail hard until ReinstallOfflinePoolSettingsSchema
+// runs. The reinstall bumps the marker generation, recreates the tables
+// and wipes their rows, and every pre-loss ETag is rejected stale: no
+// client can write against revision state the server no longer holds.
+func (s *OfflinePoolSettingsTestSuite) TestReinstallAfterLossBumpsGenerationAndInvalidatesOldETags() {
 	entity := s.orgEntity()
 
 	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
 	s.Require().NoError(err)
 	s.Require().NotZero(rev0.Epoch)
+	s.Require().Equal(uint64(1), s.installedMetaRow().Generation)
 
-	// revision epochs have one-second granularity; make sure the reinstall
-	// below happens in a later Unix second so a fresh epoch is provable
-	for uint64(time.Now().Unix()) <= rev0.Epoch {
-		time.Sleep(20 * time.Millisecond)
+	// apply a keyed change so a receipt exists to lose
+	priority := uint(3)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-pre-loss",
+		PayloadHash: offlineHash(`{"priority":3}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
 	}
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), s.receiptCount())
 
 	// lose both data tables; the installation marker survives
 	sqlDB := s.Store.(*sqlDatabase)
 	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_revisions").Error)
 	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_request_receipts").Error)
-	s.Require().False(s.revisionExists())
-	s.Require().False(s.receiptsExist())
-	s.Require().True(s.metaExists())
 
-	// the experimental path reinstalls the schema and restarts at a fresh
-	// epoch with seq back at 0
-	settings, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
-	s.Require().NoError(err)
+	// both experimental paths fail hard
+	_, _, err = s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, req)
+	s.Require().ErrorIs(err, errOfflineSettingsSchemaMissing)
+
+	// explicit reinstall: generation bump, tables back, rows wiped
+	s.Require().NoError(sqlDB.ReinstallOfflinePoolSettingsSchema())
 	s.Require().True(s.revisionExists())
 	s.Require().True(s.receiptsExist())
-	s.Require().True(s.metaExists())
-	s.Require().True(s.installedMetaRow().Installed)
-	s.Require().NotEqual(rev0.Epoch, rev1.Epoch)
-	s.Require().Greater(rev1.Epoch, rev0.Epoch)
-	s.Require().Zero(rev1.Seq)
-	// the pool row itself survived the table loss untouched
-	s.Require().Equal(uint(5), settings.MaxRunners)
-	s.Require().Equal(uint(2), settings.MinIdleRunners)
+	meta := s.installedMetaRow()
+	s.Require().True(meta.Installed)
+	s.Require().Equal(uint64(2), meta.Generation)
+	s.Require().GreaterOrEqual(meta.LastEpoch, rev0.Epoch)
+	s.Require().Equal(int64(0), s.receiptCount())
 
-	// a conditional PATCH holding a pre-loss ETag is rejected stale: the
-	// fresh epoch invalidates every outstanding ETag
-	priority := uint(7)
-	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
-		Priority: &priority,
-	}))
+	// the pre-loss receipt is gone: the same request id is treated as a
+	// brand new request, and its pre-loss precondition is stale
+	_, _, err = s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	_, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Zero(rev1.Seq)
+	s.Require().NotEqual(rev0, rev1)
+
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, req)
 	s.Require().ErrorIs(err, dbCommon.ErrOfflinePoolSettingsStaleRevision)
 	s.Require().Equal(params.OfflinePoolSettingsOutcomeRejectedStale, result.Outcome)
 	var staleErr *dbCommon.OfflinePoolSettingsStaleRevisionError
 	s.Require().ErrorAs(err, &staleErr)
 	s.Require().Equal(rev1, staleErr.Current)
+	s.Require().NotEqual(rev0.Epoch, staleErr.Current.Epoch)
 
-	// the stale rejection changed nothing
-	s.Require().Equal(uint(0), s.currentPoolRow(s.pool.ID).Priority)
-	s.Require().Equal(rev1, s.currentRevision(s.pool.ID))
+	// the settings row still carries the pre-loss value; only a fresh
+	// conditional write against the new epoch may change it
+	s.Require().Equal(uint(3), s.currentPoolRow(s.pool.ID).Priority)
+	priority = uint(7)
+	fresh := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-post-loss",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     rev1,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, fresh)
+	s.Require().NoError(err)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, result.Outcome)
+	s.Require().Equal(uint(7), s.currentPoolRow(s.pool.ID).Priority)
+}
+
+// TestReinstallNeverReusesAnEpoch guards the durable generation finding:
+// epochs are minted as max(unix_now, marker.last_epoch+1), so a reinstall
+// that completes within the same Unix second as the original install must
+// still mint a strictly greater epoch. A reused epoch could let an
+// outstanding "<epoch>:<seq>" ETag match the restarted revision sequence
+// and write on top of state the client never read.
+func (s *OfflinePoolSettingsTestSuite) TestReinstallNeverReusesAnEpoch() {
+	entity := s.orgEntity()
+
+	// no sleep here on purpose: reinstall happens in the same Unix second
+	// whenever the clock allows, which is exactly the dangerous case
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().NotZero(rev0.Epoch)
+	s.Require().Equal(uint64(1), s.installedMetaRow().Generation)
+
+	// advance the sequence so the dangerous pair exists: a client holding
+	// "<epoch0>:<seq0>" observed the settings that were lost with the table
+	priority := uint(9)
+	_, err = s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, offlineUpdateReq(rev0, params.OfflinePoolSettingsPatch{
+		Priority: &priority,
+	}))
+	s.Require().NoError(err)
+
+	sqlDB := s.Store.(*sqlDatabase)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_revisions").Error)
+	s.Require().NoError(sqlDB.conn.Exec("DROP TABLE offline_pool_settings_request_receipts").Error)
+	s.Require().NoError(sqlDB.ReinstallOfflinePoolSettingsSchema())
+	s.Require().Equal(uint64(2), s.installedMetaRow().Generation)
+
+	// even in the same second, the fresh epoch exceeds every epoch ever
+	// minted; the dangerous "<epoch0>:0" pair can never be reissued
+	_, rev1, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Zero(rev1.Seq)
+	s.Require().Greater(rev1.Epoch, rev0.Epoch)
+	s.Require().GreaterOrEqual(rev1.Epoch, rev0.Epoch+1)
+	s.Require().NotEqual(rev0, rev1)
+
+	// and a second reinstall keeps climbing rather than reusing rev1's
+	// epoch (the receipts/revision rows exist and intact this time: the
+	// reinstall must still force a fresh epoch for every pool)
+	s.Require().NoError(sqlDB.ReinstallOfflinePoolSettingsSchema())
+	s.Require().Equal(uint64(3), s.installedMetaRow().Generation)
+	_, rev2, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+	s.Require().Zero(rev2.Seq)
+	s.Require().Greater(rev2.Epoch, rev1.Epoch)
+	s.Require().NotEqual(rev1, rev2)
+}
+
+// TestCommitThenDroppedResponseReplayIsIdempotent models the commit-then-
+// drop-response failure: a keyed PATCH commits its effect and receipt, but
+// the response never reaches the client (connection drop, crash between
+// commit and write). The client retry must be answered from the durable
+// receipt — 200 semantics with the stored resulting_etag — and further
+// retries must not advance the revision again.
+func (s *OfflinePoolSettingsTestSuite) TestCommitThenDroppedResponseReplayIsIdempotent() {
+	entity := s.orgEntity()
+
+	_, rev0, err := s.Store.GetOfflinePoolSettings(s.adminCtx, entity, s.pool.ID)
+	s.Require().NoError(err)
+
+	priority := uint(7)
+	req := params.OfflinePoolSettingsUpdateRequest{
+		RequestID:   "req-dropped-response",
+		PayloadHash: offlineHash(`{"priority":7}`),
+		IfMatch:     rev0,
+		Patch:       &params.OfflinePoolSettingsPatch{Priority: &priority},
+	}
+	result, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, req)
+	s.Require().NoError(err)
+	s.Require().False(result.Replayed)
+	s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, result.Outcome)
+	s.Require().Equal(uint(7), s.currentPoolRow(s.pool.ID).Priority)
+
+	// the receipt is durable even though no response was ever produced
+	receipt := s.getReceipt("req-dropped-response")
+	s.Require().Equal(string(params.OfflinePoolSettingsOutcomeAppliedChanged), receipt.Outcome)
+	s.Require().NotNil(receipt.ResultingETag)
+	s.Require().Equal(result.Revision.ETag(), *receipt.ResultingETag)
+
+	// the retry — same key, same payload, now-stale precondition — is
+	// answered from the receipt with the stored resulting etag
+	for i := 0; i < 2; i++ {
+		replayed, err := s.Store.UpdateOfflinePoolSettings(s.adminCtx, entity, s.pool.ID, req)
+		s.Require().NoError(err)
+		s.Require().True(replayed.Replayed)
+		s.Require().Equal(params.OfflinePoolSettingsOutcomeAppliedChanged, replayed.Outcome)
+		s.Require().Equal(result.Revision.ETag(), replayed.ResultingETag)
+		s.Require().Equal(params.OfflinePoolSettings{}, replayed.Settings)
+
+		// idempotent: no additional revision advance, no extra receipt, no
+		// settings change
+		s.Require().Equal(result.Revision, s.currentRevision(s.pool.ID))
+		s.Require().Equal(uint(7), s.currentPoolRow(s.pool.ID).Priority)
+		s.Require().Equal(int64(1), s.receiptCount())
+	}
 }
 
 // TestUpdateAdvancesSeqExactlyOnce guards the no-double-bump guarantee: one

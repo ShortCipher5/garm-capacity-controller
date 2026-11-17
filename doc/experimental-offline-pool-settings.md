@@ -29,7 +29,11 @@ the flag is enabled, the three supporting tables
 `offline_pool_settings_meta`) are created lazily, on first use
 by the experimental code path — all three in a single transaction, never
 at startup, and never by the stock
-migration. Stock tables (including `pools`) are never altered; the stock
+migration — and only while the installation marker is absent (a genuine
+first enable). If the marker is present but one of the data tables is
+missing, first use fails hard instead of recreating anything (see
+"Installation marker, schema loss and reinstall" below). Stock tables
+(including `pools`) are never altered; the stock
 schema and all existing routes behave exactly as before, flag on or off.
 
 ## Endpoints
@@ -118,10 +122,17 @@ Why:
 - Keeping the counter out of the `pools` table leaves the stock schema
   completely untouched, which is a hard requirement for this slice.
 
-`epoch` is the Unix time at which the revision row was lazily created
-(first GET or PATCH against that pool through this API) and never
-changes; `seq` starts at 0 and increments on every committed, non no-op
-PATCH. The ETag is `"<epoch>:<seq>"`, quoted.
+`epoch` is minted monotonically, never a bare wall-clock value: a fresh
+revision row gets `epoch = max(unix_now, marker.last_epoch + 1)`, where
+`marker.last_epoch` is the highest epoch ever minted in this database,
+recorded durably in the installation marker at mint time (in the same
+transaction). Because the marker survives the revision table, an epoch
+minted after a reinstall is strictly above every epoch ever issued in
+this database — even when the reinstall completes within the same Unix
+second as the original install — so no `"<epoch>:<seq>"` pair from a lost
+or restored generation can ever match a post-reinstall revision row.
+`seq` starts at 0 and increments on every committed, non no-op PATCH.
+The ETag is `"<epoch>:<seq>"`, quoted.
 
 ## Atomicity
 
@@ -176,36 +187,124 @@ Properties of the legacy bump:
 ## Installation marker, schema loss and reinstall
 
 The lazy installer creates the revision table, the receipts table and a
-marker table (`offline_pool_settings_meta`: a single row, key `schema`,
-with an installed flag and timestamps) **in one transaction**, and the
-marker row is written in that same transaction. The marker therefore
-witnesses the installation: wherever the marker table is present, the
-revision table existed at install time.
+marker table in **one transaction**, and seeds the marker row in that
+same transaction. The marker row (`offline_pool_settings_meta`, single
+row, key `schema`) holds:
 
-The legacy bump uses exactly that witness. Revision table absent and
+- `installed` — always true once the row exists;
+- `generation` — the durable installation generation: **1** on a fresh
+  install, bumped by the explicit reinstall after table loss or a
+  database restore. It lets operators (and future tooling) observe epoch
+  resets; ETag validity is enforced by the epoch floor, not by this
+  number;
+- `last_epoch` — the highest epoch ever minted in this database, across
+  all generations (see "Revision mechanism"). It is what makes reinstall
+  epochs strictly monotonic.
+
+### What may create tables
+
+Table creation may only run while the **marker table is absent** — a
+genuine first enable. This is the audit rule for every table-creation
+path reachable from the experimental code, and it is enforced in one
+place (`ensureOfflinePoolSettingsSchema`, called by both GET and PATCH
+before they touch the schema; the legacy bump and the stock migration
+create nothing experimental):
+
+- marker absent → install all three tables and the marker row
+  (generation 1) in one transaction. If a revision table somehow
+  survives without its marker (see the witness-lost hole below), it is
+  left untouched; AutoMigrate only creates missing tables.
+- marker present, revision table missing → **GET and PATCH fail hard**
+  (`errOfflineSettingsSchemaMissing`, surfaced as 503 on the wire). No
+  table is recreated.
+- marker present, receipts table missing → **GET and PATCH fail hard**,
+  even though GET never writes receipts: a silent recreate would erase
+  the replay record of requests whose responses may never have reached
+  their clients.
+
+Silently recreating a lost revision table would restart revision history
+at a fresh epoch while clients still hold ETags from the lost one, and
+silently recreating a lost receipts table would let an in-flight retry
+double-apply a request the server can no longer prove it answered. Both
+are exactly what the hard failure prevents.
+
+The legacy bump keeps using the same witness: revision table absent and
 marker absent → the feature was never enabled against this database, a
 benign skip. Revision table absent and marker present → the schema was
 lost after the feature was used, and the legacy write fails closed (the
-whole stock transaction rolls back), because committing the settings
-change without the revision advance would leave every conditional client
-with a stale, undetectable view.
+whole stock transaction rolls back). The legacy bump deliberately does
+**not** consult the receipts table: losing receipts endangers replay,
+not the revision invariant the bump protects; GET/PATCH are already
+hard-failing in that state.
 
-The experimental GET/PATCH paths are deliberately unaffected by such a
-loss: they call the same lazy installer first, which recreates any
-missing table. A GET or PATCH after a lost revision table therefore
-**silently reinstalls** the schema — acceptable for this experiment, with
-one important consequence: **revision history restarts at a fresh
-epoch.** `getOrCreateOfflineRevision` creates a brand new revision row
-(new `epoch`, `seq` back at 0) whenever none exists, and the epoch
-change is exactly what makes the reinstall safe: every strong ETag is
-`"<epoch>:<seq>"`, so a tag minted against the lost history can never
-match the reinstalled revision and is rejected stale (412). No client can
-write against revision state the server no longer holds.
+### The explicit reinstall
 
-One hole is documented rather than fixed: if the marker table itself is
-lost together with the revision table, the next legacy write sees "both
-absent" and stays benign. The marker is only a witness; losing the
-witness silently weakens the guarantee.
+Recovery from table loss — or from a database restore, see below — is
+the **explicit reinstall** (`ReinstallOfflinePoolSettingsSchema` at the
+store layer; an operator-facing endpoint is deliberately not part of this
+experimental slice). It is not reachable from any request path; GET and
+PATCH never repair themselves. The reinstall, in one transaction:
+
+1. recreates any missing table;
+2. bumps the marker generation (generation+1);
+3. **wipes every revision row and every request receipt**, so all
+   outstanding ETags and all replay state are invalidated together;
+4. preserves `last_epoch`, so revision rows minted after the reinstall
+   get epochs strictly above every epoch ever issued in this database.
+
+Consequence: every pool starts a fresh `seq` at a new epoch on its next
+access, every pre-loss ETag is rejected stale (412), and every pre-loss
+request id is treated as brand new. Clients holding an invalidated ETag
+must re-read and re-send; clients retrying a request whose receipt was
+wiped are answered by the normal conditional machinery (their old
+precondition is stale), never by a resurrected outcome.
+
+### Recovery policy: restores and rollback
+
+Receipts and revisions live in the same database as everything else.
+**A local epoch is not an anti-rollback authority.** A full-file restore
+— an older snapshot of the database copied back — rolls `epoch`, `seq`
+and the receipts table back with it: ETags that the live system had
+already invalidated come back valid, receipts for requests that the
+restore erased come back servable, and `last_epoch`/`generation` revert
+to their snapshot values. Nothing in the database can detect that the
+wall clock moved backwards.
+
+The recovery is operator-driven, and it is the same explicit reinstall
+as for table loss:
+
+1. restore the database file (using SQLite's consistent
+   backup/snapshot facilities or a clean closed/checkpointed database —
+   copying the live main `.db` file alone is not safe);
+2. run the explicit reinstall: the generation bump, the wiped revision
+   rows and receipts, and the preserved `last_epoch` floor together
+   guarantee that no ETag pair from the restored snapshot can match
+   post-reinstall state;
+3. clients that cached ETags or request outcomes then go **UNKNOWN →
+   fresh read**: they discard what they know, GET the current settings
+   and revision, and resume from there;
+4. requests whose receipts were lost — in flight across the restore —
+   **stay UNKNOWN until a readback plus an explicit operator decision**:
+   the client (or tooling) reads back the current settings, reports the
+   divergence to the operator, and only the operator decides whether the
+   pre-restore intent still applies. Automatic re-submission is not safe:
+   the restored settings may deliberately differ from the lost ones.
+
+**Residual hole, documented rather than fixed:** after table loss (or a
+restore), a later 412 does **not** prove that the lost request failed.
+A 412 only proves that the presented precondition does not match the
+current revision — the same signal an unrelated concurrent writer
+produces. The lost request may have applied and been wiped; replay state
+is exactly what the loss destroyed. This is why lost in-flight requests
+stay UNKNOWN until readback plus an explicit operator decision, and why
+the reinstall refuses to resurrect receipts.
+
+One further hole stays open by design: if the marker table itself is
+lost together with the data tables, the next use sees "marker absent"
+and performs a fresh install at generation 1 with `last_epoch` reset —
+the epochs of the lost generation are no longer fenced, and the legacy
+write sees "both absent" and stays benign. The marker is only a witness;
+losing the witness silently weakens every guarantee above.
 
 ## Durable request receipts
 
@@ -288,10 +387,12 @@ no partial state — and no receipt — can exist.
 ## What is still not proven (explicit limitations)
 
 - **Restore/rollback exposure.** Receipts and revisions live in the same
-  database as everything else, with no fencing. Restoring an older
-  database snapshot resurrects old revisions and old receipts; a client
-  could then replay against resurrected state. Snapshot/restore fencing
-  is out of scope for this slice.
+  database as everything else, with no automatic fencing: a full-file
+  restore rolls epochs, sequences and receipts back, and nothing detects
+  that the wall clock moved backwards. Recovery is the explicit,
+  operator-driven reinstall documented under "Recovery policy: restores
+  and rollback" above; until it runs, a client could replay against
+  resurrected state. A local epoch is not an anti-rollback authority.
 - **No GC.** Receipts accumulate forever; there is no expiration,
   retention or pruning. Operational handling of the growth is an open
   question.

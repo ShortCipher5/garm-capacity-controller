@@ -368,4 +368,214 @@ describe('pool-settings client', () => {
 		expect(err!.status).toBe(200);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
+
+	describe('strict validation of successful (2xx) responses', () => {
+		it('a 200 without an ETag header stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(200, { priority: 3, max_runners: 5, min_idle_runners: 1 })
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(err!.etag).toBeNull();
+			expect(err!.message).toContain('no strong ETag');
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('a 200 with a malformed ETag stays UNKNOWN', async () => {
+			const malformed = ['W/"42:7"', '42:7', '"abc:1"', '"0:0"', '"42"', '"42:-1"', '"42:7:1"', '"42: 7"'];
+			for (const etag of malformed) {
+				const fetchMock = vi.fn().mockResolvedValue(
+					jsonResponse(200, { priority: 3, max_runners: 5, min_idle_runners: 1 }, etag)
+				);
+				vi.stubGlobal('fetch', fetchMock);
+
+				let err: PoolSettingsError | undefined;
+				try {
+					await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+				} catch (e) {
+					err = e as PoolSettingsError;
+				}
+				expect(err).toBeInstanceOf(PoolSettingsError);
+				expect(err!.kind).toBe('unknown');
+				expect(err!.status).toBe(200);
+				expect(err!.message).toContain('malformed ETag');
+				expect(fetchMock).toHaveBeenCalledTimes(1);
+				vi.unstubAllGlobals();
+			}
+		});
+
+		it('a GET 200 without an ETag stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(200, { priority: 3, max_runners: 5, min_idle_runners: 1 })
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await getPoolSettings(ref);
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('an out-of-range number in a 200 settings document stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(200, { priority: 3, max_runners: 5, min_idle_runners: 1_000_001 }, '"43:1"')
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('min_idle_runners above max_runners in a 200 settings document stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(200, { priority: 3, max_runners: 2, min_idle_runners: 3 }, '"43:1"')
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('an unknown field in a 200 settings document stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(
+					200,
+					{ priority: 3, max_runners: 5, min_idle_runners: 1, image: 'ubuntu-latest' },
+					'"43:1"'
+				)
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 });
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('an unknown field in a replay envelope stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(
+					200,
+					{ outcome: 'applied_changed', resulting_etag: '"43:2"', request_id: 'req-9' },
+					'"43:2"'
+				)
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 }, 'req-1');
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('a replay envelope whose resulting_etag mismatches the response ETag stays UNKNOWN', async () => {
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(200, { outcome: 'applied_changed', resulting_etag: '"44:0"' }, '"43:2"')
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			let err: PoolSettingsError | undefined;
+			try {
+				await patchPoolSettings(ref, '"42:7"', { priority: 3 }, 'req-1');
+			} catch (e) {
+				err = e as PoolSettingsError;
+			}
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(err!.message).toContain('resulting_etag');
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('failed validation leaves the caller pending record and stored revision untouched', async () => {
+			// The body alone looks like a clean apply; only the missing ETag
+			// header gives it away as malformed success evidence.
+			const fetchMock = vi.fn().mockResolvedValue(
+				jsonResponse(200, { priority: 3, max_runners: 5, min_idle_runners: 1 })
+			);
+			vi.stubGlobal('fetch', fetchMock);
+
+			// Caller-side state a confirmed result would mutate: the stored
+			// revision precondition and the durable pending record journaled
+			// before dispatch (mirrors the editor's dispatchPatch routing).
+			let storedEtag: string | null = '"42:7"';
+			const pending = {
+				requestId: 'req-pending-1',
+				payload: { priority: 3 } as PoolSettingsPatch,
+				draft: { priority: 3, max_runners: 5, min_idle_runners: 1 }
+			};
+			let pendingCleared = false;
+			let adoptedEtag: string | null = null;
+
+			let err: PoolSettingsError | undefined;
+			try {
+				const res = await patchPoolSettings(ref, storedEtag, pending.payload, pending.requestId);
+				// The confirmed-result path: only reachable when the response
+				// passes strict validation.
+				pendingCleared = true;
+				adoptedEtag = res.etag;
+				storedEtag = res.etag;
+			} catch (e) {
+				err = e as PoolSettingsError;
+				// The UNKNOWN routing keeps both the journal and the stored
+				// revision, exactly like the editor's catch block.
+			}
+
+			expect(err).toBeInstanceOf(PoolSettingsError);
+			expect(err!.kind).toBe('unknown');
+			expect(err!.status).toBe(200);
+			expect(pendingCleared).toBe(false);
+			expect(adoptedEtag).toBeNull();
+			expect(storedEtag).toBe('"42:7"');
+			expect(pending).toEqual({
+				requestId: 'req-pending-1',
+				payload: { priority: 3 },
+				draft: { priority: 3, max_runners: 5, min_idle_runners: 1 }
+			});
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+	});
 });

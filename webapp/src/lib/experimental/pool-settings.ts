@@ -8,11 +8,17 @@
 // from GET in an If-Match header.
 //
 // Outcome semantics (never an auto-retry, never an unconditional write):
-//   - 200:             applied; the response carries the new ETag and the
-//                      settings tuple. If the same request identity and
-//                      payload are presented again the server answers from
-//                      its durable request receipt instead: the result has
-//                      settings null, the resulting ETag, and replayed=true.
+//   - 200:             applied, but only ever treated as confirmed after
+//                      strict validation: a strong, well-formed "epoch:seq"
+//                      ETag header plus a body matching exactly one of the
+//                      two documented shapes (the settings tuple or the
+//                      replay outcome envelope). A malformed success is
+//                      UNKNOWN, never confirmed. When confirmed, the
+//                      response carries the new ETag and the settings
+//                      tuple. If the same request identity and payload are
+//                      presented again the server answers from its durable
+//                      request receipt instead: the result has settings
+//                      null, the resulting ETag, and replayed=true.
 //   - 412:             PoolSettingsError kind 'conflict'. A 412 proves our
 //                      write had no effect; the fresh ETag from the response
 //                      is on the error so a draft can be rebased after a
@@ -91,6 +97,26 @@ function hasOwnKey(data: object, key: string): boolean {
 	return Object.prototype.hasOwnProperty.call(data, key);
 }
 
+// isStrongETag reports whether value is a strong, quoted "<epoch>:<seq>"
+// revision tag exactly as the experimental API mints it (the server formats
+// it from two unsigned decimal integers). Both components must parse as safe
+// integers, the epoch must be positive and the sequence zero or positive;
+// anything else — missing, weak, unquoted, non-numeric, epoch 0 — can never
+// confirm an outcome, because the caller stores this value as its next
+// precondition.
+function isStrongETag(value: unknown): value is string {
+	if (typeof value !== 'string') {
+		return false;
+	}
+	const match = /^"(\d+):(\d+)"$/.exec(value);
+	if (!match) {
+		return false;
+	}
+	const epoch = Number(match[1]);
+	const seq = Number(match[2]);
+	return Number.isSafeInteger(epoch) && epoch > 0 && Number.isSafeInteger(seq) && seq >= 0;
+}
+
 export function poolSettingsPath(ref: PoolSettingsRef): string {
 	if (!ref.entityID) {
 		throw new Error('entity ID must not be empty');
@@ -113,11 +139,13 @@ function messageFromBody(data: unknown, fallback: string): string {
 }
 
 // asSettings reads a settings tuple for GET and applied-200 responses. It
-// fails closed: a value outside the bounds above, a non-integer, a negative,
-// or min_idle_runners above max_runners means the server document is corrupt
-// evidence and reads as null (UNKNOWN on PATCH, the existing 'unknown' throw
-// from getPoolSettings on GET). A document that also carries a replay outcome
-// marker is ambiguous, not a readable settings document.
+// fails closed: the server marshals exactly the three settings fields, so a
+// document carrying an unknown field is malformed evidence; a value outside
+// the bounds above, a non-integer, a negative, or min_idle_runners above
+// max_runners means the server document is corrupt evidence and reads as
+// null (UNKNOWN on PATCH, the existing 'unknown' throw from getPoolSettings
+// on GET). A document that also carries a replay outcome marker is
+// ambiguous, not a readable settings document.
 function asSettings(data: unknown): PoolSettings | null {
 	if (!data || typeof data !== 'object') {
 		return null;
@@ -126,6 +154,11 @@ function asSettings(data: unknown): PoolSettings | null {
 		return null;
 	}
 	const doc = data as Record<string, unknown>;
+	for (const key of Object.keys(doc)) {
+		if (!SETTINGS_FIELDS.includes(key as keyof PoolSettings)) {
+			return null;
+		}
+	}
 	const priority = doc.priority;
 	const maxRunners = doc.max_runners;
 	const minIdleRunners = doc.min_idle_runners;
@@ -152,21 +185,25 @@ function asSettings(data: unknown): PoolSettings | null {
 // asReplay recognises the wire document a PATCH answered from a stored
 // request receipt carries on HTTP 200 instead of the settings tuple: the
 // server does not store the original settings body. Only applied outcomes
-// arrive with status 200; rejected replays re-use their original status.
+// arrive with status 200 (rejected replays re-use their original status),
+// and the envelope marshals exactly {outcome, resulting_etag}: an unknown
+// outcome, an envelope that also carries settings fields or any other extra
+// key, or a resulting_etag that is not a strong revision tag is an ambiguous
+// or malformed document, not an applied outcome.
 function asReplay(data: unknown): { resultingETag: string } | null {
 	if (!data || typeof data !== 'object') {
 		return null;
 	}
-	const doc = data as { outcome?: unknown; resulting_etag?: unknown };
+	const doc = data as Record<string, unknown>;
+	for (const key of Object.keys(doc)) {
+		if (key !== 'outcome' && key !== 'resulting_etag') {
+			return null;
+		}
+	}
 	if (doc.outcome !== 'applied_changed' && doc.outcome !== 'applied_noop') {
 		return null;
 	}
-	if (typeof doc.resulting_etag !== 'string' || !/^"\d+:\d+"$/.test(doc.resulting_etag)) {
-		return null;
-	}
-	// An envelope that also carries settings fields is an ambiguous document,
-	// not an applied outcome; both parsers must decline it.
-	if (SETTINGS_FIELDS.some((field) => hasOwnKey(data, field))) {
+	if (typeof doc.resulting_etag !== 'string' || !isStrongETag(doc.resulting_etag)) {
 		return null;
 	}
 	return { resultingETag: doc.resulting_etag };
@@ -263,6 +300,20 @@ async function requestPoolSettings(
 
 	switch (resp.status) {
 		case 200: {
+			// A 2xx confirms nothing without a strong, well-formed revision
+			// tag: the caller stores this value as its next precondition and
+			// clears its pending record, so a missing or malformed ETag must
+			// read as UNKNOWN, never as a confirmed apply.
+			if (!isStrongETag(etag)) {
+				throw new PoolSettingsError(
+					'unknown',
+					resp.status,
+					etag,
+					etag === null
+						? 'response was 200 but carried no strong ETag; outcome of the write is unknown'
+						: 'response was 200 but carried a malformed ETag; outcome of the write is unknown'
+				);
+			}
 			const settings = asSettings(data);
 			if (settings) {
 				return { settings, etag, replayed: false };
@@ -272,6 +323,18 @@ async function requestPoolSettings(
 			// is durable and known; it must not surface as UNKNOWN.
 			const replay = asReplay(data);
 			if (replay) {
+				// The server answers an applied replay with the ETag header
+				// and the envelope resulting_etag set to the same recorded
+				// tag; a mismatch is a malformed success, not a confirmed
+				// replay.
+				if (replay.resultingETag !== etag) {
+					throw new PoolSettingsError(
+						'unknown',
+						resp.status,
+						etag,
+						'replay envelope resulting_etag does not match the response ETag; outcome of the write is unknown'
+					);
+				}
 				return { settings: null, etag: replay.resultingETag, replayed: true };
 			}
 			throw new PoolSettingsError(

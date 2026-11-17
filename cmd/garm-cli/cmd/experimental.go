@@ -387,6 +387,12 @@ type experimentalPendingRecord struct {
 	ETag       string `json:"etag"`
 	Payload    string `json:"payload"`
 	At         string `json:"at"`
+	// Profile and Server bind the record to the exact invocation context
+	// that dispatched it: the active profile name and the effective base
+	// URL of the client that carried the request. A journaled request is
+	// only ever applied or resolved from a matching binding.
+	Profile string `json:"profile"`
+	Server  string `json:"server"`
 }
 
 // experimentalPendingPathOverride exists so tests never touch the real user
@@ -563,6 +569,17 @@ set in the environment. They never fall back to stock unconditional writes.`,
 				return errNeedsInitError
 			}
 
+			// The whole read-modify-write of the single-slot journal — load,
+			// binding decision, journaling and the dispatch it guards — runs
+			// under one exclusive cross-process advisory lock, so a second
+			// garm-cli can never interleave a journal entry or a resolution
+			// with this one. --resolve takes the same lock below.
+			release, err := acquireExperimentalJournalLock()
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			// Read-before-write: any existing pending record is loaded
 			// before anything is built or sent. A normal patch invocation
 			// never overwrites an unresolved journaled request.
@@ -575,16 +592,10 @@ set in the environment. They never fall back to stock unconditional writes.`,
 			if client == nil {
 				client = rawHTTPClient
 			}
+			profile, server := experimentalCurrentBinding(client)
 
 			if expPoolSettingsResolve {
-				return runPoolSettingsResolve(cmd, client, pending, hasPending)
-			}
-
-			if hasPending {
-				return fmt.Errorf(`refusing to send a new write: unresolved request %q for %s %s pool %s, dispatched at %s, is still pending.
-The pending-request journal holds exactly one record and is never overwritten silently.
-Resolve it first: re-run this command with --resolve to re-present that exact request against the server's durable receipt; only clear the journal by hand once you have confirmed out-of-band that the request had no effect`,
-					pending.RequestID, pending.EntityType, pending.EntityID, pending.PoolID, pending.At)
+				return runPoolSettingsResolve(cmd, client, pending, hasPending, profile, server)
 			}
 
 			ref, err := experimentalPoolSettingsRefFromFlags()
@@ -593,6 +604,17 @@ Resolve it first: re-run this command with --resolve to re-present that exact re
 			}
 			if ref.poolID == "" {
 				return fmt.Errorf("pool ID must not be empty (set --pool)")
+			}
+
+			if hasPending {
+				if mismatch := pendingBindingMismatch(pending, profile, server, ref); mismatch != "" {
+					return fmt.Errorf("refusing to send a new write: pending request %q belongs to %s — switch profile or server, or resolve the pending request first (--resolve re-presents the journaled request)",
+						pending.RequestID, mismatch)
+				}
+				return fmt.Errorf(`refusing to send a new write: unresolved request %q for %s %s pool %s, dispatched at %s, is still pending.
+The pending-request journal holds exactly one record and is never overwritten silently.
+Resolve it first: re-run this command with --resolve to re-present that exact request against the server's durable receipt; only clear the journal by hand once you have confirmed out-of-band that the request had no effect`,
+					pending.RequestID, pending.EntityType, pending.EntityID, pending.PoolID, pending.At)
 			}
 
 			// Never dispatch an unconditional write: a strong ETag is mandatory.
@@ -621,7 +643,9 @@ Resolve it first: re-run this command with --resolve to re-present that exact re
 
 			// Journal the exact request before dispatch so an UNKNOWN
 			// outcome survives process restart. Fail closed: the write is
-			// never sent unjournaled.
+			// never sent unjournaled. The record is bound to this
+			// invocation's profile/server so it can only ever be resolved
+			// from the same context.
 			if err := writeExperimentalPending(experimentalPendingRecord{
 				RequestID:  requestID,
 				EntityType: ref.entityType,
@@ -630,6 +654,8 @@ Resolve it first: re-run this command with --resolve to re-present that exact re
 				ETag:       expPoolSettingsETag,
 				Payload:    string(payload),
 				At:         time.Now().UTC().Format(time.RFC3339),
+				Profile:    profile,
+				Server:     server,
 			}); err != nil {
 				return fmt.Errorf("refusing to send the request unjournaled: the pending-request journal could not be written: %w", err)
 			}
@@ -680,8 +706,11 @@ Resolve it first: re-run this command with --resolve to re-present that exact re
 // clears the journal; a fresh UNKNOWN keeps it and is reported again. The
 // journaled request is authoritative, so payload flags, --etag and
 // entity/pool flags are ignored here; combining --resolve with payload flags
-// or --request-id is ambiguous and refused.
-func runPoolSettingsResolve(cmd *cobra.Command, client *rawClient, pending *experimentalPendingRecord, hasPending bool) error {
+// or --request-id is ambiguous and refused. Resolution operates on the
+// journaled binding: a record bound to a different profile/server than the
+// current invocation is refused, never resolved against the wrong server.
+// The caller holds the journal lock for the whole read+decision+apply.
+func runPoolSettingsResolve(cmd *cobra.Command, client *rawClient, pending *experimentalPendingRecord, hasPending bool, profile, server string) error {
 	for _, f := range []string{"priority", "max-runners", "min-idle-runners", "file", "request-id"} {
 		if cmd.Flags().Changed(f) {
 			return fmt.Errorf("--resolve cannot be combined with --%s: it re-sends exactly the journaled request; remove the flag to resolve the ambiguity", f)
@@ -689,6 +718,9 @@ func runPoolSettingsResolve(cmd *cobra.Command, client *rawClient, pending *expe
 	}
 	if !hasPending {
 		return fmt.Errorf("nothing to resolve: the pending-request journal holds no unresolved request")
+	}
+	if mismatch := pendingBindingMismatchResolve(pending, profile, server); mismatch != "" {
+		return fmt.Errorf("refusing to resolve: the pending request belongs to %s — switch to that profile/server or clear the journal by hand once you have confirmed out-of-band that the request had no effect", mismatch)
 	}
 	rec := *pending
 	ref := poolSettingsRef{entityType: rec.EntityType, entityID: rec.EntityID, poolID: rec.PoolID}
