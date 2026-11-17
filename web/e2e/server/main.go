@@ -58,7 +58,7 @@ func main() {
 	defer os.RemoveAll(dir)
 	budget := admission.Resources{CPU: 4000, RAM: 8192, Runners: 4}
 	now := time.Now()
-	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"host-a": {Budget: budget, Mode: "enabled", Healthy: true, ObservedAt: now}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"host-a"}}}, MaxObservationAge: time.Hour}
+	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"host-a": {Budget: budget, Mode: "enabled", Healthy: true, ObservedAt: now, CPUCapMillis: 3000}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"host-a"}}}, MaxObservationAge: time.Hour}
 	store, err := admission.OpenSQLite(filepath.Join(dir, "ledger.db"), config)
 	if err != nil {
 		log.Fatal(err)
@@ -72,6 +72,26 @@ func main() {
 	err = store.CompleteReconciliation(context.Background(), fence, admission.InventorySnapshot{Hosts: []admission.HostObservation{{Host: "host-a", ObservedAt: now, Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true}}, Resources: []admission.InventoryResource{{ID: "test-only-instance", Host: "host-a", Pool: "pool-a", Resources: admission.Resources{CPU: 1000, RAM: 1024, Runners: 1}, State: "unknown"}}})
 	if err != nil {
 		log.Fatal(err)
+	}
+	// Measured utilization for host-a: three five-minute samples, a fifteen
+	// minute monitoring gap, then two more samples. The operator chart must
+	// render the gap as a break, never a fabricated bridge or zero-fill.
+	base := time.Now().UTC().Truncate(time.Second).Add(-30 * time.Minute)
+	for index, sample := range []struct {
+		offset    time.Duration
+		cpuMillis int64
+		ramMiB    int64
+		diskMiB   int64
+	}{
+		{0, 1200, 2048, 10240},
+		{5 * time.Minute, 1500, 2304, 10496},
+		{10 * time.Minute, 1800, 2560, 10752},
+		{25 * time.Minute, 900, 1536, 11008},
+		{26 * time.Minute, 1000, 1600, 11059},
+	} {
+		if err := store.RecordUsageSample(context.Background(), "host-a", base.Add(sample.offset), sample.cpuMillis, sample.ramMiB, sample.diskMiB, "fixture-collector"); err != nil {
+			log.Fatalf("usage sample %d: %v", index, err)
+		}
 	}
 	root, err := os.OpenRoot("dist")
 	if err != nil {

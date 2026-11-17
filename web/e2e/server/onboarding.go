@@ -83,7 +83,7 @@ func browserOnboarding(store *admission.SQLiteStore) (*onboarding.Manager, func(
 		server.Close()
 		return nil, noop, err
 	}
-	manager, err := onboarding.New(store, map[string]onboarding.Observer{"candidate-b": client}, true)
+	manager, err := onboarding.New(store, map[string]onboarding.Observer{"candidate-b": client, "candidate-discover": &browserDiscoverySource{}}, true)
 	if err != nil {
 		client.Close()
 		server.Close()

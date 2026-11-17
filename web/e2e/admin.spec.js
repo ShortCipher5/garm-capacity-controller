@@ -20,7 +20,7 @@ test("real TLS handler + SQLite snapshot, read-only requests, refresh and reload
   });
   await connect(page);
   await expect(
-    page.getByRole("heading", { name: "host-a", exact: true }),
+    page.locator("#hosts").getByRole("heading", { name: "host-a", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText(
@@ -145,7 +145,7 @@ test("review cancellation and separate write role persist actual policy with aud
   await page.getByRole("button", { name: "Review change" }).click();
   await page.getByLabel("Management write token").fill("c".repeat(64));
   await page.getByRole("button", { name: "Cancel review" }).click();
-  await expect(page.getByText("Configured mode: enabled")).toBeVisible();
+  await expect(page.locator("#hosts").getByText("Configured mode: enabled")).toBeVisible();
   await page.getByLabel("Audit reason").fill("browser fixture maintenance");
   await page.getByRole("button", { name: "Review change" }).click();
   await expect(page.getByLabel("Management write token")).toHaveValue("");
@@ -155,7 +155,7 @@ test("review cancellation and separate write role persist actual policy with aud
   await expect(page.getByLabel("Management write token")).toHaveValue("");
   await page.getByLabel("Management write token").fill("c".repeat(64));
   await page.getByRole("button", { name: "Apply reviewed change" }).dblclick();
-  await expect(page.getByText("Configured mode: disabled")).toBeVisible();
+  await expect(page.locator("#hosts").getByText("Configured mode: disabled")).toBeVisible();
   await expect(page.locator("#events .event").getByText("admin_policy_change", { exact: true })).toHaveCount(1);
   await expect(page.getByText("Provisioning off · Admission barrier not ready")).toBeVisible();
   await page.getByLabel("Policy control").selectOption("pool_budget");
@@ -169,7 +169,7 @@ test("review cancellation and separate write role persist actual policy with aud
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0,0]);
   await page.getByRole("button", { name: "Disconnect" }).click();
   await connect(page);
-  await expect(page.getByText("Configured mode: disabled")).toBeVisible();
+  await expect(page.locator("#hosts").getByText("Configured mode: disabled")).toBeVisible();
   await expect(page.getByLabel("Management write token")).toHaveCount(0);
 });
 

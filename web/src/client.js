@@ -1,5 +1,7 @@
 import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboarding-client.js";
 import { validateGarm } from "./garm-client.js";
+import { validateProfilesList } from "./profiles-client.js";
+import { validateUsageHistory } from "./usage-client.js";
 
 // This client has no persistence and no configurable remote endpoint.
 export const endpoint = "/admin/api/v1/overview";
@@ -13,6 +15,11 @@ export function validateOverview(value) {
   const allocation = (v) =>
     object(v) && resources(v.budget) && resources(v.allocated);
   const time = (v) => typeof v === "string" && Number.isFinite(Date.parse(v));
+  const resourcesFull = (v) =>
+    object(v) &&
+    ["cpu_millis", "ram_mib", "disk_mib", "runners"].every((k) => integer(v[k]));
+  const detected = (v) => v === undefined || resourcesFull(v);
+  const cpuCap = (v) => v === undefined || integer(v);
   const bool = (v) => typeof v === "boolean";
   const string = (v) => typeof v === "string";
   const id = (v) => string(v) && v.trim().length > 0;
@@ -41,6 +48,8 @@ export function validateOverview(value) {
         (h.backend_binding_status === "bound_observation" || h.new_claims_paused === true) &&
         bool(h.last_observed_healthy) &&
         bool(h.observation_fresh) &&
+        cpuCap(h.cpu_cap_millis) &&
+        detected(h.detected) &&
         bool(h.new_claims_paused) &&
         (h.new_claims_paused || (h.mode === "enabled" && h.last_observed_healthy && h.observation_fresh && value.admission_ready && value.experimental_provisioning_enabled)) &&
         time(h.observed_at),
@@ -83,6 +92,9 @@ export class ReadSession {
   #entityGeneration = 0;
   #remoteRequest;
   #remoteGeneration = 0;
+  #profilesRequest;
+  #profilesGeneration = 0;
+  #usageInFlight = new Set();
   constructor(fetcher = globalThis.fetch) {
     // Native browser fetch requires the Window/global receiver, not this
     // ReadSession instance. Preserve it even when invoked as this.fetcher().
@@ -99,6 +111,11 @@ export class ReadSession {
     this.#remoteGeneration++;
     this.#remoteRequest?.abort();
     this.#remoteRequest = undefined;
+    this.#profilesGeneration++;
+    this.#profilesRequest?.abort();
+    this.#profilesRequest = undefined;
+    for (const controller of this.#usageInFlight) controller.abort();
+    this.#usageInFlight.clear();
     this.#token = "";
     this.#request?.abort();
     this.#request = undefined;
@@ -175,6 +192,53 @@ export class ReadSession {
       if (error instanceof SessionEnded || error.message?.includes("Garm")) throw error;
       throw new Error("Garm settings could not be read. Refresh before editing.");
     } finally { clearTimeout(timeout); }
+  }
+  async profilesSnapshot() {
+    if (!this.#token) throw new SessionEnded();
+    this.#profilesRequest?.abort();
+    const generation = ++this.#profilesGeneration;
+    const controller = new AbortController(); this.#profilesRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await this.fetcher("/admin/api/v1/profiles", { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (generation !== this.#profilesGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error("Runner-size profiles are unavailable. No fit estimates were rendered.");
+      const result = validateProfilesList(await response.json());
+      if (generation !== this.#profilesGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      return result;
+    } catch (error) {
+      if (generation !== this.#profilesGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
+      if (error instanceof SessionEnded) throw error;
+      throw new Error("Runner-size profiles could not be read. Refresh before reviewing fits.");
+    } finally { clearTimeout(timeout); }
+  }
+  async usageHistory(host, { since, limit, signal } = {}) {
+    if (!this.#token) throw new SessionEnded();
+    // Concurrent calls are independent: every host card owns its request.
+    // A shared single-flight abort here would strand every card but the last
+    // on 'Loading…', and a shared generation guard would turn concurrent
+    // reads into fake session-ended errors.
+    const controller = new AbortController();
+    this.#usageInFlight.add(controller);
+    const abort = () => controller.abort(); signal?.addEventListener("abort", abort, { once: true });
+    const timeout = setTimeout(abort, 15000);
+    const query = new URLSearchParams();
+    if (since !== undefined) query.set("since", since instanceof Date ? since.toISOString() : String(since));
+    if (limit !== undefined) query.set("limit", String(limit));
+    const suffix = query.size ? `?${query}` : "";
+    try {
+      const response = await this.fetcher(`/admin/api/v1/usage/${encodeURIComponent(host)}${suffix}`, { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (controller.signal.aborted) throw new SessionEnded();
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error("Usage history is unavailable. No automatic retry was made.");
+      return validateUsageHistory(await response.json());
+    } catch (error) {
+      if (error instanceof SessionEnded) throw error;
+      throw new Error("Usage history could not be read. Refresh before reviewing measured utilization.");
+    } finally { clearTimeout(timeout); signal?.removeEventListener("abort", abort); this.#usageInFlight.delete(controller); }
   }
   async refresh() {
     if (!this.#token) throw new SessionEnded();

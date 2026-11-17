@@ -9,6 +9,11 @@ import { filterHosts } from "./host-filter.js";
 import { poolPlacementSummary } from "./pool-placement.js";
 import { AuditEvents } from "./audit-events.jsx";
 import { Management } from "./management.jsx";
+import { Servers } from "./servers.jsx";
+import { Profiles } from "./profiles.jsx";
+import { Usage, dimensions } from "./usage-bars.jsx";
+import { validateProfilesList } from "./profiles-client.js";
+import { validateUsageHistory } from "./usage-client.js";
 
 const fmt = (n) => n.toLocaleString();
 const date = (value) => new Date(value).toLocaleString();
@@ -41,55 +46,24 @@ function Notice() {
     </div>
   );
 }
-const dimensions = [
-  ["cpu_millis", "CPU allocation", "millicores"],
-  ["ram_mib", "Memory allocation", "MiB"],
-  ["runners", "Runner allocation", "runners"],
-];
-function Usage({ allocation, metric = false }) {
-  return dimensions.map(([key, label, unit]) => {
-    const used = allocation.allocated[key],
-      budget = allocation.budget[key];
-    return metric ? (
-      <article className="card metric" key={key}>
-        <span>{label}</span>
-        <h2>
-          {fmt(used)}{" "}
-          <small>
-            / {fmt(budget)} {unit}
-          </small>
-        </h2>
-        <progress
-          aria-label={label}
-          max={Math.max(budget, 1)}
-          value={Math.min(used, Math.max(budget, 1))}
-        />
-        <p>
-          {used > budget
-            ? "Over declared budget"
-            : `${fmt(budget - used)} ${unit} unallocated`}{" "}
-          · Not a guarantee of availability
-        </p>
-      </article>
-    ) : (
-      <div className="usage" key={key}>
-        <div>
-          <span>{label}</span>
-          <strong>
-            {fmt(used)} / {fmt(budget)} <small>{unit}</small>
-            {used > budget ? " · over budget" : ""}
-          </strong>
-        </div>
-        <progress
-          aria-label={label}
-          max={Math.max(budget, 1)}
-          value={Math.min(used, Math.max(budget, 1))}
-        />
-      </div>
-    );
-  });
+
+const fullDimensions = ["cpu_millis", "ram_mib", "runners"];
+function CapacityWarnings({ data }) {
+  const full = data.hosts.filter((host) => fullDimensions.some((key) => host.budget[key] > 0 && host.allocated[key] >= host.budget[key]));
+  const stale = data.hosts.filter((host) => !host.observation_fresh);
+  const unhealthy = data.hosts.filter((host) => !host.last_observed_healthy);
+  if (!full.length && !stale.length && !unhealthy.length)
+    return <p className="muted" role="status">Capacity warnings: none in this snapshot. Accounted resource states below stay charged until reconciliation proves absence.</p>;
+  return (
+    <div className="notice" role="status">
+      <strong>Capacity warnings in this snapshot</strong>
+      {full.length > 0 && <span>At full declared capacity: {full.map((host) => `${host.id} (${fullDimensions.filter((key) => host.budget[key] > 0 && host.allocated[key] >= host.budget[key]).join("/")})`).join(", ")}. Full capacity is not proof of physical exhaustion.</span>}
+      {stale.length > 0 && <span>Stale or unavailable observation: {stale.map((host) => host.id).join(", ")}. Health is the last recorded observation.</span>}
+      {unhealthy.length > 0 && <span>Last observed unhealthy: {unhealthy.map((host) => host.id).join(", ")}. Unknown or failed resources remain charged.</span>}
+    </div>
+  );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -101,7 +75,9 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         {[
           ["overview", "Overview"],
           ["hosts", "Hosts"],
+          ["servers", "Servers"],
           ["pools", "Pools"],
+          ["profiles", "Profiles"],
           ["events", "Audit events"],
         ].map(([id, label]) => (
           <a className="nav" key={id} href={`#${id}`}>
@@ -138,6 +114,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </button>
         </header>
         <Notice />
+        <CapacityWarnings data={data} />
         {data.legacy_source_preparations > 0 && <div className="notice" role="status"><strong>Original source preparation history unavailable</strong><span>{data.legacy_source_preparations} historical reservations remain charged but cannot be retroactively qualified for creation. Reconciliation, current runner metadata and this console cannot reset or import their original JIT history.</span></div>}
         {data.legacy_unplanned_reservations > 0 && <div className="notice" role="status"><strong>Historical execution plans unavailable</strong><span>{data.legacy_unplanned_reservations} reservations remain charged but lack immutable execution plans. They cannot be created or automatically imported. This console cannot reset or clear their history.</span></div>}
         {data.hosts.some((host) => host.backend_binding_status === "legacy_scope_import_required") && <div className="notice" role="status"><strong>Legacy backend scope import required</strong><span>Previously charged hosts cannot auto-bind, including after later cancellation removes charges. A separate qualified scope-import workflow is required and is not implemented. Mode and budget edits do not clear this exclusion.</span></div>}
@@ -269,6 +246,8 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
             </p>
           </div>
         </section>
+        <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} />
+        <Profiles readProfiles={readProfiles} />
         <div className="bottom-grid">
           <section>
             <div className="section-heading">
@@ -296,7 +275,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           <AuditEvents events={data.events} />
         </div>
         <footer>
-          No measured usage history is available. No Garm registration, dynamic placement, provisioning, drain, retirement or resource release is available here.
+          Usage history is measured monitoring data, not allocated capacity. No Garm registration, dynamic placement, provisioning, drain, retirement or resource release is available here.
         </footer>
       </main>
     </>
@@ -358,6 +337,14 @@ export function App() {
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
         readEntityInventory={readEntityInventory}
+        readProfiles={async () => {
+          try { return await session.current.profilesSnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
+        readUsage={async (host, options) => {
+          try { return await session.current.usageHistory(host, options); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
         readGarm={async () => {
           try { return await session.current.garmSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
