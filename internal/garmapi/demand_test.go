@@ -136,7 +136,7 @@ func TestDemandRejectsMalformedAndDuplicateJobs(t *testing.T) {
 	base := demandJob(1)
 	dup := encodeJobs(t, base, base)
 	cases := []string{"null", "{}", "[] trailing", dup}
-	for _, field := range []string{"repo_id", "workflow_job_id", "labels", "created_at", "status", "locked_by"} {
+	for _, field := range []string{"workflow_job_id", "labels", "created_at", "status", "locked_by"} {
 		j := demandJob(1)
 		j[field] = nil
 		cases = append(cases, encodeJobs(t, j))
@@ -230,5 +230,51 @@ func TestDemandBoundsCollectionAndOutput(t *testing.T) {
 		if _, e := c.Observe(context.Background()); e == nil {
 			t.Fatal("unbounded jobs accepted")
 		}
+	}
+}
+
+func TestDemandSkipsStockOrgOnlyJobs(t *testing.T) {
+	org := demandJob(2)
+	delete(org, "repo_id")
+	org["org_id"] = otherID
+	enterprise := demandJob(3)
+	enterprise["repo_id"] = nil
+	enterprise["enterprise_id"] = otherID
+	c := demandFixture(t, encodeJobs(t, demandJob(1), org, enterprise), nil)
+	o, e := c.Observe(context.Background())
+	if e != nil || len(o.Jobs) != 1 {
+		t.Fatalf("%+v %v", o, e)
+	}
+	malformed := demandJob(4)
+	malformed["repo_id"] = "bad"
+	c = demandFixture(t, encodeJobs(t, malformed), nil)
+	if _, e = c.Observe(context.Background()); e == nil {
+		t.Fatal("malformed supplied repo accepted")
+	}
+}
+func TestDemandAllowsJobsCreatedDuringRead(t *testing.T) {
+	server, trust := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/pools":
+			json.NewEncoder(w).Encode([]any{demandPool(managedPoolID)})
+		case "/api/v1/jobs":
+			time.Sleep(10 * time.Millisecond)
+			j := demandJob(1)
+			j["created_at"] = time.Now().UTC()
+			json.NewEncoder(w).Encode([]any{j})
+		case "/api/v1/instances":
+			fmt.Fprint(w, "[]")
+		default:
+			w.WriteHeader(500)
+		}
+	}))
+	c, e := NewDemand(server.URL, "token", trust, []string{"capacity"}, []string{managedRepoID})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer c.Close()
+	o, e := c.Observe(context.Background())
+	if e != nil || len(o.Jobs) != 1 || !o.Jobs[0].CreatedAt.After(o.StartedAt) {
+		t.Fatalf("%+v %v", o, e)
 	}
 }

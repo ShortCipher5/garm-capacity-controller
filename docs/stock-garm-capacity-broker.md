@@ -106,7 +106,8 @@ to an arbitrary pool or manufacture `Pool.Waiting` for the planner.
 
 A digest identifies the redacted observation; it is not an ETag, permission or
 remote CAS precondition. Organization/enterprise/scaleset scheduling is outside
-this adapter. Queued normal-pool rows lacking a repository identity fail closed.
+this adapter. Stock org/enterprise-only queued rows with omitted/null repository IDs are
+explicitly outside this repository-scoped view; malformed supplied UUIDs fail closed.
 Other provider/organization pools may compete for a job, so this provider-scoped
 view is not a complete eligible-provider graph. Historical missed webhooks are
 not repaired, and `missed_webhook_coverage` remains false. The durable broker must

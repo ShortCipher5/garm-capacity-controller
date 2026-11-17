@@ -74,7 +74,7 @@ func (c *DemandClient) Close() {
 		c.discovery.Close()
 	}
 }
-func (c *DemandClient) jobs(ctx context.Context, now time.Time) ([]QueuedJob, error) {
+func (c *DemandClient) jobs(ctx context.Context) ([]QueuedJob, error) {
 	m := c.discovery.management
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/jobs", nil)
 	if err != nil {
@@ -122,7 +122,11 @@ func (c *DemandClient) jobs(ctx context.Context, now time.Time) ([]QueuedJob, er
 		if scale != "" {
 			continue
 		}
-		// Normal queued jobs without a repository UUID cannot be safely attributed.
+		// Stock org/enterprise-only hooks may omit repo_id. Those jobs are
+		// outside this explicitly repository-scoped view, not malformed.
+		if raw, exists := f["repo_id"]; !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
 		repo, e := textField(f, "repo_id", true)
 		if e != nil || !managementID(repo) {
 			return nil, ErrManagement
@@ -155,7 +159,7 @@ func (c *DemandClient) jobs(ctx context.Context, now time.Time) ([]QueuedJob, er
 			j.Labels[i] = l
 		}
 		sort.Strings(j.Labels)
-		if json.Unmarshal(f["created_at"], &j.CreatedAt) != nil || j.CreatedAt.IsZero() || j.CreatedAt.After(now) {
+		if json.Unmarshal(f["created_at"], &j.CreatedAt) != nil || j.CreatedAt.IsZero() || j.CreatedAt.After(time.Now().UTC()) {
 			return nil, ErrManagement
 		}
 		locked, e := textField(f, "locked_by", false)
@@ -206,7 +210,7 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 	if e != nil {
 		return DemandObservation{}, ErrManagement
 	}
-	jobs, e := c.jobs(ctx, time.Now().UTC())
+	jobs, e := c.jobs(ctx)
 	if e != nil {
 		return DemandObservation{}, ErrManagement
 	}
