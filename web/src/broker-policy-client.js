@@ -18,9 +18,12 @@ export function validateBrokerView(v) {
   if (!v || v.advisory_only !== true || typeof v.writes_enabled !== 'boolean') throw new Error('Unsupported advisory policy response.');
   validateBrokerPolicy(v.policy); return v;
 }
-export async function saveBrokerPolicy(token, policy, { signal, fetcher = globalThis.fetch } = {}) {
+export function validateBrokerSaveInput(token, policy) {
   validateBrokerPolicy(policy);
   if (!/^[0-9a-f]{64}$/.test(token)) throw new Error('Enter the separate 64-character management token.');
+}
+export async function saveBrokerPolicy(token, policy, { signal, fetcher = globalThis.fetch } = {}) {
+  validateBrokerSaveInput(token, policy);
   let response;
   try { response = await fetcher('/admin/api/v1/broker-policy', { method:'PUT', headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(policy),credentials:'omit',cache:'no-store',redirect:'error',signal }); }
   catch { throw new Error('Save outcome unknown. Reload policy before another edit. No automatic retry was made.'); }

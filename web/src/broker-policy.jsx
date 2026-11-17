@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { saveBrokerPolicy } from './broker-policy-client.js';
+import { saveBrokerPolicy, validateBrokerSaveInput } from './broker-policy-client.js';
 export function BrokerPolicy({ readPolicy }) {
   const [view,setView]=useState(null), [message,setMessage]=useState(''), [busy,setBusy]=useState(false), [blocked,setBlocked]=useState(true);
   const active=useRef(null), alive=useRef(true), token=useRef(null);
@@ -17,9 +17,13 @@ export function BrokerPolicy({ readPolicy }) {
   const pool=(i,j,k,value)=>edit(rows=>rows.map((r,x)=>x===i?{...r,pools:r.pools.map((p,y)=>y===j?{...p,[k]:value}:p)}:r));
   async function save(e){
     e.preventDefault();if(active.current||blocked)return;
+    const credential = token.current?.value || '';
+    // Proven pre-dispatch failures must not discard or lock an editable draft.
+    try { validateBrokerSaveInput(credential, view.policy); }
+    catch (error) { setMessage(error.message); if (token.current) token.current.value = ''; return; }
     const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);
     const timer=setTimeout(()=>controller.abort(),15000);
-    try{await saveBrokerPolicy(token.current?.value||'',view.policy,{signal:controller.signal});if(alive.current)setMessage('Advisory policy saved. No GARM settings, grants or runners changed. Reload before further edits.');}
+    try{await saveBrokerPolicy(credential,view.policy,{signal:controller.signal});if(alive.current)setMessage('Advisory policy saved. No GARM settings, grants or runners changed. Reload before further edits.');}
     catch(e){if(alive.current)setMessage(e.message);}
     finally{clearTimeout(timer);active.current=null;if(token.current)token.current.value='';if(alive.current)setBusy(false);}
   }
