@@ -1,0 +1,36 @@
+import { expect } from '@playwright/test';
+import { test } from './fixtures.js';
+test('local validation preserves editable policy draft; dispatched unknown blocks it', async ({page}) => {
+ const id='11111111-1111-4111-8111-111111111111';
+ let calls=0;
+ await page.route('**/admin/api/v1/broker-policy',route=>{
+  if(route.request().method()==='GET')return route.fulfill({json:{advisory_only:true,writes_enabled:true,policy:{revision:0,repositories:[]}}});
+  calls++;return route.fulfill({status:503,json:{error:'unknown'}});
+ });
+ await page.goto('/');
+ await page.getByLabel('Admin read token').fill('a'.repeat(64));
+ await page.getByRole('button',{name:'Connect read-only'}).click();
+ const panel=page.locator('#broker-policy');
+ await panel.getByRole('button',{name:'Add repository',exact:true}).click();
+ await panel.getByLabel('GARM repository UUID').fill(id);
+ await panel.getByLabel('Repository runner cap').fill('8');
+ await panel.getByRole('button',{name:'Save advisory policy',exact:true}).click();
+ await expect(panel.getByRole('status')).toContainText('management token');
+ await expect(panel.getByLabel('GARM repository UUID')).toBeEnabled();
+ await expect(panel.getByLabel('Repository runner cap')).toHaveValue('8');
+ expect(calls).toBe(0);
+ await panel.getByRole('button',{name:'Add repository',exact:true}).click();
+ await panel.getByLabel('GARM repository UUID').nth(1).fill(id);
+ await panel.getByLabel('Separate management token').fill('c'.repeat(64));
+ await panel.getByRole('button',{name:'Save advisory policy',exact:true}).click();
+ await expect(panel.getByRole('status')).toContainText('Invalid repository policy');
+ await expect(panel.getByLabel('GARM repository UUID').nth(1)).toBeEnabled();
+ expect(calls).toBe(0);
+ await panel.getByLabel('GARM repository UUID').nth(1).fill('22222222-2222-4222-8222-222222222222');
+ await panel.getByLabel('Separate management token').fill('c'.repeat(64));
+ await panel.getByRole('button',{name:'Save advisory policy',exact:true}).click();
+ await expect(panel.getByRole('status')).toContainText('not confirmed');
+ await expect(panel.getByLabel('GARM repository UUID').first()).toBeDisabled();
+ await expect(panel.getByLabel('Separate management token')).toHaveValue('');
+ expect(calls).toBe(1);
+});

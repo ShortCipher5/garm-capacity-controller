@@ -14,3 +14,10 @@ test('lost response never retried and old revision sent',async()=>{
  await assert.rejects(saveBrokerPolicy('a'.repeat(64),policy(),{fetcher:async()=>({status:409})}),/changed/);
  await saveBrokerPolicy('a'.repeat(64),policy(),{fetcher:async()=>({ok:true,json:async()=>({saved:true,revision:1,advisory_only:true})})});
 });
+test('invalid local inputs never dispatch a policy write',async()=>{
+ let calls=0;const fetcher=async()=>{calls++;throw new Error('unexpected dispatch');};
+ await assert.rejects(saveBrokerPolicy('',policy(),{fetcher}),/management token/);
+ const duplicate=policy();duplicate.repositories.push(duplicate.repositories[0]);
+ await assert.rejects(saveBrokerPolicy('a'.repeat(64),duplicate,{fetcher}),/repository policy/);
+ assert.equal(calls,0);
+});
