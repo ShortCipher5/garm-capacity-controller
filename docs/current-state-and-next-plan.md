@@ -1,10 +1,12 @@
 # Current platform state and next plan
 
-Status date: 2026-11-16 (UTC). Verified `main`:
-`0e24cbdc8a798338acacb213d3fe256a804c7477` (merge of #82 atop
-`76bcc628`, which merged #75–#81). Earlier workflow evidence belongs to
-its tested PR heads; it must not be described as a separate verification
-of the merge tree without exact-tree evidence.
+Status date: 2026-11-17 (UTC). Verified `main`:
+`fc2fa3ed` (conditional client hardening and settings wiring atop
+`0daa398b`, which merged #84 and the conditional settings client; that
+chain merges #75–#84 and the closed-research cleanup record). Earlier
+workflow evidence belongs to its tested PR heads; it must not be
+described as a separate verification of the merge tree without
+exact-tree evidence.
 
 This document is the current status ledger for the project. It
 supersedes the stale snapshot sections of issue #53 (use #53 for
