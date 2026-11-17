@@ -1,0 +1,118 @@
+package capacitybroker
+
+import "sort"
+
+// DemandJob is one deduplicated queued job in a single source namespace.
+// Candidates must contain the complete eligible pool set for the intended scope.
+type DemandJob struct {
+	ID         string
+	Candidates []string
+}
+
+// DemandMatch is advisory only. Unmet jobs retain their candidate sets: they
+// cannot be copied into every candidate pool's Waiting count. Matching does not
+// bind a runner to a job, create a grant, or release charged resources.
+type DemandMatch struct {
+	Covered map[string]string
+	Unmet   []DemandJob
+}
+
+// MatchDemand performs bounded maximum-cardinality bipartite matching against
+// caller-verified idle slots. Creating, busy, unknown and pending warm resources
+// are not idle supply. Callers must not infer a complete/fresh observation from
+// this pure function or use its result as admission authority.
+func MatchDemand(jobs []DemandJob, idle map[string]int) (DemandMatch, error) {
+	if len(jobs) > 1000 || len(idle) > 1000 {
+		return DemandMatch{}, ErrSnapshot
+	}
+	ids := make([]string, 0, len(idle))
+	slots := 0
+	for id, n := range idle {
+		if id == "" || len(id) > 256 || n < 0 || n > 1000 || slots+n > 1000 {
+			return DemandMatch{}, ErrSnapshot
+		}
+		slots += n
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	poolSlots := map[string][]int{}
+	slotPool := []string{}
+	for _, id := range ids {
+		for n := 0; n < idle[id]; n++ {
+			poolSlots[id] = append(poolSlots[id], len(slotPool))
+			slotPool = append(slotPool, id)
+		}
+	}
+	ordered := make([]DemandJob, len(jobs))
+	seen := map[string]bool{}
+	edges := 0
+	for i, j := range jobs {
+		if j.ID == "" || len(j.ID) > 256 || seen[j.ID] || len(j.Candidates) > 1000 {
+			return DemandMatch{}, ErrSnapshot
+		}
+		seen[j.ID] = true
+		c := append([]string(nil), j.Candidates...)
+		sort.Strings(c)
+		for k, p := range c {
+			if _, ok := idle[p]; !ok || (k > 0 && c[k-1] == p) {
+				return DemandMatch{}, ErrSnapshot
+			}
+			edges += len(poolSlots[p])
+			if edges > 100000 {
+				return DemandMatch{}, ErrSnapshot
+			}
+		}
+		ordered[i] = DemandJob{ID: j.ID, Candidates: c}
+	}
+	// Stable ordering avoids dependence on maps/caller order. Eligibility is more
+	// important than preference; augmenting paths repair greedy flexible matches.
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	owners := make([]int, len(slotPool))
+	for i := range owners {
+		owners[i] = -1
+	}
+	operations := 0
+	exhausted := false
+	var visit func(int, []bool) bool
+	visit = func(job int, visited []bool) bool {
+		for _, p := range ordered[job].Candidates {
+			for _, slot := range poolSlots[p] {
+				operations++
+				if operations > 1000000 {
+					exhausted = true
+					return false
+				}
+				if visited[slot] {
+					continue
+				}
+				visited[slot] = true
+				if owners[slot] < 0 || visit(owners[slot], visited) {
+					owners[slot] = job
+					return true
+				}
+				if exhausted {
+					return false
+				}
+			}
+		}
+		return false
+	}
+	for i := range ordered {
+		visit(i, make([]bool, len(slotPool)))
+		if exhausted {
+			return DemandMatch{}, ErrSnapshot
+		}
+	}
+	result := DemandMatch{Covered: map[string]string{}, Unmet: []DemandJob{}}
+	for slot, j := range owners {
+		if j >= 0 {
+			result.Covered[ordered[j].ID] = slotPool[slot]
+		}
+	}
+	for _, j := range ordered {
+		if _, ok := result.Covered[j.ID]; !ok {
+			result.Unmet = append(result.Unmet, j)
+		}
+	}
+	return result, nil
+}
