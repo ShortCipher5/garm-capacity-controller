@@ -1,17 +1,12 @@
 # Native settings revision contract (Agent 1 deliverable)
 
-Status: draft/provisional, 2026-11-16 revision 10, with factual review
-corrections. Native settings and hold-register review copies are now
-published at the refs in `current-state-and-next-plan.md`; they are not
-merge proposals or production integration. Controller-client reconciliation
-and test results below remain workstream-reported unless explicitly marked
-independently verified. Experimental features remain disabled by default,
-not deployed and not deployable. No authority is granted.
-
-The historical instructions, pins and ownership map below record the
-workstream's earlier context, not current execution authorization. The
-current owner direction is repository cleanup only, with no new feature work.
-Real UI-to-server testing and lost-response fault injection remain outstanding.
+Status: draft/provisional, 2026-11-17 revision 14 (recovery hardening
+complete offline). Review refs published on the controller repository
+(`review/native-settings-c94c563b`, full hash
+`c94c563bdd41151ac61e116439453cbf9dd74228`; all prior refs intact);
+not merged to any product branch; not deployed. Experimental features
+remain disabled by default and are offline work, not deployable. No
+authority granted.
 
 **HOLD, REVISED (owner instruction, 2026-11-16, latest):** Agents 2, 3 and 5
 MAY implement OFFLINE EXPERIMENTAL vertical slices in per-agent worktrees of
@@ -29,7 +24,7 @@ code review, and its relationship to the earlier denied route/dispatch/schema
 publication is unresolved. Do not port it, and do not recreate denied
 material under another name.
 
-## 1. Historical verified pins
+## 1. Verified pins
 
 | Item | Pin | Verified |
 |---|---|---|
@@ -145,9 +140,8 @@ schema side effects, stock behavior unchanged):
   do not bump the revision (DEC-10).
 - Revision mechanism (per-pool column vs global epoch/sequence) is Agent 2's
   documented choice for the slice — an input to DEC-2, not a resolution.
-- Receipts were deliberately OUT of the initial slice; the later slice in
-  §9 adds them. UNKNOWN after a lost response remains held client-side;
-  durable end-to-end recovery is not yet proven.
+- Receipts (§4.1) are deliberately OUT of the slice; UNKNOWN after a lost
+  response is held client-side with no retry and no unconditional fallback.
 
 Flagged differences (to verify against the landed branches, not assumed):
 route shape deliberately mirrors CJ's prototype namespace for comparability
@@ -194,9 +188,8 @@ Owner round-2 corrections sharpen this further:
   true no-ops off the revision (DEC-10), and treat permanent observe-only
   recovery as the fallback that can block the controller indefinitely. A
   verifiable per-request stale response remains the only existing native
-  signal of conditional-write non-effect; it does not by itself release a
-  capacity charge. Receipts can establish a settings outcome, but ledger
-  settlement requires the explicit handoff and evidence chain described in §5.
+  signal that releases; a receipt settles an UNKNOWN to a known outcome and
+  finalizes a consumed charge — it is not a release signal by itself.
 
 ### 4.1 Request-correlated receipt semantics (paper design, target interface)
 
@@ -222,12 +215,12 @@ the implementation hold is unchanged):
   a database restore (same-database storage shares DEC-7's rollback
   exposure), fencing of old binaries or direct DB writers, or any physical
   effect.
-- Capacity consequence (target design, not current integration): an
-  `applied_*` receipt may establish the settings outcome, but does not itself
-  settle a ledger charge or prove physical non-effect. A settings stale
-  response is likewise insufficient by itself. The explicit journal/API/
-  ledger handoff, authoritative physical evidence, rollback-resistant
-  authority (DEC-7) and physical fencing remain separate prerequisites (§5).
+- Capacity consequence: an `applied_*` receipt lets the controller settle the
+  journal intent and finalize a consumed charge; it never justifies
+  releasing one. Release still requires proven non-effect (a verifiable
+  per-request stale response) or operator reconciliation. Rollback-resistant
+  receipt authority (DEC-7) and physical fencing (Agents 4/5) remain separate
+  prerequisites.
 - Open details: reuse-conflict status (Q11 — **decided for v1: 409**),
   receipt retention/purging (Q12 — **v1: none, no GC, documented**), whether
   reads participate (Q13 — **v1: writes only, GET ignores the header**).
@@ -337,18 +330,17 @@ directions above):
   destination or move potentially denied material.
 - **Q7** (open; owner round 3) No verified Chris-owned native fork exists;
   destination remains unselected.
-- **Q11–Q13** Provisionally answered for the experimental slice in §4.1:
-  409 for reuse, no receipt GC, writes only. Production choices still require
-  review; these are not unanswered experimental implementation questions.
+- **Q11** Exact status code/refusal shape for idempotency-key reuse with
+  different content (§4.1).
+- **Q12** Receipt retention/purging policy (§4.1).
+- **Q13** Do reads participate in idempotency/receipts, or writes only (§4.1)?
 
 ## 9. Experimental branch comparison and proposed integration path
 
-Implementation/test claims in this section are workstream-reported, not
-independent qualification, except the source-review limitations explicitly
-recorded in the current-state ledger.
-
 Reference implementation of wire v0, landed 2026-11-16 (all based on
-`15463844`; native review refs are now published as recorded in the ledger):
+`15463844`, local worktrees; published for review as immutable
+`review/*` refs on the controller repository — no product branch, no
+deployment):
 
 | Branch | Commit | What landed |
 |---|---|---|
@@ -386,14 +378,11 @@ Flagged differences (prototype facts §3.2 vs landed v0):
 Proposed integration path (one):
 
 1. **Now (experimental, done):** v0 server + clients + hold register,
-   new interfaces flag/env-gated. Existing native code also changes,
-   including the stock update helper's best-effort revision bump; it ignores
-   bump errors and is not proof of fail-closed all-writer participation.
+   flag/env-gated, nothing stock changed.
 2. **Next native slice (still flag-gated) — DONE 2026-11-16 (commit
    `a895ba25`):** (a) legacy-writer participation (stock pool update path
-   attempts to bump the revision in the same transaction, providing
-   normal-path participation without triggers; ignored bump errors leave
-   the stale-ETag hazard unresolved); (b) request-correlated receipts per §4.1 (v1 slice
+   bumps the revision in the same transaction, closing the stale-ETag hazard
+   without triggers); (b) request-correlated receipts per §4.1 (v1 slice
    decisions: reuse-with-different-payload -> 409; no expiration/GC yet;
    writes only). Combined client/server integration merge `a9d7b0a3`
    (agent2 + agent3) verified with full Go race suites and the 558-test
@@ -420,10 +409,9 @@ Proposed integration path (one):
    on id reuse, typed 412 with fresh ETag, typed 422 on min>max, and a
    stock legacy PUT advancing the revision so a stale-ETag patch was
    refused. The pass exposed and fixed the two client-side mismatches
-   recorded in the branch table (replay envelope; typed 409). Step 2 reports
-   real CLI/curl coverage, not real UI-to-server coverage. The latter and
-   lost-response fault injection remain outstanding, even on an unchanged
-   server tree.
+   recorded in the branch table (replay envelope; typed 409). CLI/webapp
+   (agent3) were already validated against this server in step 2;
+   re-run their suites only if the server tree changes.
 4. **Production path (blocked):** only after Q1 checkpoint comparison and
    DEC-8 destination resolution — fold the namespace into the real routes
    behind rollout modes (DEC-6), with entity/controller settings coverage
@@ -432,11 +420,231 @@ Proposed integration path (one):
    `EvidenceVerifier` class; until then `Release` cannot succeed honestly
    and unknown holds stay charged by design.
 
+### 9a. Independent-review findings and fixes (2026-11-16)
+
+An independent review of the `a9d7b0a3` review branch found four
+defects. All are fixed offline by `a1ff1716` (new tip of
+`exp/integration-check`; published for review as ref
+`review/native-settings-a1ff1716`, full hash
+`a1ff171691edf803f4421e4337b33c6dc8dca139`; the reviewed `a9d7b0a3`
+ref remains intact). No wire-shape change; semantics now match the
+documented contract.
+
+1. **Lost-race partial commit (server, confirmed real):** the pool
+   settings UPDATE ran before the conditional revision advance, and the
+   stale rejection flowed through the non-fatal path, so the transaction
+   committed the rejected request's settings change while leaving the
+   revision unadvanced — a silent violation of the stale-write
+   invariant. Fixed by advancing the revision first; a race detected at
+   advance time commits only the rejection receipt, and a generic
+   settings-write failure aborts the transaction (settings and revision
+   unchanged).
+2. **Ignored legacy revision-bump errors (confirmed real):** the
+   best-effort inline bump discarded all errors, so a stock write could
+   commit with a stale revision. It now ignores only the absent-side-table
+   case (feature disabled); any other error fails the legacy write's
+   transaction.
+3. **Native CLI/webapp replay + 409 (confirmed):** both clients mapped a
+   200 replay envelope and a 409 id-reuse refusal to UNKNOWN. They now
+   report the stored outcome with the resulting ETag and classify 409 as
+   a definitive rejection, mirroring the controller client's `99a8344`
+   fixes. Neither client sends a request id yet; handling is
+   forward-compatible.
+4. **Concurrency reachability (test gap):** new
+   `TestConcurrentConditionalUpdatesExactlyOneApplies` races 8
+   conditional updates holding the same observed revision against one
+   real SQLite database — exactly one commits, losers are typed stale,
+   the revision moves exactly once, the row carries only the winner's
+   value, all requests persist receipts. Fails on the pre-fix ordering.
+
+Gates on the fixed tree: gofmt/vet/build clean; `go test -race -tags
+testing ./database/sql ./apiserver/routers ./config ./cmd/garm-cli/cmd`
+all pass; webapp 562/562 (four new tests) and `npm run build` pass.
+Still open per the reviewer: these branches are experimental, not ready
+to merge or deploy; DEC-1..8 and Q1/Q7 remain the gating decisions.
+
+### 9b. Request IDs, UNKNOWN gating and client recovery (2026-11-16)
+
+Commit `494899b8` (new review ref `review/native-settings-494899b8`,
+full hash `494899b8b77331a7b52e5d7a12c263082dda5f19`; prior refs intact)
+implements the no-host-access recovery slice:
+
+- **Request identity everywhere:** the native CLI sends an
+  `Idempotency-Key` on every PATCH (operator-supplied `--request-id` or
+  auto-generated UUID, printed for correlation); the webapp editor
+  generates a per-save UUID. The server already consumed the header.
+- **Client-side pending journal:** the exact request (id, scope,
+  precondition, payload, time) is persisted before dispatch — CLI in a
+  pending file under the user config directory, the editor in
+  localStorage — and cleared on every definitive outcome. A browser or
+  process restart re-enters the UNKNOWN hold with the operator's draft
+  restored; the CLI resolves via `--request-id <printed-id>` re-presentation.
+- **UNKNOWN gates writes:** the editor disables Save and the draft
+  inputs while unresolved; a re-read no longer clears the state. A
+  deliberate "Resolve outcome" action re-presents the journaled request
+  so the server's durable receipt (or a definitive applied/conflict/
+  rejected answer) settles it. A 412 on re-presentation additionally
+  proves the original unknown request never committed (a committed
+  request would have been answered by replay).
+- **Applied-response validation:** the CLI no longer treats any HTTP 200
+  as success — a non-replay 200 must decode as the settings tuple with a
+  strong quoted ETag, else UNKNOWN (webapp already enforced this).
+- **Dialect-qualified absence detection:** the legacy bump's benign
+  check recognizes SQLite ("no such table"), MySQL 1146 and PostgreSQL
+  42P01 absent-table forms only, with per-dialect unit tests plus a
+  no-schema legacy-write test. Live MySQL/PostgreSQL runs remain
+  unqualified (no such databases in this environment).
+
+Gates: gofmt/vet/build clean; race suites for `database/sql`,
+`cmd/garm-cli/cmd`, `apiserver/routers`, `config`, `runner` pass;
+webapp 563/563 with build. Orchestrator-run, not independently
+re-reviewed. The controller editor/journal binding to this API remains
+blocked on the denied dispatch-envelope scope (task 1.4/1.5 of the
+current plan) — unchanged and not bypassed.
+
+### 9c. Workstream A completion (2026-11-16)
+
+Commit `8407d624` (new review ref `review/native-settings-8407d624`,
+full hash `8407d6243401f99c1928529749c730798c9e1159`; all prior refs
+intact) completes every host-free item of the reorganised Workstream A,
+built by four parallel agents and integrated by the orchestrator:
+
+- Web editor: per-pool pending keys (shared-slot overwrite fixed);
+  fail-closed persistence (change NOT sent when the journal cannot be
+  written); per-pool multi-tab lock; full-draft restart recovery
+  (untouched fields no longer reset); conflict latch after 412 (Save
+  disabled until an explicit "Mark reconciled").
+- Web client: strict field bounds and same-patch min/max validation
+  pre-dispatch; corrupt server documents (bad values, min>max, mixed
+  replay/settings keys) fail closed to UNKNOWN.
+- CLI: read-before-write (an unresolved journal refuses new writes
+  without contacting the server); `patch --resolve` re-presents exactly
+  the journaled request as the deliberate UNKNOWN-resolution path;
+  atomic journal writes (temp+fsync+rename); journaling failure aborts
+  before dispatch.
+- Server: install-marker table distinguishes "feature never enabled"
+  (benign skip) from "revision table lost after use" (hard error,
+  legacy write refused); experimental path reinstalls with a fresh
+  epoch after a loss, invalidating outstanding ETags; residual hole
+  (marker and table lost together read as never-enabled) documented.
+- Loopback integration evidence (real server+CLI binaries from this
+  tree, temp SQLite): `--request-id` apply; seeded UNKNOWN refusing a
+  new write with the revision unmoved; `--resolve` applying idempotently
+  without a receipt; `--resolve` answering from the durable receipt
+  with the revision static when a receipt exists.
+
+Field-scope decision (Workstream B input): v0 covers exactly
+`priority`, `max_runners`, `min_idle_runners`. Tags, `enabled` and
+repository balancing are NOT covered by the conditional path; clients
+must keep them on their stock (unconditional) routes and the UI must
+say so, or an explicit contract extension must be agreed first
+(DEC-4). Silently mapping unsupported fields through the conditional
+API is prohibited.
+
+Still open (not host-free): live MySQL/PostgreSQL qualification
+(classifier unit-tested only); browser-level and network-kill fault
+injection (unit + loopback coverage only); independent re-review of
+this slice; the destination/denial-scope decisions.
+
+### 9d. Recovery hardening (2026-11-17)
+
+Commit `c94c563b` (new review ref `review/native-settings-c94c563b`,
+full hash `c94c563bdd41151ac61e116439453cbf9dd74228`; all prior refs
+intact) closes the second-pass static-review findings — every remaining
+host-free recovery defect:
+
+- **Web editor — atomic, owned cross-tab coordination.** The lock
+  value is `{tabId, acquiredAt}`; claims are a synchronous
+  read-then-write (no await between), which is atomic against other
+  tabs; a tab releases only its own lock; a foreign live lock refuses
+  the save with an explanatory state and no takeover offer. A stale
+  lock (older than 5 minutes) offers an explicit "Take over lock"
+  operator action only, and the displaced tab detects the loss via the
+  `storage` event and blocks editing (inputs and Save disabled). Two
+  tabs on one injected Storage are covered by tests. Journaled records
+  now carry `tabId`; a record written by the pre-change code reads as
+  corrupt and is surfaced as a recovery error, never silently
+  discarded (acceptable for this unreleased flag-gated feature).
+- **Web editor — fail-closed corrupt recovery data.** A malformed
+  pending record or malformed lock value latches a persistent
+  recovery error: Save disabled, operator informed, bytes preserved.
+- **Web editor — reconcile gating.** "Mark reconciled" is armed only
+  by a successful GET completed after the conflict and re-arms
+  against newer reads; the handler re-checks the guard.
+- **Web client — strict validation of successful responses**, pinned
+  to the landed server wire shapes (verified against
+  `database/sql/offline_pool_settings.go`, the apiserver handlers and
+  `params/experimental.go`, not invented): strong quoted
+  `"<epoch>:<seq>"` ETag (epoch>0, seq>=0); the exact
+  `{priority, max_runners, min_idle_runners}` tuple within bounds with
+  min<=max; the exact `{outcome, resulting_etag}` replay envelope with
+  applied-only outcomes on 200. The wire carries **no request-id echo**,
+  so the identity/consistency check the protocol supports is
+  `resulting_etag === response ETag header`; mismatch is UNKNOWN.
+  A malformed success never updates stored revision or pending state.
+- **CLI — cross-process journal safety and exact binding.** All
+  journal read-modify-write runs under an exclusive adjacent lock
+  (`<journal>.lock`, O_CREATE|O_EXCL, `{pid, acquired_at}`; stale locks
+  from dead pids reclaimed once; anything else fails closed), held
+  through dispatch on every path including `--resolve`. Each pending
+  record binds the active profile name and the effective server base
+  URL (which includes `/api/v1`) captured at dispatch; apply and
+  resolve refuse a mismatched binding before any network I/O, naming
+  both values, with no override flag. Pre-change records (no
+  profile/server) are refused on both paths with the manual-recovery
+  instruction. A true two-process re-exec test proves exclusion.
+- **Server — durable generation and receipts-table-loss detection.**
+  The schema-loss hard failure now covers the **receipts** table as
+  well as the revision table, on **GET as well as PATCH** — a silent
+  recreate would erase the replay record of requests whose responses
+  may never have arrived, enabling double-apply. The install marker
+  gains `generation` (1 on fresh install, +1 on every explicit
+  reinstall) and `last_epoch`: revision epochs are minted as
+  `max(unix_now, last_epoch+1)` with the floor persisted in the same
+  transaction, so no `"<epoch>:<seq>"` pair from a lost or restored
+  generation can ever match a post-reinstall revision row. Table
+  creation runs only while the marker is absent; recovery is the
+  explicit `ReinstallOfflinePoolSettingsSchema` store primitive
+  (generation+1, revision and receipt rows wiped, epoch floor
+  preserved), deliberately not reachable from request paths. A local
+  epoch is still **not** an anti-rollback authority: a full-file
+  restore rolls epoch/sequence back, and the documented recovery is
+  operator-driven reinstall plus client UNKNOWN→fresh-read; requests
+  whose receipts were lost stay UNKNOWN until readback plus an
+  explicit operator decision. Residual hole unchanged: if the marker
+  is lost together with the tables, the next write reads as
+  never-enabled.
+- **Commit-then-drop-response coverage.** New handler-level test
+  (`apiserver/routers/offline_pool_settings_drop_response_test.go`)
+  drives a PATCH whose transaction commits and whose response then
+  dies: the settings change and receipt are durable, the retry is
+  answered from the stored receipt (200 + envelope, static revision),
+  and repeated replays neither advance the revision nor write a second
+  receipt.
+
+Gates (orchestrator-run on the final tree): gofmt/vet clean; race
+suites green for `database/sql` (84s), `apiserver/routers`,
+`config`, `cmd/garm-cli/cmd`; webapp 590/590 with `svelte-check`
+clean and `npm run build` clean. Loopback against real server+CLI
+binaries built from this tree (fresh SQLite env, bootstrap via real
+HTTP): 11/11 — settings GET with ETag, conditional apply with quoted
+`If-Match` advancing the revision, journal cleared on definitive
+outcome, live-pid lock refusal naming the holder, server/profile
+binding refusal before network on both apply and resolve, `--resolve`
+applying the journaled request idempotently, and the durable receipt
+refusing id-reuse with a different payload with no double-apply.
+
+Still open (not host-free): live MySQL/PostgreSQL qualification
+(classifier unit-tested only); browser-level and network-kill fault
+injection; independent re-review of `c94c563b`; destination and
+denial-scope decisions (Q1/Q7, DEC-1..8). The controller
+editor/journal binding remains blocked on the denied
+dispatch-envelope scope — unchanged and not bypassed.
+
 ## 10. Verification expectations (unchanged from revision 1)
 
 Repo gates per agent before handoff: `go test -race -count=1 ./...`,
 `go vet ./...`, clean `gofmt -l .`; web `npm ci && npm test && npm run
 build`; pinned-GARM opt-in gates for touched integration paths. Docs-only
-changes do not themselves require new Go execution. Historical agent holds
-above do not override the owner's current cleanup-only direction; no new
-implementation or deployment is authorized by this document.
+changes run no Go gates. The hold in the header overrides all Agent 2/3
+implementation until CJ lifts it.

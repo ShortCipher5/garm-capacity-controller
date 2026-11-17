@@ -296,6 +296,62 @@ extension. Still open: live MySQL/PostgreSQL qualification, browser and
 network-kill fault injection, independent re-review, and the
 destination/denial-scope decisions.
 
+## Recovery hardening status (orchestrator-reported, 2026-11-17)
+
+Commit `c94c563b` on `exp/integration-check` (review ref
+`review/native-settings-c94c563b`, full hash
+`c94c563bdd41151ac61e116439453cbf9dd74228`; all prior review refs
+intact) closes the second-pass static-review findings — the remaining
+host-free recovery defects. Contract advanced to revision 14
+(`docs/native-settings-revision-contract.md` in this PR). Summary:
+
+1. Web editor: atomic owned cross-tab lock (`{tabId, acquiredAt}`,
+   synchronous claim, own-release only, explicit stale takeover with
+   storage-event loss detection on the displaced tab); corrupt pending
+   or lock records fail closed (persistent error, Save disabled, bytes
+   preserved); "Mark reconciled" armed only by a fresh GET after the
+   conflict. Note: journaled records now carry `tabId`; pre-change
+   records surface as a recovery error, not silently.
+2. Web client: strict 2xx validation pinned to the landed server wire
+   shapes (strong quoted `"<epoch>:<seq>"` ETag, exact 3-field tuple,
+   `{outcome, resulting_etag}` replay envelope with
+   `resulting_etag === ETag` header as the identity check — the wire
+   has no request-id echo); malformed success never mutates client
+   state.
+3. CLI: exclusive adjacent lock around all journal
+   read-modify-write incl. `--resolve` (live-pid refusal naming the
+   holder; dead-pid reclaim once; true two-process re-exec test); each
+   record binds profile + effective server base URL (includes
+   `/api/v1`); apply and resolve refuse mismatched bindings pre-network
+   with no override.
+4. Server: schema-loss hard failure extended to the receipts table on
+   GET and PATCH; install marker gains durable `generation` and
+   `last_epoch` floor (epochs minted as `max(unix_now, last_epoch+1)`,
+   persisted in-transaction) so no lost-generation ETag can match after
+   reinstall; recovery is the explicit `ReinstallOfflinePoolSettingsSchema`
+   primitive, unreachable from request paths; documented that a local
+   epoch is still not an anti-rollback authority and the
+   marker-lost-with-tables hole remains.
+5. Commit-then-drop-response handler test: commit survives a dropped
+   response, retry answers from the durable receipt, revision static,
+   no second receipt.
+
+Reported gates (orchestrator-run on the final tree): gofmt/vet clean;
+race suites green for `database/sql` (84s), `apiserver/routers`,
+`config`, `cmd/garm-cli/cmd`; webapp 590/590, `svelte-check` clean,
+build clean. Loopback (fresh env, real server+CLI binaries from this
+tree): 11/11 — GET+ETag, quoted-If-Match apply advancing the revision,
+journal clearing, lock refusal, binding refusals on apply and resolve,
+`--resolve` idempotent apply, receipt id→payload refusal with no
+double-apply.
+
+Still open: live MySQL/PostgreSQL qualification, browser-level and
+network-kill fault injection, independent re-review of `c94c563b`,
+destination/denial-scope decisions. The controller editor/journal
+binding remains blocked on the previously denied dispatch-envelope
+scope; nothing here bypasses it. All experimental features remain
+disabled by default — offline work, not deployable.
+
 ## Evidence rules (unchanged)
 
 Record exact branch/head/base/merge tree, tested commands with
