@@ -19,7 +19,8 @@ The planner:
 - Enforces explicit repository and pool runner caps and host eligibility. Multiple
   pools belonging to one repository share that repository's cap and weight.
 - Prefers actual unmet queue demand over optional warm-idle targets. Existing idle
-  runners remain charged and count toward the warm target.
+  runners and outstanding/creating warm grants remain charged and count toward
+  the warm target, including unresolved warm attempts.
 - Charges unknown, deleting, orphan and outstanding granted capacity exactly like
   active resources; reducing a desired maximum cannot release a charge.
 - Supports explicit non-pool host charges for unrelated workloads.

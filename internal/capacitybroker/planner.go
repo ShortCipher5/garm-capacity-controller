@@ -37,6 +37,9 @@ type Pool struct {
 	WarmIdle int64
 	// AvailableIdle counts verified idle runners already included in Charges.
 	AvailableIdle int64
+	// PendingWarm counts outstanding/creating warm grants included in Charges.
+	// Keep unresolved warm grants here until authoritatively retired or resolved.
+	PendingWarm   int64
 	OldestWaiting time.Time
 }
 
@@ -151,7 +154,7 @@ func Build(s Snapshot, opt Options) (Plan, error) {
 		}
 	}
 	for id, p := range s.Pools {
-		if id == "" || !valid(p.Size) || p.Size[0] == 0 || p.Size[1] == 0 || p.Size[2] == 0 || p.Size[3] != 1 || p.MaxRunners < 0 || p.Waiting < 0 || p.WarmIdle < 0 || p.AvailableIdle < 0 || p.OldestWaiting.After(opt.Now) || (p.Waiting > 0 && p.OldestWaiting.IsZero()) {
+		if id == "" || !valid(p.Size) || p.Size[0] == 0 || p.Size[1] == 0 || p.Size[2] == 0 || p.Size[3] != 1 || p.MaxRunners < 0 || p.Waiting < 0 || p.WarmIdle < 0 || p.AvailableIdle < 0 || p.PendingWarm < 0 || p.OldestWaiting.After(opt.Now) || (p.Waiting > 0 && p.OldestWaiting.IsZero()) {
 			return Plan{}, ErrSnapshot
 		}
 		if _, ok := s.Repositories[p.Repository]; !ok {
@@ -204,11 +207,11 @@ func Build(s Snapshot, opt Options) (Plan, error) {
 	warm := map[string]int64{}
 	for _, id := range keys {
 		p := s.Pools[id]
-		if p.AvailableIdle > pools[id] {
+		if p.AvailableIdle > pools[id] || p.PendingWarm > pools[id]-p.AvailableIdle {
 			return Plan{}, ErrSnapshot
 		}
 		queued[id] = p.Waiting
-		warm[id] = max(int64(0), p.WarmIdle-p.AvailableIdle)
+		warm[id] = max(int64(0), p.WarmIdle-p.AvailableIdle-p.PendingWarm)
 		out.RemainingQueued[id] = p.Waiting
 	}
 	for phase := 0; phase < 2; phase++ {

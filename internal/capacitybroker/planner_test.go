@@ -164,3 +164,48 @@ func TestAssignmentsNeverExceedAnyDimension(t *testing.T) {
 		}
 	}
 }
+
+func TestPendingWarmGrantSatisfiesTargetAcrossFreshSnapshots(t *testing.T) {
+	s, o := fixture()
+	for id, p := range s.Pools {
+		p.Waiting = 0
+		p.WarmIdle = 1
+		s.Pools[id] = p
+	}
+	p, e := Build(s, o)
+	if e != nil || len(p.Assignments) != 2 {
+		t.Fatalf("%+v %v", p, e)
+	}
+	for _, a := range p.Assignments {
+		s.Charges = append(s.Charges, Charge{ID: "warm-" + a.Pool, Host: a.Host, Pool: a.Pool, Resources: a.Resources})
+		policy := s.Pools[a.Pool]
+		policy.PendingWarm++
+		s.Pools[a.Pool] = policy
+	}
+	s.Revision = "r2"
+	s.ObservedAt = s.ObservedAt.Add(time.Second)
+	o.Now = s.ObservedAt
+	p, e = Build(s, o)
+	if e != nil || len(p.Assignments) != 0 {
+		t.Fatalf("pending warm duplicated: %+v %v", p, e)
+	}
+	// A subsequent unresolved attempt still occupies both capacity and warm target.
+	s.Revision = "r3"
+	p, e = Build(s, o)
+	if e != nil || len(p.Assignments) != 0 {
+		t.Fatalf("unknown warm duplicated: %+v %v", p, e)
+	}
+	policy := s.Pools["a"]
+	policy.PendingWarm = 0
+	policy.AvailableIdle = 1
+	s.Pools["a"] = policy
+	p, e = Build(s, o)
+	if e != nil || len(p.Assignments) != 0 {
+		t.Fatalf("idle warm duplicated: %+v %v", p, e)
+	}
+	policy.PendingWarm = 1
+	s.Pools["a"] = policy
+	if _, e = Build(s, o); e != ErrSnapshot {
+		t.Fatalf("double-counted warm coverage accepted: %v", e)
+	}
+}
