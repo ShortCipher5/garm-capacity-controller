@@ -38,6 +38,7 @@ type Host struct {
 	Fresh                bool                  `json:"observation_fresh"`
 	ObservedAt           time.Time             `json:"observed_at"`
 	AdmissionPaused      bool                  `json:"new_claims_paused"`
+	CPUCapMillis         int64                 `json:"cpu_cap_millis,omitempty"`
 	Allocation
 }
 type Pool struct {
@@ -253,7 +254,7 @@ func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Ov
 		age := now.Sub(host.ObservedAt)
 		fresh := age >= 0 && age <= state.Config.MaxObservationAge
 		bindingStatus := backendBindingStatus(state, id)
-		result.Hosts = append(result.Hosts, Host{BackendBindingStatus: bindingStatus, Drain: drain, ID: id, Mode: host.Mode, Healthy: host.Healthy, Fresh: fresh, ObservedAt: host.ObservedAt, AdmissionPaused: bindingStatus != "bound_observation" || !provision || !state.Ready || host.Mode != "enabled" || !host.Healthy || !fresh, Allocation: Allocation{host.Budget, state.Allocated.Hosts[id]}})
+		result.Hosts = append(result.Hosts, Host{BackendBindingStatus: bindingStatus, Drain: drain, ID: id, Mode: host.Mode, Healthy: host.Healthy, Fresh: fresh, ObservedAt: host.ObservedAt, AdmissionPaused: bindingStatus != "bound_observation" || !provision || !state.Ready || host.Mode != "enabled" || !host.Healthy || !fresh, CPUCapMillis: host.CPUCapMillis, Allocation: Allocation{host.Budget, state.Allocated.Hosts[id]}})
 	}
 	sort.Slice(result.Hosts, func(i, j int) bool { return result.Hosts[i].ID < result.Hosts[j].ID })
 	for id, pool := range state.Config.Pools {

@@ -58,7 +58,7 @@ type Cancellation struct {
 func scanCancellation(scan func(...any) error) (Cancellation, error) {
 	var result Cancellation
 	var at string
-	err := scan(&result.Request.Key, &result.Request.Pool, &result.Request.Host, &result.Request.Resources.CPU, &result.Request.Resources.RAM, &result.Request.Resources.Runners, &at)
+	err := scan(&result.Request.Key, &result.Request.Pool, &result.Request.Host, &result.Request.Resources.CPU, &result.Request.Resources.RAM, &result.Request.Resources.Disk, &result.Request.Resources.Runners, &at)
 	if err != nil {
 		return Cancellation{}, err
 	}
@@ -69,7 +69,7 @@ func scanCancellation(scan func(...any) error) (Cancellation, error) {
 	return result, nil
 }
 func cancellationRecord(tx *sql.Tx, key string) (Cancellation, error) {
-	return scanCancellation(tx.QueryRow("SELECT request_key,pool,host,cpu,ram,runners,cancelled_at FROM cancellations WHERE request_key=?", key).Scan)
+	return scanCancellation(tx.QueryRow("SELECT request_key,pool,host,cpu,ram,disk,runners,cancelled_at FROM cancellations WHERE request_key=?", key).Scan)
 }
 
 // sqliteRecentCancellations is bounded administrative history ONLY, never key
@@ -79,7 +79,7 @@ func sqliteRecentCancellations(tx *sql.Tx) (map[string]Cancellation, int64, erro
 	if err := tx.QueryRow("SELECT total FROM cancellation_totals WHERE id=1").Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := tx.Query("SELECT request_key,pool,host,cpu,ram,runners,cancelled_at FROM cancellations ORDER BY sequence DESC LIMIT 100")
+	rows, err := tx.Query("SELECT request_key,pool,host,cpu,ram,disk,runners,cancelled_at FROM cancellations ORDER BY sequence DESC LIMIT 100")
 	if err != nil {
 		return nil, 0, err
 	}
@@ -191,7 +191,7 @@ func (s *SQLiteStore) CancelUndispatched(ctx context.Context, req Request) (Canc
 		if at.IsZero() {
 			return ErrConflict
 		}
-		if _, err := tx.Exec("INSERT INTO cancellations(request_key,pool,host,cpu,ram,runners,cancelled_at) VALUES(?,?,?,?,?,?,?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Runners, at.Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.Exec("INSERT INTO cancellations(request_key,pool,host,cpu,ram,disk,runners,cancelled_at) VALUES(?,?,?,?,?,?,?,?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, at.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 		deleted, err := tx.Exec("DELETE FROM reservations WHERE request_key=?", req.Key)

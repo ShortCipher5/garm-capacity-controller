@@ -128,7 +128,7 @@ func (s *SQLiteStore) StoreCreateObservation(ctx context.Context, req Request, o
 		}
 		var current Request
 		var state string
-		if err := tx.QueryRow("SELECT request_key,pool,host,cpu,ram,runners,state FROM reservations WHERE request_key=?", req.Key).Scan(&current.Key, &current.Pool, &current.Host, &current.Resources.CPU, &current.Resources.RAM, &current.Resources.Runners, &state); err != nil {
+		if err := tx.QueryRow("SELECT request_key,pool,host,cpu,ram,disk,runners,state FROM reservations WHERE request_key=?", req.Key).Scan(&current.Key, &current.Pool, &current.Host, &current.Resources.CPU, &current.Resources.RAM, &current.Resources.Disk, &current.Resources.Runners, &state); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrCreateEvidence
 			}

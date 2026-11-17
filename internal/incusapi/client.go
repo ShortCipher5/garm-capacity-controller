@@ -34,10 +34,11 @@ const maxBody = 8 << 20
 // Client owns its TLS/HTTP configuration. Endpoint and project must come from
 // trusted administration, never a job, repository label or provider request.
 type Client struct {
-	base    url.URL
-	project string
-	http    *http.Client
-	pin     *identityPinState
+	base        url.URL
+	project     string
+	storagePool string
+	http        *http.Client
+	pin         *identityPinState
 }
 
 func New(endpoint, project string, credentials *tls.Config) (*Client, error) {

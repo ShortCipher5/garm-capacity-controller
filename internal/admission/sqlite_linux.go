@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 9
+const sqliteCurrentVersion = 10
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -257,6 +257,19 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 10 {
+			for _, table := range []string{"reservations", "inventory", "cancellations"} {
+				if err := sqliteAddDiskColumn(tx, table); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(sqliteProfileUsageSchema); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v10", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -381,7 +394,7 @@ func sqliteAudit(tx *sql.Tx, kind, key string, now time.Time) error {
 }
 
 func sqliteReservations(tx *sql.Tx) (map[string]Reservation, error) {
-	rows, err := tx.Query("SELECT request_key,pool,host,cpu,ram,runners,state,created_at FROM reservations")
+	rows, err := tx.Query("SELECT request_key,pool,host,cpu,ram,disk,runners,state,created_at FROM reservations")
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +403,7 @@ func sqliteReservations(tx *sql.Tx) (map[string]Reservation, error) {
 	for rows.Next() {
 		var r Reservation
 		var created string
-		if err := rows.Scan(&r.Request.Key, &r.Request.Pool, &r.Request.Host, &r.Request.Resources.CPU, &r.Request.Resources.RAM, &r.Request.Resources.Runners, &r.State, &created); err != nil {
+		if err := rows.Scan(&r.Request.Key, &r.Request.Pool, &r.Request.Host, &r.Request.Resources.CPU, &r.Request.Resources.RAM, &r.Request.Resources.Disk, &r.Request.Resources.Runners, &r.State, &created); err != nil {
 			return nil, err
 		}
 		r.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
@@ -415,7 +428,7 @@ type InventoryResource struct {
 }
 
 func sqliteInventory(tx *sql.Tx) ([]InventoryResource, error) {
-	rows, err := tx.Query("SELECT resource_id,host,pool,COALESCE(reservation_key,''),cpu,ram,runners,state FROM inventory ORDER BY host,resource_id")
+	rows, err := tx.Query("SELECT resource_id,host,pool,COALESCE(reservation_key,''),cpu,ram,disk,runners,state FROM inventory ORDER BY host,resource_id")
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +436,7 @@ func sqliteInventory(tx *sql.Tx) ([]InventoryResource, error) {
 	var result []InventoryResource
 	for rows.Next() {
 		var resource InventoryResource
-		if err := rows.Scan(&resource.ID, &resource.Host, &resource.Pool, &resource.ReservationKey, &resource.Resources.CPU, &resource.Resources.RAM, &resource.Resources.Runners, &resource.State); err != nil {
+		if err := rows.Scan(&resource.ID, &resource.Host, &resource.Pool, &resource.ReservationKey, &resource.Resources.CPU, &resource.Resources.RAM, &resource.Resources.Disk, &resource.Resources.Runners, &resource.State); err != nil {
 			return nil, err
 		}
 		if !validInventory(resource) {
@@ -473,6 +486,7 @@ func sqliteAllocations(config Config, reservations map[string]Reservation, inven
 			charge = Resources{
 				CPU:     max(0, resource.Resources.CPU-r.Request.Resources.CPU),
 				RAM:     max(0, resource.Resources.RAM-r.Request.Resources.RAM),
+				Disk:    max(0, resource.Resources.Disk-r.Request.Resources.Disk),
 				Runners: 0,
 			}
 		}
@@ -552,7 +566,7 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		if !fits(allocated.Global, req.Resources, config.Global) || !fits(allocated.Hosts[req.Host], req.Resources, host.Budget) || !fits(allocated.Pools[req.Pool], req.Resources, pool.Budget) {
 			return deny("denied_capacity", ErrDenied)
 		}
-		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,runners,state,created_at) VALUES(?,?,?,?,?,?,'creating',?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
+		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at) VALUES(?,?,?,?,?,?,?,'creating',?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
@@ -715,8 +729,8 @@ func (s *SQLiteStore) CompleteReconciliation(ctx context.Context, fence Fence, s
 				}
 				link = resource.ReservationKey
 			}
-			_, err := tx.Exec(`INSERT INTO inventory(host,resource_id,pool,reservation_key,cpu,ram,runners,state) VALUES(?,?,?,?,?,?,?,?)
-ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),ram=MAX(inventory.ram,excluded.ram),state=excluded.state`, resource.Host, resource.ID, resource.Pool, link, resource.Resources.CPU, resource.Resources.RAM, resource.Resources.Runners, resource.State)
+			_, err := tx.Exec(`INSERT INTO inventory(host,resource_id,pool,reservation_key,cpu,ram,disk,runners,state) VALUES(?,?,?,?,?,?,?,?,?)
+ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),ram=MAX(inventory.ram,excluded.ram),disk=MAX(inventory.disk,excluded.disk),state=excluded.state`, resource.Host, resource.ID, resource.Pool, link, resource.Resources.CPU, resource.Resources.RAM, resource.Resources.Disk, resource.Resources.Runners, resource.State)
 			if err != nil {
 				return err
 			}

@@ -17,12 +17,13 @@ var ErrPolicyConflict = errors.New("policy changed; refresh before retrying")
 // PolicyChange only edits existing ledger policy. It never registers a host or
 // pool, contacts Garm, drains runners, deletes resources or releases charges.
 type PolicyChange struct {
-	Revision string     `json:"revision"`
-	Action   string     `json:"action"`
-	Target   string     `json:"target"`
-	Budget   *Resources `json:"budget,omitempty"`
-	Mode     string     `json:"mode,omitempty"`
-	Reason   string     `json:"reason"`
+	Revision     string     `json:"revision"`
+	Action       string     `json:"action"`
+	Target       string     `json:"target"`
+	Budget       *Resources `json:"budget,omitempty"`
+	CPUCapMillis *int64     `json:"cpu_cap_millis,omitempty"`
+	Mode         string     `json:"mode,omitempty"`
+	Reason       string     `json:"reason"`
 }
 
 // PolicyRevision excludes health observations, so periodic reconciliation does
@@ -31,8 +32,9 @@ type PolicyChange struct {
 // transaction, not in the HTTP handler.
 func PolicyRevision(config Config) string {
 	type hostPolicy struct {
-		Budget Resources `json:"budget"`
-		Mode   string    `json:"mode"`
+		Budget       Resources `json:"budget"`
+		Mode         string    `json:"mode"`
+		CPUCapMillis int64     `json:"cpu_cap_millis,omitempty"`
 	}
 	type policy struct {
 		Global Resources
@@ -42,7 +44,7 @@ func PolicyRevision(config Config) string {
 	}
 	value := policy{config.Global, map[string]hostPolicy{}, config.Pools, int64(config.MaxObservationAge)}
 	for id, host := range config.Hosts {
-		value.Hosts[id] = hostPolicy{host.Budget, host.Mode}
+		value.Hosts[id] = hostPolicy{host.Budget, host.Mode, host.CPUCapMillis}
 	}
 	data, _ := json.Marshal(value)
 	sum := sha256.Sum256(data)
@@ -81,7 +83,7 @@ func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange
 		var old any
 		switch change.Action {
 		case "global_budget":
-			if change.Target != "" || change.Budget == nil || change.Mode != "" {
+			if change.Target != "" || change.Budget == nil || change.Mode != "" || change.CPUCapMillis != nil {
 				return ErrDenied
 			}
 			old = config.Global
@@ -95,10 +97,18 @@ func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange
 				if change.Budget == nil || change.Mode != "" {
 					return ErrDenied
 				}
+				if change.CPUCapMillis != nil {
+					// The cap is display-only today, but it must never exceed the
+					// host CPU budget it annotates. Zero clears the cap.
+					if *change.CPUCapMillis < 0 || (*change.CPUCapMillis > 0 && *change.CPUCapMillis > change.Budget.CPU) {
+						return ErrDenied
+					}
+					host.CPUCapMillis = *change.CPUCapMillis
+				}
 				old = host.Budget
 				host.Budget = *change.Budget
 			} else {
-				if change.Budget != nil || (change.Mode != "enabled" && change.Mode != "disabled") {
+				if change.Budget != nil || change.CPUCapMillis != nil || (change.Mode != "enabled" && change.Mode != "disabled") {
 					return ErrDenied
 				}
 				old = host.Mode
@@ -107,7 +117,7 @@ func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange
 			config.Hosts[change.Target] = host
 		case "pool_budget":
 			pool, ok := config.Pools[change.Target]
-			if !ok || change.Mode != "" || change.Budget == nil {
+			if !ok || change.Mode != "" || change.Budget == nil || change.CPUCapMillis != nil {
 				return ErrDenied
 			}
 			old = pool.Budget
@@ -116,7 +126,7 @@ func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange
 		default:
 			return ErrDenied
 		}
-		if change.Budget != nil && (change.Budget.CPU > 9007199254740991 || change.Budget.RAM > 9007199254740991 || change.Budget.Runners > 9007199254740991) {
+		if change.Budget != nil && (change.Budget.CPU > 9007199254740991 || change.Budget.RAM > 9007199254740991 || change.Budget.Disk > 9007199254740991 || change.Budget.Runners > 9007199254740991) {
 			return ErrDenied
 		}
 		if validateConfig(config) != nil {

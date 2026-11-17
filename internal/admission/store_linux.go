@@ -20,10 +20,13 @@ var (
 	ErrUncertain = errors.New("store unavailable after uncertain persistence")
 )
 
-// Resources uses integer millicores, MiB and runner counts. Budgets are finite.
+// Resources uses integer millicores, MiB and runner counts. A zero disk budget
+// means the disk dimension is not budgeted and constrains nothing; a zero disk
+// request or reservation means the profile did not specify disk.
 type Resources struct {
 	CPU     int64 `json:"cpu_millis"`
 	RAM     int64 `json:"ram_mib"`
+	Disk    int64 `json:"disk_mib"`
 	Runners int64 `json:"runners"`
 }
 
@@ -32,6 +35,10 @@ type Host struct {
 	Mode       string    `json:"mode"`
 	Healthy    bool      `json:"healthy"`
 	ObservedAt time.Time `json:"observed_at"`
+	// CPUCapMillis is an optional fair-use sustained CPU display cap. Zero means
+	// unset. It does not constrain admission yet; creation enforcement is a later
+	// slice. When positive it must not exceed the host CPU budget.
+	CPUCapMillis int64 `json:"cpu_cap_millis,omitempty"`
 }
 
 type Pool struct {
@@ -288,11 +295,11 @@ func (s *Store) Snapshot() (Ledger, error) {
 }
 
 func nonnegative(r Resources) bool {
-	return r.CPU >= 0 && r.RAM >= 0 && r.Runners >= 0
+	return r.CPU >= 0 && r.RAM >= 0 && r.Disk >= 0 && r.Runners >= 0
 }
 
 func validRequest(r Request) bool {
-	return len(r.Key) > 0 && len(r.Key) <= 256 && len(r.Host) > 0 && len(r.Pool) > 0 && r.Resources.CPU > 0 && r.Resources.RAM > 0 && r.Resources.Runners == 1
+	return len(r.Key) > 0 && len(r.Key) <= 256 && len(r.Host) > 0 && len(r.Pool) > 0 && r.Resources.CPU > 0 && r.Resources.RAM > 0 && r.Resources.Disk >= 0 && r.Resources.Runners == 1
 }
 
 func validState(state string) bool {
@@ -308,7 +315,7 @@ func validateConfig(c Config) error {
 		return errors.New("invalid policy")
 	}
 	for name, h := range c.Hosts {
-		if name == "" || !nonnegative(h.Budget) || (h.Mode != "enabled" && h.Mode != "draining" && h.Mode != "disabled") || h.ObservedAt.IsZero() {
+		if name == "" || !nonnegative(h.Budget) || h.CPUCapMillis < 0 || (h.Mode != "enabled" && h.Mode != "draining" && h.Mode != "disabled") || h.ObservedAt.IsZero() {
 			return errors.New("invalid host policy")
 		}
 	}
@@ -335,17 +342,32 @@ func contains(values []string, value string) bool {
 }
 
 func fits(used, request, budget Resources) bool {
-	// Subtraction after the bounds check avoids integer overflow.
-	return used.CPU <= budget.CPU && request.CPU <= budget.CPU-used.CPU && used.RAM <= budget.RAM && request.RAM <= budget.RAM-used.RAM && used.Runners <= budget.Runners && request.Runners <= budget.Runners-used.Runners
+	// Subtraction after the bounds check avoids integer overflow. CPU, RAM and
+	// runner budgets keep the legacy fail-closed semantics: a zero budget denies
+	// any positive request. Disk follows the v10 semantics: a zero disk budget
+	// means the dimension is not budgeted and constrains nothing.
+	return fitsBounded(used.CPU, request.CPU, budget.CPU) && fitsBounded(used.RAM, request.RAM, budget.RAM) && fitsBounded(used.Runners, request.Runners, budget.Runners) && fitsDisk(used.Disk, request.Disk, budget.Disk)
+}
+
+func fitsBounded(used, request, budget int64) bool {
+	return used <= budget && request <= budget-used
+}
+
+func fitsDisk(used, request, budget int64) bool {
+	if budget == 0 {
+		return true
+	}
+	return used <= budget && request <= budget-used
 }
 
 func accumulate(total *Resources, value Resources) bool {
 	const max = int64(1<<63 - 1)
-	if value.CPU > max-total.CPU || value.RAM > max-total.RAM || value.Runners > max-total.Runners {
+	if value.CPU > max-total.CPU || value.RAM > max-total.RAM || value.Disk > max-total.Disk || value.Runners > max-total.Runners {
 		return false
 	}
 	total.CPU += value.CPU
 	total.RAM += value.RAM
+	total.Disk += value.Disk
 	total.Runners += value.Runners
 	return true
 }
