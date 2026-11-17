@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 10
+const sqliteCurrentVersion = 11
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -270,6 +270,14 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 11 {
+			if _, err := tx.Exec(sqliteReleaseSchema); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v11", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -453,7 +461,7 @@ type Allocations struct {
 	Pools  map[string]Resources `json:"pools"`
 }
 
-func sqliteAllocations(config Config, reservations map[string]Reservation, inventory []InventoryResource) (Allocations, error) {
+func sqliteAllocations(config Config, reservations map[string]Reservation, inventory []InventoryResource, released map[string]bool) (Allocations, error) {
 	total := Allocations{Hosts: map[string]Resources{}, Pools: map[string]Resources{}}
 	add := func(host, pool string, resources Resources) error {
 		if _, ok := config.Hosts[host]; !ok {
@@ -470,6 +478,12 @@ func sqliteAllocations(config Config, reservations map[string]Reservation, inven
 		return nil
 	}
 	for _, r := range reservations {
+		// The immutable release tombstone retires the charge; the reservation
+		// row itself stays because dispatch/create-evidence history references
+		// it by foreign key and that journal is never rewritten.
+		if released[r.Request.Key] {
+			continue
+		}
 		if err := add(r.Request.Host, r.Request.Pool, r.Request.Resources); err != nil {
 			return Allocations{}, err
 		}
@@ -483,11 +497,18 @@ func sqliteAllocations(config Config, reservations map[string]Reservation, inven
 				return Allocations{}, errors.New("conflicting reservation binding")
 			}
 			linked[resource.ReservationKey] = true
-			charge = Resources{
-				CPU:     max(0, resource.Resources.CPU-r.Request.Resources.CPU),
-				RAM:     max(0, resource.Resources.RAM-r.Request.Resources.RAM),
-				Disk:    max(0, resource.Resources.Disk-r.Request.Resources.Disk),
-				Runners: 0,
+			if released[resource.ReservationKey] {
+				// A guest that reappears under a released identity is an
+				// unverified orphan: charge it in full instead of letting the
+				// retired identity absorb it.
+				charge = resource.Resources
+			} else {
+				charge = Resources{
+					CPU:     max(0, resource.Resources.CPU-r.Request.Resources.CPU),
+					RAM:     max(0, resource.Resources.RAM-r.Request.Resources.RAM),
+					Disk:    max(0, resource.Resources.Disk-r.Request.Resources.Disk),
+					Runners: 0,
+				}
 			}
 		}
 		if err := add(resource.Host, resource.Pool, charge); err != nil {
@@ -527,6 +548,14 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		if released, err := releaseRecord(tx, req.Key); err == nil {
+			if released.Request != req {
+				return deny("denied_released_identity_conflict", ErrConflict)
+			}
+			return deny("denied_released_request", ErrDenied)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		if existing, ok := reservations[req.Key]; ok {
 			if existing.Request != req {
 				return deny("denied_identity_conflict", ErrConflict)
@@ -559,7 +588,11 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		if err != nil {
 			return err
 		}
-		allocated, err := sqliteAllocations(config, reservations, inventory)
+		released, err := sqliteReleasedKeys(tx)
+		if err != nil {
+			return err
+		}
+		allocated, err := sqliteAllocations(config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}
@@ -739,7 +772,11 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 		if err != nil {
 			return err
 		}
-		if _, err := sqliteAllocations(config, reservations, inventory); err != nil {
+		released, err := sqliteReleasedKeys(tx)
+		if err != nil {
+			return err
+		}
+		if _, err := sqliteAllocations(config, reservations, inventory, released); err != nil {
 			return err
 		}
 		encoded, err := json.Marshal(config)
@@ -826,7 +863,11 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 		if err != nil {
 			return err
 		}
-		result.Allocated, err = sqliteAllocations(result.Config, result.Reservations, result.Inventory)
+		released, err := sqliteReleasedKeys(tx)
+		if err != nil {
+			return err
+		}
+		result.Allocated, err = sqliteAllocations(result.Config, result.Reservations, result.Inventory, released)
 		if err != nil {
 			return err
 		}

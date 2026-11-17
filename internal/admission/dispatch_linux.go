@@ -178,7 +178,11 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 				return deny("dispatch_denied_existing_resource", ErrDispatchClaimed)
 			}
 		}
-		allocated, err := sqliteAllocations(config, reservations, inventory)
+		released, err := sqliteReleasedKeys(tx)
+		if err != nil {
+			return err
+		}
+		allocated, err := sqliteAllocations(config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}

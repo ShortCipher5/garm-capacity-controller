@@ -129,6 +129,37 @@ func (c *Client) List(ctx context.Context, pool string) ([]common.ProviderInstan
 	return result, nil
 }
 
+// Delete retires exactly one verified runner. A nil error with a non-released
+// outcome still means the charge remains and the caller must not claim
+// deletion; only OutcomeReleased confirms the gateway observed absence and
+// freed the reservation. A lost response is resolved by re-presenting the same
+// identity, which replays from the durable tombstone.
+func (c *Client) Delete(ctx context.Context, request DeletionRequest) (DeletionResponse, error) {
+	if request.Controller == "" || request.Name == "" || request.PoolID == "" {
+		return DeletionResponse{}, ErrConfiguration
+	}
+	var result DeletionResponse
+	if err := c.call(ctx, "/v1/delete", request, &result); err != nil {
+		return DeletionResponse{}, err
+	}
+	if result.Name != request.Name || result.PoolID != request.PoolID {
+		return DeletionResponse{}, ErrUnavailable
+	}
+	switch result.Outcome {
+	case OutcomeReleased:
+		if result.Resources == nil || result.Resources.CPU <= 0 || result.Resources.RAM <= 0 || result.Resources.Runners != 1 {
+			return DeletionResponse{}, ErrUnavailable
+		}
+	case OutcomeAlreadyReleased, OutcomeStillCharged:
+		if result.Resources != nil {
+			return DeletionResponse{}, ErrUnavailable
+		}
+	default:
+		return DeletionResponse{}, ErrUnavailable
+	}
+	return result, nil
+}
+
 // CancelAdmission only returns the gateway's strict tombstone receipt. A lost
 // response is not proof of release; retrying the exact identity is idempotent.
 func (c *Client) CancelAdmission(ctx context.Context, request garmprotocol.Request) (garmprotocol.CancellationResponse, error) {

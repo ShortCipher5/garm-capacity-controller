@@ -83,6 +83,41 @@ type Identity struct {
 	Name   string `json:"name"`
 	PoolID string `json:"pool_id"`
 }
+
+// DeletionRequest is the provider-side retirement request. The controller
+// identity must match the facade's enrolled controller; a listed controller
+// certificate alone is not cross-controller authority.
+type DeletionRequest struct {
+	Controller string `json:"controller"`
+	Name       string `json:"name"`
+	PoolID     string `json:"pool_id"`
+}
+
+// ReleasedResources is the bounded charge the ledger freed for one runner.
+type ReleasedResources struct {
+	CPU     int64 `json:"cpu_millis"`
+	RAM     int64 `json:"ram_mib"`
+	Disk    int64 `json:"disk_mib"`
+	Runners int64 `json:"runners"`
+}
+
+// DeletionResponse carries the durable disposition. OutcomeReleased includes
+// the freed resources; OutcomeAlreadyReleased and OutcomeStillCharged never
+// claim a deletion happened on this call.
+type DeletionResponse struct {
+	Name      string             `json:"name"`
+	PoolID    string             `json:"pool_id"`
+	Outcome   string             `json:"outcome"`
+	Resources *ReleasedResources `json:"resources,omitempty"`
+}
+
+// Outcome values mirror the gateway's durable deletion outcomes.
+const (
+	OutcomeReleased        = string(gateway.DeletionReleased)
+	OutcomeAlreadyReleased = string(gateway.DeletionAlreadyReleased)
+	OutcomeStillCharged    = string(gateway.DeletionStillCharged)
+)
+
 type AdmissionResult struct {
 	ExitCode int             `json:"exit_code"`
 	Response json.RawMessage `json:"response"`
@@ -133,7 +168,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnsupportedMediaType)
 		return
 	}
-	if (r.URL.Path == "/v1/admit" || r.URL.Path == "/v1/create" || r.URL.Path == "/v1/cancel-admission" || sourceCommand) && !h.provision {
+	if (r.URL.Path == "/v1/admit" || r.URL.Path == "/v1/create" || r.URL.Path == "/v1/cancel-admission" || r.URL.Path == "/v1/delete" || sourceCommand) && !h.provision {
 		fail(http.StatusForbidden)
 		return
 	}
@@ -213,6 +248,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result = instance
+	case "/v1/delete":
+		var request DeletionRequest
+		if Decode(r.Body, &request) != nil {
+			fail(http.StatusBadRequest)
+			return
+		}
+		receipt, err := h.facade.Delete(r.Context(), request.Controller, request.PoolID, request.Name)
+		if err != nil {
+			fail(http.StatusServiceUnavailable)
+			return
+		}
+		response := DeletionResponse{Name: request.Name, PoolID: request.PoolID, Outcome: string(receipt.Outcome)}
+		if receipt.Outcome == gateway.DeletionReleased {
+			response.Resources = &ReleasedResources{CPU: receipt.Request.Resources.CPU, RAM: receipt.Request.Resources.RAM, Disk: receipt.Request.Resources.Disk, Runners: receipt.Request.Resources.Runners}
+		}
+		result = response
 	case "/v1/list":
 		var request Identity
 		if Decode(r.Body, &request) != nil || request.Name != "" {

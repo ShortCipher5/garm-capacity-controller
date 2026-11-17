@@ -120,6 +120,16 @@ func (b *backend) Instances(context.Context) ([]incusapi.Instance, error) {
 func (b *backend) Operations(context.Context) ([]incusapi.Operation, error) {
 	return []incusapi.Operation{}, nil
 }
+func (b *backend) Delete(_ context.Context, name string) (incusapi.Deletion, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.instances[name]; !ok {
+		return incusapi.Deletion{}, ErrUnavailable
+	}
+	delete(b.instances, name)
+	return incusapi.Deletion{OperationID: "12345678-1234-1234-1234-123456789abc", ResourceID: name}, nil
+}
+func (b *backend) WaitDeletion(context.Context, incusapi.Deletion) error { return nil }
 
 type source struct{}
 

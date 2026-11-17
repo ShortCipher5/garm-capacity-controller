@@ -113,6 +113,27 @@ func (b *backendFixture) Operations(context.Context) ([]incusapi.Operation, erro
 	}
 	return append([]incusapi.Operation(nil), b.operations...), nil
 }
+func (b *backendFixture) Delete(_ context.Context, name string) (incusapi.Deletion, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.readFail {
+		return incusapi.Deletion{}, ErrUnavailable
+	}
+	if _, ok := b.instances[name]; !ok {
+		return incusapi.Deletion{}, ErrUnavailable
+	}
+	delete(b.instances, name)
+	return incusapi.Deletion{OperationID: operation, ResourceID: name}, nil
+}
+func (b *backendFixture) WaitDeletion(_ context.Context, deletion incusapi.Deletion) error {
+	if deletion.OperationID != operation {
+		return ErrUnavailable
+	}
+	if b.fail {
+		return errors.New("private-delete-fault")
+	}
+	return nil
+}
 
 type garmRows []GarmInstance
 

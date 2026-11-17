@@ -19,7 +19,8 @@ func providerView(instance incusapi.Instance, policy PoolPolicy) common.Provider
 }
 
 // Get never converts a failed read or uncertain dispatch to provider-not-found.
-// Proof-based absence and retirement are deliberately not implemented yet.
+// Absence proof only exists in Delete, after a terminal delete operation plus
+// two matching project-scoped reads; this read never retires a runner.
 func (f *Facade) Get(ctx context.Context, name, pool string) (common.ProviderInstance, error) {
 	plan, policy, err := f.planned(ctx, name, pool)
 	req := plan.Request

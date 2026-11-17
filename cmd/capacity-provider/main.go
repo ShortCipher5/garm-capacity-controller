@@ -1,6 +1,7 @@
 // capacity-provider speaks the opt-in Garm v0.1.1 external provider interface.
 // Its private configuration contains gateway-only mTLS credentials, never Incus
-// keys, Garm API tokens or database paths. Unsupported destructive commands fail.
+// keys, Garm API tokens or database paths. Destructive commands reach only the
+// authenticated gateway's verified lifecycle, never raw infrastructure.
 package main
 
 import (
@@ -16,6 +17,13 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 	common "github.com/cloudbase/garm-provider-common/params"
 )
+
+// exitCodeNotFound mirrors garm-provider-common execution/common.ExitCodeNotFound,
+// pinned at 30 in garm-provider-common v0.1.9 and documented in
+// docs/stock-garm-provider-capacity-behavior.md: stock GARM tolerates it in
+// DeleteInstance as an idempotent not-found. The literal is used instead of
+// the import so the provider adds no new module checksums.
+const exitCodeNotFound = 30
 
 type configuration struct {
 	Gateway       string                `json:"gateway"`
@@ -57,7 +65,7 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	}
 	// Refuse unsupported commands before loading any credentials or networking.
 	switch command {
-	case "AdmitInstance", "CancelAdmission", "RecordPreparation", "ValidatePreparation", "CreateInstance", "GetInstance", "ListInstances":
+	case "AdmitInstance", "CancelAdmission", "RecordPreparation", "ValidatePreparation", "CreateInstance", "GetInstance", "ListInstances", "DeleteInstance":
 	default:
 		return 1
 	}
@@ -182,12 +190,35 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 			return 1
 		}
 		return 0
+	case "DeleteInstance":
+		name := getenv("GARM_INSTANCE_ID")
+		if name == "" {
+			return 1
+		}
+		response, err := client.Delete(ctx, gatewayrpc.DeletionRequest{Controller: config.Controller, Name: name, PoolID: pool})
+		if err != nil {
+			return 1
+		}
+		switch response.Outcome {
+		case gatewayrpc.OutcomeReleased:
+			return 0
+		case gatewayrpc.OutcomeAlreadyReleased:
+			// The gateway durably confirmed this guest is already retired and
+			// its charge freed: stock GARM treats provider-common NotFound as
+			// an idempotent success.
+			return exitCodeNotFound
+		default:
+			// release_failed_still_charged: the gateway kept the charge. Exit
+			// non-zero WITHOUT claiming deletion; GARM's retry backoff
+			// re-enters the idempotent gateway path.
+			return 1
+		}
 	}
 	return 1
 }
 func main() {
 	code := run(context.Background(), os.Getenv, os.Stdin, os.Stdout)
-	if code != 0 && code != garmprotocol.DeferredExitCode {
+	if code != 0 && code != garmprotocol.DeferredExitCode && code != exitCodeNotFound {
 		fmt.Fprintln(os.Stderr, "capacity provider request unavailable")
 	}
 	os.Exit(code)

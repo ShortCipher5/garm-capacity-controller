@@ -174,7 +174,11 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 				return deny("placement_denied_existing_name", ErrConflict)
 			}
 		}
-		allocated, err := sqliteAllocations(config, reservations, inventory)
+		released, err := sqliteReleasedKeys(tx)
+		if err != nil {
+			return err
+		}
+		allocated, err := sqliteAllocations(config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}

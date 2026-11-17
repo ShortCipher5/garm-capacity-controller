@@ -21,6 +21,7 @@ import (
 
 var ErrPolicy = errors.New("provider request conflicts with trusted policy")
 var ErrUnavailable = errors.New("provider state unavailable; allocation remains charged")
+var ErrNotFound = errors.New("runner is unknown, unlinked or unproven in this ledger")
 
 // Backend is implemented by the concrete mTLS incusapi.Client. Only the gateway
 // owner supplies implementations; a repository or browser cannot register one.
@@ -30,6 +31,8 @@ type Backend interface {
 	Instance(context.Context, string) (incusapi.Instance, error)
 	Instances(context.Context) ([]incusapi.Instance, error)
 	Operations(context.Context) ([]incusapi.Operation, error)
+	Delete(context.Context, string) (incusapi.Deletion, error)
+	WaitDeletion(context.Context, incusapi.Deletion) error
 }
 
 // PoolPolicy is trusted server configuration. Host is the legacy single-host
