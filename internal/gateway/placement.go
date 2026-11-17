@@ -2,10 +2,13 @@ package gateway
 
 import (
 	"context"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
-	common "github.com/cloudbase/garm-provider-common/params"
 	"reflect"
 	"sort"
+	"strings"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
+	common "github.com/cloudbase/garm-provider-common/params"
 )
 
 func placementHosts(policy PoolPolicy) ([]string, error) {
@@ -49,18 +52,31 @@ func (f *Facade) planned(ctx context.Context, name, pool string) (admission.Exec
 
 // accountingRequest resolves an already charged reservation independently of
 // mutable pool defaults. Orphans may be charged only to an actually observed
-// host; an unlocated Garm row cannot guess a multi-host placement.
-func (f *Facade) accountingRequest(state admission.SQLiteSnapshot, name, pool, observedHost string) (admission.Request, error) {
-	req, policy, err := f.request(name, pool)
-	if err != nil {
-		return admission.Request{}, err
+// host; an unlocated Garm row cannot guess a multi-host placement. Existing
+// charges are returned from the durable reservation, so a deleted runner-size
+// profile cannot orphan them; only a NEW orphan charge resolves the profile,
+// and a missing profile fails closed instead of inventing a charge.
+func (f *Facade) accountingRequest(ctx context.Context, state admission.SQLiteSnapshot, name, pool, observedHost string) (admission.Request, error) {
+	policy, ok := f.pools[pool]
+	if !ok || name == "" || strings.ContainsRune(name, 0) {
+		return admission.Request{}, ErrPolicy
 	}
-	if reservation, exists := state.Reservations[req.Key]; exists {
+	id := key(f.controller, pool, name)
+	if reservation, exists := state.Reservations[id]; exists {
 		old := reservation.Request
-		if old.Key != req.Key || old.Pool != pool || f.hosts[old.Host] == nil || (observedHost != "" && old.Host != observedHost) {
+		if old.Key != id || old.Pool != pool || f.hosts[old.Host] == nil || (observedHost != "" && old.Host != observedHost) {
 			return admission.Request{}, ErrUnavailable
 		}
 		return old, nil
+	}
+	resources, err := f.resources(ctx, policy)
+	if err != nil {
+		return admission.Request{}, err
+	}
+	req := admission.Request{Key: id, Pool: pool, Host: policy.Hosts[0], Resources: resources}
+	spec := incusapi.InstanceSpec{Name: name, Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: resources.CPU, RAMMiB: resources.RAM, DiskMiB: resources.Disk, UserData: "validation", ControllerID: f.controller, PoolID: pool, ReservationKey: id}
+	if incusapi.ValidateSpec(spec) != nil {
+		return admission.Request{}, ErrPolicy
 	}
 	if observedHost != "" {
 		if f.hosts[observedHost] == nil {
@@ -77,9 +93,12 @@ func (f *Facade) accountingRequest(state admission.SQLiteSnapshot, name, pool, o
 
 // A stored plan preserves history, not an exemption from a later trusted
 // startup-policy revocation. Refuse drift; never substitute the new image or
-// move the old reservation. Current ledger budgets/eligibility are rechecked
-// atomically by claim. This cannot revoke another still-running process.
-func (f *Facade) planAllowed(plan admission.ExecutionPlan) bool {
+// move the old reservation. Size-profiled pools compare against the CURRENT
+// stored profile, so a profile edit revokes in-flight plans: the charge stays
+// until authoritative release and new admits take the edited profile. Current
+// ledger budgets/eligibility are rechecked atomically by claim. This cannot
+// revoke another still-running process.
+func (f *Facade) planAllowed(ctx context.Context, plan admission.ExecutionPlan) bool {
 	current, ok := f.pools[plan.Request.Pool]
 	if !ok {
 		return false
@@ -90,5 +109,12 @@ func (f *Facade) planAllowed(plan admission.ExecutionPlan) bool {
 			hostAllowed = true
 		}
 	}
-	return hostAllowed && plan.Request.Resources == (admission.Resources{CPU: current.CPU, RAM: current.RAM, Runners: 1}) && reflect.DeepEqual(plan.Execution, executionImage(f.controller, plan.Execution.Name, current))
+	if !hostAllowed {
+		return false
+	}
+	resources, err := f.resources(ctx, current)
+	if err != nil {
+		return false
+	}
+	return plan.Request.Resources == resources && reflect.DeepEqual(plan.Execution, executionImage(f.controller, plan.Execution.Name, current))
 }

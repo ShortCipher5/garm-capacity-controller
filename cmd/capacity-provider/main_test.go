@@ -203,6 +203,74 @@ type brokenDiscoveryOutput struct{}
 
 func (brokenDiscoveryOutput) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
+func TestDeleteInstanceMapsGatewayOutcomesToExitCodes(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/delete" {
+			t.Error("wrong delete route")
+			http.Error(w, "route", http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Controller string `json:"controller"`
+			Name       string `json:"name"`
+			PoolID     string `json:"pool_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Controller != "controller-a" || body.Name != "runner-1" || body.PoolID != "pool-a" {
+			t.Errorf("unsafe delete request %+v %v", body, err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		switch requests.Add(1) {
+		case 1:
+			_, _ = w.Write([]byte(`{"name":"runner-1","pool_id":"pool-a","outcome":"released","resources":{"cpu_millis":1000,"ram_mib":1024,"disk_mib":0,"runners":1}}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"name":"runner-1","pool_id":"pool-a","outcome":"already_released"}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"name":"runner-1","pool_id":"pool-a","outcome":"release_failed_still_charged"}`))
+		default:
+			http.Error(w, "private-gateway-fault", http.StatusBadGateway)
+		}
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	write := func(name string, data []byte) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	key, err := x509.MarshalPKCS8PrivateKey(server.TLS.Certificates[0].PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := configuration{Gateway: server.URL, Controller: "controller-a", TLS: securefiles.TLSFiles{CA: write("ca.pem", cert), Certificate: write("client.pem", cert), Key: write("client.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}))}}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"GARM_COMMAND": "DeleteInstance", "GARM_INTERFACE_VERSION": "v0.1.1", "GARM_PROVIDER_CONFIG_FILE": write("provider.json", raw), "GARM_CONTROLLER_ID": "controller-a", "GARM_POOL_ID": "pool-a", "GARM_INSTANCE_ID": "runner-1"}
+	var output bytes.Buffer
+	if exit := run(context.Background(), environment(env), strings.NewReader(""), &output); exit != 0 || output.Len() != 0 || requests.Load() != 1 {
+		t.Fatalf("released delete exit=%d output=%s requests=%d", exit, &output, requests.Load())
+	}
+	if exit := run(context.Background(), environment(env), strings.NewReader(""), &output); exit != 30 || requests.Load() != 2 {
+		t.Fatalf("idempotent replay exit=%d requests=%d", exit, requests.Load())
+	}
+	if exit := run(context.Background(), environment(env), strings.NewReader(""), &output); exit != 1 || requests.Load() != 3 {
+		t.Fatalf("still-charged outcome must not claim deletion exit=%d requests=%d", exit, requests.Load())
+	}
+	if exit := run(context.Background(), environment(env), strings.NewReader(""), &output); exit != 1 || requests.Load() != 4 {
+		t.Fatalf("gateway fault exit=%d requests=%d", exit, requests.Load())
+	}
+	delete(env, "GARM_INSTANCE_ID")
+	if exit := run(context.Background(), environment(env), strings.NewReader(""), &output); exit != 1 || requests.Load() != 4 {
+		t.Fatalf("missing instance id reached gateway exit=%d requests=%d", exit, requests.Load())
+	}
+}
+
 func TestDiscoveryOutputFailureReturnsNonzeroWithoutConfigurationAccess(t *testing.T) {
 	for _, command := range []string{"GetVersion", "GetConfigJSONSchema", "GetSupportedInterfaceVersions", "GetExtraSpecsJSONSchema"} {
 		t.Run(command, func(t *testing.T) {

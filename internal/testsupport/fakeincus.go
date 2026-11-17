@@ -37,6 +37,22 @@ const FakeIncusDeleteOperation = "87654321-4321-4321-a321-cba987654321"
 const fakeInstanceUUID = "11111111-1111-4111-8111-111111111111"
 const fakeGeneration = "22222222-2222-4222-8222-222222222222"
 
+// fakeGuestUsage is one guest's measured instance-state utilization: cumulative
+// CPU time in nanoseconds plus current memory and disk usage in bytes.
+type fakeGuestUsage struct {
+	cpuNanos    int64
+	memoryBytes int64
+	diskBytes   int64
+}
+
+// fakeHostResources is the bounded /1.0/resources snapshot: total CPU count,
+// total memory in bytes and per-disk (size, usage) byte pairs.
+type fakeHostResources struct {
+	cpuTotal    int64
+	memoryBytes int64
+	disks       [][2]int64
+}
+
 // FakeIncus is a stateful fake Incus 6.0.4 daemon for tests only. It serves
 // the narrow route set the verified transport exercises (root, create, wait,
 // named identity read, recursive inventories, force delete, delete-operation
@@ -49,6 +65,8 @@ type FakeIncus struct {
 	mu               sync.Mutex
 	configs          map[string]map[string]string
 	createdAt        map[string]string
+	usage            map[string]fakeGuestUsage
+	hostResources    fakeHostResources
 	guestVisible     bool
 	deleteFaulty     bool
 	waitFaulty       bool
@@ -61,13 +79,33 @@ type FakeIncus struct {
 	DeletePolls   atomic.Int32
 	IdentityReads atomic.Int32
 	AbsenceReads  atomic.Int32
+	StateReads    atomic.Int32
+	ResourceReads atomic.Int32
+}
+
+// SetGuestUsage configures one guest's measured instance-state utilization:
+// cumulative CPU time in nanoseconds, current memory usage in bytes and
+// current disk usage in bytes. It is the fixture behind the /state route.
+func (f *FakeIncus) SetGuestUsage(name string, cpuNanos, memoryBytes, diskBytes int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.usage[name] = fakeGuestUsage{cpuNanos: cpuNanos, memoryBytes: memoryBytes, diskBytes: diskBytes}
+}
+
+// SetHostResources configures the bounded /1.0/resources snapshot: total CPU
+// count, total memory in bytes and per-disk (size, usage) byte pairs. Until
+// configured the route reports zeros, which clients read as unknown.
+func (f *FakeIncus) SetHostResources(cpuTotal, memoryBytes int64, disks [][2]int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hostResources = fakeHostResources{cpuTotal: cpuTotal, memoryBytes: memoryBytes, disks: disks}
 }
 
 // NewFakeIncus starts a mutually-authenticated fake daemon and returns it with
 // an already-constructed verified client (project "runners").
 func NewFakeIncus(t testing.TB, serverName string) *FakeIncus {
 	t.Helper()
-	fake := &FakeIncus{configs: map[string]map[string]string{}, createdAt: map[string]string{}, guestVisible: true}
+	fake := &FakeIncus{configs: map[string]map[string]string{}, createdAt: map[string]string{}, usage: map[string]fakeGuestUsage{}, guestVisible: true}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +209,7 @@ func (f *FakeIncus) guestRow(name string) (map[string]any, bool) {
 	for k, v := range config {
 		expanded[k] = v
 	}
-	return map[string]any{"name": name, "status_code": 103, "created_at": f.createdAt[name], "expanded_config": expanded}, true
+	return map[string]any{"name": name, "status": "Running", "status_code": 103, "created_at": f.createdAt[name], "expanded_config": expanded}, true
 }
 
 func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
@@ -224,6 +262,16 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/1.0":
 		f.writeSync(w, f.rootMetadata())
+	case "/1.0/resources":
+		f.ResourceReads.Add(1)
+		f.mu.Lock()
+		resources := f.hostResources
+		f.mu.Unlock()
+		disks := []any{}
+		for _, disk := range resources.disks {
+			disks = append(disks, map[string]any{"size": disk[0], "usage": disk[1]})
+		}
+		f.writeSync(w, map[string]any{"cpu": map[string]any{"total": resources.cpuTotal}, "memory": map[string]any{"total": resources.memoryBytes}, "disk": disks})
 	case "/1.0/instances":
 		if r.URL.Query().Get("recursion") != "1" {
 			http.Error(w, "incomplete inventory query", http.StatusBadRequest)
@@ -278,7 +326,17 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		if len(r.URL.Path) > len("/1.0/instances/") && strings.HasSuffix(r.URL.Path, "/state") {
 			name := r.URL.Path[len("/1.0/instances/") : len(r.URL.Path)-len("/state")]
 			if _, ok := f.guestRow(name); ok {
-				f.writeSync(w, map[string]any{"status_code": 103})
+				f.StateReads.Add(1)
+				metadata := map[string]any{"status_code": 103}
+				f.mu.Lock()
+				usage, found := f.usage[name]
+				f.mu.Unlock()
+				if found {
+					metadata["cpu"] = map[string]any{"usage": usage.cpuNanos}
+					metadata["memory"] = map[string]any{"usage": usage.memoryBytes}
+					metadata["disk"] = []any{map[string]any{"usage": map[string]any{"usage_bytes": usage.diskBytes}}}
+				}
+				f.writeSync(w, metadata)
 				return
 			}
 			http.NotFound(w, r)

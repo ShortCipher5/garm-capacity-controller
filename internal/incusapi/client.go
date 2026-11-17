@@ -323,6 +323,7 @@ func validateTrustedRoot(response envelope, requireCreate bool) error {
 // InstanceSpec is produced by trusted gateway policy. It deliberately has no
 // arbitrary config/device/remote-image URL map. Explicit instance limits win
 // over mutable profile limits. Initial transport supports whole vCPU budgets.
+// DiskMiB is an optional root-disk size bound; zero sends no disk limit.
 type InstanceSpec struct {
 	Name             string
 	Type             string
@@ -330,6 +331,7 @@ type InstanceSpec struct {
 	ImageFingerprint string
 	CPUMillis        int64
 	RAMMiB           int64
+	DiskMiB          int64
 	UserData         string
 	ControllerID     string
 	PoolID           string
@@ -344,7 +346,7 @@ type Created struct {
 // Create sends exactly one POST, never automatically retries or compensates by
 // deletion. A returned error after dispatch is unknown, not proof of absence.
 func ValidateSpec(spec InstanceSpec) error {
-	if !name(spec.Name) || (spec.Type != "container" && spec.Type != "virtual-machine") || len(spec.Profiles) == 0 || len(spec.Profiles) > 16 || !fingerprint(spec.ImageFingerprint) || !fingerprint(spec.ReservationKey) || spec.CPUMillis <= 0 || spec.CPUMillis%1000 != 0 || spec.RAMMiB <= 0 || spec.RAMMiB > int64(1<<63-1)/(1<<20) || len(spec.UserData) == 0 || len(spec.UserData) > 1<<20 || !utf8.ValidString(spec.UserData) || !label(spec.ControllerID) || !label(spec.PoolID) {
+	if !name(spec.Name) || (spec.Type != "container" && spec.Type != "virtual-machine") || len(spec.Profiles) == 0 || len(spec.Profiles) > 16 || !fingerprint(spec.ImageFingerprint) || !fingerprint(spec.ReservationKey) || spec.CPUMillis <= 0 || spec.CPUMillis%1000 != 0 || spec.RAMMiB <= 0 || spec.RAMMiB > int64(1<<63-1)/(1<<20) || spec.DiskMiB < 0 || len(spec.UserData) == 0 || len(spec.UserData) > 1<<20 || !utf8.ValidString(spec.UserData) || !label(spec.ControllerID) || !label(spec.PoolID) {
 		return ErrConfiguration
 	}
 	seen := map[string]bool{}
@@ -368,14 +370,22 @@ func (c *Client) Create(ctx context.Context, spec InstanceSpec) (Created, error)
 	if spec.Type == "container" {
 		config["limits.memory.enforce"] = "hard"
 	}
+	// A nonzero disk bound overrides the profile's root device size at the
+	// instance level. Like the bounded-inventory root-disk read, this is
+	// best-effort: not every storage backend can quota containers.
+	var devices map[string]map[string]string
+	if spec.DiskMiB > 0 {
+		devices = map[string]map[string]string{"root": {"type": "disk", "path": "/", "size": strconv.FormatInt(spec.DiskMiB, 10) + "MiB"}}
+	}
 	payload := struct {
-		Name     string            `json:"name"`
-		Type     string            `json:"type"`
-		Profiles []string          `json:"profiles"`
-		Config   map[string]string `json:"config"`
-		Source   map[string]string `json:"source"`
-		Start    bool              `json:"start"`
-	}{spec.Name, spec.Type, spec.Profiles, config, map[string]string{"type": "image", "fingerprint": spec.ImageFingerprint}, true}
+		Name     string                       `json:"name"`
+		Type     string                       `json:"type"`
+		Profiles []string                     `json:"profiles"`
+		Config   map[string]string            `json:"config"`
+		Devices  map[string]map[string]string `json:"devices,omitempty"`
+		Source   map[string]string            `json:"source"`
+		Start    bool                         `json:"start"`
+	}{spec.Name, spec.Type, spec.Profiles, config, devices, map[string]string{"type": "image", "fingerprint": spec.ImageFingerprint}, true}
 	response, err := c.request(ctx, http.MethodPost, "/1.0/instances", nil, payload)
 	if err != nil {
 		return Created{}, err

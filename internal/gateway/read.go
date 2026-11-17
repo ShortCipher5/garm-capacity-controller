@@ -61,7 +61,7 @@ func (f *Facade) List(ctx context.Context, pool string) ([]common.ProviderInstan
 			if instance.ControllerID != f.controller || instance.PoolID != pool {
 				continue
 			}
-			req, err := f.accountingRequest(state, instance.Name, pool, host)
+			req, err := f.accountingRequest(ctx, state, instance.Name, pool, host)
 			if err != nil || seen[instance.Name] || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || (instance.ReservationKey != "" && instance.ReservationKey != req.Key) {
 				return nil, ErrUnavailable
 			}

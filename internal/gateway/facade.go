@@ -38,12 +38,16 @@ type Backend interface {
 // PoolPolicy is trusted server configuration. Host is the legacy single-host
 // shorthand; Hosts enables atomic durable selection. Flavor/Image are Garm-side
 // identifiers; neither can override the pinned image or explicit allocation.
+// Profiles lists Incus profiles applied verbatim to instances; SizeProfile
+// names a ledger runner-size profile that supplies the charged CPU/RAM/disk
+// per runner. The two concepts never mix.
 type PoolPolicy struct {
 	Host        string        `json:"host,omitempty"`
 	Hosts       []string      `json:"hosts,omitempty"`
 	Strategy    string        `json:"strategy,omitempty"`
 	CPU         int64         `json:"cpu_millis"`
 	RAM         int64         `json:"ram_mib"`
+	SizeProfile string        `json:"size_profile,omitempty"`
 	Flavor      string        `json:"flavor"`
 	Image       string        `json:"image"`
 	Fingerprint string        `json:"image_fingerprint"`
@@ -112,7 +116,15 @@ func New(ctx context.Context, store *admission.SQLiteStore, controller string, p
 		}
 		policy.Hosts = ids
 
-		spec := incusapi.InstanceSpec{Name: "policy-validation", Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: policy.CPU, RAMMiB: policy.RAM, UserData: "validation", ControllerID: controller, PoolID: id, ReservationKey: strings.Repeat("0", 64)}
+		cpu, ram, disk := policy.CPU, policy.RAM, int64(0)
+		if policy.SizeProfile != "" {
+			profile, err := storeProfile(ctx, store, policy.SizeProfile)
+			if err != nil {
+				return nil, err
+			}
+			cpu, ram, disk = profile.CPUMillis, profile.RAMMiB, profile.DiskMiB
+		}
+		spec := incusapi.InstanceSpec{Name: "policy-validation", Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: cpu, RAMMiB: ram, DiskMiB: disk, UserData: "validation", ControllerID: controller, PoolID: id, ReservationKey: strings.Repeat("0", 64)}
 		if incusapi.ValidateSpec(spec) != nil {
 			return nil, ErrPolicy
 		}
@@ -130,13 +142,48 @@ func New(ctx context.Context, store *admission.SQLiteStore, controller string, p
 	return f, nil
 }
 
-func (f *Facade) request(name, pool string) (admission.Request, PoolPolicy, error) {
+// storeProfile returns the named runner-size profile from the current store.
+// A store read failure is unavailable state; a missing profile is policy
+// drift and must fail closed before any reservation.
+func storeProfile(ctx context.Context, store *admission.SQLiteStore, name string) (admission.Profile, error) {
+	profiles, err := store.Profiles(ctx)
+	if err != nil {
+		return admission.Profile{}, ErrUnavailable
+	}
+	for _, profile := range profiles {
+		if profile.Name == name {
+			return profile, nil
+		}
+	}
+	return admission.Profile{}, ErrPolicy
+}
+
+// resources resolves the per-runner charge for one pool. A configured
+// SizeProfile resolves the CURRENT stored profile, so profile edits take
+// effect without a facade restart; a missing or deleted profile fails closed.
+// Legacy pools keep their fixed CPU/RAM policy values and charge no disk.
+func (f *Facade) resources(ctx context.Context, policy PoolPolicy) (admission.Resources, error) {
+	if policy.SizeProfile == "" {
+		return admission.Resources{CPU: policy.CPU, RAM: policy.RAM, Runners: 1}, nil
+	}
+	profile, err := storeProfile(ctx, f.store, policy.SizeProfile)
+	if err != nil {
+		return admission.Resources{}, err
+	}
+	return admission.Resources{CPU: profile.CPUMillis, RAM: profile.RAMMiB, Disk: profile.DiskMiB, Runners: 1}, nil
+}
+
+func (f *Facade) request(ctx context.Context, name, pool string) (admission.Request, PoolPolicy, error) {
 	policy, ok := f.pools[pool]
 	if !ok || name == "" || strings.ContainsRune(name, 0) {
 		return admission.Request{}, PoolPolicy{}, ErrPolicy
 	}
-	req := admission.Request{Key: key(f.controller, pool, name), Pool: pool, Host: policy.Hosts[0], Resources: admission.Resources{CPU: policy.CPU, RAM: policy.RAM, Runners: 1}}
-	spec := incusapi.InstanceSpec{Name: name, Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: policy.CPU, RAMMiB: policy.RAM, UserData: "validation", ControllerID: f.controller, PoolID: pool, ReservationKey: req.Key}
+	resources, err := f.resources(ctx, policy)
+	if err != nil {
+		return admission.Request{}, PoolPolicy{}, err
+	}
+	req := admission.Request{Key: key(f.controller, pool, name), Pool: pool, Host: policy.Hosts[0], Resources: resources}
+	spec := incusapi.InstanceSpec{Name: name, Type: policy.Type, Profiles: policy.Profiles, ImageFingerprint: policy.Fingerprint, CPUMillis: resources.CPU, RAMMiB: resources.RAM, DiskMiB: resources.Disk, UserData: "validation", ControllerID: f.controller, PoolID: pool, ReservationKey: req.Key}
 	if incusapi.ValidateSpec(spec) != nil {
 		return admission.Request{}, PoolPolicy{}, ErrPolicy
 	}
@@ -149,7 +196,7 @@ func (f *Facade) Admit(ctx context.Context, request garmprotocol.Request) (int, 
 	if request.Validate() != nil {
 		return 0, nil, ErrPolicy
 	}
-	req, policy, err := f.request(request.Name, request.PoolID)
+	req, policy, err := f.request(ctx, request.Name, request.PoolID)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -192,7 +239,7 @@ func (f *Facade) verified(ctx context.Context, req admission.Request, name strin
 func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance) (common.ProviderInstance, error) {
 	plan, policy, err := f.planned(ctx, bootstrap.Name, bootstrap.PoolID)
 	req := plan.Request
-	if err == nil && !f.planAllowed(plan) {
+	if err == nil && !f.planAllowed(ctx, plan) {
 		return common.ProviderInstance{}, ErrUnavailable
 	}
 	if err != nil || bootstrap.Flavor != policy.Flavor || bootstrap.Image != policy.Image || bootstrap.OSType != common.Linux || bootstrap.OSArch != policy.Arch || (len(bootstrap.ExtraSpecs) != 0 && !bytes.Equal(bytes.TrimSpace(bootstrap.ExtraSpecs), []byte("{}"))) {
@@ -219,7 +266,7 @@ func (f *Facade) Create(ctx context.Context, bootstrap common.BootstrapInstance)
 	if err != nil {
 		return common.ProviderInstance{}, ErrPolicy
 	}
-	spec := incusapi.InstanceSpec{Name: bootstrap.Name, Type: policy.Type, Profiles: append([]string(nil), policy.Profiles...), ImageFingerprint: policy.Fingerprint, CPUMillis: policy.CPU, RAMMiB: policy.RAM, UserData: userdata, ControllerID: f.controller, PoolID: req.Pool, ReservationKey: req.Key}
+	spec := incusapi.InstanceSpec{Name: bootstrap.Name, Type: policy.Type, Profiles: append([]string(nil), policy.Profiles...), ImageFingerprint: policy.Fingerprint, CPUMillis: policy.CPU, RAMMiB: policy.RAM, DiskMiB: req.Resources.Disk, UserData: userdata, ControllerID: f.controller, PoolID: req.Pool, ReservationKey: req.Key}
 	if incusapi.ValidateSpec(spec) != nil {
 		return common.ProviderInstance{}, ErrPolicy
 	}

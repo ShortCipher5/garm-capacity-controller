@@ -66,7 +66,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 	preparations := map[[2]string]admission.GarmPreparation{}
 	seen := map[string]bool{}
 	for _, row := range rows {
-		req, err := f.accountingRequest(state, row.Name, row.PoolID, "")
+		req, err := f.accountingRequest(ctx, state, row.Name, row.PoolID, "")
 		if err != nil || seen[row.Name] || (row.ProviderID != "" && row.ProviderID != row.Name) {
 			return ErrUnavailable
 		}
@@ -117,7 +117,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			if !known || physicalNames[instance.Name] || instance.ControllerID != f.controller || instance.CPUMillis <= 0 || instance.RAMMiB <= 0 || hostNames[instance.Name] {
 				return ErrUnavailable
 			}
-			req, err := f.accountingRequest(state, instance.Name, instance.PoolID, host)
+			req, err := f.accountingRequest(ctx, state, instance.Name, instance.PoolID, host)
 			if err != nil {
 				return ErrUnavailable
 			}

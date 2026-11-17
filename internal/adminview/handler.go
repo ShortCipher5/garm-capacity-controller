@@ -154,6 +154,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveHosts(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/profiles" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/profiles/") {
+		h.serveProfiles(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/admin/api/v1/usage/") {
+		h.serveUsage(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/admin/api/") {
 		if r.URL.Path != "/admin/api/v1/overview" {
 			fail(http.StatusNotFound)

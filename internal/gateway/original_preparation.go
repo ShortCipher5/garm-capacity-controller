@@ -201,7 +201,7 @@ func (f *Facade) RecordPreparation(ctx context.Context, request garmprotocol.Pre
 		return garmprotocol.PreparationResponse{}, err
 	}
 	plan, _, err := f.planned(ctx, request.Name, request.PoolID)
-	if err != nil || !f.planAllowed(plan) {
+	if err != nil || !f.planAllowed(ctx, plan) {
 		return garmprotocol.PreparationResponse{}, ErrUnavailable
 	}
 	// First mint must precede visibility. This defensive read complements, rather

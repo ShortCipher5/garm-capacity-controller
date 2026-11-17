@@ -78,6 +78,32 @@ The full provisional contract (revision 10) is attached in this PR as
 comparison document: it does not publish an interface, grant authority,
 or assert deployability.
 
+## Host utilization monitoring (experimental offline slice)
+
+An experimental, flag-disabled slice adds historical resource
+monitoring on this branch:
+
+- `--allow-experimental-monitoring` starts a `internal/hostmetrics`
+  collector inside the gateway, sharing the reconcile loop's lifecycle
+  and the same verified per-host Incus clients the gateway provisions
+  through. It is off by default.
+- Every interval (default 60s, minimum 15s) the collector samples each
+  host's guest-state utilization (`SampleUtilization`: cumulative CPU
+  nanoseconds, RAM MiB, disk MiB) plus `HostTotals`. The recorded
+  `cpu_used_millis` is a rate derived from consecutive cumulative
+  readings over the actual elapsed wall clock; the first reading per
+  host is a baseline only, and a counter reset (daemon restart)
+  re-baselines silently instead of producing a negative sample.
+- Samples are appended to the admission usage history with source
+  `guest-state` and are exposed read-only at
+  `GET /admin/api/v1/usage/{host}?since=<RFC3339>&limit=<n>` on the
+  separately authorized admin surface. One failing host backs off
+  independently and never blocks the others.
+- Samples are monitoring data only: they never gate admission, fits,
+  charges or retirement. A host without samples returns an empty array
+  with 200 — monitoring absence means unavailable, never fabricated
+  zeros, so UI history gaps stay visibly gaps.
+
 ## Ordered next work
 
 1. **Physical authority design gates everything.** Produce an
@@ -100,6 +126,13 @@ or assert deployability.
    terminal evidence from a qualified verifier; handle lost
    acknowledgements, concurrent job assignment, crash/restart and
    restored databases.
+   An experimental offline-only slice now exists on this branch:
+   gateway delete with a durable 'deleting' mark, one force delete,
+   terminal wait and two matching project-scoped absence reads bound
+   to the original-create incarnation release the charge in one
+   BEGIN IMMEDIATE transaction. It is not qualified retirement — no
+   physical fence, external-writer or job-assignment authority — and
+   no live deployment is enabled.
 4. **Combined-system qualification.** Concurrent writers, legacy
    bypass attempts, entity/auth boundaries, commit failure, lost ACK
    and duplicate delivery, process restart, database restore/clone,
@@ -401,6 +434,36 @@ host inventory, safe retirement, onboarding/two-way sync, live
 backup/recovery, native destination selection, denial-scope resolution.
 All conditional behavior is opt-in and off by default; the native work
 remains experimental review refs, not deployable.
+
+## Runner-size profiles capability (2026-11-17)
+
+An experimental, fixture-tested-only slice adds ledger runner-size profiles
+on this branch:
+
+- `internal/admission` stores named profiles (whole-vCPU `cpu_millis`,
+  positive `ram_mib`, non-negative `disk_mib`; zero disk ignores the
+  dimension) and reports per-host fit estimates from current remaining
+  budgets (`ProfileEstimate`).
+- `internal/gateway` `PoolPolicy.SizeProfile` selects a profile per pool,
+  distinct from `PoolPolicy.Profiles`, which remains the verbatim Incus
+  profile list applied to instances. Resolution reads the current store at
+  admit/dispatch time, so profile edits take effect without a facade
+  restart; a missing or deleted profile fails closed with a policy error,
+  and a profile edit revokes in-flight plans while their charges stay
+  durable. The profile disk flows into the admission request, so
+  host/global/pool disk budgets constrain placement, and into the Incus
+  create payload as an instance-level root-disk size.
+- `internal/adminview` exposes the profiles API under
+  `/admin/api/v1/profiles` (list with per-enabled-host estimates, upsert,
+  delete, single-host estimate) with the usual read/management credential
+  split. Deleting a profile that a pool policy still references succeeds;
+  the response documents that the next dispatch against such a pool fails
+  closed.
+
+Label-based association of pools to profiles (for example deriving the
+size profile from pool metadata) is future work; today the association is
+explicit trusted gateway configuration. No live system was contacted; all
+coverage is fixture-based and the capability is not deployable.
 
 ## Evidence rules (unchanged)
 

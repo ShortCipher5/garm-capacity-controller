@@ -265,7 +265,7 @@ func qualifyActualSourcePreparation(t *testing.T, work, mode string) {
 	initializeRuntimeFixture(t, &config)
 	serviceCtx, stopService := context.WithCancel(ctx)
 	serviceDone := make(chan error, 1)
-	go func() { serviceDone <- serveOnListener(serviceCtx, config, true, listener) }()
+	go func() { serviceDone <- serveOnListener(serviceCtx, config, true, false, listener) }()
 	defer func() {
 		stopService()
 		select {

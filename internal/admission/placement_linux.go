@@ -69,7 +69,7 @@ func validExecution(image ExecutionImage, req Request) bool {
 	if image.Flavor == "" || len(image.Flavor) > 256 || image.Image == "" || len(image.Image) > 256 || len(image.Profiles) > 16 || (image.Arch != "amd64" && image.Arch != "arm64") || executionKey(image, req.Pool) != req.Key {
 		return false
 	}
-	return incusapi.ValidateSpec(incusapi.InstanceSpec{Name: image.Name, Type: image.Type, Profiles: image.Profiles, ImageFingerprint: image.Fingerprint, CPUMillis: req.Resources.CPU, RAMMiB: req.Resources.RAM, UserData: "validation", ControllerID: image.Controller, PoolID: req.Pool, ReservationKey: req.Key}) == nil
+	return incusapi.ValidateSpec(incusapi.InstanceSpec{Name: image.Name, Type: image.Type, Profiles: image.Profiles, ImageFingerprint: image.Fingerprint, CPUMillis: req.Resources.CPU, RAMMiB: req.Resources.RAM, DiskMiB: req.Resources.Disk, UserData: "validation", ControllerID: image.Controller, PoolID: req.Pool, ReservationKey: req.Key}) == nil
 }
 func executionPlanRecord(tx *sql.Tx, key string) (ExecutionPlan, error) {
 	var raw, hash, at string

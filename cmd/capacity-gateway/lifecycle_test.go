@@ -224,7 +224,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			initializeRuntimeFixture(t, &config)
-			go func() { done <- serveOnListeners(ctx, config, provision, listener, adminListener) }()
+			go func() { done <- serveOnListeners(ctx, config, provision, false, listener, adminListener) }()
 			defer cancel()
 			clientTLS := &tls.Config{RootCAs: keys.root, Certificates: []tls.Certificate{keys.provider}, MinVersion: tls.VersionTLS13}
 			client, err := gatewayrpc.NewClient("https://"+address, clientTLS)

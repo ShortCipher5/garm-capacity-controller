@@ -225,7 +225,7 @@ func qualifyPinnedProviderWire(t *testing.T, work, goBinary, mode string) {
 	running, cancelService := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	initializeRuntimeFixture(t, &config)
-	go func() { done <- serveOnListener(running, config, true, listener) }()
+	go func() { done <- serveOnListener(running, config, true, false, listener) }()
 	defer func() {
 		cancelService()
 		select {

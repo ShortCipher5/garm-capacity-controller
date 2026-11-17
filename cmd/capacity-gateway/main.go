@@ -20,6 +20,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gatewayrpc"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/hostmetrics"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
@@ -60,7 +61,7 @@ func (redactedConnectionLog) Write(message []byte) (int, error) {
 	return len(message), nil
 }
 
-func serve(ctx context.Context, config configuration, provision bool) error {
+func serve(ctx context.Context, config configuration, provision, monitoring bool) error {
 	// Initial listener is deliberately local-only even though it also requires
 	// verified mTLS and a leaf allowlist. Use a private reverse tunnel if needed;
 	// never terminate client verification in an unauthenticated proxy.
@@ -73,16 +74,16 @@ func serve(ctx context.Context, config configuration, provision bool) error {
 	if err != nil {
 		return err
 	}
-	return serveOnListener(ctx, config, provision, listener)
+	return serveOnListener(ctx, config, provision, monitoring, listener)
 }
 
 // A supplied listener is used by the offline integration tests; production calls
 // still validate and create an explicit loopback listener above.
-func serveOnListener(ctx context.Context, config configuration, provision bool, listener net.Listener) error {
-	return serveOnListeners(ctx, config, provision, listener, nil)
+func serveOnListener(ctx context.Context, config configuration, provision, monitoring bool, listener net.Listener) error {
+	return serveOnListeners(ctx, config, provision, monitoring, listener, nil)
 }
 
-func serveOnListeners(ctx context.Context, config configuration, provision bool, listener, adminListener net.Listener) error {
+func serveOnListeners(ctx context.Context, config configuration, provision, monitoring bool, listener, adminListener net.Listener) error {
 	defer listener.Close()
 	address, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !address.IP.IsLoopback() {
@@ -97,6 +98,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 	}
 	defer store.Close()
 	backends := map[string]gateway.Backend{}
+	monitors := map[string]hostmetrics.Source{}
 	for id, host := range config.Hosts {
 		credentials, err := securefiles.LoadTLS(host.TLS)
 		if err != nil {
@@ -108,6 +110,14 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 		}
 		defer client.Close()
 		backends[id] = client
+		monitors[id] = client
+	}
+	var collector *hostmetrics.Collector
+	if monitoring {
+		collector, err = hostmetrics.New(monitors, store, hostmetrics.Options{Log: func(event string) { log.Print(event) }})
+		if err != nil {
+			return err
+		}
 	}
 	token, err := securefiles.Read(config.Garm.TokenFile, 16384)
 	if err != nil {
@@ -225,7 +235,16 @@ func serveOnListeners(ctx context.Context, config configuration, provision bool,
 			}
 		}
 	}()
-	defer func() { cancel(); <-loopDone }()
+	monitorDone := make(chan struct{})
+	if collector != nil {
+		go func() {
+			defer close(monitorDone)
+			collector.Run(runctx)
+		}()
+	} else {
+		close(monitorDone)
+	}
+	defer func() { cancel(); <-loopDone; <-monitorDone }()
 	var adminDone chan error
 	if adminServer != nil {
 		adminDone = make(chan error, 1)
@@ -275,6 +294,7 @@ func main() {
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
 	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
+	monitoring := flag.Bool("allow-experimental-monitoring", false, "allow periodic host utilization sampling into the admission usage history; monitoring data never gates admission, fits or retirement")
 	flag.Parse()
 	raw, err := securefiles.Read(*configPath, 1<<20)
 	if err != nil {
@@ -317,7 +337,7 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	if err := serve(ctx, config, *provision); err != nil {
+	if err := serve(ctx, config, *provision, *monitoring); err != nil {
 		fmt.Fprintln(os.Stderr, "gateway unavailable; no automatic recovery or deployment attempted")
 		os.Exit(1)
 	}

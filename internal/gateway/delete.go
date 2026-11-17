@@ -74,7 +74,7 @@ func (f *Facade) Delete(ctx context.Context, controller, pool, name string) (Del
 	if err != nil {
 		return DeletionReceipt{}, ErrUnavailable
 	}
-	req, err := f.accountingRequest(state, name, pool, "")
+	req, err := f.accountingRequest(ctx, state, name, pool, "")
 	if err != nil {
 		return DeletionReceipt{}, ErrPolicy
 	}
