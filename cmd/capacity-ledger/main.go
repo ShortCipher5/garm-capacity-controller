@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 
 const usage = `Usage:
   capacity-ledger initialize --destination NEW_LEDGER --identity-file NEW_IDENTITY --policy PRIVATE_POLICY_JSON
+  capacity-ledger assess-recovery --source EXISTING_LEDGER [--after REQUEST_KEY] [--limit 100]
   capacity-ledger backup --source EXISTING_LEDGER --destination NEW_BACKUP
   capacity-ledger restore --source BACKUP --destination NEW_LEDGER --old-writers-fenced
 
@@ -41,6 +43,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		fmt.Fprint(stdout, usage)
 		return 0
+	}
+	if len(args) > 0 && args[0] == "assess-recovery" {
+		return assessRecovery(ctx, args[1:], stdout, stderr)
 	}
 	if len(args) > 0 && args[0] == "initialize" {
 		return initialize(ctx, args[1:], stdout, stderr)
@@ -140,5 +145,31 @@ func initialize(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 1
 	}
 	fmt.Fprintln(stdout, "new runtime ledger initialized; admission blocked; independent private identity created; no service started or recovery performed")
+	return 0
+}
+
+// assessRecovery only emits an advisory snapshot. No resume/repair flags exist.
+func assessRecovery(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("assess-recovery", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	source := flags.String("source", "", "existing private ledger")
+	after := flags.String("after", "", "exclusive request key cursor")
+	limit := flags.Int("limit", 100, "maximum entries, 1 to 100")
+	if err := flags.Parse(args); errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, usage)
+		return 0
+	} else if err != nil || flags.NArg() != 0 || *source == "" || *limit < 1 || *limit > 100 {
+		fmt.Fprintln(stderr, "invalid assessment arguments; use capacity-ledger --help")
+		return 2
+	}
+	report, err := admission.AssessRecoverySQLiteFile(ctx, *source, *after, *limit)
+	if err != nil {
+		fmt.Fprintln(stderr, "recovery assessment unavailable: requires an existing private current ledger; nothing migrated, repaired or resumed")
+		return 1
+	}
+	if json.NewEncoder(stdout).Encode(report) != nil {
+		fmt.Fprintln(stderr, "recovery assessment output failed")
+		return 1
+	}
 	return 0
 }
