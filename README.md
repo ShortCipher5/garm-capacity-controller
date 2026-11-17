@@ -25,6 +25,8 @@ The full goal also includes safe lifecycle management and historical measured us
 
 ## Current boundaries
 
+Physical deletion and project-observation-based release are blocked by the [retirement safety hold](docs/retirement-safety-hold.md). Provisioning opt-in does not override it. This is not an automatic capacity-recycling implementation.
+
 | Component | Implemented | Remaining qualification |
 | --- | --- | --- |
 | Admission | SQLite WAL/FULL, `BEGIN IMMEDIATE`, atomic budget/reservation/audit and process-race tests | One authoritative local ledger, not distributed consensus |
