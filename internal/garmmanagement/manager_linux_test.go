@@ -36,6 +36,7 @@ type fakeRemote struct {
 	fail          error
 	apply         bool
 	hook          func()
+	reflect       func() garmapi.ManagedPool
 }
 
 func (f *fakeRemote) ManagementIdentity() string { return strings.Repeat("c", 64) }
@@ -46,6 +47,9 @@ func (f *fakeRemote) Pool(context.Context, string) (garmapi.ManagedPool, error) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
+	if f.reflect != nil {
+		return f.reflect(), f.fail
+	}
 	return f.pool, nil
 }
 func (f *fakeRemote) Repository(context.Context, string) (garmapi.ManagedRepository, error) {

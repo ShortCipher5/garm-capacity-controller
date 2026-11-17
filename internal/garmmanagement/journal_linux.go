@@ -330,7 +330,7 @@ func (j *Journal) finish(ctx context.Context, id, state string, result []byte) e
 		return ErrJournal
 	}
 	return j.transaction(ctx, func(tx *sql.Tx) error {
-		update, err := tx.Exec("UPDATE intents SET state=?,result_json=?,updated_at=? WHERE request_id=? AND state='pending'", state, result, timestamp(), id)
+		update, err := tx.Exec("UPDATE intents SET state=?,result_json=?,updated_at=? WHERE request_id=? AND state IN ('pending','unknown')", state, result, timestamp(), id)
 		if err != nil {
 			return ErrJournal
 		}

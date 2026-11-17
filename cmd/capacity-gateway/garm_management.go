@@ -30,6 +30,12 @@ type garmManagementConfiguration struct {
 	// not only the console's pool_ids. This field does not prove that graph.
 	QualifiedAdmissionRouting bool `json:"qualified_admission_routing"`
 	ExclusiveSettingsWriter   bool `json:"exclusive_settings_writer"`
+	// ExperimentalConditionalSettings opts the settings tuple writes
+	// (priority, max_runners, min_idle_runners) on repository-scoped pools
+	// into the native conditional API (If-Match + durable request receipts)
+	// instead of the legacy GET/fingerprint/PUT path. All other fields and
+	// scopes keep the legacy path. Off by default; construction fails closed.
+	ExperimentalConditionalSettings bool `json:"experimental_conditional_settings"`
 }
 
 func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (adminview.GarmManager, func(), error) {
@@ -44,7 +50,7 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 		return nil, noop, nil
 	}
 	remote := config.GarmManagement
-	if remote.DiscoveryOnly && (config.EnableExperimentalGarmManagement || len(remote.PoolIDs) != 0 || len(remote.RepositoryIDs) != 0 || remote.Journal != "" || remote.JournalLineage != "" || remote.QualifiedAdmissionRouting || remote.ExclusiveSettingsWriter) {
+	if remote.DiscoveryOnly && (config.EnableExperimentalGarmManagement || len(remote.PoolIDs) != 0 || len(remote.RepositoryIDs) != 0 || remote.Journal != "" || remote.JournalLineage != "" || remote.QualifiedAdmissionRouting || remote.ExclusiveSettingsWriter || remote.ExperimentalConditionalSettings) {
 		return nil, noop, adminview.ErrConfiguration
 	}
 	if !remote.DiscoveryOnly {
@@ -107,19 +113,40 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 		client.Close()
 		return nil, noop, adminview.ErrConfiguration
 	}
-	manager, err := garmmanagement.New(client, journal)
+	var conditional *garmapi.ConditionalManagementClient
+	if remote.ExperimentalConditionalSettings {
+		conditional, err = garmapi.NewConditionalManagement(garmapi.ManagementConfig{Endpoint: remote.Endpoint, Token: string(token), Trust: trust, Providers: remote.Providers, PoolIDs: remote.PoolIDs, RepositoryIDs: remote.RepositoryIDs, AllowWrites: config.EnableExperimentalGarmManagement, ExperimentalConditionalSettings: true})
+		if err != nil {
+			journal.Close()
+			client.Close()
+			return nil, noop, adminview.ErrConfiguration
+		}
+	}
+	manager, err := garmmanagement.NewConditional(client, journal, conditional)
 	if err != nil {
+		if conditional != nil {
+			conditional.Close()
+		}
 		journal.Close()
 		client.Close()
 		return nil, noop, adminview.ErrConfiguration
 	}
 	adapter, err := adminview.NewJournalledGarm(manager, config.EnableExperimentalGarmManagement, remote.PoolIDs, remote.RepositoryIDs)
 	if err != nil {
+		if conditional != nil {
+			conditional.Close()
+		}
 		journal.Close()
 		client.Close()
 		return nil, noop, err
 	}
-	return adapter, func() { client.Close(); journal.Close() }, nil
+	return adapter, func() {
+		if conditional != nil {
+			conditional.Close()
+		}
+		client.Close()
+		journal.Close()
+	}, nil
 }
 
 // validateGarmManagementRouting rejects obvious scope/placement mismatches at

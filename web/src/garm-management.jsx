@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { GarmConflictDetails } from "./garm-conflict.jsx";
 import { preserveDraftWithLatestInventory, retainGarmDraftConflict, invalidateGarmInventories } from "./garm-observation.js";
 import { garmSettingsChanged } from "./garm-sync.js";
-import { applyGarmChange } from "./garm-client.js";
+import { applyGarmChange, resolveGarmPending } from "./garm-client.js";
 import { canEditGarm, GarmSettingsPresentation, GarmPoolInventory } from "./garm-discovery.jsx";
 
 export function GarmManagement({ read, readEntities, readEntityPools }) {
@@ -76,6 +76,19 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     } catch(error) { if(mounted.current){setMessage(error.message);if(error.message.includes("Garm settings changed or another change is pending")){setNeedsRefresh(true);setReview(null);}if(error.message.includes("outcome")||error.message.includes("confirmation")){uncertain.current=true;setReview(null);}} }
     finally {clearTimeout(timeout);active.current=null;if(mounted.current)setBusy(false);}
   }
+  async function resolvePendingWrite(event) {
+    event.preventDefault();if(active.current || !snapshot?.pending)return;
+    const credential=token.current.value;token.current.value="";
+    const controller=new AbortController();active.current=controller;setBusy(true);setMessage("");
+    const timeout=setTimeout(()=>controller.abort(),15000);
+    try {
+      await resolveGarmPending(credential,snapshot.pending.request_id,{signal:controller.signal});
+      if(!mounted.current)return;
+      uncertain.current=false;setMessage("Pending write resolved as confirmed by the server receipt. Refreshing current settings.");
+      try {const next=await read();if(mounted.current)setSnapshot(next);}catch{if(mounted.current){setSnapshot(null);setMessage("Pending write resolved as confirmed, but current settings could not be refreshed. Refresh Garm settings before another change.");}}
+    } catch(error) { if(mounted.current){setMessage(error.message);if(error.message.includes("outcome")||error.message.includes("confirmation")){uncertain.current=true;}} }
+    finally {clearTimeout(timeout);active.current=null;if(mounted.current)setBusy(false);}
+  }
   const choices=snapshot?(kind==="pool"?snapshot.settings.pools:snapshot.settings.repositories):[], selected=choices.find((v)=>v.id===target);
   const stale=review && (review.kind==="pool"?snapshot?.settings.pools:snapshot?.settings.repositories)?.find((v)=>v.id===review.change.target)?.fingerprint!==review.change.fingerprint;
   const blocked=needsRefresh||syncError||busy||!canEditGarm(snapshot)||snapshot?.write_blocked||uncertain.current||stale;
@@ -96,7 +109,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
     {snapshot && !snapshot.discovery_only && !snapshot.settings_available && <p className="error">Remote settings are unavailable. Durable journal status is still shown; editing stays disabled.</p>}
     {snapshot?.write_blocked && <p className="error">A durable pending or unknown operation blocks Garm writes. Reading fresh state does not fence a delayed write and cannot safely clear this block.</p>}
-    {snapshot?.pending && <p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target}</p>}
+    {snapshot?.pending && <p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target} <button className="quiet" type="button" onClick={resolvePendingWrite} disabled={busy||!canEditGarm(snapshot)}>Resolve pending write</button></p>}
     {uncertain.current && <p className="error">This session has an uncertain write. Further changes are disabled. Inspect journal status and resolve the external operation before reconnecting.</p>}
     {snapshot && !canEditGarm(snapshot) && <p>Garm editing is unavailable. Discovery only.</p>}
     {snapshot && <div hidden={Boolean(review)}><GarmSettingsPresentation snapshot={snapshot}><form key={formEpoch} onSubmit={prepare} onChange={()=>{dirty.current=true;setDraftDirty(true);}}><fieldset disabled={busy || Boolean(review)} style={{border:0,padding:0,margin:0,minWidth:0}}>

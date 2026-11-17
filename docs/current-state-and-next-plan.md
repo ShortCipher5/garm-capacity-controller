@@ -138,57 +138,49 @@ succeeded. The linked PR state is authoritative for the cleanup outcome.
   at the platform level), so this file and its PR serve as the fresh
   status ledger until that restriction changes.
 
-## Native review access (added 2026-11-16)
+## Native review access (consolidated 2026-11-17)
 
 The experimental native commits are available for independent review as
-two read-only refs in this repository (review-only; no PR is opened
-from them and they are not a merge proposal):
+three read-only refs in this repository (review-only; no PR is opened
+from them and they are not a merge proposal). On 2026-11-17 the branch
+inventory was consolidated: 90 stale branches were deleted (merged work,
+superseded docs, closed-PR heads preserved via GitHub `refs/pull/*`, and
+intermediate native review refs whose commits remain reachable from
+`3a714496`). The four remaining branches are `main`,
+`feat/route-revision-guards` (denied material, untouched pending scope
+resolution), and these two experiment lines:
 
-- `review/native-settings-a9d7b0a3` — tip
-  `a9d7b0a3dafb5506ac54ad69e47165dea969d4c1`: the combined server
-  (slices `013ed0e7` + `a895ba25`) and CLI/webapp client (`7e3cc544`)
-  integration merge. Base is upstream
-  `154638445c3949c1958b01812f69d9a1e4d82684` (v0.2.1), an ancestor of
-  the tip. 25 files, +5222/-11: experimental additive files plus
-  changes to existing native paths, including the stock pool-update
-  helper's best-effort revision bump. The new endpoint is flag-gated;
-  this does not mean every changed stock path is flag-gated.
+- `review/native-settings-3a714496` — tip
+  `3a7144960a84d52aaf76489b0a5df78e763a4ed5`: the current native
+  settings experiment, including the second-pass recovery hardening
+  (nonce-owned cross-tab locks, resolve-path 412 hold, flock-based CLI
+  journal locking with profile/server binding, four-quadrant schema
+  audit, legacy-marker upgrade, commit-then-drop-response coverage).
+  Base is upstream `154638445c3949c1958b01812f69d9a1e4d82684` (v0.2.1),
+  an ancestor of the tip. It supersedes the earlier snapshots
+  (`a9d7b0a3`, `a1ff1716`, `494899b8`, `8407d624`, `c94c563b`), all of
+  whose commits remain reachable from this tip.
+- `review/native-settings-c94c563b` — kept as the exact slice the
+  second-pass review examined; fully contained in `3a714496`.
 - `review/capacity-hold-2971b0b6` — tip
   `2971b0b6e9a5e667c8c11abb1139f34a4078e1ca`: the separate offline
-  hold-register leaf package (`experimental/capacityhold`), same base.
-- `review/native-settings-a1ff1716` — tip
-  `a1ff171691edf803f4421e4337b33c6dc8dca139`: review-finding fixes on
-  top of `a9d7b0a3` (details in "Fix status" below). The `a9d7b0a3` ref
-  above remains intact as the reviewed snapshot. Verify with
-  `git rev-parse origin/review/native-settings-a1ff1716` expecting
-  `a1ff171691edf803f4421e4337b33c6dc8dca139`, and the same ancestry and
-  diff commands against that ref.
-- `review/native-settings-494899b8` — tip
-  `494899b8b77331a7b52e5d7a12c263082dda5f19`: request-ID/UNKNOWN-gating/
-  client-recovery slice on top of `a1ff1716` (details in "Recovery slice
-  status" below). Prior refs remain intact. Verify with
-  `git rev-parse origin/review/native-settings-494899b8` expecting
-  `494899b8b77331a7b52e5d7a12c263082dda5f19`.
-- `review/native-settings-8407d624` — tip
-  `8407d6243401f99c1928529749c730798c9e1159`: Workstream A completion
-  (per-pool pending storage, fail-closed persistence, CLI resolve,
-  conflict latch, strict validation, schema-loss detection) on top of
-  `494899b8` (details in "Workstream A status" below). Prior refs remain
-  intact. Verify with `git rev-parse
-  origin/review/native-settings-8407d624` expecting
-  `8407d6243401f99c1928529749c730798c9e1159`.
+  hold-register leaf package (`experimental/capacityhold`), same base;
+  unchanged.
 
 Integrity checks a reviewer can run:
 
 ```sh
-git fetch origin review/native-settings-a9d7b0a3 review/capacity-hold-2971b0b6
-git rev-parse origin/review/native-settings-a9d7b0a3
-# expect a9d7b0a3dafb5506ac54ad69e47165dea969d4c1
+git fetch origin review/native-settings-3a714496 review/capacity-hold-2971b0b6 review/native-settings-c94c563b
+git rev-parse origin/review/native-settings-3a714496
+# expect 3a7144960a84d52aaf76489b0a5df78e763a4ed5
 git rev-parse origin/review/capacity-hold-2971b0b6
 # expect 2971b0b6e9a5e667c8c11abb1139f34a4078e1ca
 git merge-base --is-ancestor 154638445c3949c1958b01812f69d9a1e4d82684 \
-  origin/review/native-settings-a9d7b0a3 && echo base-ok
-git diff 154638445c3949c1958b01812f69d9a1e4d82684..origin/review/native-settings-a9d7b0a3
+  origin/review/native-settings-3a714496 && echo base-ok
+# every earlier native settings snapshot is contained in the current tip:
+git merge-base --is-ancestor origin/review/native-settings-c94c563b \
+  origin/review/native-settings-3a714496 && echo superseded-ok
+git diff 154638445c3949c1958b01812f69d9a1e4d82684..origin/review/native-settings-3a714496
 ```
 
 Git commit IDs identify the exact committed tree and ancestry; the patch
@@ -351,6 +343,62 @@ destination/denial-scope decisions. The controller editor/journal
 binding remains blocked on the previously denied dispatch-envelope
 scope; nothing here bypasses it. All experimental features remain
 disabled by default — offline work, not deployable.
+
+## Conditional client hardening and settings wiring (orchestrator-reported, 2026-11-17)
+
+Addresses every statically reviewable item of review section B, on main:
+
+1. Client library hardening (`internal/garmapi`): replay envelopes are
+   validated against the response ETag (`resulting_etag === ETag`,
+   applied-only outcomes, exact two-key shape) with any mismatch failing
+   closed to UNKNOWN; the patch result is now statically split
+   (`ConditionalPatchResult{Replay|Settings}`, exactly one set) so a
+   replay can never masquerade as pool settings; organization and
+   enterprise scopes fail before any network use with the typed
+   `ErrConditionalScopeUnsupported` (repository scope remains the only
+   implemented scope); the safeguard boundary is documented — the
+   low-level client never enforces controller policy such as the
+   minimum-idle decrease block.
+2. Settings wiring (B.5): the manager (`NewConditional`, off-by-default
+   via the existing `experimental_conditional_settings` config opt-in)
+   routes pool writes that touch only priority/max_runners/min_idle_runners
+   on repository-scoped pools through the native conditional API, inside
+   the unchanged durable journal intent/finish lifecycle; the legacy
+   policy guards (including the minimum-idle decrease safeguard) are
+   mirrored manager-side; tags/enabled/balancing and non-repository
+   scopes keep the legacy path. Confirmed results are refreshed through
+   a legacy read. Definitive conditional rejections (400/403/404/409/
+   422/428/scope) are journaled as rejected, not unknown.
+3. Authoritative UNKNOWN resolution: `Manager.ResolvePool` re-presents
+   the journaled request (same Idempotency-Key + payload, fresh
+   precondition) so the native durable receipt answers definitively;
+   ambiguous outcomes and stale preconditions keep the intent UNKNOWN —
+   a 412 after possible receipt loss is never treated as proof of
+   non-effect. Journal `finish` now accepts intents in state `unknown`
+   (previously only `pending`), enabling that lifecycle. Exposed as
+   `POST /admin/api/v1/garm/resolve` and a "Resolve pending write"
+   button in the settings UI; discovery-only deployments report
+   disabled.
+4. Branch consolidation: 90 stale branches deleted; four remain (`main`,
+   the two native experiment refs above, and the denied route-guard
+   branch kept untouched pending denial-scope resolution).
+
+Reported gates: gofmt/vet clean; `go test -race ./...` green except the
+two documented environmental `internal/admission` root-permission
+failures that also fail on unmodified main; web suite 58 pass with the
+same 8 pre-existing module-resolution failures present before this
+change (verified by stash-and-rerun on clean main). New coverage:
+manager conditional tests (confirmed write via native API with quoted
+If-Match + journaled request id, pre-dispatch min-idle refusal with zero
+network calls, tags keep the legacy path, raced-revision conflict is
+rejected, commit-then-drop UNKNOWN resolves from the durable receipt,
+ambiguous resolve retains the intent).
+
+Still not done (unchanged blockers): physical capacity enforcement and
+host inventory, safe retirement, onboarding/two-way sync, live
+backup/recovery, native destination selection, denial-scope resolution.
+All conditional behavior is opt-in and off by default; the native work
+remains experimental review refs, not deployable.
 
 ## Evidence rules (unchanged)
 

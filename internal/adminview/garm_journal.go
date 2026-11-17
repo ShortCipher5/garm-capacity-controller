@@ -135,6 +135,14 @@ func (j *journalledGarm) UpdatePool(ctx context.Context, request, id, fingerprin
 	result, err := j.manager.UpdatePool(ctx, request, id, fingerprint, update, reason)
 	return result, garmControlError(err)
 }
+
+func (j *journalledGarm) ResolvePool(ctx context.Context, request string) (garmapi.ManagedPool, error) {
+	if !j.writes {
+		return garmapi.ManagedPool{}, garmapi.ErrManagementDisabled
+	}
+	result, err := j.manager.ResolvePool(ctx, request)
+	return result, garmControlError(err)
+}
 func (j *journalledGarm) UpdateRepositoryBalancer(ctx context.Context, request, id, fingerprint, value, reason string) (garmapi.ManagedRepository, error) {
 	if !j.writes {
 		return garmapi.ManagedRepository{}, garmapi.ErrManagementDisabled

@@ -33,6 +33,11 @@ type conditionalFixture struct {
 	omitETag    bool
 	badETag     bool
 	badBody     bool
+	// Replay knobs: corrupt the receipt answer to exercise client
+	// validation. replayHeaderETag overrides the response ETag header on a
+	// replay; replayOutcome overrides the stored outcome value.
+	replayHeaderETag string
+	replayOutcome    string
 }
 
 type conditionalApplied struct {
@@ -95,8 +100,16 @@ func (f *conditionalFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Replay: answer from the stored outcome without applying
 				// or advancing, mirroring the native receipt journal.
 				f.replays++
-				w.Header().Set("ETag", stored.etag)
-				_ = json.NewEncoder(w).Encode(map[string]any{"outcome": "applied_changed", "resulting_etag": stored.etag})
+				headerETag := stored.etag
+				if f.replayHeaderETag != "" {
+					headerETag = f.replayHeaderETag
+				}
+				outcome := "applied_changed"
+				if f.replayOutcome != "" {
+					outcome = f.replayOutcome
+				}
+				w.Header().Set("ETag", headerETag)
+				_ = json.NewEncoder(w).Encode(map[string]any{"outcome": outcome, "resulting_etag": stored.etag})
 				return
 			}
 			w.WriteHeader(http.StatusConflict)
@@ -167,11 +180,18 @@ func TestConditionalSettingsETagRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ETag != `"7:4"` || res.Settings.MaxRunners != 9 || res.Settings.MinIdleRunners != 2 || res.Settings.Priority != 0 {
-		t.Fatalf("patch %+v", res)
+	if res.Replay != nil || res.Settings == nil {
+		t.Fatalf("fresh apply misclassified: %+v", res)
 	}
-	if _, err = c.PatchConditionalSettings(context.Background(), ref, managedPoolID, res.ETag, "", PoolSettingsPatch{Priority: value(uint64(1))}); err != nil {
+	if res.Settings.ETag != `"7:4"` || res.Settings.Settings.MaxRunners != 9 || res.Settings.Settings.MinIdleRunners != 2 || res.Settings.Settings.Priority != 0 {
+		t.Fatalf("patch %+v", res.Settings)
+	}
+	second, err := c.PatchConditionalSettings(context.Background(), ref, managedPoolID, res.Settings.ETag, "", PoolSettingsPatch{Priority: value(uint64(1))})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if second.Replay != nil || second.Settings == nil {
+		t.Fatalf("second fresh apply misclassified: %+v", second)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -464,18 +484,21 @@ func TestConditionalSettingsReplayUsesStoredOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay held as failure: %v", err)
 	}
-	if replay.ETag != first.ETag {
-		t.Fatalf("replay advanced the revision: %q vs %q", replay.ETag, first.ETag)
+	if replay.Settings != nil || replay.Replay == nil {
+		t.Fatalf("replay misclassified as a settings document: %+v", replay)
 	}
-	if replay.Settings != (PoolSettings{}) {
-		t.Fatalf("replay invented a settings tuple: %+v", replay.Settings)
+	if replay.Replay.Outcome != "applied_changed" {
+		t.Fatalf("replay outcome not surfaced: %+v", replay.Replay)
+	}
+	if replay.Replay.ETag != first.Settings.ETag {
+		t.Fatalf("replay advanced the revision: %q vs %q", replay.Replay.ETag, first.Settings.ETag)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.replays != 1 {
 		t.Fatalf("fixture did not serve from receipt: replays=%d", f.replays)
 	}
-	if strconv.Quote(f.etag()) != first.ETag {
+	if strconv.Quote(f.etag()) != first.Settings.ETag {
 		t.Fatalf("replay mutated state: etag now %q", f.etag())
 	}
 }
@@ -517,8 +540,99 @@ func TestConditionalReplayDecodeRejectsNonAppliedOutcomes(t *testing.T) {
 		t.Fatal("weak resulting ETag accepted")
 	}
 	res, ok := decodeConditionalReplay([]byte(`{"outcome":"applied_noop","resulting_etag":"\"7:4\""}`), `"7:4"`)
-	if !ok || res.ETag != `"7:4"` || res.Settings != (PoolSettings{}) {
+	if !ok || res.ETag != `"7:4"` || res.Outcome != "applied_noop" {
 		t.Fatalf("valid noop replay rejected: %+v", res)
+	}
+}
+
+func TestConditionalReplayDecodeRequiresHeaderConsistency(t *testing.T) {
+	body := []byte(`{"outcome":"applied_changed","resulting_etag":"\"7:4\""}`)
+	if _, ok := decodeConditionalReplay(body, `"7:5"`); ok {
+		t.Fatal("replay envelope accepted with a mismatched response ETag header")
+	}
+	if _, ok := decodeConditionalReplay(body, ""); ok {
+		t.Fatal("replay envelope accepted without a response ETag header")
+	}
+	if _, ok := decodeConditionalReplay(body, `W/"7:4"`); ok {
+		t.Fatal("replay envelope accepted against a weak response ETag header")
+	}
+	res, ok := decodeConditionalReplay(body, `"7:4"`)
+	if !ok || res.Outcome != "applied_changed" || res.ETag != `"7:4"` {
+		t.Fatalf("consistent replay rejected: %+v", res)
+	}
+}
+
+func TestConditionalReplayDecodeRejectsCorruptEnvelopes(t *testing.T) {
+	cases := map[string]string{
+		"not-json":        `{"outcome":`,
+		"not-an-object":   `["applied_changed"]`,
+		"duplicate-key":   `{"outcome":"applied_changed","outcome":"applied_changed","resulting_etag":"\"7:4\""}`,
+		"missing-outcome": `{"resulting_etag":"\"7:4\""}`,
+		"missing-etag":    `{"outcome":"applied_changed"}`,
+		"extra-key":       `{"outcome":"applied_changed","resulting_etag":"\"7:4\"","priority":3}`,
+		"empty-etag":      `{"outcome":"applied_changed","resulting_etag":""}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := decodeConditionalReplay([]byte(body), `"7:4"`); ok {
+				t.Fatalf("corrupt replay envelope accepted: %s", body)
+			}
+		})
+	}
+}
+
+func TestConditionalSettingsReplayEnvelopeMismatchIsUnknown(t *testing.T) {
+	cases := map[string]func(*conditionalFixture){
+		"etag-header-mismatch": func(f *conditionalFixture) { f.replayHeaderETag = `"9:9"` },
+		"non-applied-outcome":  func(f *conditionalFixture) { f.replayOutcome = "rejected_stale" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, f := conditionalServer(t, mutate)
+			ref := EntityRef{Kind: EntityKindRepository, ID: managedRepoID}
+			got, err := c.GetConditionalSettings(context.Background(), ref, managedPoolID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			priority := got.Settings.Priority + 1
+			first, err := c.PatchConditionalSettings(context.Background(), ref, managedPoolID, got.ETag, "replay-corrupt-1", PoolSettingsPatch{Priority: &priority})
+			if err != nil || first.Replay != nil || first.Settings == nil {
+				t.Fatalf("baseline patch misclassified: %+v %v", first, err)
+			}
+			if _, err = c.PatchConditionalSettings(context.Background(), ref, managedPoolID, got.ETag, "replay-corrupt-1", PoolSettingsPatch{Priority: &priority}); !errors.Is(err, ErrManagementOutcomeUnknown) {
+				t.Fatalf("corrupt replay envelope accepted: %v", err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.replays != 1 || f.patches != 2 {
+				t.Fatalf("accounting replays=%d patches=%d", f.replays, f.patches)
+			}
+			if current := strconv.Quote(f.etag()); current != first.Settings.ETag {
+				t.Fatalf("replay mutated state: etag now %s", current)
+			}
+		})
+	}
+}
+
+func TestConditionalSettingsOrganizationAndEnterpriseUnsupported(t *testing.T) {
+	c, f := conditionalServer(t, nil)
+	for _, kind := range []string{EntityKindOrganization, EntityKindEnterprise} {
+		ref := EntityRef{Kind: kind, ID: managedRepoID}
+		if _, err := c.GetConditionalSettings(context.Background(), ref, managedPoolID); !errors.Is(err, ErrConditionalScopeUnsupported) {
+			t.Fatalf("get %s: %v", kind, err)
+		}
+		if _, err := c.PatchConditionalSettings(context.Background(), ref, managedPoolID, `"7:3"`, "", PoolSettingsPatch{Priority: value(uint64(1))}); !errors.Is(err, ErrConditionalScopeUnsupported) {
+			t.Fatalf("patch %s: %v", kind, err)
+		}
+	}
+	// Unknown kinds stay unsafe input, not unsupported scope.
+	if _, err := c.GetConditionalSettings(context.Background(), EntityRef{Kind: "pools", ID: managedRepoID}, managedPoolID); !errors.Is(err, ErrManagementUnsafe) {
+		t.Fatalf("unknown kind misclassified: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gets != 0 || f.patches != 0 {
+		t.Fatalf("unsupported scope dispatched: gets=%d patches=%d", f.gets, f.patches)
 	}
 }
 
@@ -545,7 +659,11 @@ func TestConditionalSettingsConcurrentAccess(t *testing.T) {
 					failures[w] = err
 					return
 				}
-				if res.Settings.Priority != priority || !conditionalETag(res.ETag) {
+				if res.Replay != nil || res.Settings == nil {
+					failures[w] = ErrManagement
+					return
+				}
+				if res.Settings.Settings.Priority != priority || !conditionalETag(res.Settings.ETag) {
 					failures[w] = ErrManagement
 					return
 				}

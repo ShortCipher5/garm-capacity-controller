@@ -38,6 +38,10 @@ func (v *poolDiscoveryView) Snapshot(ctx context.Context) (GarmOverview, error) 
 func (*poolDiscoveryView) UpdatePool(context.Context, string, string, string, garmapi.PoolUpdate, string) (garmapi.ManagedPool, error) {
 	return garmapi.ManagedPool{}, garmapi.ErrManagementDisabled
 }
+
+func (*poolDiscoveryView) ResolvePool(context.Context, string) (garmapi.ManagedPool, error) {
+	return garmapi.ManagedPool{}, garmapi.ErrManagementDisabled
+}
 func (*poolDiscoveryView) UpdateRepositoryBalancer(context.Context, string, string, string, string, string) (garmapi.ManagedRepository, error) {
 	return garmapi.ManagedRepository{}, garmapi.ErrManagementDisabled
 }

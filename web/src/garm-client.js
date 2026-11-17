@@ -53,3 +53,18 @@ export async function applyGarmChange(token, kind, change, { signal, fetcher = g
   try { if ((await response.json()).recorded_confirmed !== true) throw new Error(); }
   catch { throw new Error("Garm change confirmation unavailable. Refresh journal status. Do not retry the write."); }
 }
+export async function resolveGarmPending(token, requestID, { signal, fetcher = globalThis.fetch } = {}) {
+  if (!/^[0-9a-f]{64}$/.test(token)) throw new Error("Enter the separate 64-character management token.");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestID)) throw new Error("Unsupported pending request identity.");
+  let response;
+  try {
+    response = await fetcher.call(globalThis, "/admin/api/v1/garm/resolve", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ request_id: requestID }), credentials: "omit", cache: "no-store", redirect: "error", signal });
+  } catch { throw new Error("Garm resolution outcome unknown. Refresh journal status. Do not submit another resolution. No automatic retry was made."); }
+  if (response.status === 401) throw new Error("Management token rejected. The read token cannot authorize changes.");
+  if (response.status === 409) throw new Error("No matching pending Garm pool write. Refresh journal status.");
+  if (response.status === 503) throw new Error("Garm write outcome still unknown. The pending entry is retained; do not retry blindly.");
+  if (response.status === 404) throw new Error("Garm writes are disabled on this server.");
+  if (!response.ok) throw new Error("Garm resolution unavailable. Refresh journal status.");
+  try { if ((await response.json()).recorded_confirmed !== true) throw new Error(); }
+  catch { throw new Error("Garm resolution confirmation unavailable. Refresh journal status."); }
+}

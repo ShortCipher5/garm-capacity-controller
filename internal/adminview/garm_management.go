@@ -57,6 +57,9 @@ type GarmManager interface {
 	Snapshot(context.Context) (GarmOverview, error)
 	UpdatePool(context.Context, string, string, string, garmapi.PoolUpdate, string) (garmapi.ManagedPool, error)
 	UpdateRepositoryBalancer(context.Context, string, string, string, string, string) (garmapi.ManagedRepository, error)
+	// ResolvePool re-presents one pending pool write to obtain its
+	// authoritative outcome; it errors when no such pending intent exists.
+	ResolvePool(context.Context, string) (garmapi.ManagedPool, error)
 }
 
 type GarmChange struct {
@@ -176,6 +179,44 @@ func (h *Handler) serveGarm(w http.ResponseWriter, r *http.Request) {
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
 		fail(http.StatusUnsupportedMediaType, "JSON required")
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/garm/resolve" {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 8193))
+		if err != nil || len(body) > 8192 {
+			fail(http.StatusRequestEntityTooLarge, "request too large")
+			return
+		}
+		var resolve struct {
+			RequestID string `json:"request_id"`
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(body)))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&resolve) != nil || decoder.Decode(new(any)) != io.EOF || !managementText(resolve.RequestID, 64) {
+			fail(http.StatusBadRequest, "invalid Garm resolve request")
+			return
+		}
+		select {
+		case h.remoteFlight <- struct{}{}:
+			defer func() { <-h.remoteFlight }()
+		default:
+			fail(http.StatusConflict, "another Garm change is in progress; refresh before retrying")
+			return
+		}
+		_, err = h.garm.ResolvePool(ctx, resolve.RequestID)
+		switch {
+		case errors.Is(err, garmapi.ErrManagementConflict):
+			fail(http.StatusConflict, "no matching pending Garm pool write")
+		case errors.Is(err, garmapi.ErrManagementOutcomeUnknown):
+			h.audit("Garm pending write still unknown after resolution attempt")
+			fail(http.StatusServiceUnavailable, "Garm write outcome still unknown; the pending entry is retained; do not retry blindly")
+		case errors.Is(err, garmapi.ErrManagementDisabled):
+			fail(http.StatusNotFound, "Garm writes disabled")
+		case err != nil:
+			fail(http.StatusServiceUnavailable, "Garm resolution unavailable; refresh journal status")
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]bool{"recorded_confirmed": true})
+		}
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8193))

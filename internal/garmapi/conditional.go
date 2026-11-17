@@ -38,6 +38,14 @@ var (
 	// refused and nothing was written, so this is definitive, never
 	// ErrManagementOutcomeUnknown.
 	ErrConditionalSettingsRequestIDReuse = errors.New("conditional settings rejected: request id already used with different content")
+
+	// ErrConditionalScopeUnsupported maps an entity scope the conditional
+	// client deliberately does not implement. ManagementConfig carries
+	// allowlists for repositories and pools only; organization and
+	// enterprise settings have no validated client-side scope mapping, so
+	// calls with those kinds fail closed with this typed error before any
+	// network use instead of constructing an unvalidated URL.
+	ErrConditionalScopeUnsupported = errors.New("conditional settings unsupported: entity scope not implemented")
 )
 
 // SettingsConflictError maps HTTP 412: the If-Match ETag precondition failed,
@@ -56,7 +64,13 @@ func (e *SettingsConflictError) Error() string {
 func (e *SettingsConflictError) Is(target error) bool { return target == ErrManagementConflict }
 
 const (
-	EntityKindRepository   = "repository"
+	// EntityKindRepository is the only fully implemented conditional
+	// settings scope today; its IDs are allowlisted in ManagementConfig.
+	EntityKindRepository = "repository"
+	// EntityKindOrganization and EntityKindEnterprise are valid wire kinds
+	// with no allowlisted client scope yet (ManagementConfig carries no
+	// organization or enterprise ID lists). Calls with these kinds fail
+	// before any network use with ErrConditionalScopeUnsupported.
 	EntityKindOrganization = "organization"
 	EntityKindEnterprise   = "enterprise"
 )
@@ -88,10 +102,35 @@ type PoolSettingsPatch struct {
 
 // SettingsResult is the authoritative post-state plus its new strong ETag.
 // ETag is the required If-Match precondition for the next
-// PatchConditionalSettings call.
+// PatchConditionalSettings call. GetConditionalSettings returns it directly;
+// PatchConditionalSettings returns it as ConditionalPatchResult.Settings for
+// a fresh applied document.
 type SettingsResult struct {
 	Settings PoolSettings
 	ETag     string
+}
+
+// ReplayOutcome is the durable terminal outcome of an earlier PATCH, served
+// from the server's stored request receipt when the same (Idempotency-Key,
+// payload) is re-presented. The receipt does not store the settings body, so
+// a replay never carries a settings tuple: re-GET deliberately if the tuple
+// is needed. Outcome is the receipt's terminal outcome ("applied_changed" or
+// "applied_noop") and ETag is its resulting strong ETag, accepted only when
+// it equals the response's ETag header.
+type ReplayOutcome struct {
+	Outcome string
+	ETag    string
+}
+
+// ConditionalPatchResult is the success result of PatchConditionalSettings.
+// Exactly one field is non-nil: Settings carries the fresh applied document,
+// while Replay carries the receipt outcome when the server answered from its
+// durable request receipt. Keeping the two statically distinct prevents a
+// replay's absent settings tuple from being mistaken for real pool settings.
+// A non-nil error always accompanies the zero value (neither field set).
+type ConditionalPatchResult struct {
+	Replay   *ReplayOutcome
+	Settings *SettingsResult
 }
 
 // ConditionalManagementClient is an opt-in experimental client for the native
@@ -104,6 +143,15 @@ type SettingsResult struct {
 // ErrManagementOutcomeUnknown because the write may have committed: callers
 // must read authoritative state and reconcile. This client never auto-retries
 // and never falls back to an unconditional write.
+//
+// Safeguard boundary: this is a low-level wire client, not a policy enforcer.
+// It validates scope, preconditions, ranges and response shape, but it never
+// applies the controller's policy guards — for example the rule against
+// decreasing min_idle_runners before assignment-safe retirement of the excess
+// runners (enforced on the unconditional ManagementClient write path, and by
+// the manager layer above it). A successful PATCH here is transport and
+// precondition confirmation, never policy approval; callers embedding this
+// client must enforce those guards themselves.
 type ConditionalManagementClient struct {
 	client       *Client
 	base         string
@@ -145,20 +193,24 @@ func NewConditionalManagement(config ManagementConfig) (*ConditionalManagementCl
 func (m *ConditionalManagementClient) Close() { m.client.Close() }
 
 // conditionalPath validates exact scope before any network use. IDs pass the
-// managementID UUID shape check, so the constructed path can never carry
-// arbitrary input. Organization and enterprise scope lists do not exist in
-// ManagementConfig yet; their IDs are UUID-validated but not allowlisted,
-// while repository IDs and all pool IDs keep exact allowlist scope.
+// managementID UUID shape check, so any constructed path can never carry
+// arbitrary input. Repository scope is fully implemented: repository IDs and
+// all pool IDs keep exact allowlist scope. Organization and enterprise kinds
+// are recognised but not implemented — ManagementConfig carries no scope
+// lists for them — so they fail with ErrConditionalScopeUnsupported rather
+// than producing an unvalidated URL. Unknown kinds fail as unsafe input.
 func (m *ConditionalManagementClient) conditionalPath(ref EntityRef, poolID string) (string, error) {
 	switch ref.Kind {
-	case EntityKindRepository, EntityKindOrganization, EntityKindEnterprise:
+	case EntityKindOrganization, EntityKindEnterprise:
+		return "", ErrConditionalScopeUnsupported
+	case EntityKindRepository:
 	default:
 		return "", ErrManagementUnsafe
 	}
 	if !managementID(ref.ID) || !managementID(poolID) || !m.pools[poolID] {
 		return "", ErrManagementUnsafe
 	}
-	if ref.Kind == EntityKindRepository && !m.repositories[ref.ID] {
+	if !m.repositories[ref.ID] {
 		return "", ErrManagementUnsafe
 	}
 	return "/offline/entities/" + ref.Kind + "/" + url.PathEscape(ref.ID) + "/pools/" + url.PathEscape(poolID) + "/settings", nil
@@ -216,23 +268,31 @@ type conditionalReplay struct {
 	ResultingETag string `json:"resulting_etag"`
 }
 
-// decodeConditionalReplay recognises a 200 replay envelope. Applied replays
-// carry only the durable outcome and the resulting ETag; the settings tuple
-// is left to a deliberate re-GET by the caller (Settings is the zero value).
-func decodeConditionalReplay(data []byte, etag string) (SettingsResult, bool) {
+// decodeConditionalReplay recognises a 200 replay envelope: exactly the
+// {outcome, resulting_etag} document, an applied-only outcome, and a
+// resulting_etag that is a strong quoted ETag equal to the response's ETag
+// header. The wire carries no request-id echo, so that equality is the only
+// consistency check the protocol supports; any mismatch or corrupt envelope
+// means the outcome cannot be confirmed and must surface as
+// ErrManagementOutcomeUnknown at the caller, never as a confirmed outcome.
+func decodeConditionalReplay(data []byte, etag string) (ReplayOutcome, bool) {
+	fields, err := row(data)
+	if err != nil || len(fields) != 2 || fields["outcome"] == nil || fields["resulting_etag"] == nil {
+		return ReplayOutcome{}, false
+	}
 	var replay conditionalReplay
 	if err := json.Unmarshal(data, &replay); err != nil {
-		return SettingsResult{}, false
+		return ReplayOutcome{}, false
 	}
 	switch replay.Outcome {
 	case "applied_changed", "applied_noop":
 	default:
-		return SettingsResult{}, false
+		return ReplayOutcome{}, false
 	}
-	if !conditionalETag(replay.ResultingETag) {
-		return SettingsResult{}, false
+	if !conditionalETag(replay.ResultingETag) || replay.ResultingETag != etag {
+		return ReplayOutcome{}, false
 	}
-	return SettingsResult{ETag: replay.ResultingETag}, true
+	return ReplayOutcome{Outcome: replay.Outcome, ETag: replay.ResultingETag}, true
 }
 
 // conditionalDispatch sends exactly one request over the shared transport: no
@@ -336,39 +396,39 @@ func (m *ConditionalManagementClient) GetConditionalSettings(ctx context.Context
 // *SettingsConflictError carrying the fresh ETag for a deliberate rebase. A
 // 409 returns ErrConditionalSettingsRequestIDReuse: the Idempotency-Key was
 // already used with different content and nothing was written, so the outcome
-// is known and must not be held as UNKNOWN. Re-presenting a successful
-// (key, payload) pair is answered from the server's durable request receipt:
-// the result carries the resulting ETag with a zero Settings tuple (the
-// server does not store the settings body); re-GET deliberately if the tuple
-// is needed.
-func (m *ConditionalManagementClient) PatchConditionalSettings(ctx context.Context, ref EntityRef, poolID, etag, requestID string, patch PoolSettingsPatch) (SettingsResult, error) {
+// is known and must not be held as UNKNOWN. On success the returned
+// ConditionalPatchResult has exactly one field set: Settings for a fresh
+// applied document, or Replay when the server answered from its durable
+// request receipt for a re-presented (key, payload) — the receipt carries no
+// settings tuple, so re-GET deliberately if the tuple is needed.
+func (m *ConditionalManagementClient) PatchConditionalSettings(ctx context.Context, ref EntityRef, poolID, etag, requestID string, patch PoolSettingsPatch) (ConditionalPatchResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	path, err := m.conditionalPath(ref, poolID)
 	if err != nil {
-		return SettingsResult{}, err
+		return ConditionalPatchResult{}, err
 	}
 	if !conditionalETag(etag) {
-		return SettingsResult{}, ErrManagementUnsafe
+		return ConditionalPatchResult{}, ErrManagementUnsafe
 	}
 	if patch.Priority == nil && patch.MaxRunners == nil && patch.MinIdleRunners == nil {
-		return SettingsResult{}, ErrManagementUnsafe
+		return ConditionalPatchResult{}, ErrManagementUnsafe
 	}
 	if patch.Priority != nil && *patch.Priority > 1000000 {
-		return SettingsResult{}, ErrManagementUnsafe
+		return ConditionalPatchResult{}, ErrManagementUnsafe
 	}
 	if patch.MaxRunners != nil && (*patch.MaxRunners == 0 || *patch.MaxRunners > 1000000) {
-		return SettingsResult{}, ErrManagementUnsafe
+		return ConditionalPatchResult{}, ErrManagementUnsafe
 	}
 	if patch.MinIdleRunners != nil && *patch.MinIdleRunners > 1000000 {
-		return SettingsResult{}, ErrManagementUnsafe
+		return ConditionalPatchResult{}, ErrManagementUnsafe
 	}
 	if requestID != "" && !boundedSettingText(requestID, 256) {
-		return SettingsResult{}, ErrManagementUnsafe
+		return ConditionalPatchResult{}, ErrManagementUnsafe
 	}
 	status, newETag, data, err := m.conditionalDispatch(ctx, http.MethodPatch, path, patch, etag, requestID)
 	if err != nil {
-		return SettingsResult{}, err
+		return ConditionalPatchResult{}, err
 	}
 	if status == http.StatusOK {
 		settings, err := decodeConditionalSettings(data)
@@ -378,26 +438,26 @@ func (m *ConditionalManagementClient) PatchConditionalSettings(ctx context.Conte
 			// envelope instead of the settings tuple. That outcome is
 			// durable and known; it must not surface as UNKNOWN.
 			if replay, ok := decodeConditionalReplay(data, newETag); ok {
-				return replay, nil
+				return ConditionalPatchResult{Replay: &replay}, nil
 			}
 			// The write may have committed but the response cannot be trusted.
-			return SettingsResult{}, ErrManagementOutcomeUnknown
+			return ConditionalPatchResult{}, ErrManagementOutcomeUnknown
 		}
 		if !conditionalETag(newETag) {
 			// The write may have committed but the response cannot be trusted.
-			return SettingsResult{}, ErrManagementOutcomeUnknown
+			return ConditionalPatchResult{}, ErrManagementOutcomeUnknown
 		}
-		return SettingsResult{Settings: settings, ETag: newETag}, nil
+		return ConditionalPatchResult{Settings: &SettingsResult{Settings: settings, ETag: newETag}}, nil
 	}
 	if status == http.StatusPreconditionFailed {
 		fresh := ""
 		if conditionalETag(newETag) {
 			fresh = newETag
 		}
-		return SettingsResult{}, &SettingsConflictError{FreshETag: fresh}
+		return ConditionalPatchResult{}, &SettingsConflictError{FreshETag: fresh}
 	}
 	if rejection := conditionalRejection(status); rejection != nil {
-		return SettingsResult{}, rejection
+		return ConditionalPatchResult{}, rejection
 	}
-	return SettingsResult{}, ErrManagementOutcomeUnknown
+	return ConditionalPatchResult{}, ErrManagementOutcomeUnknown
 }

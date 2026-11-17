@@ -26,6 +26,10 @@ func (m *testGarmManager) UpdatePool(_ context.Context, request, target, fingerp
 	m.change = GarmChange{RequestID: request, Target: target, Fingerprint: fingerprint, Reason: reason, Pool: &update}
 	return garmapi.ManagedPool{}, m.err
 }
+func (m *testGarmManager) ResolvePool(_ context.Context, request string) (garmapi.ManagedPool, error) {
+	m.writes++
+	return garmapi.ManagedPool{}, m.err
+}
 func (m *testGarmManager) UpdateRepositoryBalancer(_ context.Context, request, target, fingerprint, value, reason string) (garmapi.ManagedRepository, error) {
 	m.writes++
 	return garmapi.ManagedRepository{}, m.err
