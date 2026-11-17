@@ -6,11 +6,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,6 +20,15 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 )
+
+// conditionalReceipt is the durable per-request-id record the fake keeps:
+// the recorded outcome plus the exact payload it is bound to, so a replay
+// attempt with different content yields the typed id-reuse refusal, like
+// the server.
+type conditionalReceipt struct {
+	outcome garmapi.ReplayOutcome
+	payload string
+}
 
 // fakeConditionalNative implements the subset of the native experimental
 // conditional settings API the manager wiring uses: GET settings + strong
@@ -28,7 +39,7 @@ type fakeConditionalNative struct {
 	mu       sync.Mutex
 	settings garmapi.PoolSettings
 	seq      int
-	receipts map[string]garmapi.ReplayOutcome // request id -> recorded outcome
+	receipts map[string]conditionalReceipt
 	// dropResponse commits (and optionally records the receipt) then sends a
 	// truncated 200 - headers plus a partial body - and closes the connection.
 	// The started response prevents transparent transport retries, and the
@@ -36,13 +47,13 @@ type fakeConditionalNative struct {
 	dropResponse, recordOnDrop bool
 	// bumpNextPatch simulates a racing writer: it advances the revision just
 	// before the precondition check of the next PATCH, forcing a 412.
-	bumpNextPatch       bool
-	sawIfMatch, sawIdem string
-	patchCalls          int
+	bumpNextPatch        bool
+	sawIfMatch, sawIdem  string
+	patchCalls, getCalls int
 }
 
 func newFakeConditionalNative() *fakeConditionalNative {
-	return &fakeConditionalNative{settings: garmapi.PoolSettings{Priority: 0, MaxRunners: 4, MinIdleRunners: 1}, receipts: map[string]garmapi.ReplayOutcome{}}
+	return &fakeConditionalNative{settings: garmapi.PoolSettings{Priority: 0, MaxRunners: 4, MinIdleRunners: 1}, receipts: map[string]conditionalReceipt{}}
 }
 
 func (f *fakeConditionalNative) etag() string {
@@ -88,16 +99,24 @@ func (f *fakeConditionalNative) ServeHTTP(w http.ResponseWriter, r *http.Request
 		f.patchCalls++
 		f.sawIdem = id
 		f.sawIfMatch = r.Header.Get("If-Match")
-		replay, replayed := f.receipts[id]
+		f.mu.Unlock()
+		raw, _ := io.ReadAll(r.Body)
+		var patch garmapi.PoolSettingsPatch
+		_ = json.Unmarshal(raw, &patch)
+		f.mu.Lock()
+		receipt, replayed := f.receipts[id]
 		f.mu.Unlock()
 		if replayed {
-			w.Header().Set("ETag", replay.ETag)
-			_ = json.NewEncoder(w).Encode(map[string]string{"outcome": replay.Outcome, "resulting_etag": replay.ETag})
+			if receipt.payload != string(raw) {
+				// The id is bound to different content, like the server's
+				// id-reuse refusal; the client maps it to a typed 409.
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			w.Header().Set("ETag", receipt.outcome.ETag)
+			_ = json.NewEncoder(w).Encode(map[string]string{"outcome": receipt.outcome.Outcome, "resulting_etag": receipt.outcome.ETag})
 			return
 		}
-		var patch garmapi.PoolSettingsPatch
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &patch)
 		f.mu.Lock()
 		if f.bumpNextPatch {
 			f.bumpNextPatch = false
@@ -128,7 +147,7 @@ func (f *fakeConditionalNative) ServeHTTP(w http.ResponseWriter, r *http.Request
 		next := "\"" + "1" + ":" + itoa(f.seq) + "\""
 		if f.dropResponse {
 			if f.recordOnDrop {
-				f.receipts[id] = garmapi.ReplayOutcome{Outcome: "applied_changed", ETag: next}
+				f.receipts[id] = conditionalReceipt{outcome: garmapi.ReplayOutcome{Outcome: "applied_changed", ETag: next}, payload: string(raw)}
 			}
 			f.mu.Unlock()
 			// Truncated 200: response already started (no transparent client
@@ -139,7 +158,7 @@ func (f *fakeConditionalNative) ServeHTTP(w http.ResponseWriter, r *http.Request
 			_, _ = w.Write([]byte("{\"prior"))
 			return
 		}
-		f.receipts[id] = garmapi.ReplayOutcome{Outcome: "applied_changed", ETag: next}
+		f.receipts[id] = conditionalReceipt{outcome: garmapi.ReplayOutcome{Outcome: "applied_changed", ETag: next}, payload: string(raw)}
 		body, _ := json.Marshal(f.settings)
 		f.mu.Unlock()
 		w.Header().Set("ETag", next)
@@ -329,5 +348,143 @@ func TestResolvePoolWithoutPendingIntentConflicts(t *testing.T) {
 	m, _, _, _ := conditionalFixture(t, native)
 	if _, err := m.ResolvePool(context.Background(), nextID); !errors.Is(err, ErrRequestConflict) {
 		t.Fatalf("err = %v, want ErrRequestConflict", err)
+	}
+}
+
+func TestConditionalWriteRejectsUnreviewedRevisionSkew(t *testing.T) {
+	native := newFakeConditionalNative()
+	m, _, f, nativeRef := conditionalFixture(t, native)
+	// The native revision carries state the operator never reviewed. Break
+	// the fixture's legacy/native mirror so the reviewed legacy snapshot
+	// (fingerprint-bound) still shows the old tuple while native moved on.
+	f.reflect = nil
+	native.mu.Lock()
+	native.settings.Priority = 9
+	native.mu.Unlock()
+	priority := uint64(5)
+	_, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "skewed revision")
+	if !errors.Is(err, garmapi.ErrManagementConflict) {
+		t.Fatalf("err = %v, want ErrManagementConflict", err)
+	}
+	nativeRef.mu.Lock()
+	defer nativeRef.mu.Unlock()
+	if nativeRef.patchCalls != 0 {
+		t.Fatalf("native PATCH called %d times against an unreviewed revision", nativeRef.patchCalls)
+	}
+}
+
+func TestResolvePoolRefusesLegacyUnknownWrite(t *testing.T) {
+	native := newFakeConditionalNative()
+	m, _, f, nativeRef := conditionalFixture(t, native)
+	f.writeFail = garmapi.ErrManagementOutcomeUnknown
+	priority := uint64(4)
+	tags := []string{"linux"}
+	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority, Tags: &tags}, "legacy write"); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
+	}
+	// A legacy write must never be resolved as a partial conditional write.
+	if _, err := m.ResolvePool(context.Background(), requestID); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("ResolvePool err = %v, want ErrRequestConflict", err)
+	}
+	nativeRef.mu.Lock()
+	defer nativeRef.mu.Unlock()
+	if nativeRef.patchCalls != 0 {
+		t.Fatalf("native PATCH called %d times while resolving a legacy write", nativeRef.patchCalls)
+	}
+}
+
+func TestResolvePoolIdReuseHoldsUnknown(t *testing.T) {
+	native := newFakeConditionalNative()
+	native.dropResponse = true
+	native.recordOnDrop = true
+	m, j, _, _ := conditionalFixture(t, native)
+	priority := uint64(7)
+	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{Priority: &priority}, "lost response"); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
+	}
+	// The receipt now binds the id to different content (reconstruction
+	// drift or foreign reuse): a 409 is NOT proof the original write
+	// failed, so the intent must stay UNKNOWN.
+	native.mu.Lock()
+	rec := native.receipts[requestID]
+	rec.payload = `{"priority":8}`
+	native.receipts[requestID] = rec
+	native.mu.Unlock()
+	if _, err := m.ResolvePool(context.Background(), requestID); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("ResolvePool err = %v, want ErrOutcomeUnknown on id-reuse mismatch", err)
+	}
+	pending, _ := j.Pending(context.Background())
+	if len(pending) != 1 {
+		t.Fatalf("pending after id-reuse mismatch = %v, want intent retained", pending)
+	}
+}
+
+func TestResolvePoolReappliesMinIdleGuardAgainstCurrentState(t *testing.T) {
+	native := newFakeConditionalNative()
+	native.dropResponse = true // original dispatch never arrived
+	m, _, _, nativeRef := conditionalFixture(t, native)
+	minIdle := uint64(3)
+	if _, err := m.UpdatePool(context.Background(), requestID, poolID, fingerprint, garmapi.PoolUpdate{MinIdleRunners: &minIdle}, "increase min idle"); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrOutcomeUnknown", err)
+	}
+	// While the write was unknown, another writer raised min idle above the
+	// journaled target: re-applying it now would decrease the current
+	// minimum, so resolution must hold UNKNOWN without dispatching.
+	native.mu.Lock()
+	native.settings.MinIdleRunners = 8
+	native.mu.Unlock()
+	if _, err := m.ResolvePool(context.Background(), requestID); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("ResolvePool err = %v, want ErrOutcomeUnknown on safeguard re-check", err)
+	}
+	nativeRef.mu.Lock()
+	defer nativeRef.mu.Unlock()
+	if nativeRef.patchCalls != 1 {
+		t.Fatalf("native PATCH calls = %d, want exactly the original dispatch (no re-application)", nativeRef.patchCalls)
+	}
+}
+
+func TestJournalMigratesV2ToV3DispatchColumn(t *testing.T) {
+	dir := privateJournalDir(t)
+	path := filepath.Join(dir, "journal.db")
+	lineage := strings.Repeat("d", 64)
+	// Rebuild the exact v2 journal shape (no dispatch column) from the schema
+	// const, then prove OpenJournal migrates it in place and the new column
+	// is fully usable.
+	oldSchema := strings.ReplaceAll(schema, " dispatch_json BLOB,\n", "")
+	oldSchema = strings.ReplaceAll(oldSchema, "PRAGMA user_version=3;", "PRAGMA user_version=2;")
+	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO journal_identity(id,lineage) VALUES(1,?)", lineage); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	j, err := OpenJournal(path, lineage)
+	if err != nil {
+		t.Fatalf("OpenJournal on a v2 journal: %v", err)
+	}
+	t.Cleanup(func() { _ = j.Close() })
+	var version int
+	if err := j.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+		t.Fatalf("user_version after migration = %d %v, want 3", version, err)
+	}
+	if _, err := j.begin(context.Background(), Intent{RequestID: requestID, Kind: "pool", Target: poolID, Reason: "migration", Before: []byte(`{}`), Desired: []byte(`{}`), Dispatch: []byte(`{"api":"legacy"}`)}, "hash", fingerprint); err != nil {
+		t.Fatalf("begin with dispatch record: %v", err)
+	}
+	pending, err := j.Pending(context.Background())
+	if err != nil || len(pending) != 1 || len(pending[0].Dispatch) == 0 {
+		t.Fatalf("pending dispatch after migration = %v %v, want the recorded intent", pending, err)
+	}
+	if err := j.finish(context.Background(), requestID, "confirmed", []byte(`{}`)); err != nil {
+		t.Fatalf("finish after migration: %v", err)
 	}
 }

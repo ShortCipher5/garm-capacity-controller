@@ -96,7 +96,7 @@ func archiveOpenReadOnly(path string) (*sql.DB, error) {
 }
 func archiveHeader(ctx context.Context, db *sql.DB, expected int) error {
 	var app, version int
-	if db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app) != nil || db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version) != nil || app != expected || version != 2 {
+	if db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app) != nil || db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version) != nil || app != expected || (version != 2 && version != 3) {
 		return ErrArchive
 	}
 	return nil

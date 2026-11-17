@@ -34,9 +34,12 @@ type fakeRemote struct {
 	repo          garmapi.ManagedRepository
 	reads, writes int
 	fail          error
-	apply         bool
-	hook          func()
-	reflect       func() garmapi.ManagedPool
+	// writeFail fails only the write calls, so a write can be made
+	// outcome-unknown without breaking the pre-dispatch reads.
+	writeFail error
+	apply     bool
+	hook      func()
+	reflect   func() garmapi.ManagedPool
 }
 
 func (f *fakeRemote) ManagementIdentity() string { return strings.Repeat("c", 64) }
@@ -70,6 +73,9 @@ func (f *fakeRemote) UpdatePool(_ context.Context, _ string, expected string, up
 	f.writes++
 	if expected != f.pool.Fingerprint {
 		return garmapi.ManagedPool{}, garmapi.ErrManagementConflict
+	}
+	if f.writeFail != nil {
+		return garmapi.ManagedPool{}, f.writeFail
 	}
 	if f.hook != nil {
 		f.hook()

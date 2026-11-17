@@ -48,6 +48,7 @@ CREATE TABLE intents (
  role TEXT NOT NULL CHECK(role='management'),
  before_json BLOB NOT NULL,
  desired_json BLOB NOT NULL,
+ dispatch_json BLOB,
  result_json BLOB,
  state TEXT NOT NULL CHECK(state IN ('pending','unknown','confirmed','rejected')),
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -61,7 +62,7 @@ CREATE TABLE audit (
  observation_json BLOB
 ) STRICT;
 PRAGMA application_id=1195593009;
-PRAGMA user_version=2;
+PRAGMA user_version=3;
 `
 
 type Journal struct {
@@ -188,7 +189,7 @@ func openJournalFile(absolute, expected string, initialize bool) (*Journal, erro
 		if app != 0 || version != 0 || tables != 0 {
 			return nil, ErrJournal
 		}
-	} else if app != applicationID || version != 2 || observed != expected {
+	} else if app != applicationID || (version != 2 && version != 3) || observed != expected {
 		return nil, ErrJournal
 	}
 	query := url.Values{"mode": {"rw"}, "_busy_timeout": {"5000"}, "_journal_mode": {"WAL"}, "_synchronous": {"FULL"}, "_foreign_keys": {"on"}, "_txlock": {"immediate"}}
@@ -224,10 +225,21 @@ func openJournalFile(absolute, expected string, initialize bool) (*Journal, erro
 			_, err := tx.Exec("INSERT INTO journal_identity(id,lineage) VALUES(1,?)", expected)
 			return err
 		}
-		if app != applicationID || version != 2 || tx.QueryRow("SELECT lineage FROM journal_identity WHERE id=1").Scan(&observed) != nil || observed != expected {
+		if app != applicationID || (version != 2 && version != 3) || tx.QueryRow("SELECT lineage FROM journal_identity WHERE id=1").Scan(&observed) != nil || observed != expected {
 			return ErrJournal
 		}
-		_, err := tx.Exec("SELECT request_id,request_hash,kind,target,expected,reason,role,before_json,desired_json,result_json,state,created_at,updated_at FROM intents LIMIT 0")
+		if version == 2 {
+			// v2 -> v3: add the exact dispatch record for pool writes. Existing
+			// intents keep a NULL dispatch_json and stay observe-only for
+			// resolution, exactly as before this column existed.
+			if _, err := tx.Exec("ALTER TABLE intents ADD COLUMN dispatch_json BLOB"); err != nil {
+				return ErrJournal
+			}
+			if _, err := tx.Exec("PRAGMA user_version=3"); err != nil {
+				return ErrJournal
+			}
+		}
+		_, err := tx.Exec("SELECT request_id,request_hash,kind,target,expected,reason,role,before_json,desired_json,dispatch_json,result_json,state,created_at,updated_at FROM intents LIMIT 0")
 		return err
 	})
 	if err != nil {
@@ -270,7 +282,11 @@ type Intent struct {
 	UpdatedAt string          `json:"updated_at"`
 	Before    json.RawMessage `json:"before"`
 	Desired   json.RawMessage `json:"desired"`
-	Result    json.RawMessage `json:"result,omitempty"`
+	// Dispatch is the exact dispatch record for pool writes (API kind,
+	// supplied fields, precondition). NULL for pre-v3 intents and for writes
+	// that never carried one; without it, recovery stays observe-only.
+	Dispatch json.RawMessage `json:"dispatch,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
 }
 
 type AuditEvent struct {
@@ -314,7 +330,7 @@ func (j *Journal) begin(ctx context.Context, intent Intent, hash, expected strin
 			return ErrBlocked
 		}
 		now := timestamp()
-		_, err = tx.Exec("INSERT INTO intents(request_id,request_hash,kind,target,expected,reason,role,before_json,desired_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'management',?,?,'pending',?,?)", intent.RequestID, hash, intent.Kind, intent.Target, expected, intent.Reason, []byte(intent.Before), []byte(intent.Desired), now, now)
+		_, err = tx.Exec("INSERT INTO intents(request_id,request_hash,kind,target,expected,reason,role,before_json,desired_json,dispatch_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'management',?,?,?,'pending',?,?)", intent.RequestID, hash, intent.Kind, intent.Target, expected, intent.Reason, []byte(intent.Before), []byte(intent.Desired), []byte(intent.Dispatch), now, now)
 		if err != nil {
 			return ErrJournal
 		}
@@ -346,15 +362,16 @@ func (j *Journal) finish(ctx context.Context, id, state string, result []byte) e
 }
 func scanIntent(row interface{ Scan(...any) error }) (Intent, error) {
 	var intent Intent
-	var before, desired, result []byte
-	err := row.Scan(&intent.Sequence, &intent.RequestID, &intent.Kind, &intent.Target, &intent.State, &intent.Reason, &intent.CreatedAt, &intent.UpdatedAt, &before, &desired, &result)
+	var before, desired, dispatch, result []byte
+	err := row.Scan(&intent.Sequence, &intent.RequestID, &intent.Kind, &intent.Target, &intent.State, &intent.Reason, &intent.CreatedAt, &intent.UpdatedAt, &before, &desired, &dispatch, &result)
 	intent.Before = before
 	intent.Desired = desired
+	intent.Dispatch = dispatch
 	intent.Result = result
 	return intent, err
 }
 
-const intentColumns = "sequence,request_id,kind,target,state,reason,created_at,updated_at,before_json,desired_json,result_json"
+const intentColumns = "sequence,request_id,kind,target,state,reason,created_at,updated_at,before_json,desired_json,dispatch_json,result_json"
 
 func (j *Journal) Pending(ctx context.Context) ([]Intent, error) {
 	rows, err := j.db.QueryContext(ctx, "SELECT "+intentColumns+" FROM intents WHERE state IN ('pending','unknown') ORDER BY sequence")
