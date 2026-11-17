@@ -34,3 +34,15 @@ test('selected storage pool limits constrain disk and unavailable pool data stay
   assert.equal(hostBudgetGuidance({...result, totals}).budget.disk_mib,29760);
   assert.equal(hostBudgetGuidance({...result, totals:{...totals,storage_pool_disk_mib_used:undefined}}).budget.disk_mib,undefined);
 });
+test('disk reserves host usage plus guest growth, also within the selected pool', () => {
+  const r={...result,totals:{...result.totals,disk_mib:204800,disk_mib_used:102400},guests:[{cpu_millis:1000,ram_mib:2048,root_disk_mib:102400}]};
+  assert.equal(hostBudgetGuidance(r).budget.disk_mib,undefined);
+  const pooled={...r, totals:{...r.totals,disk_mib:1000000,disk_mib_used:1000,storage_pool:'pool',storage_pool_disk_mib:204800,storage_pool_disk_mib_used:102400}};
+  assert.equal(hostBudgetGuidance(pooled).budget.disk_mib,undefined);
+});
+
+test('exhausted disk never prefills an unconstrained zero', () => {
+ const g=hostBudgetGuidance({...result,totals:{...result.totals,disk_mib_used:240000}});
+ assert.equal(g.budget.disk_mib,undefined);
+ assert.match(g.warnings.join(' '),/No disk capacity remains/);
+});

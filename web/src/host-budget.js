@@ -27,17 +27,26 @@ export function hostBudgetGuidance(result) {
       // Missing usage is not zero. The backend currently omits both zero and
       // unavailable disk usage, so do not silently recommend disk space.
       if (!valid(totals.disk_mib_used)) { warnings.push('disk_mib: disk usage unknown; enter a reviewed disk budget manually.'); continue; }
-      guestReserved = Math.max(guestReserved, totals.disk_mib_used);
+      // No per-guest used-bytes attribution exists here. Reserve current
+      // usage PLUS full guest limits so host data and future guest growth
+      // cannot be mistaken for reusable capacity (overlap is conservative).
+      const guestDiskLimits = guestReserved;
+      guestReserved += totals.disk_mib_used;
+      if (!Number.isSafeInteger(guestReserved)) { warnings.push('disk_mib: disk allowance exceeds the supported planning range.'); continue; }
       if (totals.storage_pool) {
         if (!valid(totals.storage_pool_disk_mib) || !valid(totals.storage_pool_disk_mib_used)) {
           warnings.push('disk_mib: selected storage pool capacity or usage is unknown.'); continue;
         }
-        const poolFree = Math.max(0, totals.storage_pool_disk_mib - totals.storage_pool_disk_mib_used - Math.max(10240, Math.ceil(totals.storage_pool_disk_mib * 0.1)));
+        const poolFree = Math.max(0, totals.storage_pool_disk_mib - totals.storage_pool_disk_mib_used - guestDiskLimits - Math.max(10240, Math.ceil(totals.storage_pool_disk_mib * 0.1)));
         budget[key] = Math.min(Math.max(0, total - reserve[key] - guestReserved), poolFree);
         continue;
       }
     }
     budget[key] = Math.max(0, total - reserve[key] - guestReserved);
+  }
+  if (budget.disk_mib === 0) {
+    delete budget.disk_mib;
+    warnings.push('No disk capacity remains in this proposal. Disk budget is left blank because zero would mean unconstrained, not no capacity.');
   }
   warnings.push('Existing guest limits are reserved conservatively, including attributed guests. Other projects and host services may be missing; this is a proposal, not qualified free capacity.');
   return { budget, reserve, warnings };
