@@ -84,3 +84,30 @@ any selected stock release accepts a zero maximum through all API paths.
 
 The previously denied dispatch-envelope/binding scope is not changed here. No
 live GARM, Incus or GitHub runner infrastructure is contacted by this package.
+
+## Stock read-only demand adapter
+
+`garmapi.NewDemand` / `Observe` now collect existing stock `/pools`, `/jobs` and
+`/instances` through the verified TLS read-only transports. An explicit repository
+UUID allowlist and provider scope constrain returned data. Reads are bounded;
+malformed/ambiguous jobs, duplicates, cancellation or detected pool drift return
+no partial observation. Pool reads bracket the other observations. This catches
+some drift but is **not an atomic snapshot or fence**, including ABA changes.
+Freshness starts at the first request, not at the last response.
+
+Each observed queued job is retained once with all matching enabled repository
+pool IDs. Label matching follows pinned GARM's case-insensitive all-label rule.
+Locked jobs remain marked, not assumed completed. Disabled pools remain visible
+but are not placement candidates. Idle/creating/busy/other runner supply is
+reported separately without job names, URLs, payloads or credentials. The reader
+must not subtract the same idle runner for multiple jobs or multiply one job by
+its number of pool candidates. It deliberately does not assign ambiguous demand
+to an arbitrary pool or manufacture `Pool.Waiting` for the planner.
+
+A digest identifies the redacted observation; it is not an ETag, permission or
+remote CAS precondition. Organization/enterprise/scaleset scheduling is outside
+this adapter. Queued normal-pool rows lacking a repository identity fail closed.
+Other provider/organization pools may compete for a job, so this provider-scoped
+view is not a complete eligible-provider graph. Historical missed webhooks are
+not repaired, and `missed_webhook_coverage` remains false. The durable broker must
+supply supported demand repair and cross-pool matching before runtime grant use.
