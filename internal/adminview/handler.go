@@ -22,6 +22,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/sshinventory"
 )
@@ -81,6 +82,7 @@ type Overview struct {
 }
 type Handler struct {
 	nativeEnrollments map[string]frozenNativeRecipe
+	overheadRefresh   *overheadrefresh.Service
 	brokerProfiles    map[string]BrokerProfileRecipe
 	allocatorStatus   AllocatorStatusSource
 	rotation          *firstboot.ManagedRotationService
@@ -196,6 +198,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/native-enrollment" {
 		h.serveNativeEnrollment(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/overhead-refresh" {
+		h.serveOverheadRefresh(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/broker-profiles" {
