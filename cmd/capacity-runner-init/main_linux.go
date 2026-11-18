@@ -22,14 +22,17 @@ func main() {
 	} else {
 		err = protectedinit.ErrRefused
 	}
+	// Success is returned only after durable local fence and a halt request.
+	if err == nil {
+		return
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "protected runner lifecycle unavailable; retain unknown state")
 		if os.Getpid() != 1 {
 			os.Exit(1)
 		}
 	}
-	// PID1 must remain alive after process exit: exiting could terminate namespace
-	// activity not established by this component. No successful guest shutdown.
+	// Failure never authorizes guest shutdown or physical capacity release.
 	for {
 		time.Sleep(time.Hour)
 	}
