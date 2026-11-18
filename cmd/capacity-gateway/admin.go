@@ -15,8 +15,10 @@ import (
 )
 
 type adminConfiguration struct {
-	IncusOnboarding                    *onboardingConfiguration `json:"incus_onboarding,omitempty"`
-	EnableExperimentalOnboardingProbes bool                     `json:"-"`
+	SSHInventory                       *sshInventoryConfiguration `json:"ssh_inventory,omitempty"`
+	EnableSSHInventory                 bool                       `json:"-"`
+	IncusOnboarding                    *onboardingConfiguration   `json:"incus_onboarding,omitempty"`
+	EnableExperimentalOnboardingProbes bool                       `json:"-"`
 	onboardingRuntime                  *onboarding.Manager
 	GarmManagement                     *garmManagementConfiguration `json:"garm_management,omitempty"`
 	EnableExperimentalGarmManagement   bool                         `json:"-"`
@@ -114,6 +116,17 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	} else if config.EnableExperimentalOnboardingProbes {
 		cleanup()
 		return nil, noop, adminview.ErrConfiguration
+	}
+	if config.EnableSSHInventory {
+		service, sshToken, e := newSSHInventory(config.SSHInventory, store)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetSSHInventory(service, sshToken); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

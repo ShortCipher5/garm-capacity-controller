@@ -21,7 +21,7 @@ import (
 func (h *Handler) EnableManagement(token string) error {
 	decoded, err := hex.DecodeString(token)
 	hash := sha256.Sum256([]byte("Bearer " + token))
-	if err != nil || len(decoded) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(h.tokenHash[:], hash[:]) == 1 {
+	if err != nil || len(decoded) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(h.tokenHash[:], hash[:]) == 1 || subtle.ConstantTimeCompare(h.sshHash[:], hash[:]) == 1 {
 		return ErrConfiguration
 	}
 	h.writeHash = hash

@@ -294,6 +294,7 @@ func main() {
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
 	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
+	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
 	monitoring := flag.Bool("allow-experimental-monitoring", false, "allow periodic host utilization sampling into the admission usage history; monitoring data never gates admission, fits or retirement")
 	flag.Parse()
 	raw, err := securefiles.Read(*configPath, 1<<20)
@@ -326,6 +327,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableExperimentalOnboardingProbes = true
+	}
+	if *sshInventory {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "SSH inventory requires separate admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableSSHInventory = true
 	}
 	if *checkConfig {
 		if checkStaticConfig(config, *provision) != nil {

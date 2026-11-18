@@ -21,6 +21,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/sshinventory"
 )
 
 var ErrConfiguration = errors.New("invalid admin configuration")
@@ -77,6 +78,8 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	sshInventory    *sshinventory.Service
+	sshHash         [32]byte
 	onboarding      *onboarding.Manager
 	onboardingProbe bool
 	onboardingHash  [32]byte
@@ -136,6 +139,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-h.inFlight }()
 	default:
 		fail(http.StatusServiceUnavailable)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/ssh-inventory" {
+		h.serveSSHInventory(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/onboarding" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/onboarding/") {

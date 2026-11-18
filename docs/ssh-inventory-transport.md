@@ -45,17 +45,18 @@ unsupported/malformed shell output fails closed.
 
 ## Deliberately not implemented here
 
-- Browser/API Add server flow, SSH credential upload or secret storage.
-- Host-key review UI, key rotation, bootstrap/install approval or host-agent setup.
+- Arbitrary server entry, SSH credential upload or secret storage.
+- Key rotation, bootstrap/install approval or host-agent setup.
 - Remote credential revocation or removing access from the host.
 - Binding this OS view to the existing Incus discovery/review/enrollment identity.
 - Runner activation, admission, resource grants, retirement or deployment.
 
 The current Incus connection flow uses endpoint/project/TLS-key identities. An SSH
 key is a different identity namespace; treating one as the other would be unsafe.
-A later guided workflow must explicitly bind both observations and handle revoked
-or changed credentials before enrollment. This package is not wired into the live
-gateway yet, and no live host was accessed during development.
+A later enrollment workflow must explicitly bind both observations and handle
+revoked or changed credentials. The separate opt-in [staged SSH inventory UI/API](ssh-inventory-ui.md)
+now wires this transport to reviewed read-only inspection, never host enrollment
+or activation. No live host was accessed during development.
 
 Tests use disposable in-process SSH servers, generated keys and temporary private
 files. They exercise exact key pinning, fail-before-authentication mismatch,
