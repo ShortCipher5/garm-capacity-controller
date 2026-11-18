@@ -55,5 +55,6 @@ func (h *Handler) serveMaximumReduction(w http.ResponseWriter, r *http.Request) 
 		fail(409)
 		return
 	}
+	h.sourceHeaders(w)
 	json.NewEncoder(w).Encode(result)
 }
