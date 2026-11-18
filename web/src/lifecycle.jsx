@@ -6,7 +6,7 @@ export function Lifecycle({data}) {
  <p>Recorded snapshot at {new Date(data.observed_at).toLocaleString()}. Use Refresh snapshot above to reload. This is not live GitHub job status, an operation queue, or proof that the automatic allocator is running.</p>
  <p>Pending and uncertain outcomes require reconciliation, not a new request. This panel cannot retry work, enable runtime, drain runners or release capacity.</p>
  <h3>Recorded lifecycle states</h3>
- {rows.length ? <table><thead><tr><th>Recorded state</th><th>Records</th><th>Meaning and next step</th></tr></thead><tbody>{rows.map(([state,count])=>{const g=stateGuidance(state);return <tr key={state}><td>{g.label} <code>{state}</code></td><td>{count}</td><td>{g.action}</td></tr>;})}</tbody></table> : <p>No lifecycle records reported. This does not prove no runners exist or that deployment is ready.</p>}
+ {rows.length ? <div className="table-wrap" role="region" aria-label="Recorded lifecycle states" tabIndex={0}><table><thead><tr><th>Recorded state</th><th>Records</th><th>Meaning and next step</th></tr></thead><tbody>{rows.map(([state,count])=>{const g=stateGuidance(state);return <tr key={state}><td>{g.label} <code>{state}</code></td><td>{count}</td><td>{g.action}</td></tr>;})}</tbody></table></div> : <p>No lifecycle records reported. This does not prove no runners exist or that deployment is ready.</p>}
  <p>Counts are overview records, including released history when reported, not charged resource totals. Use the charged capacity breakdown for capacity accounting.</p>
  <h3>Host admission and retirement blockers</h3>
  {!data.hosts.length&&<p>No hosts are registered in this snapshot. Registration alone does not activate execution.</p>}

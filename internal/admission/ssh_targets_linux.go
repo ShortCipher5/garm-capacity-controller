@@ -151,6 +151,12 @@ func (s *SQLiteStore) RevokeSSHTarget(ctx context.Context, request, id, digest s
 // The old ID remains permanently tombstoned, protecting older clients and
 // preventing ABA reuse of a previously reviewed target identity.
 func (s *SQLiteStore) ReplaceSSHTarget(ctx context.Context, request, oldID, oldDigest, id string, c sshinventory.Config, digest string, limit int) error {
+	return s.replaceSSHTarget(ctx, request, oldID, oldDigest, id, c, digest, limit, "ssh-target-management-token")
+}
+func (s *SQLiteStore) ReplaceSSHTargetForRotation(ctx context.Context, request, oldID, oldDigest, id string, c sshinventory.Config, digest string, limit int) error {
+	return s.replaceSSHTarget(ctx, request, oldID, oldDigest, id, c, digest, limit, "inventory-key-rotation-token")
+}
+func (s *SQLiteStore) replaceSSHTarget(ctx context.Context, request, oldID, oldDigest, id string, c sshinventory.Config, digest string, limit int, actor string) error {
 	if !ValidOnboardingRequestID(request) || !ValidOnboardingProfileID(oldID) || !ValidOnboardingProfileID(id) || oldID == id || len(oldDigest) != 64 || digest != sshinventory.ReviewDigest(id, c) || limit < 1 || limit > 32 {
 		return ErrDenied
 	}
@@ -205,7 +211,50 @@ func (s *SQLiteStore) ReplaceSSHTarget(ctx context.Context, request, oldID, oldD
 		if _, e = tx.ExecContext(ctx, `INSERT INTO ssh_inventory_replacements(request,old_id,old_digest,new_id,new_digest) VALUES(?,?,?,?,?)`, request, oldID, oldDigest, id, digest); e != nil {
 			return e
 		}
-		audit, _ := json.Marshal(map[string]string{"actor": "ssh-target-management-token", "request_id": request, "old_target_id": oldID, "old_review_digest": oldDigest, "target_id": id, "review_digest": digest})
+		audit, _ := json.Marshal(map[string]string{"actor": actor, "request_id": request, "old_target_id": oldID, "old_review_digest": oldDigest, "target_id": id, "review_digest": digest})
 		return sqliteAudit(tx, "ssh_target_replaced", string(audit), s.now())
+	})
+}
+
+func (s *SQLiteStore) CheckSSHTargetReplacement(ctx context.Context, request, oldID, oldDigest, id string, c sshinventory.Config, digest string) error {
+	if !ValidOnboardingRequestID(request) || !ValidOnboardingProfileID(oldID) || !ValidOnboardingProfileID(id) || oldID == id || len(oldDigest) != 64 || digest != sshinventory.ReviewDigest(id, c) {
+		return ErrDenied
+	}
+	raw, e := json.Marshal(c)
+	if e != nil {
+		return ErrDenied
+	}
+	return s.transaction(ctx, func(tx *sql.Tx) error {
+		var o, od, n, nd string
+		e := tx.QueryRowContext(ctx, `SELECT old_id,old_digest,new_id,new_digest FROM ssh_inventory_replacements WHERE request=?`, request).Scan(&o, &od, &n, &nd)
+		if e == nil {
+			if o != oldID || od != oldDigest || n != id || nd != digest {
+				return ErrDenied
+			}
+			var saved, body string
+			if tx.QueryRowContext(ctx, `SELECT config,digest FROM ssh_inventory_targets WHERE id=? AND NOT EXISTS(SELECT 1 FROM ssh_inventory_revocations WHERE id=?)`, id, id).Scan(&body, &saved) != nil || body != string(raw) || saved != digest {
+				return ErrDenied
+			}
+			return nil
+		}
+		if e != sql.ErrNoRows {
+			return e
+		}
+		var saved, body string
+		if tx.QueryRowContext(ctx, `SELECT config,digest FROM ssh_inventory_targets WHERE id=? AND NOT EXISTS(SELECT 1 FROM ssh_inventory_revocations WHERE id=?)`, oldID, oldID).Scan(&body, &saved) != nil || saved != oldDigest {
+			return ErrDenied
+		}
+		var old sshinventory.Config
+		if json.Unmarshal([]byte(body), &old) != nil || sshinventory.ReviewDigest(oldID, old) != oldDigest {
+			return ErrDenied
+		}
+		var count int
+		if e = tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM ssh_inventory_targets WHERE id=?)+(SELECT count(*) FROM ssh_inventory_revocations WHERE id=?)`, id, id).Scan(&count); e != nil {
+			return e
+		}
+		if count != 0 {
+			return ErrDenied
+		}
+		return nil
 	})
 }

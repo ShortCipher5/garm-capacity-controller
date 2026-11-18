@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -18,10 +19,13 @@ import (
 )
 
 var (
-	ErrManagement         = errors.New("Garm management unavailable")
-	ErrManagementDisabled = errors.New("Garm writes are disabled")
-	ErrManagementConflict = errors.New("Garm settings changed; refresh before editing")
-	ErrManagementUnsafe   = errors.New("unsupported or unsafe Garm settings change")
+	// ErrManagementNotDispatched is returned only before any PUT is attempted.
+	// It is not evidence for resolving an old pending intent after a crash.
+	ErrManagementNotDispatched = errors.New("Garm write was not dispatched")
+	ErrManagement              = errors.New("Garm management unavailable")
+	ErrManagementDisabled      = errors.New("Garm writes are disabled")
+	ErrManagementConflict      = errors.New("Garm settings changed; refresh before editing")
+	ErrManagementUnsafe        = errors.New("unsupported or unsafe Garm settings change")
 	// ErrManagementOutcomeUnknown means a write may have committed. Never retry it
 	// automatically or report that it failed without first reading authoritative state.
 	ErrManagementOutcomeUnknown = errors.New("Garm write outcome unknown; refresh and reconcile before another write")
@@ -341,14 +345,16 @@ func (m *ManagementClient) Repository(ctx context.Context, id string) (ManagedRe
 }
 
 func (m *ManagementClient) UpdatePool(ctx context.Context, id, expected string, update PoolUpdate) (ManagedPool, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedPool{}, fmt.Errorf("%w: %w", ErrManagementNotDispatched, ErrManagement)
+	}
 	defer m.mu.Unlock()
 	if !m.writes {
 		return ManagedPool{}, ErrManagementDisabled
 	}
 	before, err := m.pool(ctx, id)
 	if err != nil {
-		return ManagedPool{}, err
+		return ManagedPool{}, fmt.Errorf("%w: %w", ErrManagementNotDispatched, err)
 	}
 	if expected == "" || expected != before.Fingerprint {
 		return ManagedPool{}, ErrManagementConflict
@@ -420,7 +426,9 @@ func (m *ManagementClient) UpdatePool(ctx context.Context, id, expected string, 
 }
 
 func (m *ManagementClient) UpdateRepositoryBalancer(ctx context.Context, id, expected, value string) (ManagedRepository, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return ManagedRepository{}, fmt.Errorf("%w: %w", ErrManagementNotDispatched, ErrManagement)
+	}
 	defer m.mu.Unlock()
 	if !m.writes {
 		return ManagedRepository{}, ErrManagementDisabled
@@ -430,7 +438,7 @@ func (m *ManagementClient) UpdateRepositoryBalancer(ctx context.Context, id, exp
 	}
 	before, err := m.repository(ctx, id)
 	if err != nil {
-		return ManagedRepository{}, err
+		return ManagedRepository{}, fmt.Errorf("%w: %w", ErrManagementNotDispatched, err)
 	}
 	if expected == "" || expected != before.Fingerprint {
 		return ManagedRepository{}, ErrManagementConflict

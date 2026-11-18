@@ -6,9 +6,9 @@ import (
 )
 
 // managementMutex keeps the same single serialization domain for reads and
-// writes, but permits a queued read to withdraw without a waiting goroutine.
-// Like sync.Mutex it must not be copied after first use. Lock remains blocking
-// for existing mutation paths; cancellation never unlocks another operation.
+// writes, but permits a queued operation to withdraw without a waiting goroutine.
+// Like sync.Mutex it must not be copied after first use. Lock remains available for existing callers; cancellation never unlocks another
+// operation.
 type managementMutex struct {
 	once sync.Once
 	gate chan struct{}

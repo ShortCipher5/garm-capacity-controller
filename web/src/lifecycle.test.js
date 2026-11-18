@@ -28,7 +28,7 @@ test('rendered status shows uncertainty and replaces old snapshot data',async()=
  try{
  const {Lifecycle}=await server.ssrLoadModule('/src/lifecycle.jsx');
  const render=d=>renderToStaticMarkup(React.createElement(Lifecycle,{data:d}));
- const html=render(data);assert.match(html,/Outcome unknown/);assert.match(html,/Pending creation/);assert.match(html,/Retirement assessment unavailable/);assert.match(html,/not live GitHub job status/);assert.match(html,/not a runtime, backend capacity or production-readiness guarantee/);
+ const html=render(data);assert.match(html,/class="table-wrap" role="region" aria-label="Recorded lifecycle states" tabindex="0"/);assert.match(html,/Outcome unknown/);assert.match(html,/Pending creation/);assert.match(html,/Retirement assessment unavailable/);assert.match(html,/not live GitHub job status/);assert.match(html,/not a runtime, backend capacity or production-readiness guarantee/);
  const empty=render({...data,states:{},hosts:[]});assert.doesNotMatch(empty,/server-a|Outcome unknown/);assert.match(empty,/does not prove no runners exist/);
  const zero=render({...data,hosts:[{...host,drain_assessment:{tracked_allocations:0,unobserved_reservations:0,unreserved_resources:0,blockers:[]}}]});assert.match(zero,/empty blocker list is not retirement approval/);
  }finally{await server.close();}

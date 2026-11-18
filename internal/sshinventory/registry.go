@@ -160,3 +160,33 @@ func (r *Registry) Replace(ctx context.Context, request, oldID, oldDigest, id st
 	}
 	return t, nil
 }
+
+// RotationReplacementStore preserves the distinct approval role in the durable audit.
+type RotationReplacementStore interface {
+	ReplaceSSHTargetForRotation(context.Context, string, string, string, string, Config, string, int) error
+}
+
+func (r *Registry) ReplaceForRotation(ctx context.Context, request, oldID, oldDigest, id string, c Config, digest string) (Target, error) {
+	t, e := r.Review(id, c)
+	store, ok := r.store.(RotationReplacementStore)
+	if e != nil || !ok || !requestID.MatchString(request) || !targetID.MatchString(oldID) || r.reserved[oldID] || oldID == id || len(oldDigest) != 64 || digest != t.ReviewDigest {
+		return Target{}, ErrReview
+	}
+	if store.ReplaceSSHTargetForRotation(ctx, request, oldID, oldDigest, id, c, digest, 32-len(r.reserved)) != nil {
+		return Target{}, ErrReview
+	}
+	return t, nil
+}
+
+// CheckRotationReplacement is a read-only preflight. Replacement itself still
+// revalidates atomically after the pinned new-key proof.
+func (r *Registry) CheckRotationReplacement(ctx context.Context, request, oldID, oldDigest, id string, c Config, digest string) error {
+	t, e := r.Review(id, c)
+	store, ok := r.store.(interface {
+		CheckSSHTargetReplacement(context.Context, string, string, string, string, Config, string) error
+	})
+	if e != nil || !ok || !requestID.MatchString(request) || !targetID.MatchString(oldID) || r.reserved[oldID] || oldID == id || len(oldDigest) != 64 || digest != t.ReviewDigest {
+		return ErrReview
+	}
+	return store.CheckSSHTargetReplacement(ctx, request, oldID, oldDigest, id, c, digest)
+}
