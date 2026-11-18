@@ -282,6 +282,12 @@ export function App() {
     try { return await session.current.entityInventorySnapshot(options); }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
+  // Refresh measured history once per committed overview snapshot, not on busy
+  // transitions. Stable identity also prevents unrelated renders aborting reads.
+  const readUsage = useCallback(async (host, options) => {
+    try { return await session.current.usageHistory(host, options); }
+    catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+  }, [disconnect, data]);
   useEffect(() => {
     window.addEventListener("pagehide", disconnect);
     return () => {
@@ -331,10 +337,7 @@ export function App() {
           try { return await session.current.profilesSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
-        readUsage={async (host, options) => {
-          try { return await session.current.usageHistory(host, options); }
-          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
-        }}
+        readUsage={readUsage}
         readGarm={async () => {
           try { return await session.current.garmSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
