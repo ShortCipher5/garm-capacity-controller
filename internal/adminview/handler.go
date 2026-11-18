@@ -146,6 +146,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/capacity-states" {
+		h.serveCapacityStates(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/bootstrap" {
 		h.serveBootstrap(w, r)
 		return

@@ -159,3 +159,77 @@ func TestGitHubReadsOldActiveRunWithoutCreatedFilter(t *testing.T) {
 		t.Fatalf("%+v %v calls%d states%v", jobs, e, jobsCalls, states)
 	}
 }
+
+func TestLookupMissingHistoryConservativeAndScoped(t *testing.T) {
+	c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo/actions/jobs/1":
+			fmt.Fprint(w, `{"id":1,"run_id":7,"status":"completed","labels":["linux"]}`)
+		case "/repos/owner/repo/actions/jobs/2":
+			fmt.Fprint(w, `{"id":2,"run_id":7,"status":"completed","labels":["windows"]}`)
+		case "/repos/owner/repo/actions/jobs/3":
+			w.WriteHeader(404)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(500)
+		}
+	})
+	items := []Item{{RepositoryID: repo.GarmID, Job: Job{ID: 1, Status: "queued", Labels: []string{"Linux"}}, MissingFromReader: true}, {RepositoryID: repo.GarmID, Job: Job{ID: 2, Status: "queued", Labels: []string{"linux"}}, MissingFromReader: true}, {RepositoryID: repo.GarmID, Job: Job{ID: 3, Status: "queued", Labels: []string{"linux"}}, MissingFromReader: true}, {RepositoryID: repo.GarmID, Job: Job{ID: 4, Status: "queued"}, MissingFromReader: true}}
+	past := map[string]Item{}
+	for _, item := range items {
+		past[key(item.RepositoryID, item.Job.ID)] = item
+	}
+	current := map[string]bool{key(repo.GarmID, 4): true}
+	lookupMissingHistory(context.Background(), c, []Repository{repo}, items, past, current, "")
+	if items[0].MissingFromReader || items[0].ReaderStatus != "completed" {
+		t.Fatalf("completion not observed: %+v", items[0])
+	}
+	if !items[1].MissingFromReader || !items[1].Conflict {
+		t.Fatalf("mismatch not preserved: %+v", items[1])
+	}
+	if !items[2].MissingFromReader || !items[3].MissingFromReader {
+		t.Fatal("missing or stock item changed")
+	}
+}
+func TestLookupJobRejectsWrongIdentityBeforeCreds(t *testing.T) {
+	c := fixture(t, func(http.ResponseWriter, *http.Request) { t.Fatal("unexpected request") })
+	c.resolve = func(context.Context, string) (string, error) { t.Fatal("unexpected credential"); return "", nil }
+	other := repo
+	other.Name = "other"
+	if _, err := c.lookupJob(context.Background(), other, 1); err != ErrObservation {
+		t.Fatal("accepted changed scope")
+	}
+}
+
+func TestMissingHistoryCursorVisitsAllEvenWithLongGaps(t *testing.T) {
+	calls := map[string]int{}
+	c := fixture(t, func(w http.ResponseWriter, r *http.Request) { calls[r.URL.Path]++; w.WriteHeader(404) })
+	items := make([]Item, 64)
+	past := map[string]Item{}
+	for i := range items {
+		items[i] = Item{RepositoryID: repo.GarmID, Job: Job{ID: int64(i + 1), Status: "queued"}, MissingFromReader: true}
+		past[key(repo.GarmID, int64(i+1))] = items[i]
+	}
+	cursor := lookupMissingHistory(context.Background(), c, []Repository{repo}, items, past, nil, "")
+	if len(calls) != 32 {
+		t.Fatalf("expected cap of 32, got %d", len(calls))
+	}
+	cursor = lookupMissingHistory(context.Background(), c, []Repository{repo}, items, past, nil, cursor)
+	if len(calls) != 64 {
+		t.Fatalf("cursor starved entries: got %d", len(calls))
+	}
+	if cursor == "" {
+		t.Fatal("missing cursor")
+	}
+}
+
+func TestLookupCancellationRetainsCursorAndHistory(t *testing.T) {
+	c := fixture(t, func(http.ResponseWriter, *http.Request) { t.Fatal("cancelled lookup contacted server") })
+	items := []Item{{RepositoryID: repo.GarmID, Job: Job{ID: 1, Status: "queued"}, MissingFromReader: true}}
+	past := map[string]Item{key(repo.GarmID, 1): items[0]}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := lookupMissingHistory(ctx, c, []Repository{repo}, items, past, nil, "old"); got != "old" || !items[0].MissingFromReader {
+		t.Fatal("cancel changed observation")
+	}
+}

@@ -88,3 +88,11 @@ This supplies the real observation runtime only. Still required separately:
 
 No live infrastructure was used for verification. Tests use disposable TLS HTTP
 servers and temporary private files plus injected scheduling clocks/waits.
+
+Historical queued observations missing from a fresh run enumeration are checked
+against the exact repository-scoped GitHub job endpoint in a rotating batch of at
+most 32 lookups per poll, within a 10-second budget. A matching positive
+completed response can retire an old observation only when the stock queue does
+not still claim the job. Missing, inaccessible, malformed or conflicting results
+remain unknown; no physical capacity is released and this does not prove
+complete webhook coverage. Lookup failures preserve the prior observation.

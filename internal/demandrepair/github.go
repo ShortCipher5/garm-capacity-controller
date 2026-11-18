@@ -177,6 +177,32 @@ func (c *GitHubClient) Read(ctx context.Context, repo Repository, from, to time.
 	return result, nil
 }
 
+// lookupJob reads one explicitly scoped job by ID. It is observation only and
+// does not prove runner completion, capacity release, or job-list completeness.
+func (c *GitHubClient) lookupJob(ctx context.Context, repo Repository, id int64) (Job, error) {
+	if c == nil || ctx == nil || ctx.Err() != nil || id <= 0 {
+		return Job{}, ErrObservation
+	}
+	if mapped, ok := c.scope[repo.GarmID]; !ok || mapped != repo {
+		return Job{}, ErrObservation
+	}
+	var result struct {
+		ID     int64    `json:"id"`
+		RunID  int64    `json:"run_id"`
+		Status string   `json:"status"`
+		Labels []string `json:"labels"`
+	}
+	path := "/repos/" + repo.Owner + "/" + repo.Name + "/actions/jobs/" + strconv.FormatInt(id, 10)
+	if c.get(ctx, path, url.Values{}, &result) != nil {
+		return Job{}, ErrObservation
+	}
+	job := Job{ID: result.ID, Status: result.Status, Labels: result.Labels}
+	if result.ID != id || result.RunID <= 0 || result.Labels == nil || !validJob(job) {
+		return Job{}, ErrObservation
+	}
+	return canonical(job), nil
+}
+
 // ObserveGitHub joins a bounded live-capable read transport to the conservative
 // reconciliation adapter. It does not persist checkpoints or establish coverage
 // outside the run-created interval. No runtime caller enables it in this PR.

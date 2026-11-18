@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"golang.org/x/crypto/ssh"
 	"net/http/httptest"
@@ -94,5 +95,44 @@ func TestBootstrapAPISeparateAuthorityAndExactReview(t *testing.T) {
 	ops, e := store.BootstrapOperations(ctx)
 	if e != nil || ops["one"].State != "unknown" {
 		t.Fatal("unknown not durable", ops, e)
+	}
+}
+
+// Integration guard: adding a privileged route must not replace an existing
+// read-only route or mix their authorities on the same handler.
+func TestBootstrapAndCapacityStateRoutesCoexist(t *testing.T) {
+	h, store, read := fixture(t)
+	baseline(t, store, []admission.InventoryResource{{ID: "one", Host: "host-a", Pool: "pool-a", State: "unknown", Resources: admission.Resources{CPU: 1000, RAM: 1000, Runners: 1}}})
+	if e := store.InitializeBootstrap(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	r := bootstrapFixture(t)
+	service, e := hostbootstrap.NewService(map[string]hostbootstrap.DeploymentTarget{"prepared": {Request: r, CredentialAlias: "admin"}}, store, func(context.Context, string) (ssh.Signer, error) {
+		t.Error("read-only GET resolved credential")
+		return nil, hostbootstrap.ErrInvalid
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer service.Close()
+	token := strings.Repeat("e", 64)
+	if e = h.SetBootstrap(service, token); e != nil {
+		t.Fatal(e)
+	}
+	for _, tc := range []struct{ path, credential, field string }{{"/admin/api/v1/capacity-states", read, "source"}, {"/admin/api/v1/bootstrap", token, "targets"}} {
+		w := request(t, h, "GET", tc.path, tc.credential)
+		if w.Code != 200 {
+			t.Fatal(tc.path, w.Code, w.Body.String())
+		}
+		var body map[string]json.RawMessage
+		if json.Unmarshal(w.Body.Bytes(), &body) != nil || body[tc.field] == nil {
+			t.Fatal("wrong endpoint dispatched", tc.path, w.Body.String())
+		}
+	}
+	if w := request(t, h, "GET", "/admin/api/v1/capacity-states", token); w.Code != 401 {
+		t.Fatal("bootstrap token became read authority", w.Code)
+	}
+	if w := request(t, h, "GET", "/admin/api/v1/bootstrap", read); w.Code != 401 {
+		t.Fatal("read token became bootstrap authority", w.Code)
 	}
 }
