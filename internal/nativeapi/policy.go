@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/protectedboot"
 	"reflect"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ var ErrPolicy = errors.New("native policy refused")
 var ErrNative = errors.New("native operation outcome unknown; retain charge")
 
 const PolicyVersion = "garm-native-policy/v2"
+const ProtectedPolicyVersion = "garm-native-policy/v3"
 const NativeVersion = "6.0.4"
 
 type PolicySpec struct {
@@ -36,9 +38,11 @@ type Pool struct {
 	Type        string `json:"type"`
 	Arch        string `json:"arch"`
 	// Logical labels expected in legacy canonical plans; NOT Incus inheritance.
-	ExpectedProfiles []string `json:"expected_profiles"`
-	StoragePool      string   `json:"storage_pool"`
-	Bridge           string   `json:"bridge"`
+	ExpectedProfiles []string                       `json:"expected_profiles"`
+	StoragePool      string                         `json:"storage_pool"`
+	Bridge           string                         `json:"bridge"`
+	ZFSDataset       string                         `json:"zfs_dataset"`
+	ProtectedImage   *protectedboot.ImageDescriptor `json:"protected_image,omitempty"`
 }
 type Policy struct {
 	spec   PolicySpec
@@ -46,10 +50,17 @@ type Policy struct {
 }
 
 func NewPolicy(spec PolicySpec) (Policy, error) {
-	if spec.Version != PolicyVersion || spec.ServerVersion != NativeVersion || !label(spec.Controller) || !label(spec.Host) || !hash(spec.DomainID) || !hash(spec.NativeSHA256) || !hash(spec.LauncherSHA256) || len(spec.Pools) == 0 || len(spec.Pools) > 256 {
+	if (spec.Version != PolicyVersion && spec.Version != ProtectedPolicyVersion) || spec.ServerVersion != NativeVersion || !label(spec.Controller) || !label(spec.Host) || !hash(spec.DomainID) || !hash(spec.NativeSHA256) || !hash(spec.LauncherSHA256) || len(spec.Pools) == 0 || len(spec.Pools) > 256 {
 		return Policy{}, ErrPolicy
 	}
 	for id, p := range spec.Pools {
+		if spec.Version == ProtectedPolicyVersion {
+			if p.ProtectedImage == nil || protectedboot.ValidateDescriptor(*p.ProtectedImage) != nil {
+				return Policy{}, ErrPolicy
+			}
+		} else if p.ProtectedImage != nil {
+			return Policy{}, ErrPolicy
+		}
 		if !label(id) || !label(p.Flavor) || !label(p.Image) || !hash(p.Fingerprint) || p.Type != "container" || (p.Arch != "amd64" && p.Arch != "arm64") || !name(p.StoragePool) || !name(p.Bridge) || len(p.ExpectedProfiles) == 0 || len(p.ExpectedProfiles) > 16 {
 			return Policy{}, ErrPolicy
 		}
@@ -77,6 +88,17 @@ func (p Policy) DomainID() string   { return p.spec.DomainID }
 func (p Policy) Controller() string { return p.spec.Controller }
 func (p Policy) Host() string       { return p.spec.Host }
 
+// ProtectedImage returns a detached immutable-policy descriptor, never proof
+// that a live image or boot environment has been independently qualified.
+func (p Policy) ProtectedImage(pool string) (protectedboot.ImageDescriptor, bool) {
+	v, ok := p.spec.Pools[pool]
+	if !ok || p.spec.Version != ProtectedPolicyVersion || v.ProtectedImage == nil {
+		return protectedboot.ImageDescriptor{}, false
+	}
+	return protectedboot.CloneDescriptor(*v.ProtectedImage), true
+}
+func (p Policy) Protected() bool { return p.spec.Version == ProtectedPolicyVersion && hash(p.digest) }
+
 // Allocation must come from the canonical native envelope, not caller-selected
 // free-form labels/resources. The owner verifies that envelope by fresh central
 // consumption before invoking Create. This structure alone grants nothing.
@@ -97,10 +119,27 @@ type Prepared struct {
 func (p Prepared) Body() []byte   { return []byte(p.body) }
 func (p Prepared) Digest() string { return p.digest }
 func (p Prepared) Name() string   { return p.name }
-func (p Policy) Compile(a Allocation, userData string) (Prepared, error) {
+
+// ValidateAllocation checks only immutable template/resource compatibility. It
+// does not accept bootstrap data, produce a native body, or grant execution.
+// Pool registration uses this method without manufacturing a job/JIT payload.
+func (p Policy) ValidateAllocation(a Allocation) error {
 	pool, ok := p.spec.Pools[a.Pool]
-	if !hash(p.digest) || !ok || a.Controller != p.spec.Controller || a.Host != p.spec.Host || !name(a.Name) || !hash(a.RequestKey) || a.CPU <= 0 || a.CPU%1000 != 0 || a.RAM <= 0 || a.RAM > (1<<63-1)/(1<<20) || a.Disk <= 0 || a.Disk > (1<<63-1)/(1<<20) || a.Runners != 1 || a.Flavor != pool.Flavor || a.Image != pool.Image || a.Fingerprint != pool.Fingerprint || a.Type != pool.Type || a.Arch != pool.Arch || !reflect.DeepEqual(a.Profiles, pool.ExpectedProfiles) || len(userData) == 0 || len(userData) > 1<<20 || !utf8.ValidString(userData) {
+	if !hash(p.digest) || !ok || a.Controller != p.spec.Controller || a.Host != p.spec.Host || !name(a.Name) || !hash(a.RequestKey) || a.CPU <= 0 || a.CPU%1000 != 0 || a.RAM <= 0 || a.RAM > (1<<63-1)/(1<<20) || a.Disk <= 0 || a.Disk > (1<<63-1)/(1<<20) || a.Runners != 1 || a.Flavor != pool.Flavor || a.Image != pool.Image || a.Fingerprint != pool.Fingerprint || a.Type != pool.Type || a.Arch != pool.Arch || !reflect.DeepEqual(a.Profiles, pool.ExpectedProfiles) {
+		return ErrPolicy
+	}
+	return nil
+}
+func (p Policy) Compile(a Allocation, userData string) (Prepared, error) {
+	if p.ValidateAllocation(a) != nil || len(userData) == 0 || len(userData) > 1<<20 || !utf8.ValidString(userData) {
 		return Prepared{}, ErrPolicy
+	}
+	pool := p.spec.Pools[a.Pool]
+	if p.spec.Version == ProtectedPolicyVersion {
+		payload, e := protectedboot.Decode([]byte(userData))
+		if e != nil || payload.RunnerName != a.Name || pool.ProtectedImage == nil || !reflect.DeepEqual(payload.Image, *pool.ProtectedImage) {
+			return Prepared{}, ErrPolicy
+		}
 	}
 	config := map[string]string{
 		"limits.cpu": strconv.FormatInt(a.CPU/1000, 10), "limits.memory": strconv.FormatInt(a.RAM, 10) + "MiB",

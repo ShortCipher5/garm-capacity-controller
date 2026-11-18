@@ -64,6 +64,9 @@ func TestPolicyRejectsUnchargedOrChangedShape(t *testing.T) {
 	for i, mutate := range mutations {
 		b := a
 		mutate(&b)
+		if e := p.ValidateAllocation(b); e != ErrPolicy {
+			t.Fatal("template accepted mismatch", i, e)
+		}
 		if _, e := p.Compile(b, "data"); e != ErrPolicy {
 			t.Fatal("accepted mismatch", i, e)
 		}
