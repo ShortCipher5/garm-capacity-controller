@@ -144,7 +144,7 @@ func TestNativeDomainOverheadRejectsPre26Writer(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer old.Close()
-	if _, e = old.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES('old25','app','a',1,1,0,1,'creating','2026-01-01T00:00:00Z',18)"); e == nil || !strings.Contains(e.Error(), "current domain overhead accounting required") {
+	if _, e = old.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES('old25','app','a',1,1,0,1,'creating','2026-01-01T00:00:00Z',18)"); e == nil || !strings.Contains(e.Error(), "current artifact overhead accounting required") {
 		t.Fatal("pre26 accounting bypassed overhead", e)
 	}
 	if _, e = s.db.Exec("PRAGMA user_version=25"); e != nil {
@@ -153,7 +153,7 @@ func TestNativeDomainOverheadRejectsPre26Writer(t *testing.T) {
 	if _, e = s.Admit(context.Background(), request("rolled-back-version")); e == nil {
 		t.Fatal("stale schema version accepted")
 	}
-	if _, e = s.db.Exec("PRAGMA user_version=26"); e != nil {
+	if _, e = s.db.Exec("PRAGMA user_version=27"); e != nil {
 		t.Fatal(e)
 	}
 }

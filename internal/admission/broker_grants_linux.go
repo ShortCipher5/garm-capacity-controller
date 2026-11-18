@@ -38,21 +38,22 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
-	DomainOverheads []NativeDomainOverhead
-	NativeDomains   map[int64]NativeDomainBinding
-	PoolProfiles    map[string]BrokerPoolProfile
-	Allocated       Allocations
-	HostBindings    map[string]HostBinding
-	ExecutionPlans  map[string]ExecutionPlan
-	Sequence        int64
-	Policy          BrokerPolicy
-	Config          Config
-	Ready           bool
-	Epoch           int64
-	Reservations    map[string]Reservation
-	Inventory       []InventoryResource
-	Released        map[string]bool
-	Grants          []BrokerGrant
+	ArtifactOverheads []NativeArtifactOverhead
+	DomainOverheads   []NativeDomainOverhead
+	NativeDomains     map[int64]NativeDomainBinding
+	PoolProfiles      map[string]BrokerPoolProfile
+	Allocated         Allocations
+	HostBindings      map[string]HostBinding
+	ExecutionPlans    map[string]ExecutionPlan
+	Sequence          int64
+	Policy            BrokerPolicy
+	Config            Config
+	Ready             bool
+	Epoch             int64
+	Reservations      map[string]Reservation
+	Inventory         []InventoryResource
+	Released          map[string]bool
+	Grants            []BrokerGrant
 }
 
 const sqliteBrokerGrantSchema = `
@@ -215,6 +216,13 @@ func sqliteAllocationsWithGrants(tx *sql.Tx, c Config, r map[string]Reservation,
 	if e = addDomainOverheads(&out, c, records); e != nil {
 		return Allocations{}, e
 	}
+	artifacts, e := sqliteNativeArtifactOverheads(tx)
+	if e != nil {
+		return Allocations{}, e
+	}
+	if e = addArtifactOverheads(&out, c, artifacts); e != nil {
+		return Allocations{}, e
+	}
 	return out, nil
 }
 func sqliteBrokerPolicy(tx *sql.Tx) (BrokerPolicy, error) {
@@ -275,6 +283,9 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 			return e
 		}
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
+			return e
+		}
+		if v.ArtifactOverheads, e = sqliteNativeArtifactOverheads(tx); e != nil {
 			return e
 		}
 		if v.DomainOverheads, e = sqliteNativeDomainOverheads(tx); e != nil {

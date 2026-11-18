@@ -12,16 +12,17 @@ import (
 // add UnusedGrants to it again. Counts describe ledger entries, not idle runners,
 // usable grants, native execution permission or confirmed physical completion.
 type Accounting struct {
-	DomainOverheads               []admission.NativeDomainOverhead `json:"domain_overheads"`
-	Sequence                      int64                            `json:"sequence"`
-	ReconciliationEpoch           int64                            `json:"reconciliation_epoch"`
-	LedgerReady                   bool                             `json:"ledger_ready"`
-	Policy                        admission.BrokerPolicy           `json:"policy"`
-	Budgets                       admission.Allocations            `json:"budgets"`
-	Allocated                     admission.Allocations            `json:"allocated"`
-	UnusedGrants                  admission.Allocations            `json:"unused_grants"`
-	UnusedGrantCounts             map[string]int64                 `json:"unused_grant_counts"`
-	ConsumedUnreleasedGrantCounts map[string]int64                 `json:"consumed_unreleased_grant_counts"`
+	ArtifactOverheads             []admission.NativeArtifactOverhead `json:"artifact_overheads"`
+	DomainOverheads               []admission.NativeDomainOverhead   `json:"domain_overheads"`
+	Sequence                      int64                              `json:"sequence"`
+	ReconciliationEpoch           int64                              `json:"reconciliation_epoch"`
+	LedgerReady                   bool                               `json:"ledger_ready"`
+	Policy                        admission.BrokerPolicy             `json:"policy"`
+	Budgets                       admission.Allocations              `json:"budgets"`
+	Allocated                     admission.Allocations              `json:"allocated"`
+	UnusedGrants                  admission.Allocations              `json:"unused_grants"`
+	UnusedGrantCounts             map[string]int64                   `json:"unused_grant_counts"`
+	ConsumedUnreleasedGrantCounts map[string]int64                   `json:"consumed_unreleased_grant_counts"`
 }
 
 func AccountingDigest(a Accounting) string { b, _ := json.Marshal(a); return digestBytes(b) }
@@ -64,7 +65,7 @@ func within(a, b admission.Resources) bool {
 	return a.CPU <= b.CPU && a.RAM <= b.RAM && a.Disk <= b.Disk && a.Runners <= b.Runners
 }
 func projectAccounting(s admission.BrokerGrantState) (Accounting, error) {
-	a := Accounting{DomainOverheads: append([]admission.NativeDomainOverhead(nil), s.DomainOverheads...), Sequence: s.Sequence, ReconciliationEpoch: s.Epoch, LedgerReady: s.Ready, Policy: s.Policy, Budgets: emptyAllocations(), Allocated: s.Allocated, UnusedGrants: emptyAllocations(), UnusedGrantCounts: map[string]int64{}, ConsumedUnreleasedGrantCounts: map[string]int64{}}
+	a := Accounting{ArtifactOverheads: append([]admission.NativeArtifactOverhead(nil), s.ArtifactOverheads...), DomainOverheads: append([]admission.NativeDomainOverhead(nil), s.DomainOverheads...), Sequence: s.Sequence, ReconciliationEpoch: s.Epoch, LedgerReady: s.Ready, Policy: s.Policy, Budgets: emptyAllocations(), Allocated: s.Allocated, UnusedGrants: emptyAllocations(), UnusedGrantCounts: map[string]int64{}, ConsumedUnreleasedGrantCounts: map[string]int64{}}
 	a.Policy.Repositories = append([]admission.BrokerRepositoryPolicy{}, s.Policy.Repositories...)
 	a.Budgets.Global = s.Config.Global
 	for id, h := range s.Config.Hosts {
@@ -119,7 +120,7 @@ func projectAccounting(s admission.BrokerGrantState) (Accounting, error) {
 	return a, nil
 }
 func validateAccounting(a Accounting, sequence int64) error {
-	if len(a.DomainOverheads) > 1000 || a.Budgets.DomainOverhead != (admission.Resources{}) || a.UnusedGrants.DomainOverhead != (admission.Resources{}) || a.Sequence != sequence || a.Sequence < 0 || a.ReconciliationEpoch < 0 || a.Policy.Revision > a.Sequence || admission.ValidateBrokerPolicy(a.Policy) != nil || len(a.Budgets.Hosts) > 1000 || len(a.Budgets.Pools) > 256 || !nonnegative(a.Budgets.Global) {
+	if len(a.ArtifactOverheads) > 1000 || a.Budgets.ArtifactOverhead != (admission.Resources{}) || a.UnusedGrants.ArtifactOverhead != (admission.Resources{}) || len(a.DomainOverheads) > 1000 || a.Budgets.DomainOverhead != (admission.Resources{}) || a.UnusedGrants.DomainOverhead != (admission.Resources{}) || a.Sequence != sequence || a.Sequence < 0 || a.ReconciliationEpoch < 0 || a.Policy.Revision > a.Sequence || admission.ValidateBrokerPolicy(a.Policy) != nil || len(a.Budgets.Hosts) > 1000 || len(a.Budgets.Pools) > 256 || !nonnegative(a.Budgets.Global) {
 		return ErrSnapshot
 	}
 	for _, r := range a.Budgets.Hosts {
@@ -158,7 +159,11 @@ func validateAccounting(a Accounting, sequence int64) error {
 			}
 		}
 		poolTotal, ok := addResources(poolTotal, v.DomainOverhead)
-		if !ok || v.DomainOverhead.Runners != 0 || hostTotal != v.Global || poolTotal != v.Global {
+		if !ok {
+			return ErrSnapshot
+		}
+		poolTotal, ok = addResources(poolTotal, v.ArtifactOverhead)
+		if !ok || v.ArtifactOverhead.CPU != 0 || v.ArtifactOverhead.RAM != 0 || v.ArtifactOverhead.Runners != 0 || v.DomainOverhead.Runners != 0 || hostTotal != v.Global || poolTotal != v.Global {
 			return ErrSnapshot
 		}
 	}
@@ -195,6 +200,35 @@ func validateAccounting(a Accounting, sequence int64) error {
 		}
 	}
 	if overhead != a.Allocated.DomainOverhead {
+		return ErrSnapshot
+	}
+	// Shared artifact roots are charged once per immutable physical identity,
+	// not once per enrolling domain. Old roots remain charged after replacement.
+	artifact := admission.Resources{}
+	seenRoots := map[string]bool{}
+	seenArtifacts := map[string]bool{}
+	for _, record := range a.ArtifactOverheads {
+		key := record.PoolGUID + "/" + record.RootGUID
+		if admission.ValidateNativeArtifactOverhead(record) != nil || record.Sequence > a.Sequence || seenSequences[record.Sequence] || seenRoots[key] || seenArtifacts[record.ArtifactID] {
+			return ErrSnapshot
+		}
+		if _, ok := a.Budgets.Hosts[record.Host]; !ok {
+			return ErrSnapshot
+		}
+		seenSequences[record.Sequence] = true
+		seenRoots[key] = true
+		seenArtifacts[record.ArtifactID] = true
+		var ok bool
+		artifact, ok = addResources(artifact, record.Resources)
+		if !ok {
+			return ErrSnapshot
+		}
+		byHost[record.Host], ok = addResources(byHost[record.Host], record.Resources)
+		if !ok {
+			return ErrSnapshot
+		}
+	}
+	if artifact != a.Allocated.ArtifactOverhead {
 		return ErrSnapshot
 	}
 	for host, r := range byHost {

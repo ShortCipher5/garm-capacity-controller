@@ -151,3 +151,64 @@ func TestDomainOverheadRemainsExplicitGlobalHostCharge(t *testing.T) {
 		})
 	}
 }
+
+func artifactFixture() admission.BrokerGrantState {
+	s := overheadFixture()
+	now := time.Now().Add(-time.Hour)
+	owner := s.DomainOverheads[0].Evidence.Owner
+	r := admission.Resources{Disk: 7}
+	s.ArtifactOverheads = []admission.NativeArtifactOverhead{{Sequence: 11, DomainBindingSequence: 8, Host: "host", Owner: owner, ArtifactID: strings.Repeat("6", 64), Nonce: strings.Repeat("7", 64), PoolGUID: "101", PoolLoadGUID: "102", RootGUID: "103", Dataset: "pool/control-" + strings.Repeat("6", 64), QuotaBytes: 7 << 20, Resources: r, ObservedAt: now, IssuedAt: now, RecordedAt: now}}
+	s.Sequence = 11
+	s.Allocated.ArtifactOverhead = r
+	s.Allocated.Global, _ = addResources(s.Allocated.Global, r)
+	s.Allocated.Hosts["host"], _ = addResources(s.Allocated.Hosts["host"], r)
+	return s
+}
+func TestArtifactRootChargeIsSeparateAndRetained(t *testing.T) {
+	s := artifactFixture()
+	snapshot := accountingSnapshot(t, s)
+	raw, _ := json.Marshal(snapshot)
+	if _, e := Decode(raw, snapshot.Controller, snapshot.Nonce, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	if snapshot.Accounting.Allocated.Pools["pool"] != accountingFixture().Allocated.Pools["pool"] || snapshot.Accounting.Allocated.ArtifactOverhead.Disk != 7 {
+		t.Fatal("artifact became pool supply")
+	}
+	for _, mode := range []string{"missing", "duplicate-root", "duplicate-artifact", "duplicate-sequence", "unknown-host", "wrong-subtotal", "runner-charge", "combined-host-undercount"} {
+		t.Run(mode, func(t *testing.T) {
+			v := artifactFixture()
+			switch mode {
+			case "missing":
+				v.ArtifactOverheads = nil
+			case "duplicate-root":
+				v.ArtifactOverheads = append(v.ArtifactOverheads, v.ArtifactOverheads[0])
+				v.ArtifactOverheads[1].Sequence = 12
+				v.Sequence = 12
+			case "duplicate-artifact":
+				v.ArtifactOverheads = append(v.ArtifactOverheads, v.ArtifactOverheads[0])
+				v.ArtifactOverheads[1].RootGUID = "104"
+				v.ArtifactOverheads[1].Sequence = 12
+				v.Sequence = 12
+			case "duplicate-sequence":
+				v.ArtifactOverheads[0].Sequence = v.DomainOverheads[0].Sequence
+			case "unknown-host":
+				v.ArtifactOverheads[0].Host = "missing"
+			case "wrong-subtotal":
+				v.Allocated.ArtifactOverhead.Disk--
+			case "runner-charge":
+				v.ArtifactOverheads[0].Resources.Runners = 1
+			case "combined-host-undercount":
+				// Preserve global and aggregate sums while placing the artifact charge
+				// on another host: each old individual subtotal could still fit host1.
+				v.Config.Hosts["other"] = v.Config.Hosts["host"]
+				host := v.Allocated.Hosts["host"]
+				host.Disk -= 11
+				v.Allocated.Hosts["host"] = host
+				v.Allocated.Hosts["other"] = admission.Resources{Disk: 11}
+			}
+			if _, e := New("controller", strings.Repeat("a", 64), strings.Repeat("b", 64), v, time.Now()); e == nil {
+				t.Fatal("inconsistent artifact charge accepted")
+			}
+		})
+	}
+}
