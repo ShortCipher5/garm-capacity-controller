@@ -219,6 +219,11 @@ func TestNativeClaimBuilderUsesActualImmutableEnrollmentAndSeparateRoles(t *test
 		t.Fatal("native host client/owner leaf overlap")
 	}
 	c.Hosts = nil
+	c.NativeRetirement = &nativeRetirementConfiguration{Owners: []nativeStockHostConfiguration{{OwnerTLS: writeClaimTLS(t, owner.Certificates[0], discovery.TLS.Certificates[0].Certificate[1])}}}
+	if _, e := buildNativeClaims(t.Context(), c, store); !errors.Is(e, nativecontrol.ErrControl) {
+		t.Fatal("retirement outbound role overlaps owner claim", e)
+	}
+	c.NativeRetirement = nil
 	// Real private recipe loading must include every outbound enrollment key in
 	// owner claim role separation, not merely operator-supplied fingerprints.
 	files := map[string]string{"bin/Runner.Listener": strings.Repeat("1", 64), "bin/Runner.Listener.dll": strings.Repeat("2", 64)}

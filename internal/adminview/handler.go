@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"io"
 	"mime"
 	"net/http"
@@ -80,6 +81,7 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	nativeRetirement  *nativecontroller.RetirementService
 	nativeEnrollments map[string]frozenNativeRecipe
 	brokerProfiles    map[string]BrokerProfileRecipe
 	allocatorStatus   AllocatorStatusSource
@@ -157,6 +159,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/allocator-plan" {
 		h.serveAllocatorPlan(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-retirement-status" {
+		h.serveNativeRetirementStatus(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/job-observer-status" {

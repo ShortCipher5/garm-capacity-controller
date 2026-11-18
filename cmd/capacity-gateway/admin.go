@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"log"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 )
 
 type adminConfiguration struct {
+	nativeRetirementRuntime            *nativecontroller.RetirementService
 	jobObserverRuntime                 *jobobserver.Service
 	NativeEnrollmentRecipesFile        string `json:"native_enrollment_recipes_file,omitempty"`
 	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
@@ -81,6 +83,7 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	}
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
 	handler.SetJobObserver(config.jobObserverRuntime)
+	handler.SetNativeRetirement(config.nativeRetirementRuntime)
 	needsCredential := config.EnableExperimentalManagement || config.EnableExperimentalOnboardingProbes
 	if needsCredential != (config.ManagementTokenFile != "") {
 		cleanup()

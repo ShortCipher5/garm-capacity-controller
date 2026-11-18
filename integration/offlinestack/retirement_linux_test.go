@@ -122,6 +122,74 @@ func exerciseRetirement(t *testing.T, f *nativeBridgeFixture, permit string, reo
 		reopen()
 	}
 	run := func() {
+		service, e := nativecontroller.NewRetirementService(context.Background(), nativecontroller.RetirementConfiguration{Store: f.s, Owners: []nativecontroller.Configuration{f.config}, Interval: time.Second})
+		if e != nil {
+			t.Fatal(e)
+		}
+		cycle, e := service.Cycle(context.Background())
+		if e != nil || cycle.Examined != 1 || cycle.ReleaseAuthorized {
+			t.Fatal("automation cycle", cycle, e)
+		}
+		// A bounded cycle can stop after a durable claim without terminal proof.
+		// Recover only that existing history; a permanent unknown/failed receipt
+		// is never eligible for this eventual-success assertion.
+		for attempt := 0; attempt < 3 && !strings.HasSuffix(f.owner.mode, "-unknown") && cycle.OperationsCompleted == 0; attempt++ {
+			found := false
+			for _, step := range []string{admission.NativeRetireStop, admission.NativeRetireDelete} {
+				claim, err := f.s.LookupNativeRetirementClaim(context.Background(), permit, step)
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					t.Fatal("cannot recover uncertain canonical claim", err)
+				}
+				found = true
+				for _, kind := range []string{"failed", "unknown"} {
+					if _, err := f.s.LookupNativeRetirementReceipt(context.Background(), claim.ID, kind); !errors.Is(err, sql.ErrNoRows) {
+						t.Fatal("irreversible receipt cannot be retried", kind, err)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("unresolved automation without durable claim", cycle)
+			}
+			intent, _, err := f.s.LookupNativeRetirement(context.Background(), permit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.s.LookupRelease(context.Background(), intent.RequestKey); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatal("recovery released charge", err)
+			}
+			f.owner.mu.Lock()
+			excess := f.owner.retirementCalls[admission.NativeRetireStop] > 1 || f.owner.retirementCalls[admission.NativeRetireDelete] > 1
+			f.owner.mu.Unlock()
+			if excess {
+				t.Fatal("recovery already replayed a native POST")
+			}
+			cycle, e = service.Cycle(context.Background())
+			if e != nil || cycle.ReleaseAuthorized {
+				t.Fatal("recovery cycle", cycle, e)
+			}
+		}
+		if strings.HasSuffix(f.owner.mode, "-unknown") {
+			if cycle.Unresolved != 1 || cycle.OperationsCompleted != 0 {
+				t.Fatal("unknown automation", cycle)
+			}
+		} else if cycle.OperationsCompleted != 1 || cycle.Unresolved != 0 {
+			for _, step := range []string{admission.NativeRetireStop, admission.NativeRetireDelete} {
+				claim, err := f.s.LookupNativeRetirementClaim(context.Background(), permit, step)
+				t.Logf("diagnostic step=%s claim=%s error=%v", step, claim.ID, err)
+				if err == nil {
+					for _, kind := range []string{"accepted", "succeeded", "failed", "unknown"} {
+						receipt, err := f.s.LookupNativeRetirementReceipt(context.Background(), claim.ID, kind)
+						t.Logf("diagnostic step=%s kind=%s outcome=%s error=%v", step, kind, receipt.Record.Outcome, err)
+					}
+				}
+			}
+			t.Fatal("completed automation", cycle)
+		}
+		// Existing direct coordinator assertions below must now recover only durable
+		// history, not issue a second STOP/DELETE after the real service cycle.
 		c, e := nativecontroller.New(context.Background(), f.config)
 		if e != nil {
 			t.Fatal(e)

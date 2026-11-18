@@ -209,6 +209,24 @@ func TestOfflineManagedDemandThroughNativeCreationAndRestart(t *testing.T) {
 			}
 			f.owner.mu.Unlock()
 			if success {
+				// A runner binding alone is not permission to retire. Exercise the
+				// real service before any canonical terminal job/root receipt exists.
+				if strings.HasPrefix(mode, "retire-") {
+					service, e := nativecontroller.NewRetirementService(ctx, nativecontroller.RetirementConfiguration{Store: f.s, Owners: []nativecontroller.Configuration{f.config}, Interval: time.Second})
+					if e != nil {
+						t.Fatal(e)
+					}
+					cycle, e := service.Cycle(ctx)
+					if e != nil || cycle.AwaitingEvidence != 1 || cycle.OperationsCompleted != 0 || cycle.ReleaseAuthorized {
+						t.Fatal("retired without evidence", cycle, e)
+					}
+					f.owner.mu.Lock()
+					calls := len(f.owner.retirementCalls)
+					f.owner.mu.Unlock()
+					if calls != 0 {
+						t.Fatal("retirement POST before positive evidence")
+					}
+				}
 				observeTerminal(t, &f, repository, permit, reopen)
 				if strings.HasPrefix(mode, "retire-") {
 					exerciseRetirement(t, &f, permit, reopen)

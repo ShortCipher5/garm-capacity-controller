@@ -123,6 +123,11 @@ func buildNativeClaims(ctx context.Context, config configuration, store *admissi
 			outgoing = append(outgoing, host.OwnerTLS)
 		}
 	}
+	if config.NativeRetirement != nil {
+		for _, host := range config.NativeRetirement.Owners {
+			outgoing = append(outgoing, host.OwnerTLS)
+		}
+	}
 	if config.JobObserver != nil {
 		for _, host := range config.JobObserver.Owners {
 			outgoing = append(outgoing, host.OwnerTLS)

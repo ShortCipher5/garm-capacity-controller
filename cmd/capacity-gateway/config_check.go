@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -31,6 +32,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	}
 	if validateNativeClaimConfiguration(c.NativeClaims, c.Listen, adminAddress) != nil {
 		return fail()
+	}
+	if validateNativeRetirement(c) != nil {
+		return nativecontroller.ErrConfiguration
 	}
 	if validateJobObserver(c) != nil {
 		return fail()
