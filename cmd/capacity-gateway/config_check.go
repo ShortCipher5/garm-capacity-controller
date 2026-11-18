@@ -25,6 +25,16 @@ var errStaticConfig = errors.New("static configuration check failed")
 // It cannot establish persisted policy, reachability, fencing or readiness.
 func checkStaticConfig(c configuration, provision bool) error {
 	fail := func() error { return errStaticConfig }
+	if validateAllocatorLoop(c.AllocatorLoop) != nil {
+		return fail()
+	}
+	allocatorSource, sourceErr := managedAllocatorSource(c)
+	if sourceErr != nil {
+		return fail()
+	}
+	if allocatorSource != nil {
+		allocatorSource.Close()
+	}
 	loopback := func(address string) bool {
 		host, port, e := net.SplitHostPort(address)
 		ip := net.ParseIP(host)
@@ -137,6 +147,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if e != nil {
 		return fail()
 	}
+	if validateProviderProfileRole(c, server.Certificates[0]) != nil {
+		return fail()
+	}
 	if _, e = gatewayrpc.ServerTLS(server.Certificates[0], server.RootCAs); e != nil {
 		return fail()
 	}
@@ -147,6 +160,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.BrokerProfileRecipesFile != "" {
+		if !a.EnableExperimentalManagement {
+			return fail()
+		}
+		if _, e := loadBrokerProfileRecipes(a.BrokerProfileRecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if !loopback(a.Listen) {
 		return fail()
 	}

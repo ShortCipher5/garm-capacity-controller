@@ -31,6 +31,8 @@ type BrokerPoolProfile struct {
 	Domains                                                        []BrokerProfileDomain
 }
 type BrokerPoolProfileRequest struct {
+	// Optional compatibility guard; browser registration always supplies reviewed size.
+	ExpectedResources           Resources
 	ExpectedProfileSequence     int64
 	SourceIdentity, SizeProfile string
 	Authority                   StockProviderAuthority
@@ -157,7 +159,7 @@ func (s *SQLiteStore) checkBrokerProfiles(ctx context.Context) error {
 // independently authenticated GARM controller identity or a remote write fence.
 func (s *SQLiteStore) RegisterBrokerPoolProfile(ctx context.Context, r BrokerPoolProfileRequest, observed stockidentity.Observation, policies map[int64]nativeapi.Policy) (BrokerPoolProfile, error) {
 	var out BrokerPoolProfile
-	if !observed.Valid() || r.ExpectedProfileSequence < 0 || !profileName(r.SizeProfile) || !bindingFingerprint(r.SourceIdentity) ||
+	if (observed.ControllerID() != "" && observed.ControllerID() != r.Authority.Controller) || !observed.Valid() || r.ExpectedProfileSequence < 0 || !profileName(r.SizeProfile) || !bindingFingerprint(r.SourceIdentity) ||
 		r.SourceIdentity != observed.SourceIdentity() || r.Execution.Name != "" || len(policies) == 0 || len(policies) > 1000 {
 		return out, ErrBrokerProfile
 	}
@@ -200,6 +202,9 @@ func (s *SQLiteStore) RegisterBrokerPoolProfile(ctx context.Context, r BrokerPoo
 		v := BrokerPoolProfile{Previous: r.ExpectedProfileSequence, Pool: pool.Pool, Repository: pool.Repository, SourceIdentity: r.SourceIdentity,
 			PoolFingerprint: pool.Fingerprint(), SizeProfile: r.SizeProfile, ObservedAt: observed.ObservedAt(), Authority: r.Authority, Execution: r.Execution, Resources: Resources{Runners: 1}}
 		if err = tx.QueryRow("SELECT cpu,ram,disk FROM profiles WHERE name=?", r.SizeProfile).Scan(&v.Resources.CPU, &v.Resources.RAM, &v.Resources.Disk); err != nil {
+			return ErrBrokerProfile
+		}
+		if r.ExpectedResources != (Resources{}) && r.ExpectedResources != v.Resources {
 			return ErrBrokerProfile
 		}
 		for seq, policy := range policies {
