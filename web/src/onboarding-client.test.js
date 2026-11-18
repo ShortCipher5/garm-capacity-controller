@@ -56,3 +56,8 @@ test("probe rejects otherwise valid results for another request or profile", asy
     assert.equal(calls, 1);
   }
 });
+test('discovery supports mixed static and dynamic profile limits without losing the view',()=>{
+ const mixed={...discovery,profiles:Array.from({length:64},(_,i)=>({id:`profile-${i}`}))};
+ assert.equal(validateOnboardingDiscovery(mixed),mixed);
+ assert.throws(()=>validateOnboardingDiscovery({...mixed,profiles:[...mixed.profiles,{id:'too-many'}]}));
+});

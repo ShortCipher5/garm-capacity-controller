@@ -50,7 +50,7 @@ test("fetchProfileDiscovery requires the management credential on the profile di
 });
 test("enrollHost posts the reviewed enrollment and maps durable outcomes", async () => {
   const calls = [];
-  const request = { name: "host-b", budget: { cpu_millis: 2000, ram_mib: 4096, disk_mib: 51200, runners: 2 }, detected: { cpu_millis: 8000, ram_mib: 32768, disk_mib: 524288, runners: 0 }, mode: "disabled" };
+  const request = { name: "host-b", budget: { cpu_millis: 2000, ram_mib: 4096, disk_mib: 51200, runners: 2 }, review: { id: "11111111-1111-4111-8111-111111111111", revision: "a".repeat(64), profile_id: "candidate-b" }, mode: "disabled" };
   await enrollHost(write, request, { fetcher: async (url, options) => { calls.push([url, options]); return { ok: true, status: 201, json: async () => ({ enrolled: true }) }; } });
   assert.equal(calls[0][0], "/admin/api/v1/hosts");
   assert.equal(calls[0][1].method, "POST");
@@ -62,4 +62,9 @@ test("enrollHost posts the reviewed enrollment and maps durable outcomes", async
   await assert.rejects(enrollHost(write, request, { fetcher: async () => ({ status: 401, ok: false }) }), /Management token rejected/);
   await assert.rejects(enrollHost(write, { ...request, mode: "enabled" }, { fetcher: async () => ({ ok: true, status: 201 }) }), /disabled or draining/);
   await assert.rejects(enrollHost(write, { ...request, budget: { cpu_millis: -1, ram_mib: 1, disk_mib: 0, runners: 1 } }, { fetcher: async () => ({ ok: true, status: 201 }) }), /non-negative/);
+});
+test('discovery validates versioned server budget and saved size proposal', () => {
+ const proposal={version:1,budget:{cpu_millis:1000,ram_mib:2048,disk_mib:10000},reserve:{cpu_millis:1000},warnings:[],sizes:[{name:'custom',cpu_millis:1000,ram_mib:2048,disk_mib:0}],size_source:'saved-profiles'};
+ assert.deepEqual(validateDiscoveryResult({...result,proposal}).proposal,proposal);
+ for(const change of [{version:2},{budget:{disk_mib:0}},{sizes:[{name:'custom',cpu_millis:0,ram_mib:1,disk_mib:1}]},{size_source:'qualified'}]) assert.throws(()=>validateDiscoveryResult({...result,proposal:{...proposal,...change}}),DiscoveryResponseError);
 });

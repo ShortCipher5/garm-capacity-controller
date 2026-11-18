@@ -83,3 +83,11 @@ test("editable settings refuse ambiguous target identities and excessive configu
  bounded.settings.repositories=[repo];assert.throws(()=>validateGarm(bounded),/unsupported/);
  const empty=structuredClone(settings);empty.settings.pools=[];assert.equal(validateGarm(empty),empty);
 });
+
+test("pending resolution capability is optional for older servers and strictly boolean",()=>{
+ const v=structuredClone(settings);
+ v.pending={request_id:"11111111-1111-4111-8111-111111111111",kind:"pool",target:"pool",started_at:"2026-01-01T00:00:00Z"};
+ assert.equal(validateGarm(v),v);
+ for(const value of [false,true]) {v.pending.resolution_available=value;assert.equal(validateGarm(v),v);}
+ for(const value of ["true",1,null,{}]) {v.pending.resolution_available=value;assert.throws(()=>validateGarm(v),/unsupported/);}
+});

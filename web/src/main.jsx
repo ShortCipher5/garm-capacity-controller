@@ -1,3 +1,4 @@
+import { BrokerPolicy } from "./broker-policy.jsx";
 import { createEntityInventoryReader } from "./entity-inventory-client.js";
 import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { createRoot } from "react-dom/client";
@@ -63,7 +64,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -78,6 +79,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           ["servers", "Servers"],
           ["pools", "Pools"],
           ["profiles", "Profiles"],
+          ["broker-policy", "Repository policy"],
           ["events", "Audit events"],
         ].map(([id, label]) => (
           <a className="nav" key={id} href={`#${id}`}>
@@ -248,6 +250,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         </section>
         <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} />
         <Profiles readProfiles={readProfiles} />
+        <BrokerPolicy readPolicy={readBrokerPolicy} />
         <div className="bottom-grid">
           <section>
             <div className="section-heading">
@@ -337,6 +340,10 @@ export function App() {
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
         readEntityInventory={readEntityInventory}
+        readBrokerPolicy={async () => {
+          try { return await session.current.brokerPolicySnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
         readProfiles={async () => {
           try { return await session.current.profilesSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }

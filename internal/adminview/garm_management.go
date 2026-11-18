@@ -44,10 +44,11 @@ type GarmOverview struct {
 	Pending           *GarmPending               `json:"pending,omitempty"`
 }
 type GarmPending struct {
-	RequestID string    `json:"request_id"`
-	Kind      string    `json:"kind"`
-	Target    string    `json:"target"`
-	StartedAt time.Time `json:"started_at"`
+	ResolutionAvailable bool      `json:"resolution_available"`
+	RequestID           string    `json:"request_id"`
+	Kind                string    `json:"kind"`
+	Target              string    `json:"target"`
+	StartedAt           time.Time `json:"started_at"`
 }
 
 // GarmManager must durably journal intent/audit before a remote mutation and
@@ -154,7 +155,7 @@ func (h *Handler) serveGarm(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(append(data, '\n'))
 		return
 	}
-	if r.URL.Path != "/admin/api/v1/garm/pool" && r.URL.Path != "/admin/api/v1/garm/repository" {
+	if r.URL.Path != "/admin/api/v1/garm/pool" && r.URL.Path != "/admin/api/v1/garm/repository" && r.URL.Path != "/admin/api/v1/garm/resolve" {
 		fail(http.StatusNotFound, "Garm management unavailable")
 		return
 	}

@@ -31,10 +31,11 @@ type Store interface {
 	ReadOnboardingBindings(context.Context) (map[string]admission.HostBinding, error)
 }
 type Manager struct {
-	allowProbe bool
-	store      Store
-	profiles   map[string]Observer
-	gate       chan struct{}
+	connections *ConnectionService
+	allowProbe  bool
+	store       Store
+	profiles    map[string]Observer
+	gate        chan struct{}
 }
 type Profile struct {
 	ID string `json:"id"`
@@ -78,6 +79,25 @@ func New(store Store, profiles map[string]Observer, allowProbe bool) (*Manager, 
 	}
 	return manager, nil
 }
+func NewDynamic(store Store, service *ConnectionService, allowProbe bool) (*Manager, error) {
+	if store == nil || service == nil {
+		return nil, ErrConfiguration
+	}
+	return &Manager{store: store, connections: service, profiles: map[string]Observer{}, gate: make(chan struct{}, 1), allowProbe: allowProbe}, nil
+}
+
+// SetConnections is startup-only, before any handler is served.
+func (m *Manager) SetConnections(service *ConnectionService) { m.connections = service }
+func (m *Manager) Connections() *ConnectionService           { return m.connections }
+func (m *Manager) resolve(ctx context.Context, id string) (context.Context, Observer, int64, func(), error) {
+	if observer, ok := m.profiles[id]; ok {
+		return ctx, observer, 0, func() {}, nil
+	}
+	if m.connections != nil {
+		return m.connections.Resolve(ctx, id)
+	}
+	return ctx, nil, 0, func() {}, ErrDenied
+}
 func (m *Manager) ProbeEnabled() bool { return m.allowProbe }
 func (m *Manager) Discovery() Discovery {
 	result := Discovery{Mode: "read-only-onboarding-preflight", ProbeEnabled: m.allowProbe, Profiles: []Profile{}}
@@ -118,10 +138,14 @@ func (m *Manager) Probe(ctx context.Context, request Request) (Result, error) {
 	if !m.allowProbe {
 		return Result{}, ErrDisabled
 	}
-	observer, exists := m.profiles[request.ProfileID]
-	if !exists || !admission.ValidOnboardingRequestID(request.RequestID) || !validReason(request.Reason) {
+	if !admission.ValidOnboardingRequestID(request.RequestID) || !validReason(request.Reason) {
 		return Result{}, ErrDenied
 	}
+	ctx, observer, _, close, resolveErr := m.resolve(ctx, request.ProfileID)
+	if resolveErr != nil {
+		return Result{}, resolveErr
+	}
+	defer close()
 	select {
 	case m.gate <- struct{}{}:
 		defer func() { <-m.gate }()

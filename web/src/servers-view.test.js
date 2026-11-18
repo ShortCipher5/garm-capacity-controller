@@ -62,3 +62,29 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     await server.close();
   }
 });
+
+test('enrollment planner presents headroom warnings, distinct alternatives and unknown mix', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
+  try {
+    const { BudgetPlanner } = await server.ssrLoadModule('/src/servers.jsx');
+    const markup = renderToStaticMarkup(React.createElement(BudgetPlanner, {result:discovery, budget:{cpu_millis:8000,ram_mib:32000,disk_mib:0,runners:0},onChange:()=>{}}));
+    assert.match(markup,/Budget needs review/);
+    assert.match(markup,/unconstrained disk/);
+    assert.match(markup,/Maximum|maximum/);
+    assert.match(markup,/Mix unavailable/);
+    assert.match(markup,/small planned count/);
+    assert.match(markup,/not saved profiles/);
+  } finally { await server.close(); }
+});
+test('planner uses saved profile snapshot without claiming counts were saved', async () => {
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});
+ try {
+  const {BudgetPlanner}=await server.ssrLoadModule('/src/servers.jsx');
+  const result={...discovery,proposal:{version:1,budget:{cpu_millis:6000,ram_mib:16000,disk_mib:80000},reserve:{},warnings:[],size_source:'saved-profiles',sizes:[{name:'custom-size',cpu_millis:2000,ram_mib:6144,disk_mib:40000}]}};
+  const html=renderToStaticMarkup(React.createElement(BudgetPlanner,{result,budget:{...result.proposal.budget,runners:2},onChange:()=>{}}));
+  assert.match(html,/Saved runner-size profiles from this discovery review/);
+  assert.match(html,/custom-size planned count/);
+  assert.match(html,/does not save counts/);
+  assert.doesNotMatch(html,/small planned count/);
+ }finally{await server.close()}
+});
