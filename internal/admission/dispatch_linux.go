@@ -221,7 +221,7 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 		if binding != nil {
 			bindingSequence = binding.Sequence
 		}
-		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence,original_preparation_sequence,stock_provider_sequence,grant_accounting_version) VALUES(?,?,'intent','','',?,?,?,?,?,18)", req.Key, id, at, at, bindingSequence, originalSequence, stockSequence); err != nil {
+		if _, err := tx.Exec("INSERT INTO dispatches(reservation_key,permit_id,state,operation_id,resource_id,created_at,updated_at,host_binding_sequence,original_preparation_sequence,stock_provider_sequence,grant_accounting_version) VALUES(?,?,'intent','','',?,?,?,?,?,26)", req.Key, id, at, at, bindingSequence, originalSequence, stockSequence); err != nil {
 			return err
 		}
 		if err := sqliteAudit(tx, "dispatch_claimed", req.Key, s.now()); err != nil {

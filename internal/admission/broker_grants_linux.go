@@ -38,20 +38,21 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
-	NativeDomains  map[int64]NativeDomainBinding
-	PoolProfiles   map[string]BrokerPoolProfile
-	Allocated      Allocations
-	HostBindings   map[string]HostBinding
-	ExecutionPlans map[string]ExecutionPlan
-	Sequence       int64
-	Policy         BrokerPolicy
-	Config         Config
-	Ready          bool
-	Epoch          int64
-	Reservations   map[string]Reservation
-	Inventory      []InventoryResource
-	Released       map[string]bool
-	Grants         []BrokerGrant
+	DomainOverheads []NativeDomainOverhead
+	NativeDomains   map[int64]NativeDomainBinding
+	PoolProfiles    map[string]BrokerPoolProfile
+	Allocated       Allocations
+	HostBindings    map[string]HostBinding
+	ExecutionPlans  map[string]ExecutionPlan
+	Sequence        int64
+	Policy          BrokerPolicy
+	Config          Config
+	Ready           bool
+	Epoch           int64
+	Reservations    map[string]Reservation
+	Inventory       []InventoryResource
+	Released        map[string]bool
+	Grants          []BrokerGrant
 }
 
 const sqliteBrokerGrantSchema = `
@@ -207,6 +208,13 @@ func sqliteAllocationsWithGrants(tx *sql.Tx, c Config, r map[string]Reservation,
 		}
 		out.Hosts[g.Spec.Host], out.Pools[g.Spec.Authority.PoolID] = h, p
 	}
+	records, e := sqliteNativeDomainOverheads(tx)
+	if e != nil {
+		return Allocations{}, e
+	}
+	if e = addDomainOverheads(&out, c, records); e != nil {
+		return Allocations{}, e
+	}
 	return out, nil
 }
 func sqliteBrokerPolicy(tx *sql.Tx) (BrokerPolicy, error) {
@@ -267,6 +275,9 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 			return e
 		}
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
+			return e
+		}
+		if v.DomainOverheads, e = sqliteNativeDomainOverheads(tx); e != nil {
 			return e
 		}
 		if v.Allocated, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {

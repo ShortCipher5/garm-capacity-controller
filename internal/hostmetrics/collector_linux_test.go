@@ -264,37 +264,41 @@ func TestCollectorRecordFailureBacksOffHostOnly(t *testing.T) {
 	}
 }
 
+// Cancel while the first complete source sweep is returning, before Run can
+// start its periodic timer. Polling every 5ms against a 10ms ticker can miss
+// this boundary under scheduler load and accidentally test two sweeps.
+type baselineCancelSource struct {
+	*fakeSource
+	cancel context.CancelFunc
+}
+
+func (s *baselineCancelSource) HostTotals(ctx context.Context) (incusapi.HostTotals, error) {
+	totals, err := s.fakeSource.HostTotals(ctx)
+	s.cancel()
+	return totals, err
+}
+
 func TestRunStopsWithContextAndRecordsBaselineFirst(t *testing.T) {
-	source := &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	source := &baselineCancelSource{fakeSource: &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000}}, cancel: cancel}
 	recorder := &fakeRecorder{}
 	collector, err := New(map[string]Source{"host-a": source}, recorder, Options{Interval: MinInterval})
 	if err != nil {
 		t.Fatal(err)
 	}
 	collector.interval = 10 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		collector.Run(ctx)
-	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, totals := source.calls(); totals >= 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("collector never swept")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	cancel()
+	go func() { defer close(done); collector.Run(ctx) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("collector did not stop")
 	}
-	calls, _ := source.calls()
+	calls, totals := source.calls()
+	if calls != 1 || totals != 1 || !collector.states["host-a"].hasBaseline {
+		t.Fatal("initial complete sweep/baseline missing", calls, totals)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if later, _ := source.calls(); later != calls {
 		t.Fatal("collector kept sampling after stop")
