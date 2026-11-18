@@ -68,7 +68,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -258,7 +258,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         </section>
         <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} />
         <Profiles readProfiles={readProfiles} />
-        <BrokerPolicy readPolicy={readBrokerPolicy} />
+        <BrokerPolicy readPolicy={readBrokerPolicy} readPlan={readAllocatorPlan} />
         <div className="bottom-grid">
           <CapacityStates read={readCapacityStates} />
           <AuditEvents events={data.events} />
@@ -342,6 +342,9 @@ export function App() {
           try { return await session.current.poolMappingsSnapshot(); }
           catch(error) { if(error instanceof SessionEnded && error.message) {disconnect();setError(error.message);} throw error; }
         }}
+        readAllocatorPlan={async (options) => {
+ try{return await session.current.allocatorPlanSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}
+ }}
         readBrokerPolicy={async () => {
           try { return await session.current.brokerPolicySnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
