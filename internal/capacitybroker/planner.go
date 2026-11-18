@@ -228,10 +228,11 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 		for len(out.Assignments) < opt.MaxAssignments {
 			selected, host := "", ""
 			var best *big.Rat
+			var bestOldest time.Time
 			for _, id := range keys {
 				p := s.Pools[id]
 				r := s.Repositories[p.Repository]
-				if demand[id] == 0 || pools[id] >= p.MaxRunners || repos[p.Repository][3] >= r.MaxRunners || !fits(global, p.Size, s.Global) {
+				if pools[id] >= p.MaxRunners || repos[p.Repository][3] >= r.MaxRunners || !fits(global, p.Size, s.Global) {
 					continue
 				}
 				eligible := append([]string(nil), p.Hosts...)
@@ -246,12 +247,28 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				if placement == "" {
 					continue
 				}
+				oldest := p.OldestWaiting
+				hasDemand := demand[id] > 0
+				if phase == 0 && jobs != nil {
+					path := jobs.path(id)
+					if jobs.exhausted {
+						return Plan{}, ErrSnapshot
+					}
+					hasDemand = len(path) > 0
+					if hasDemand {
+						oldest = jobs.rows[path[0].row].CreatedAt
+					}
+				}
+				if !hasDemand {
+					continue
+				}
 				score := share(repos[p.Repository], s.Global, weight(r))
-				earlier := selected != "" && phase == 0 && p.OldestWaiting.Before(s.Pools[selected].OldestWaiting)
+				earlier := selected != "" && phase == 0 && oldest.Before(bestOldest)
 				if selected == "" || score.Cmp(best) < 0 || (score.Cmp(best) == 0 && earlier) {
 					selected = id
 					host = placement
 					best = score
+					bestOldest = oldest
 				}
 			}
 			if selected == "" {

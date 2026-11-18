@@ -39,6 +39,19 @@ GitHub-repaired demand. Neither independent stock reads nor this derived revisio
 prove an atomic fleet snapshot or complete webhook coverage. The prior denied
 route/dispatch publication scope is not changed or republished here.
 
-### Placement-quality limitation
+### Bounded placement improvement and remaining limits
 
-This is a bounded greedy planning bridge, not a maximum-utilization production scheduler. For example, with one free slot each in pools A and B, an older job eligible for A or B can be placed in A, leaving an A-only job waiting while B remains unused. It never duplicates jobs or exceeds capacity, but an augmenting reassignment or constraint-aware optimization is still required to guarantee maximal feasible placement.
+New slots use alternating-path matching over existing planned slots: if a flexible
+A/B job was correlated to an A slot and an A-only job remains queued, a new B slot
+can cover the flexible job and leave the existing A slot for the constrained job.
+Only advisory job correlations change. Pool/host resource placements and weighted
+repository share accounting never move; no already-covered job is evicted.
+The oldest reachable unmet job supplies the age tie-break. A shared one-million
+edge-visit budget fails the entire planning call closed on exhaustion.
+
+This repairs the flexible/constrained slot example, not general heterogeneous
+resource packing. Host selection and resource placement remain greedy, and initial
+idle matches remain fixed. No maximum-utilization guarantee applies across mixed
+runner sizes, overlapping host eligibility, or fixed idle correlations. The test
+suite exhausts all 512 eligibility graphs of three jobs and three independent unit
+slots, in addition to the resource/fairness tests; that is not live qualification.

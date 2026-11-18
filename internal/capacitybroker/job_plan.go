@@ -22,10 +22,14 @@ type JobPlan struct {
 	RemainingJobs []QueuedDemand
 }
 type jobQueue struct {
-	rows   []QueuedDemand
-	done   map[string]bool
-	byPool map[string][]int
-	head   map[string]int
+	rows       []QueuedDemand
+	done       map[string]bool
+	byPool     map[string][]int
+	assigned   map[string]string
+	paths      map[string][]jobStep
+	operations int
+	oldest     int
+	exhausted  bool
 }
 
 // BuildForJobs matches existing idle supply once, then chooses each unmet job's
@@ -60,7 +64,7 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 		}
 	}
 	s.Pools = copyPools
-	q := &jobQueue{done: map[string]bool{}, byPool: map[string][]int{}, head: map[string]int{}}
+	q := &jobQueue{done: map[string]bool{}, byPool: map[string][]int{}, assigned: map[string]string{}, paths: map[string][]jobStep{}}
 	matchJobs := make([]DemandJob, 0, len(jobs))
 	edges := 0
 	for _, j := range jobs {
@@ -114,6 +118,7 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 	if e != nil {
 		return JobPlan{}, e
 	}
+	q.correlate(&plan)
 	remaining := []QueuedDemand{}
 	for _, j := range q.rows {
 		if !q.done[j.ID] {
@@ -124,31 +129,100 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 	plan.RemainingQueued = nil
 	return JobPlan{Plan: plan, CoveredByIdle: match.Covered, RemainingJobs: remaining}, nil
 }
-func (q *jobQueue) first(pool string) *QueuedDemand {
-	list := q.byPool[pool]
-	for q.head[pool] < len(list) {
-		j := &q.rows[list[q.head[pool]]]
-		if !q.done[j.ID] {
-			return j
-		}
-		q.head[pool]++
-	}
-	return nil
+
+// jobStep is an advisory correlation change, never a resource movement.
+type jobStep struct {
+	pool string
+	row  int
 }
-func (q *jobQueue) consume(pool string, counts map[string]int64, pools map[string]Pool) string {
-	j := q.first(pool)
-	if j == nil {
+
+// path finds the oldest unmet job reachable from a prospective pool slot through
+// previously planned slots. Each existing job stays covered. Idle matches remain
+// fixed. Work is globally bounded per BuildForJobs invocation.
+func (q *jobQueue) path(pool string) []jobStep {
+	if path, ok := q.paths[pool]; ok {
+		return path
+	}
+	seen := map[string]bool{pool: true}
+	parents := map[string]jobStep{}
+	todo := []string{pool}
+	best := -1
+	for q.oldest < len(q.rows) && q.done[q.rows[q.oldest].ID] {
+		q.oldest++
+	}
+	if q.oldest == len(q.rows) {
+		q.paths[pool] = nil
+		return nil
+	}
+	oldest := q.oldest
+	end := ""
+search:
+	for len(todo) > 0 {
+		current := todo[0]
+		todo = todo[1:]
+		for _, row := range q.byPool[current] {
+			q.operations++
+			if q.operations > 1000000 {
+				q.exhausted = true
+				return nil
+			}
+			j := q.rows[row]
+			assigned, planned := q.assigned[j.ID]
+			if !q.done[j.ID] {
+				if best < 0 || row < best {
+					best = row
+					end = current
+				}
+				if best == oldest {
+					break search
+				}
+			} else if planned && !seen[assigned] {
+				seen[assigned] = true
+				parents[assigned] = jobStep{current, row}
+				todo = append(todo, assigned)
+			}
+		}
+	}
+	var path []jobStep
+	if best >= 0 {
+		path = append(path, jobStep{end, best})
+		for end != pool {
+			step := parents[end]
+			path = append(path, step)
+			end = step.pool
+		}
+	}
+	q.paths[pool] = path
+	return path
+}
+func (q *jobQueue) consume(pool string, _ map[string]int64, _ map[string]Pool) string {
+	path := q.path(pool)
+	if len(path) == 0 {
 		return ""
 	}
-	q.done[j.ID] = true
-	for _, id := range j.Candidates {
-		counts[id]--
-		p := pools[id]
-		p.OldestWaiting = time.Time{}
-		if next := q.first(id); next != nil {
-			p.OldestWaiting = next.CreatedAt
-		}
-		pools[id] = p
+	for _, step := range path {
+		id := q.rows[step.row].ID
+		q.assigned[id] = step.pool
+		q.done[id] = true
 	}
-	return j.ID
+	q.paths = map[string][]jobStep{}
+	return q.rows[path[len(path)-1].row].ID
+}
+
+// Refresh advisory job IDs after augmentation; physical pool/host assignments
+// and their resource accounting never change.
+func (q *jobQueue) correlate(plan *Plan) {
+	ids := map[string][]string{}
+	for _, j := range q.rows {
+		if pool, ok := q.assigned[j.ID]; ok {
+			ids[pool] = append(ids[pool], j.ID)
+		}
+	}
+	for i := range plan.Assignments {
+		a := &plan.Assignments[i]
+		if !a.Warm {
+			a.JobID = ids[a.Pool][0]
+			ids[a.Pool] = ids[a.Pool][1:]
+		}
+	}
 }
