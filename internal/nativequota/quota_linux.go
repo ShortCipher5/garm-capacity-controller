@@ -58,17 +58,73 @@ func New(c Configuration) (*Reader, error) {
 // Only a filesystem's quota (including descendants/snapshots), never refquota,
 // is accepted. Missing/unlimited/rounded values are not enforcement evidence.
 func (r *Reader) Read(ctx context.Context, dataset string, expectedBytes int64) (Observation, error) {
-	if r == nil || os.Geteuid() != 0 || !validDataset(dataset) || expectedBytes <= 0 {
+	if expectedBytes <= 0 {
 		return Observation{}, ErrQuota
+	}
+	raw, e := r.readRaw(ctx, dataset)
+	if e != nil {
+		return Observation{}, e
+	}
+	return parse(raw, dataset, expectedBytes, time.Now().UTC())
+}
+
+// FilesystemIdentity verifies identity, not an enforced positive quota. A zero
+// quota here means no per-filesystem limit; callers must separately verify its
+// immutable quota ancestor. It cannot be used as a StoppedQuota or allocation.
+type FilesystemIdentity struct {
+	dataset, guid string
+	quota         int64
+}
+
+func (v FilesystemIdentity) Dataset() string { return v.dataset }
+func (v FilesystemIdentity) GUID() string    { return v.guid }
+func (v FilesystemIdentity) Quota() int64    { return v.quota }
+func (r *Reader) ReadFilesystem(ctx context.Context, dataset string) (FilesystemIdentity, error) {
+	raw, e := r.readRaw(ctx, dataset)
+	if e != nil {
+		return FilesystemIdentity{}, e
+	}
+	return parseFilesystem(raw, dataset)
+}
+func parseFilesystem(raw []byte, dataset string) (FilesystemIdentity, error) {
+	if !validDataset(dataset) || len(raw) > 4096 {
+		return FilesystemIdentity{}, ErrQuota
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) != 3 {
+		return FilesystemIdentity{}, ErrQuota
+	}
+	values := map[string]string{}
+	for _, line := range lines {
+		f := strings.Split(line, "\t")
+		if len(f) != 3 || f[0] != dataset || values[f[1]] != "" {
+			return FilesystemIdentity{}, ErrQuota
+		}
+		values[f[1]] = f[2]
+	}
+	guid, e := strconv.ParseUint(values["guid"], 10, 64)
+	if e != nil || guid == 0 || strconv.FormatUint(guid, 10) != values["guid"] || values["type"] != "filesystem" {
+		return FilesystemIdentity{}, ErrQuota
+	}
+	quota, e := strconv.ParseInt(values["quota"], 10, 64)
+	if e != nil || quota < 0 || strconv.FormatInt(quota, 10) != values["quota"] {
+		return FilesystemIdentity{}, ErrQuota
+	}
+	return FilesystemIdentity{dataset, values["guid"], quota}, nil
+}
+
+func (r *Reader) readRaw(ctx context.Context, dataset string) ([]byte, error) {
+	if r == nil || os.Geteuid() != 0 || !validDataset(dataset) {
+		return nil, ErrQuota
 	}
 	binary, e := pinned(r.config.Binary, r.config.BinarySHA256)
 	if e != nil {
-		return Observation{}, e
+		return nil, e
 	}
 	defer binary.Close()
 	helper, e := pinned(r.config.Helper, r.config.HelperSHA256)
 	if e != nil {
-		return Observation{}, e
+		return nil, e
 	}
 	defer helper.Close()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -80,9 +136,9 @@ func (r *Reader) Read(ctx context.Context, dataset string, expectedBytes int64) 
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if cmd.Run() != nil || ctx.Err() != nil {
-		return Observation{}, ErrQuota
+		return nil, ErrQuota
 	}
-	return parse(output.Bytes(), dataset, expectedBytes, time.Now().UTC())
+	return output.Bytes(), nil
 }
 
 type limitedBuffer struct{ bytes.Buffer }
@@ -183,10 +239,14 @@ func pinned(path, digest string) (*os.File, error) {
 	return f, nil
 }
 
-// ExecHelper is called only in the dedicated child. Its sole operation is a
-// fixed read-only zfs get. No shell, recursive mode, property write or fallback.
+// ExecHelper runs only in the dedicated child. Fixed read-only grammars cover
+// quota/root accounting, typed identity inventories and pool get/free-wait.
+// No shell, property mutation, arbitrary options or fallback is accepted.
 func ExecHelper() error {
-	if os.Geteuid() != 0 || len(os.Args) != 2 || !validDataset(os.Args[1]) {
+	inventory := len(os.Args) == 3 && ((os.Args[1] == "--identity-inventory" && validDataset(os.Args[2])) || (os.Args[1] == "--pool-identity-inventory" && validPool(os.Args[2])))
+	rootMode := len(os.Args) == 3 && os.Args[1] == "--root-accounting" && validDataset(os.Args[2])
+	poolMode := len(os.Args) == 3 && (os.Args[1] == "--pool-accounting" || os.Args[1] == "--pool-wait-free") && validPool(os.Args[2])
+	if os.Geteuid() != 0 || (!inventory && !poolMode && !rootMode && (len(os.Args) != 2 || !validDataset(os.Args[1]))) {
 		return ErrQuota
 	}
 	var st unix.Stat_t
@@ -195,6 +255,19 @@ func ExecHelper() error {
 	}
 	if unix.CloseRange(4, ^uint(0), unix.CLOSE_RANGE_CLOEXEC) != nil {
 		return ErrQuota
+	}
+	if rootMode {
+		return syscall.Exec("/proc/self/fd/3", []string{"zfs", "get", "-Hp", "-o", "name,property,value", rootAccountingProperties, os.Args[2]}, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
+	}
+	if poolMode {
+		args := []string{"zpool", "get", "-Hp", "-o", "name,property,value", poolProperties, os.Args[2]}
+		if os.Args[1] == "--pool-wait-free" {
+			args = []string{"zpool", "wait", "-t", "free", os.Args[2]}
+		}
+		return syscall.Exec("/proc/self/fd/3", args, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
+	}
+	if inventory {
+		return syscall.Exec("/proc/self/fd/3", []string{"zfs", "list", "-Hpr", "-t", "all", "-o", "name,guid,type,origin,defer_destroy,userrefs", os.Args[2]}, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 	}
 	return syscall.Exec("/proc/self/fd/3", []string{"zfs", "get", "-Hp", "-o", "name,property,value", "guid,type,quota", os.Args[1]}, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 }
