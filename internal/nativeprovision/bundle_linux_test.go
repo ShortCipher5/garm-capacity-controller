@@ -142,8 +142,13 @@ func TestStartReturnsDurableUnknownBeforeNetwork(t *testing.T) {
 	dir := t.TempDir()
 	s := &Service{bundle: b, plan: p, dir: dir, uid: uint32(os.Geteuid()), execute: b.Execute}
 	wait := make(chan struct{})
-	done := make(chan struct{})
-	resolver := func() (ssh.Signer, error) { defer close(done); <-wait; return nil, ErrInvalid }
+	defer func() {
+		close(wait)
+		// Resolver return is not worker completion: Close joins apply's
+		// mutex-protected terminal journal writes before TempDir cleanup.
+		s.Close()
+	}()
+	resolver := func() (ssh.Signer, error) { <-wait; return nil, ErrInvalid }
 	state, e := s.Start(context.Background(), Digest(p), false, resolver)
 	if e != nil || state.Status != "unknown" {
 		t.Fatal(state, e)
@@ -155,8 +160,6 @@ func TestStartReturnsDurableUnknownBeforeNetwork(t *testing.T) {
 	if _, e = s.Start(context.Background(), Digest(p), true, resolver); e == nil {
 		t.Fatal("concurrent accepted")
 	}
-	close(wait)
-	<-done
 }
 func TestRejectedStartReleasesBusyBeforeReturn(t *testing.T) {
 	b, target := fixture(t)
