@@ -167,7 +167,7 @@ func (o *ownerFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if claim.Step == admission.NativeStart {
 			rid = resource
 		}
-		if terminal && o.mode != "pending" {
+		if terminal && o.mode != "pending" && o.mode != "pending-mismatch" {
 			outcome = "succeeded"
 			rid = resource
 			if o.mode == "terminal-failed" {
@@ -176,6 +176,9 @@ func (o *ownerFixture) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		record := nativeidentity.OperationRecord{PermitID: claim.PermitID, EnvelopeDigest: claim.EnvelopeDigest, ParentClaimID: claim.ParentClaimID, Step: claim.Step, StepClaimID: claim.ID, DomainID: o.parent.Envelope.DomainID, PolicyDigest: o.parent.Envelope.PolicyDigest, NativeName: o.parent.Envelope.NativeName, OperationID: op, Outcome: outcome, ResourceID: rid}
+		if terminal && o.mode == "pending-mismatch" {
+			record.OperationID = startOp
+		}
 		json.NewEncoder(w).Encode(record)
 		return
 	}
@@ -311,7 +314,7 @@ func TestCoordinatorRunsCanonicalOwnerSequenceOnce(t *testing.T) {
 	}
 }
 func TestCoordinatorUncertaintyNeverRetriesOrReleases(t *testing.T) {
-	for _, mode := range []string{"create-drop", "start-drop", "bootstrap-drop", "bootstrap-unknown", "bootstrap-wrong-uuid", "redirect", "quota-bad", "terminal-failed", "pending"} {
+	for _, mode := range []string{"create-drop", "start-drop", "bootstrap-drop", "bootstrap-unknown", "bootstrap-wrong-uuid", "redirect", "quota-bad", "terminal-failed", "pending", "pending-mismatch"} {
 		t.Run(mode, func(t *testing.T) {
 			f := setup(t, mode)
 			ctx := context.Background()
@@ -391,13 +394,6 @@ func TestCoordinatorFreezesNestedTLSConfiguration(t *testing.T) {
 	}
 }
 
-func TestExecuteProtectedRejectsAbsentSourceBeforeMutation(t *testing.T) {
-	var c *Coordinator
-	if _, e := c.ExecuteProtected(context.Background(), admission.ExecutionPlan{}, admission.HostBinding{}, admission.StockProviderAuthority{}, "", stockjit.ProtectedBootstrap{}); e == nil {
-		t.Fatal("absent source accepted")
-	}
-}
-
 func TestTerminalReceiptWriteTimeoutNeverReplaysNativeMutation(t *testing.T) {
 	f := setup(t, "")
 	db, e := sql.Open("sqlite3", f.path)
@@ -457,5 +453,12 @@ func TestTerminalReceiptWriteTimeoutNeverReplaysNativeMutation(t *testing.T) {
 	defer f.owner.mu.Unlock()
 	if f.owner.createCalls != 1 || f.owner.startCalls != 0 || f.owner.bootstrapCalls != 0 {
 		t.Fatal("mutation replay")
+	}
+}
+
+func TestExecuteProtectedRejectsAbsentSourceBeforeMutation(t *testing.T) {
+	var c *Coordinator
+	if _, e := c.ExecuteProtected(context.Background(), admission.ExecutionPlan{}, admission.HostBinding{}, admission.StockProviderAuthority{}, "", stockjit.ProtectedBootstrap{}); e == nil {
+		t.Fatal("absent source accepted")
 	}
 }
