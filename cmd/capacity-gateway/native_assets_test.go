@@ -39,3 +39,15 @@ func TestNativeAssetsRequireExplicitModeAndDistinctToken(t *testing.T) {
 		t.Fatal("missing protected token")
 	}
 }
+
+func TestNativeAssetSlotConfigurationFailsClosed(t *testing.T) {
+	if r, e := loadNativeAssetRegistry(&nativeAssetsConfiguration{}); e != nil || r != nil {
+		t.Fatal("legacy empty slot configuration", e)
+	}
+	if _, e := loadNativeAssetRegistry(&nativeAssetsConfiguration{RegistryDirectory: "/not-configured"}); e == nil {
+		t.Fatal("orphan registry accepted")
+	}
+	if _, e := loadNativeAssetRegistry(&nativeAssetsConfiguration{RegistryDirectory: "/not-configured", Slots: map[string]nativeAssetsSlot{"slot": {BundleDirectory: "/missing", HelperPath: "/missing"}}}); e == nil {
+		t.Fatal("unverified slot sources accepted")
+	}
+}

@@ -10,8 +10,10 @@ import (
 )
 
 type nativeAssetsConfiguration struct {
-	TokenFile string                        `json:"token_file"`
-	Targets   map[string]nativeAssetsRecipe `json:"targets"`
+	RegistryDirectory string                        `json:"registry_directory,omitempty"`
+	Slots             map[string]nativeAssetsSlot   `json:"slots,omitempty"`
+	TokenFile         string                        `json:"token_file"`
+	Targets           map[string]nativeAssetsRecipe `json:"targets"`
 }
 type nativeAssetsRecipe struct {
 	PreparationID    string                     `json:"preparation_id"`
@@ -35,7 +37,7 @@ func loadNativeAssets(a *adminConfiguration) (map[string]adminview.NativeAssetsT
 		closeAll()
 		return nil, "", func() {}, adminview.ErrConfiguration
 	}
-	if a == nil || !a.EnableNativeAssets || (!a.EnableNativePreparation && !a.EnableNativeRegistration) || a.NativeAssets == nil || len(a.NativeAssets.Targets) < 1 || len(a.NativeAssets.Targets) > 8 {
+	if a == nil || !a.EnableNativeAssets || (!a.EnableNativePreparation && !a.EnableNativeRegistration) || a.NativeAssets == nil || len(a.NativeAssets.Targets)+len(a.NativeAssets.Slots) < 1 || len(a.NativeAssets.Targets)+len(a.NativeAssets.Slots) > 8 {
 		return fail()
 	}
 	c := a.NativeAssets
@@ -101,4 +103,39 @@ func loadNativeAssets(a *adminConfiguration) (map[string]adminview.NativeAssetsT
 		targets[id] = adminview.NativeAssetsTarget{Service: s, PreparationID: r.PreparationID}
 	}
 	return targets, token, closeAll, nil
+}
+
+type nativeAssetsSlot struct {
+	BundleDirectory string `json:"bundle_directory"`
+	HelperPath      string `json:"helper_path"`
+	ManifestSHA256  string `json:"manifest_sha256"`
+	HelperSHA256    string `json:"helper_sha256"`
+}
+
+func loadNativeAssetRegistry(c *nativeAssetsConfiguration) (*nativeassettransfer.Registry, error) {
+	if len(c.Slots) == 0 {
+		if c.RegistryDirectory != "" {
+			return nil, adminview.ErrConfiguration
+		}
+		return nil, nil
+	}
+	slots := map[string]*nativeassettransfer.Bundle{}
+	fail := func() (*nativeassettransfer.Registry, error) {
+		for _, b := range slots {
+			b.Close()
+		}
+		return nil, adminview.ErrConfiguration
+	}
+	for name, v := range c.Slots {
+		b, e := nativeassettransfer.LoadBundle(v.BundleDirectory, v.HelperPath, v.ManifestSHA256, v.HelperSHA256)
+		if e != nil {
+			return fail()
+		}
+		slots[name] = b
+	}
+	r, e := nativeassettransfer.NewRegistry(c.RegistryDirectory, slots)
+	if e != nil {
+		return fail()
+	}
+	return r, nil
 }

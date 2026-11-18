@@ -10,6 +10,7 @@ import (
 	"errors"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassembly"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassettransfer"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"io"
 	"mime"
@@ -91,6 +92,8 @@ type Overview struct {
 type Handler struct {
 	nativeAssets                map[string]NativeAssetsTarget
 	nativeAssetsHash            [32]byte
+	nativeAssetRegistry         *nativeassettransfer.Registry
+	nativeAssetSlots            map[string]string
 	nativeRetirement            *nativecontroller.RetirementService
 	demandObserver              *demandobserver.Service
 	jobObserver                 JobObserverStatusSource
@@ -221,6 +224,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/native-assembly" {
 		h.serveNativeAssembly(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-asset-plans" {
+		h.serveNativeAssetPlans(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/native-assets" {

@@ -24,7 +24,7 @@ type NativeAssetsTarget struct {
 func (h *Handler) SetNativeAssets(targets map[string]NativeAssetsTarget, token string) error {
 	raw, e := hex.DecodeString(token)
 	hash := sha256.Sum256([]byte("Bearer " + token))
-	if h.nativeAssets != nil || e != nil || len(raw) != 32 || token != hex.EncodeToString(raw) || len(targets) < 1 || len(targets) > 8 {
+	if h.nativeAssets != nil || e != nil || len(raw) != 32 || token != hex.EncodeToString(raw) || len(targets) > 8 {
 		return ErrConfiguration
 	}
 	for _, other := range [][32]byte{h.nativePreparationHash, h.nativePlanningHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash, h.rotationHash} {
@@ -58,6 +58,16 @@ type nativeAssetsView struct {
 
 func (h *Handler) boundNativeAssets(id string) (nativeAssetsView, NativePreparationTarget, bool) {
 	a, ok := h.nativeAssets[id]
+	if slot := h.nativeAssetSlots[id]; slot != "" {
+		c, e := h.assetAssembly(id)
+		if e != nil {
+			return nativeAssetsView{}, NativePreparationTarget{}, false
+		}
+		s, e := h.nativeAssetRegistry.Restore(slot, c)
+		if e != nil || s != a.Service {
+			return nativeAssetsView{}, NativePreparationTarget{}, false
+		}
+	}
 	p, pok := h.nativePreparation[id]
 	if !ok || !pok || p.Service == nil || p.Resolve == nil {
 		return nativeAssetsView{}, NativePreparationTarget{}, false
@@ -80,7 +90,7 @@ func (h *Handler) serveNativeAssets(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(code)
 		json.NewEncoder(w).Encode(map[string]string{"error": msg})
 	}
-	if len(h.nativeAssets) == 0 {
+	if len(h.nativeAssets) == 0 && h.nativeAssetRegistry == nil {
 		fail(404, "native asset staging disabled")
 		return
 	}

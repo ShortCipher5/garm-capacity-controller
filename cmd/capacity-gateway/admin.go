@@ -374,8 +374,28 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, e
 		}
+		registry, e := loadNativeAssetRegistry(config.NativeAssets)
+		if e != nil {
+			closeAssets()
+			cleanup()
+			return nil, noop, e
+		}
+		if registry != nil {
+			if e = handler.SetNativeAssetRegistry(registry); e != nil {
+				registry.Close()
+				closeAssets()
+				cleanup()
+				return nil, noop, e
+			}
+		}
 		old := cleanup
-		cleanup = func() { closeAssets(); old() }
+		cleanup = func() {
+			if registry != nil {
+				registry.Close()
+			}
+			closeAssets()
+			old()
+		}
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil
