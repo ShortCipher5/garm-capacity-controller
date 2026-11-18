@@ -55,8 +55,9 @@ in a separate `ssh_inventory_targets` table. The durable digest binds ID, addres
 port, user, public host key and credential alias. A digest mismatch fails closed.
 No private key, credential path or target address is copied to the audit.
 Identical repeated saves are idempotent; existing IDs cannot be repointed or have
-their host key silently replaced. The combined configured and registered target
-list is capped at 32. The registration-only store uses the existing transactional
+their host key silently replaced. The combined configured and active registered target
+list is capped at 32. Active plus revoked records are bounded at 1,024; hitting
+that history bound fails closed rather than deleting tombstones. The registration-only store uses the existing transactional
 and backup facilities, not a separate file-copy backup scheme.
 
 Restart keeps saved targets, but every list/probe revalidates them against the
@@ -74,8 +75,36 @@ can occur during configuration approval.
 ## Deliberate remaining boundaries
 
 This is durable target creation and read-only inspection, not full guided server
-installation. Private-key provisioning/rotation, direct per-target removal or
+installation. Private-key provisioning/rotation, direct target
 editing, agent install/update/revocation, SSH-to-Incus identity linking and safe
 physical-capacity enrollment remain separate work. Host-key changes require a
 new reviewed ID; old target access can be withdrawn through deployment scopes.
 The public key must be independently obtained, not accepted from a blind scan.
+
+## Withdraw a saved target
+
+Load permitted scopes with the separate target-management token, select the
+saved target under **Withdraw an SSH target**, review its exact identity and
+fingerprint, confirm, and re-enter the token to revoke its local inventory
+permission. Even records no longer matching current scopes can be withdrawn.
+Static deployment targets are not managed here; remove those from deployment
+configuration instead.
+
+The exact reviewed digest is required. The approval record is moved atomically
+into a durable tombstone alongside its revocation audit; original configuration
+is retained, not irreversibly deleted. Subsequent inventory requests cannot find
+it. Previously reviewed client state cannot resurrect it, and repeated identical
+revocations are idempotent. A new approval needs a different target ID. Revoking
+frees an active target slot but never removes history.
+
+Database triggers prevent an older gateway writer from reinserting a tombstoned
+ID. Older readers see only the active table, from which revoked records were
+removed atomically. Thus rolling back the application binary does not restore
+these local permissions. Restoring an older database backup is a separate rollback
+of authorization history and must be handled accordingly by the operator.
+
+Already in-flight read-only requests may complete within their existing bounded
+timeout. This is not remote key revocation, SSH session termination, agent removal,
+runner deletion, retirement or capacity release. It makes no physical-authority
+claim. A canceled/lost revocation response can have committed: reload targets;
+never assume aborting the browser restored permission.

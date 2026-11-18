@@ -12,13 +12,27 @@ import (
 func (s *SQLiteStore) InitializeSSHTargets(ctx context.Context) error {
 	return s.transaction(ctx, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ssh_inventory_targets (id TEXT PRIMARY KEY, config TEXT NOT NULL, digest TEXT NOT NULL)`)
+		if e != nil {
+			return e
+		}
+		_, e = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ssh_inventory_revocations (id TEXT PRIMARY KEY, config TEXT NOT NULL, digest TEXT NOT NULL)`)
+		if e != nil {
+			return e
+		}
+		// Database-enforced tombstones also protect older readers/writers that know
+		// only the active target table and would otherwise resurrect revoked IDs.
+		_, e = tx.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS ssh_target_no_resurrection_insert BEFORE INSERT ON ssh_inventory_targets WHEN EXISTS (SELECT 1 FROM ssh_inventory_revocations WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'SSH target ID revoked'); END`)
+		if e != nil {
+			return e
+		}
+		_, e = tx.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS ssh_target_no_resurrection_update BEFORE UPDATE ON ssh_inventory_targets WHEN EXISTS (SELECT 1 FROM ssh_inventory_revocations WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'SSH target ID revoked'); END`)
 		return e
 	})
 }
 func (s *SQLiteStore) ListSSHTargets(ctx context.Context) (map[string]sshinventory.Config, error) {
 	out := map[string]sshinventory.Config{}
 	e := s.transaction(ctx, func(tx *sql.Tx) error {
-		rows, e := tx.QueryContext(ctx, `SELECT id,config,digest FROM ssh_inventory_targets ORDER BY id LIMIT 33`)
+		rows, e := tx.QueryContext(ctx, `SELECT t.id,t.config,t.digest FROM ssh_inventory_targets t WHERE NOT EXISTS (SELECT 1 FROM ssh_inventory_revocations r WHERE r.id=t.id) ORDER BY t.id LIMIT 33`)
 		if e != nil {
 			return e
 		}
@@ -55,6 +69,13 @@ func (s *SQLiteStore) SaveSSHTarget(ctx context.Context, request, id string, c s
 		e := tx.QueryRowContext(ctx, `SELECT config,digest FROM ssh_inventory_targets WHERE id=?`, id).Scan(&old, &oldDigest)
 		if e == nil {
 			if old == string(raw) && oldDigest == digest {
+				var revoked int
+				if e = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM ssh_inventory_revocations WHERE id=?`, id).Scan(&revoked); e != nil {
+					return e
+				}
+				if revoked != 0 {
+					return ErrDenied
+				}
 				return nil
 			}
 			return ErrDenied
@@ -63,8 +84,15 @@ func (s *SQLiteStore) SaveSSHTarget(ctx context.Context, request, id string, c s
 			return e
 		}
 		var count int
-		if e = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM ssh_inventory_targets`).Scan(&count); e != nil {
+		if e = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM ssh_inventory_targets t WHERE NOT EXISTS (SELECT 1 FROM ssh_inventory_revocations r WHERE r.id=t.id)`).Scan(&count); e != nil {
 			return e
+		}
+		var total int
+		if e = tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM ssh_inventory_targets)+(SELECT COUNT(*) FROM ssh_inventory_revocations)`).Scan(&total); e != nil {
+			return e
+		}
+		if total >= 1024 {
+			return ErrDenied
 		}
 		if count >= limit {
 			return ErrDenied
@@ -74,5 +102,43 @@ func (s *SQLiteStore) SaveSSHTarget(ctx context.Context, request, id string, c s
 		}
 		audit, _ := json.Marshal(map[string]string{"actor": "ssh-target-management-token", "request_id": request, "target_id": id, "review_digest": digest})
 		return sqliteAudit(tx, "ssh_target_approved", string(audit), s.now())
+	})
+}
+
+// RevokeSSHTarget only withdraws local inventory authorization. It does not
+// delete target data, revoke remote keys, stop runners or release any capacity.
+func (s *SQLiteStore) RevokeSSHTarget(ctx context.Context, request, id, digest string) error {
+	if !ValidOnboardingRequestID(request) || !ValidOnboardingProfileID(id) {
+		return ErrDenied
+	}
+	return s.transaction(ctx, func(tx *sql.Tx) error {
+		var raw, saved string
+		e := tx.QueryRowContext(ctx, `SELECT config,digest FROM ssh_inventory_revocations WHERE id=?`, id).Scan(&raw, &saved)
+		if e == nil {
+			var c sshinventory.Config
+			if len(raw) > 20000 || json.Unmarshal([]byte(raw), &c) != nil || saved != digest || saved != sshinventory.ReviewDigest(id, c) {
+				return ErrDenied
+			}
+			return nil
+		}
+		if e != sql.ErrNoRows {
+			return e
+		}
+		if e = tx.QueryRowContext(ctx, `SELECT config,digest FROM ssh_inventory_targets WHERE id=?`, id).Scan(&raw, &saved); e != nil {
+			return ErrDenied
+		}
+		var c sshinventory.Config
+		if len(raw) > 20000 || json.Unmarshal([]byte(raw), &c) != nil || saved != digest || saved != sshinventory.ReviewDigest(id, c) {
+			return ErrDenied
+		}
+		if _, e = tx.ExecContext(ctx, `INSERT INTO ssh_inventory_revocations(id,config,digest) VALUES(?,?,?)`, id, raw, digest); e != nil {
+			return e
+		}
+		if _, e = tx.ExecContext(ctx, `DELETE FROM ssh_inventory_targets WHERE id=?`, id); e != nil {
+			return e
+		}
+
+		audit, _ := json.Marshal(map[string]string{"actor": "ssh-target-management-token", "request_id": request, "target_id": id, "review_digest": digest})
+		return sqliteAudit(tx, "ssh_target_revoked", string(audit), s.now())
 	})
 }

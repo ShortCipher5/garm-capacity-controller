@@ -2,18 +2,20 @@ import React,{useEffect,useRef,useState} from 'react';
 import {sshTargetsRequest} from './ssh-targets-client.js';
 const empty={id:'',address:'',port:22,user:'',host_key:'',credential_ref:''};
 export function SSHTargetRegistration(){
+ const [targets,setTargets]=useState([]),[revokeID,setRevokeID]=useState(''),[confirmRevoke,setConfirmRevoke]=useState(false);
  const [scopes,setScopes]=useState(null),[form,setForm]=useState(empty),[review,setReview]=useState(null),[verified,setVerified]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
  const token=useRef(null),active=useRef(null),pending=useRef(null),generation=useRef(0),mounted=useRef(true);
  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;generation.current++;active.current?.abort();if(token.current)token.current.value=''}},[]);
- function reset(){const uncertain=pending.current==='approve';pending.current=null;generation.current++;active.current?.abort();active.current=null;if(token.current)token.current.value='';setBusy(false);setScopes(null);setForm(empty);setReview(null);setVerified(false);setMessage(uncertain?'Approval may already have saved. Reload approved SSH targets before retrying; cancellation does not undo a committed configuration.':'');}
+ function reset(){const uncertain=pending.current;pending.current=null;generation.current++;active.current?.abort();active.current=null;if(token.current)token.current.value='';setBusy(false);setScopes(null);setTargets([]);setRevokeID('');setConfirmRevoke(false);setForm(empty);setReview(null);setVerified(false);setMessage(uncertain==='approve'?'Approval may already have saved. Reload approved SSH targets before retrying; cancellation does not undo a committed configuration.':uncertain==='revoke'?'Revocation may already have saved. Reload approved SSH targets before retrying; cancellation does not restore permission.':'');}
  function change(key,value){setForm(old=>({...old,[key]:value}));setReview(null);setVerified(false);setMessage('');}
  async function run(action){
-  if(active.current)return;if(action==='approve'&&(!review||!verified))return;
+  if(active.current)return;if(action==='revoke'&&(!confirmRevoke||!targets.some(t=>t.id===revokeID)))return;if(action==='approve'&&(!review||!verified))return;
   const credential=token.current?.value||'';if(token.current)token.current.value='';
-  const {id,...config}=form;const body=action==='scopes'?null:{action,target_id:id,config,...(action==='approve'?{review_digest:review.review_digest,verified_host_key:true,request_id:crypto.randomUUID()}:{})};
-  const version=++generation.current,controller=new AbortController();active.current=controller;pending.current=action;setBusy(true);setMessage('');setVerified(false);const timeout=setTimeout(()=>controller.abort(),20000);
+  const {id,...config}=form;const revoking=targets.find(t=>t.id===revokeID);const body=action==='scopes'?null:action==='revoke'?{action,target_id:revoking.id,review_digest:revoking.review_digest,confirm_revoke:true,request_id:crypto.randomUUID()}:{action,target_id:id,config,...(action==='approve'?{review_digest:review.review_digest,verified_host_key:true,request_id:crypto.randomUUID()}:{})};
+  const version=++generation.current,controller=new AbortController();active.current=controller;pending.current=action;setBusy(true);setMessage('');setVerified(false);setConfirmRevoke(false);const timeout=setTimeout(()=>controller.abort(),20000);
   try{const value=await sshTargetsRequest(credential,body,{signal:controller.signal});if(!mounted.current||version!==generation.current)return;
-   if(action==='scopes'){setScopes(value.scopes);setReview(null);setMessage('Choose an approved credential scope, then enter the server and its independently obtained public host key.');}
+   if(action==='scopes'){setScopes(value.scopes);setTargets(value.targets);setRevokeID('');setReview(null);setMessage('Choose an approved credential scope, then enter the server and its independently obtained public host key.');}
+   else if(action==='revoke'){setTargets(old=>old.filter(t=>t.id!==value.target_id));setRevokeID('');setMessage('Local inventory permission revoked. Already in-flight probes may finish within their timeout. No remote key, running workload or capacity was changed.');}
    else if(action==='review'){setReview(value.target);setMessage('Compare the fingerprint independently, then re-enter the target-management token to save. No connection has been made.');}
    else{setReview(null);setMessage('SSH target saved. Use Inspect a new server over SSH below to load it and separately authorize a read-only probe. No server was contacted or activated.');}
   }catch(e){if(mounted.current&&version===generation.current){setMessage(e.message);setReview(null)}}
@@ -37,6 +39,10 @@ export function SSHTargetRegistration(){
  <label><input aria-label="Approve new SSH server identity" type="checkbox" checked={verified} disabled={busy} onChange={e=>setVerified(e.target.checked)}/>I independently verified this host-key fingerprint and approve this exact server and credential pairing for future separately requested read-only inventory.</label>
  <button type="button" disabled={busy||!verified} onClick={()=>run('approve')}>Save approved SSH server</button></>}
  </>}
+ {scopes&&<section><h4>Withdraw an SSH target</h4><p>Revocation prevents subsequent inventory requests. It does not remove a remote SSH key or stop an already in-flight read-only probe. Target IDs remain reserved; adding it again requires a new ID and full approval.</p>
+ <label>Target to revoke<select aria-label="Target to revoke" disabled={busy} value={revokeID} onChange={e=>{setRevokeID(e.target.value);setConfirmRevoke(false)}}><option value="">Select saved target</option>{targets.map(t=><option key={t.id} value={t.id}>{t.id} · {t.user}@{t.address}:{t.port} · {t.credential_ref}</option>)}</select></label>
+ {revokeID&&<><code>{targets.find(t=>t.id===revokeID)?.host_key_fingerprint}</code><label><input aria-label="Confirm local SSH revocation" type="checkbox" disabled={busy} checked={confirmRevoke} onChange={e=>setConfirmRevoke(e.target.checked)}/>Withdraw this exact saved target's local inventory permission.</label><button type="button" disabled={busy||!confirmRevoke} onClick={()=>run('revoke')}>Revoke local SSH permission</button></>}
+ </section>}
  <button type="button" onClick={reset}>{busy?'Cancel server configuration':'Clear server configuration'}</button>
  {message&&<p role="status">{message}</p>}
  </details>;

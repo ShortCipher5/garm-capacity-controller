@@ -13,6 +13,14 @@ type memoryTargets struct {
 	saves  int
 }
 
+func (m *memoryTargets) RevokeSSHTarget(_ context.Context, _ string, id, digest string) error {
+	c, ok := m.values[id]
+	if m.fail || !ok || ReviewDigest(id, c) != digest {
+		return ErrReview
+	}
+	delete(m.values, id)
+	return nil
+}
 func (m *memoryTargets) ListSSHTargets(context.Context) (map[string]Config, error) {
 	if m.fail {
 		return nil, ErrInventory
@@ -111,5 +119,38 @@ func TestRegistryRejectsOutOfScopeAndSpecialDestinations(t *testing.T) {
 		if _, e := NewRegistry(map[string]Scope{"key": bad}, &memoryTargets{}, resolve, nil); e == nil {
 			t.Fatal(network)
 		}
+	}
+}
+
+func TestRevocationRejectsPreviouslyReviewedProbeWithoutCredentialUse(t *testing.T) {
+	c, _, _ := server(t, sample)
+	c.Address = "192.0.2.20"
+	c.Port = 22
+	c.User = "inventory"
+	c.CredentialRef = "key"
+	store := &memoryTargets{values: map[string]Config{"candidate": c}}
+	calls := 0
+	resolve := func(context.Context, string) (ssh.Signer, error) { calls++; return nil, ErrInventory }
+	registry, e := NewRegistry(map[string]Scope{"key": {Networks: []string{"192.0.2.0/24"}, Users: []string{"inventory"}, Ports: []uint16{22}}}, store, resolve, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	service, _ := NewService(nil, resolve, func(context.Context, string, string, string, string, bool) error { return nil })
+	service.SetRegistry(registry)
+	targets, e := service.ListTargets(context.Background())
+	if e != nil || len(targets) != 1 {
+		t.Fatal(targets, e)
+	}
+	target := targets[0]
+	request := "11111111-1111-4111-8111-111111111111"
+	if e = registry.Revoke(context.Background(), request, target.ID, target.ReviewDigest); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = service.Probe(context.Background(), target.ID, target.ReviewDigest, request); !errors.Is(e, ErrReview) || calls != 0 {
+		t.Fatal("stale target reached credential")
+	}
+	targets, e = registry.ManagedTargets(context.Background())
+	if e != nil || len(targets) != 0 {
+		t.Fatal("revoked record remained active")
 	}
 }
