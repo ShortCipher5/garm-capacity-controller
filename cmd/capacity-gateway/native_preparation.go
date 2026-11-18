@@ -5,6 +5,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassembly"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeprovision"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/sshinventory"
@@ -13,9 +14,10 @@ import (
 )
 
 type nativePreparationConfiguration struct {
-	TokenFile   string                             `json:"token_file"`
-	Credentials map[string]string                  `json:"admin_credential_files"`
-	Targets     map[string]nativePreparationTarget `json:"targets"`
+	AssemblyRecipes map[string]nativeassembly.Recipe   `json:"assembly_recipes,omitempty"`
+	TokenFile       string                             `json:"token_file"`
+	Credentials     map[string]string                  `json:"admin_credential_files"`
+	Targets         map[string]nativePreparationTarget `json:"targets"`
 }
 type nativePreparationTarget struct {
 	Target           nativeprovision.Target `json:"target"`
@@ -125,11 +127,16 @@ func loadNativePreparation(a *adminConfiguration) (map[string]adminview.NativePr
 			return fail()
 		}
 		services = append(services, service)
-		view, e := service.View(id)
-		if e != nil || seenID[view.PreparationID] || service.ReviewDigest() != t.ReviewDigest {
+		registered, e := service.RegisteredConfiguration()
+		if e != nil || (registered != nil && (!a.EnableNativeAssembly || c.AssemblyRecipes[id].Binding.PreparationID != service.PreparationID())) || seenID[service.PreparationID()] || service.ReviewDigest() != t.ReviewDigest {
 			return fail()
 		}
-		seenID[view.PreparationID] = true
+		if registered == nil {
+			if _, e := service.View(id); e != nil {
+				return fail()
+			}
+		}
+		seenID[service.PreparationID()] = true
 		alias := t.CredentialAlias
 		targets[id] = adminview.NativePreparationTarget{Service: service, Resolve: func() (ssh.Signer, error) { return resolve(context.Background(), alias) }}
 	}

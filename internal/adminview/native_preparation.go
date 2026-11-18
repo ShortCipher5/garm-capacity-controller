@@ -44,6 +44,8 @@ func (h *Handler) SetNativePreparation(targets map[string]NativePreparationTarge
 	return nil
 }
 func (h *Handler) serveNativePreparation(w http.ResponseWriter, r *http.Request) {
+	h.nativePreparationMu.Lock()
+	defer h.nativePreparationMu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	fail := func(code int, msg string) {
 		w.WriteHeader(code)

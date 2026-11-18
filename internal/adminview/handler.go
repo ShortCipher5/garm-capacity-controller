@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassembly"
 	"io"
 	"mime"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,6 +85,9 @@ type Overview struct {
 type Handler struct {
 	nativePlanning        *nativeplanning.Service
 	nativePlanningHash    [32]byte
+	nativePreparationMu   sync.Mutex
+	nativeAssembly        *nativeassembly.Service
+	nativeAssemblyTargets map[string]bool
 	nativePreparation     map[string]NativePreparationTarget
 	nativePreparationHash [32]byte
 	brokerProfiles        map[string]BrokerProfileRecipe
@@ -176,6 +181,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/native-planning" {
 		h.serveNativePlanning(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-assembly" {
+		h.serveNativeAssembly(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/native-preparation" {

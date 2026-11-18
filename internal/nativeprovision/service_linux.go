@@ -137,6 +137,9 @@ func (s *Service) apply(ctx context.Context, review string, inspect bool, resolv
 		return State{}, e
 	}
 	defer lock.Close()
+	if s.currentRegisteredPlan() != nil {
+		return State{}, ErrInvalid
+	}
 	id := s.plan.Manifest.ID
 	intent := id + ".intent.json"
 	state := State{ReviewDigest: review, Status: "unknown"}
@@ -307,6 +310,9 @@ func (s *Service) Close() {
 }
 
 func (s *Service) Status() (State, error) {
+	if s == nil || s.currentRegisteredPlan() != nil {
+		return State{}, ErrInvalid
+	}
 	state, e := s.historicalStatus()
 	if e != nil {
 		return State{}, e

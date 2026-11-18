@@ -19,6 +19,7 @@ import (
 )
 
 type adminConfiguration struct {
+	EnableNativeAssembly               bool                            `json:"-"`
 	NativePlanning                     *nativePlanningConfiguration    `json:"native_planning,omitempty"`
 	EnableNativePlanning               bool                            `json:"-"`
 	NativePreparation                  *nativePreparationConfiguration `json:"native_preparation,omitempty"`
@@ -285,6 +286,18 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, e
 		}
+	}
+	if config.EnableNativeAssembly {
+		if !config.EnableNativePreparation || !config.EnableNativePlanning || config.NativePreparation == nil {
+			cleanup()
+			return nil, noop, adminview.ErrConfiguration
+		}
+		if e := handler.ConfigureNativeAssembly(config.NativePreparation.AssemblyRecipes); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { handler.CloseNativePreparation(); old() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil
