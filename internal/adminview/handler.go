@@ -154,6 +154,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/allocator-plan" {
+		h.serveAllocatorPlan(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/allocator-status" {
 		h.serveAllocatorStatus(w, r)
 		return
