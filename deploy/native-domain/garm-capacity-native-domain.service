@@ -1,0 +1,23 @@
+# Experimental fresh-only owner. Not wired to the provider; do not enable live
+# provisioning. Requires systemd >= 250 with unified cgroup v2 and qualified Incus.
+# Deliberately static: no Install/enable-at-boot, socket activation, controller
+# dependency, automatic restart, reload, cleanup or existing-domain adoption.
+[Unit]
+Description=GARM capacity private fresh native domain owner (experimental)
+StopWhenUnneeded=no
+
+[Service]
+Type=exec
+ExitType=cgroup
+User=root
+Group=root
+UMask=0077
+StateDirectory=garm-capacity-native
+StateDirectoryMode=0700
+ExecStart=/usr/libexec/garm-capacity/capacity-native-domain --domain-dir=/var/lib/garm-capacity-native/domain --incusd=/usr/libexec/incus/incusd --launcher=/usr/libexec/garm-capacity/capacity-native-launch
+Restart=no
+Delegate=yes
+KillMode=control-group
+SendSIGKILL=no
+TimeoutStopSec=infinity
+OOMPolicy=continue
