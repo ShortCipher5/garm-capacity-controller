@@ -80,6 +80,7 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	nativeEnrollments map[string]frozenNativeRecipe
 	brokerProfiles  map[string]BrokerProfileRecipe
 	allocatorStatus AllocatorStatusSource
 	jobObserver     JobObserverStatusSource
@@ -196,6 +197,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/garm" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/garm/") {
 		h.serveGarm(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-enrollment" {
+		h.serveNativeEnrollment(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/broker-profiles" {
