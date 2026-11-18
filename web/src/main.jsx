@@ -68,7 +68,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -256,7 +256,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </div>
           <PoolMappings readMappings={readPoolMappings} readProfiles={readProfiles} />
         </section>
-        <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} />
+        <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} readOverheadRefresh={readOverheadRefresh} readNativeEnrollment={readNativeEnrollment} />
         <Profiles readProfiles={readProfiles} />
         <BrokerPolicy readPolicy={readBrokerPolicy} readPlan={readAllocatorPlan} />
         <div className="bottom-grid">
@@ -342,6 +342,8 @@ export function App() {
           try { return await session.current.poolMappingsSnapshot(); }
           catch(error) { if(error instanceof SessionEnded && error.message) {disconnect();setError(error.message);} throw error; }
         }}
+        readNativeEnrollment={async options=>{try{return await session.current.nativeEnrollmentSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}}}
+        readOverheadRefresh={async options=>{try{return await session.current.overheadRefreshSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}}}
         readAllocatorPlan={async (options) => {
  try{return await session.current.allocatorPlanSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}
  }}

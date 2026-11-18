@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {maximumReduction,reviewedReductionAllowed} from './garm-reduction.js';
+const pool={id:'pool',max_runners:10,min_idle_runners:2};
+test('managed reduction preserves minimum and emits only a lower maximum',()=>{assert.deepEqual(maximumReduction(pool,'3'),{max_runners:3});for(const v of ['0','1','10','11','','-1','2.5','2e0'])assert.throws(()=>maximumReduction(pool,v));assert.throws(()=>maximumReduction({...pool,max_runners:0},'1'));});
+test('mode changes cannot apply previously reviewed generic edits',()=>{const s={maximum_reduction_only:true,settings:{pools:[pool]}};const r={kind:'pool',change:{target:'pool',pool:{max_runners:3}}};assert.equal(reviewedReductionAllowed(s,r),true);for(const update of [{enabled:false},{max_runners:3,tags:['x']},{min_idle_runners:2},{max_runners:12}])assert.equal(reviewedReductionAllowed(s,{...r,change:{...r.change,pool:update}}),false);assert.equal(reviewedReductionAllowed(s,{kind:'repository',change:{target:'repo'}}),false);});

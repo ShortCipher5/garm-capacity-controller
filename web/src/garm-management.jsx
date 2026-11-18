@@ -1,3 +1,4 @@
+import { maximumReductionOnly, maximumReduction, reviewedReductionAllowed } from "./garm-reduction.js";
 import { reconcileGarmRead } from "./garm-read-reconciliation.js";
 import { GarmReadChanges } from "./garm-read-reconciliation.jsx";
 import { ExistingEntityOnboardingPanel } from "./entity-onboarding-flow.jsx";
@@ -37,7 +38,9 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
         } else if(!needsRefresh || !background) {
           setSnapshot(next);setNeedsRefresh(false);setConflictLatest(null);
           if(!canEditGarm(next)){setReview(null);if(token.current)token.current.value="";}
-          const objects=kind==="pool"?next.settings.pools:next.settings.repositories;
+          const nextKind=maximumReductionOnly(next)?"pool":kind;
+          if(nextKind!==kind)setKind(nextKind);
+          const objects=nextKind==="pool"?next.settings.pools:next.settings.repositories;
           if(!objects.some(value=>value.id===target))setTarget(objects[0]?.id || "");
         }
       }
@@ -62,7 +65,10 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     if(!selected)return;
     const change={request_id:crypto.randomUUID(),target,fingerprint:selected.fingerprint,reason:String(form.get("reason")).trim()};
     if(!change.reason||new TextEncoder().encode(change.reason).length>256){setMessage("Use an audit reason of 1–256 bytes.");return;}
-    if(kind==="pool") {
+    if(maximumReductionOnly(snapshot)){
+      if(kind!=="pool"){setMessage("Managed mode permits pool maximum reductions only. Refresh the review.");return;}
+      try{change.pool=maximumReduction(selected,String(form.get("max_runners")));}catch(error){setMessage(error.message);return;}
+    } else if(kind==="pool") {
       const update={enabled:form.get("enabled")==="true",priority:Number(form.get("priority")),max_runners:Number(form.get("max_runners")),min_idle_runners:Number(form.get("min_idle_runners")),tags:String(form.get("tags")).split(/\r?\n/).map((v)=>v.trim()).filter(Boolean)};
       if(![update.priority,update.max_runners,update.min_idle_runners].every((v)=>Number.isSafeInteger(v)&&v>=0&&v<=1000000)||update.min_idle_runners>update.max_runners||update.min_idle_runners<selected.min_idle_runners){setMessage("Use nonnegative safe integers, maximum at least idle minimum, and do not decrease the idle minimum.");return;}
       change.pool=Object.fromEntries(Object.entries(update).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(selected[key])));
@@ -100,14 +106,15 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
   }
   const choices=snapshot?(kind==="pool"?snapshot.settings.pools:snapshot.settings.repositories):[], selected=choices.find((v)=>v.id===target);
   const stale=review && (review.kind==="pool"?snapshot?.settings.pools:snapshot?.settings.repositories)?.find((v)=>v.id===review.change.target)?.fingerprint!==review.change.fingerprint;
-  const blocked=needsRefresh||syncError||busy||!canEditGarm(snapshot)||snapshot?.write_blocked||uncertain.current||stale;
+  const reductionOnly=maximumReductionOnly(snapshot);
+  const blocked=(review&&!reviewedReductionAllowed(snapshot,review))||needsRefresh||syncError||busy||!canEditGarm(snapshot)||snapshot?.write_blocked||uncertain.current||stale;
   return <section className="card management" id="garm-management">
     <h2>Garm settings</h2>
-    <p><strong>Existing installation: observe, do not adopt.</strong> Keep your existing stock Garm pools. Changes made in Garm are read back here; discovery does not transfer ownership, enroll a host, or enable automatic two-way writes. The separately provisioned managed single-writer installation is a different mode.</p>
+    {reductionOnly?<p><strong>Managed single-writer: maximum reductions only.</strong> This view can reduce a configured pool maximum through the authenticated supervisor. It cannot increase capacity, change idle minimums, enable or pause pools, edit tags or priority, or change repository balancing. A lower maximum is not a drain or proof that resources have been released.</p>:<p><strong>Existing installation: observe, do not adopt.</strong> Keep your existing stock Garm pools. Changes made in Garm are read back here; discovery does not transfer ownership, enroll a host, or enable automatic two-way writes. The separately provisioned managed single-writer installation is a different mode.</p>}
     {typeof readEntities === "function" && typeof readEntityPools === "function" && <ExistingEntityOnboardingPanel readEntities={readEntities} readEntityPools={readEntityPools} />}
     <p>Actual settings on explicitly configured Garm pools and repositories, separate from ledger budgets. No registration, deletion, runner placement or drain controls.</p>
-    <p>New demand is ledger-enforced only for separately qualified gateway-routed pools. Repository balancing can affect other eligible pools outside this allowlist; its routing acknowledgement must cover that complete pool/provider graph.</p>
-    <p className="drain-warning">Garm v0.2.1 has no atomic conditional updates. A fresh fingerprint check does not fence other Garm UI/CLI writers. Use only with externally coordinated exclusive settings ownership. Tags affect future runners only. Priority is not a fair scheduler. Disabling does not drain idle runners. Decreasing minimum idle is blocked.</p>
+    {!reductionOnly&&<p>New demand is ledger-enforced only for separately qualified gateway-routed pools. Repository balancing can affect other eligible pools outside this allowlist; its routing acknowledgement must cover that complete pool/provider graph.</p>}
+    {!reductionOnly&&<p className="drain-warning">Garm v0.2.1 has no atomic conditional updates. A fresh fingerprint check does not fence other Garm UI/CLI writers. Use only with externally coordinated exclusive settings ownership. Tags affect future runners only. Priority is not a fair scheduler. Disabling does not drain idle runners. Decreasing minimum idle is blocked.</p>}
     <button className="quiet" onClick={()=>load(false)} disabled={busy}>{busy?"Working…":(needsRefresh||draftDirty||review)?"Discard draft and refresh Garm settings":snapshot?"Refresh Garm settings":"Load Garm settings"}</button>
     {snapshot && <button className="quiet" type="button" onClick={()=>load(true)} disabled={busy}>Refresh observations, keep draft</button>}
     <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. No automatic writes or recreation.</p>
@@ -130,17 +137,17 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {uncertain.current && <p className="error">This session has an uncertain write. Further changes are disabled. Inspect journal status and resolve the external operation before reconnecting.</p>}
     {snapshot && !canEditGarm(snapshot) && <p>Garm editing is unavailable. Discovery only.</p>}
     {snapshot && <div hidden={Boolean(review)}><GarmSettingsPresentation snapshot={snapshot}><form key={formEpoch} onSubmit={prepare} onChange={()=>{dirty.current=true;setDraftDirty(true);}}><fieldset disabled={busy || Boolean(review)} style={{border:0,padding:0,margin:0,minWidth:0}}>
-      <label>Garm object type<select aria-label="Garm object type" value={kind} onChange={(e)=>{setKind(e.target.value);setTarget((e.target.value==="pool"?snapshot.settings.pools:snapshot.settings.repositories)[0]?.id||"");}}><option value="pool">Pool settings</option><option value="repository">Repository balancing</option></select></label>
+      <label>Garm object type<select aria-label="Garm object type" value={kind} onChange={(e)=>{setKind(e.target.value);setTarget((e.target.value==="pool"?snapshot.settings.pools:snapshot.settings.repositories)[0]?.id||"");}}><option value="pool">Pool settings</option>{!reductionOnly&&<option value="repository">Repository balancing</option>}</select></label>
       <label>Garm object<select value={target} onChange={(e)=>setTarget(e.target.value)}>{choices.map((v)=><option key={v.id} value={v.id}>{v.owner?`${v.owner}/${v.name}`:v.id}</option>)}</select></label>
       {selected && (kind==="pool"?<div className="budget-fields" key={selected.fingerprint}>
-        <label>Pool enabled<select name="enabled" defaultValue={String(selected.enabled)}><option value="true">Enabled</option><option value="false">Disabled, not drained</option></select></label>
-        <label>Pool priority<input name="priority" type="number" min="0" max="1000000" step="1" defaultValue={selected.priority} required /></label>
-        <label>Maximum runners<input name="max_runners" type="number" min={selected.min_idle_runners} max="1000000" step="1" defaultValue={selected.max_runners} required /></label>
-        <label>Minimum idle runners<input name="min_idle_runners" type="number" min={selected.min_idle_runners} max="1000000" step="1" defaultValue={selected.min_idle_runners} required /></label>
-        <label>Future-runner tags, one per line<textarea name="tags" defaultValue={selected.tags.join("\n")} maxLength="8192" /></label>
+        {!reductionOnly&&<><label>Pool enabled<select name="enabled" defaultValue={String(selected.enabled)}><option value="true">Enabled</option><option value="false">Disabled, not drained</option></select></label>
+        <label>Pool priority<input name="priority" type="number" min="0" max="1000000" step="1" defaultValue={selected.priority} required /></label></>}
+        <label>Maximum runners<input name="max_runners" type="number" min={reductionOnly?Math.max(1,selected.min_idle_runners):selected.min_idle_runners} max={reductionOnly?Math.max(0,selected.max_runners-1):1000000} step="1" defaultValue={selected.max_runners} required /></label>
+        {reductionOnly?<p>Current maximum {selected.max_runners}; unchanged idle minimum {selected.min_idle_runners}. Only a strictly lower positive maximum is permitted. Pools already at their minimum have no available reduction.</p>:<><label>Minimum idle runners<input name="min_idle_runners" type="number" min={selected.min_idle_runners} max="1000000" step="1" defaultValue={selected.min_idle_runners} required /></label>
+        <label>Future-runner tags, one per line<textarea name="tags" defaultValue={selected.tags.join("\n")} maxLength="8192" /></label></>}
       </div>:<label key={selected.fingerprint}>Repository balancing<select aria-label="Repository balancing" name="balancer" defaultValue={selected.pool_balancing_type}>{selected.pool_balancing_type===""&&<option value="">Upstream default</option>}<option value="roundrobin">Round robin</option><option value="pack">Pack</option></select></label>)}
       <label>Garm audit reason<input name="reason" maxLength="256" required placeholder="No credentials or sensitive data" /></label>
-      <button className="primary" disabled={blocked||!selected} type="submit">Review Garm change</button>
+      <button className="primary" disabled={blocked||!selected||(reductionOnly&&selected.max_runners<=Math.max(1,selected.min_idle_runners))} type="submit">Review Garm change</button>
     </fieldset></form></GarmSettingsPresentation></div>}
     {review && canEditGarm(snapshot) && <form onSubmit={apply}>
       <h3>Review actual Garm change</h3><p>{review.kind}: {review.change.target}</p>
@@ -151,8 +158,10 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
       <button className="primary" disabled={blocked} type="submit">{busy?"Applying…":"Apply reviewed Garm change"}</button>
       <button className="quiet" disabled={busy} type="button" onClick={()=>{if(token.current)token.current.value="";setReview(null);setMessage("");}}>Cancel Garm review</button>
     </form>}
-    {snapshot?.history_truncated && <p>History is bounded by count and byte size. Older records remain in the journal.</p>}
-    {snapshot?.history?.length > 0 && <div className="garm-audit"><h3>Recent Garm changes</h3><p>Up to 25 recent scoped durable operations. Shared management role, not individual operator attribution.</p>{snapshot.history.map((event)=><details key={event.request_id}><summary>{event.state}: {event.kind} / {event.target}</summary><p>{event.reason}</p><p>Request {event.request_id} · {event.created_at}</p><p>Before: {JSON.stringify(event.before)}</p><p>Desired: {JSON.stringify(event.desired)}</p>{event.result && <p>Recorded result: {JSON.stringify(event.result)}</p>}</details>)}</div>}
+    {reductionOnly&&snapshot?.managed_history_available!==true&&<p>Authenticated supervisor history is unavailable or not supplied by this server. Do not infer that no earlier operation occurred; pending and unknown write blocks remain in force.</p>}
+    {reductionOnly&&snapshot?.managed_history_available===true&&snapshot.history.length===0&&<p>The last successful scoped supervisor read returned no recent receipts. This bounded view is not proof that no earlier operation occurred.</p>}
+    {snapshot?.history_truncated && <p>Only bounded recent history is displayed. Older receipts remain in the authoritative journal; absence from this page does not mean an operation never happened.</p>}
+    {snapshot?.history?.length > 0 && (!reductionOnly||snapshot.managed_history_available===true) && <div className="garm-audit"><h3>Historical Garm writer receipts</h3><p>Up to 25 scoped durable operation receipts from the last successful authenticated read. A confirmed receipt describes that original request, not current settings, runner retirement, free capacity or permission to increase capacity. Confirmation of another request never clears an unknown or pending write.</p><p>Shared management role, not individual operator attribution. On failed refresh these receipts are stale; preserve the authoritative journal and original request ID. Do not reset, replay, or infer an unknown outcome from matching current settings.</p>{snapshot.history.map((event)=><details key={event.request_id}><summary>{event.state}: {event.kind} / {event.target}</summary><p>{event.reason}</p><p>Request {event.request_id} · {event.created_at}</p><p>Before: {JSON.stringify(event.before)}</p><p>Desired: {JSON.stringify(event.desired)}</p>{event.result && <p>Recorded result: {JSON.stringify(event.result)}</p>}</details>)}</div>}
     {message&&<p role="status">{message}</p>}
   </section>;
 }
