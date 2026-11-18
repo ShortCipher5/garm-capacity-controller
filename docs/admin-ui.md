@@ -103,3 +103,19 @@ private transport references. Discovery uses the read role; an explicit audited
 read additionally requires the independent management role and probe opt-in.
 The UI never accepts a URL, key or certificate and cannot enroll/activate a
 backend or qualify physical capacity. Admission state is unchanged; audit grows.
+
+### Charged capacity breakdown
+
+The existing dashboard's state-count panel is replaced by a read-only charged
+resource breakdown. Refresh it separately using the read token. Its
+`GET /admin/api/v1/capacity-states` response comes from one ledger transaction,
+uses the same allocation calculation as admission, and fails closed if totals
+disagree. Linked inventory and reservations are deduplicated using per-resource
+maximums. Released history is excluded; a reappearing released instance is
+charged as an orphan. Conflicting reservation and inventory states are shown
+as unknown, since neither record establishes which state is newer.
+
+These are recorded ledger states, not live job telemetry, measured utilization,
+or evidence that an automatic allocator is running. Broker grants are explicitly
+unavailable. The view neither changes policy nor releases resources. Its read
+timestamp is independent of the overview snapshot; refresh each as required.

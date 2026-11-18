@@ -31,7 +31,14 @@ test("real TLS handler + SQLite snapshot, read-only requests, refresh and reload
     page.getByText("Provisioning off · Admission barrier ready"),
   ).toBeVisible();
   await expect(page.locator(".metric").first()).toContainText("1,000");
-  await expect(page.locator(".states")).toContainText("unknown");
+  const capacity = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Charged capacity breakdown", exact: true }),
+  });
+  await expect(capacity).toContainText("Broker grants: unavailable");
+  await page.getByRole("button", { name: "Refresh charged capacity" }).click();
+  await expect(capacity.getByRole("cell", { name: "unknown", exact: true })).toBeVisible();
+  await expect(capacity).toContainText("Read at");
+  expect(api.some(request => new URL(request.url()).pathname === "/admin/api/v1/capacity-states")).toBe(true);
   await page.getByRole("button", { name: "Refresh snapshot" }).dblclick();
   await expect(
     page.getByRole("button", { name: "Refresh snapshot" }),
@@ -523,4 +530,17 @@ test("pending manual refresh disables draft fields until read completes",async({
  await expect(page.getByLabel("Garm audit reason")).toBeDisabled();
  finish();
  await expect(page.getByLabel("Pool priority",{exact:true})).toBeEnabled();
+});
+
+test("charged capacity refresh error removes stale rows rather than presenting old data", async ({page}) => {
+  await connect(page);
+  const capacity = page.locator("section").filter({
+    has: page.getByRole("heading", {name:"Charged capacity breakdown",exact:true}),
+  });
+  await page.getByRole("button", {name:"Refresh charged capacity"}).click();
+  await expect(capacity.getByRole("cell",{name:"unknown",exact:true})).toBeVisible();
+  await page.route("**/admin/api/v1/capacity-states", route => route.fulfill({status:503,body:"unavailable"}));
+  await page.getByRole("button", {name:"Refresh charged capacity"}).click();
+  await expect(capacity.getByRole("alert")).toContainText("could not be read");
+  await expect(capacity.getByRole("table")).toHaveCount(0);
 });
