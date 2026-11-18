@@ -19,7 +19,7 @@ import (
 func (h *Handler) SetSSHInventory(service *sshinventory.Service, token string) error {
 	raw, e := hex.DecodeString(token)
 	hash := sha256.Sum256([]byte("Bearer " + token))
-	if service == nil || e != nil || len(raw) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(hash[:], h.tokenHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.writeHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.onboardingHash[:]) == 1 {
+	if service == nil || e != nil || len(raw) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(hash[:], h.sshTargetsHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.tokenHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.writeHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.onboardingHash[:]) == 1 {
 		return ErrConfiguration
 	}
 	h.sshInventory = service
@@ -45,7 +45,14 @@ func (h *Handler) serveSSHInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		json.NewEncoder(w).Encode(map[string]any{"targets": h.sshInventory.Targets()})
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		targets, e := h.sshInventory.ListTargets(ctx)
+		if e != nil {
+			fail(503, "SSH target registry unavailable")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"targets": targets})
 		return
 	}
 	if r.Method != http.MethodPost {

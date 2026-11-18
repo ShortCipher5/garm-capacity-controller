@@ -58,3 +58,47 @@ func TestSSHInventoryStartupNeedsExplicitFlagAndDistinctToken(t *testing.T) {
 		t.Fatal("unmapped target credential accepted")
 	}
 }
+
+func TestSSHTargetRegistrationStartupPolicyAndSeparateRole(t *testing.T) {
+	keys := credentials(t)
+	dir := t.TempDir()
+	budget := admission.Resources{CPU: 1, RAM: 1, Runners: 1}
+	store, e := admission.OpenSQLite(filepath.Join(dir, "ledger.db"), admission.Config{Global: budget, Hosts: map[string]admission.Host{"host": {Budget: budget, Mode: "disabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool": {Budget: budget, Hosts: []string{"host"}}}, MaxObservationAge: time.Minute})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer store.Close()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if e := os.WriteFile(p, []byte(content), 0600); e != nil {
+			t.Fatal(e)
+		}
+		return p
+	}
+	readPath, sshPath, targetPath := write("read", strings.Repeat("a", 64)), write("ssh", strings.Repeat("c", 64)), write("targets", strings.Repeat("d", 64))
+	_, private, _ := ed25519.GenerateKey(rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(private)
+	keyPath := write("key", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})))
+	c := &adminConfiguration{Listen: "127.0.0.1:0", TLS: keys.serverFiles, TokenFile: readPath, EnableSSHTargetManagement: true, SSHInventory: &sshInventoryConfiguration{TokenFile: sshPath, TargetManagementTokenFile: targetPath, Keys: map[string]string{"key": keyPath}, Scopes: map[string]sshinventory.Scope{"key": {Networks: []string{"192.0.2.0/24"}, Users: []string{"inventory"}, Ports: []uint16{22}}}}}
+	if _, close, e := newAdminServer(c, store, false); e == nil {
+		close()
+		t.Fatal("registration enabled without inventory opt-in")
+	}
+	c.EnableSSHInventory = true
+	server, close, e := newAdminServer(c, store, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	close()
+	server.Close()
+	c.SSHInventory.TargetManagementTokenFile = sshPath
+	if _, close, e := newAdminServer(c, store, false); e == nil {
+		close()
+		t.Fatal("inventory token gained target creation")
+	}
+	c.SSHInventory.TargetManagementTokenFile = targetPath
+	c.SSHInventory.Scopes["unmapped"] = c.SSHInventory.Scopes["key"]
+	if _, _, e := newSSHTargetRegistry(c.SSHInventory, store); e == nil {
+		t.Fatal("unmapped credential accepted")
+	}
+}

@@ -34,9 +34,10 @@ contacting the host. No credential is uploaded from the browser.
 
 The deployment operator authorizes the **whole tuple**: target ID, literal IP,
 port, username, exact SSH host key and credential alias. An alias alone never
-authorizes use against arbitrary destinations. The browser cannot submit or edit
-any of those values. Supporting user-entered arbitrary servers requires a future
-separate credential/authorization workflow; it is not silently enabled here.
+authorizes use against arbitrary destinations. The inventory endpoint cannot submit or edit
+any of those values. The optional [target-registration workflow](ssh-target-registration.md)
+adds browser-created targets under a distinct role and explicit deployment-scoped
+credential/network/user/port policy. It is not enabled by the inventory flag alone.
 
 ## UI/API flow
 

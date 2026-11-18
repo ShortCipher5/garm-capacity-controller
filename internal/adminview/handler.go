@@ -78,6 +78,8 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	sshTargets      *sshinventory.Registry
+	sshTargetsHash  [32]byte
 	sshInventory    *sshinventory.Service
 	sshHash         [32]byte
 	onboarding      *onboarding.Manager
@@ -139,6 +141,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-h.inFlight }()
 	default:
 		fail(http.StatusServiceUnavailable)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/ssh-targets" {
+		h.serveSSHTargets(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/ssh-inventory" {

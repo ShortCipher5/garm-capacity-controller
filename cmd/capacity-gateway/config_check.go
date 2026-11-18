@@ -200,6 +200,23 @@ func checkStaticConfig(c configuration, provision bool) error {
 			}
 		}
 	}
+	if a.EnableSSHTargetManagement {
+		if !a.EnableSSHInventory {
+			return fail()
+		}
+		_, targetToken, e := newSSHTargetRegistry(a.SSHInventory, nil)
+		if e != nil || !validToken([]byte(targetToken)) || bytes.Equal([]byte(targetToken), adminToken) {
+			return fail()
+		}
+		for _, path := range []string{a.ManagementTokenFile, a.SSHInventory.TokenFile} {
+			if path != "" {
+				other, e := securefiles.Read(path, 256)
+				if e != nil || bytes.Equal(bytes.TrimSpace(other), []byte(targetToken)) {
+					return fail()
+				}
+			}
+		}
+	}
 	if a.EnableExperimentalGarmManagement && (!a.EnableExperimentalManagement || a.GarmManagement == nil) {
 		return fail()
 	}
