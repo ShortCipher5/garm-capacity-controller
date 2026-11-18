@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassembly"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"io"
@@ -89,6 +90,7 @@ type Overview struct {
 }
 type Handler struct {
 	nativeRetirement            *nativecontroller.RetirementService
+	demandObserver              *demandobserver.Service
 	jobObserver                 JobObserverStatusSource
 	nativeRegistration          *nativeregistration.Service
 	nativeRegistrationResolvers map[string]func() (ssh.Signer, error)
@@ -173,6 +175,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-h.inFlight }()
 	default:
 		fail(http.StatusServiceUnavailable)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/demand-observer-status" {
+		h.serveDemandObserver(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/allocator-plan" {

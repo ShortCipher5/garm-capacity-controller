@@ -1,3 +1,4 @@
+import {validateDemandObserverStatus} from "./demand-observer-status.js";
 import { mixHost, validateMixView } from "./runner-mix-client.js";
 import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
 import {validateAllocatorPlan} from "./allocator-plan.js";
@@ -90,6 +91,8 @@ export function validateOverview(value) {
   return value;
 }
 export class ReadSession {
+ #demandObserverRequest;
+ #demandObserverGeneration=0;
  #enrollmentRequest;
  #enrollmentGeneration=0;
  #collectionRequest;
@@ -124,6 +127,7 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+ this.#demandObserverGeneration++;this.#demandObserverRequest?.abort();this.#demandObserverRequest=undefined;
  this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
  this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
  this.#planGeneration++;this.#planRequest?.abort();this.#planRequest=undefined;
@@ -253,6 +257,22 @@ export class ReadSession {
       if(!response.ok)throw new Error('Collection status unavailable.');
       const result=validateCollectionView(await response.json());
       if(generation!==this.#collectionGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async demandObserverStatusSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#demandObserverRequest?.abort(); const generation=++this.#demandObserverGeneration;
+    const controller=new AbortController();this.#demandObserverRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/demand-observer-status',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#demandObserverGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Demand observer status unavailable.');
+      const result=validateDemandObserverStatus(await response.json());
+      if(generation!==this.#demandObserverGeneration||controller.signal.aborted)throw new SessionEnded();
       return result;
     } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
   }
