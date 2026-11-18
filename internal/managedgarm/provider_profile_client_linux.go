@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -34,7 +33,7 @@ func newProviderProfileClient(s *Session, c ProviderProfileConfiguration) (*prov
 		return nil, ErrBoundary
 	}
 	for _, path := range []string{c.TLS.CA, c.TLS.Certificate, c.TLS.Key} {
-		if rootControlledAncestors(filepath.Dir(path)) != nil {
+		if ValidateSupervisorFilePath(path) != nil {
 			return nil, ErrBoundary
 		}
 	}

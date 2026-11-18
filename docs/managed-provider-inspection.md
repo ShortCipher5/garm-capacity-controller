@@ -65,3 +65,15 @@ TLS endpoint authentication, canonical snapshot freshness and corruption,
 sequence/lineage drift revocation, unchanged ledger sequence, and rooted file
 and configuration refusal paths. No real root-managed Docker deployment or
 upstream process startup was performed in the development environment.
+
+The current inspector compares enrolled controller/pool/provider/template facts,
+not the composite managed-source identity (proxy URL, server pin and actual
+supervisor identity). An enrollment from a different origin with identical facts
+must not be treated as activation authority. Binding that exact transport origin
+is still required before any capacity-increase permit can consume this evidence.
+
+Existing installations remain discovery/read-only inputs. The managed deployment
+is an explicit separate topology, not transparent adoption of an arbitrary GARM
+server. Direct changes through the GARM UI are incompatible with an enforced
+single management writer; detected changes revoke inspection rather than being
+silently overwritten. No two-way synchronization is introduced by this slice.

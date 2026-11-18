@@ -2,6 +2,7 @@ package managedgarm
 
 import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/profilesnapshot"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 	"testing"
 )
 
@@ -34,5 +35,13 @@ func TestProviderProfileSnapshotContinuity(t *testing.T) {
 				t.Fatal("revocation reset")
 			}
 		})
+	}
+}
+
+func TestProviderProfileClientRejectsNoncanonicalCredentialPaths(t *testing.T) {
+	for _, p := range []string{"relative.pem", "/trusted/link/../client.pem", "/trusted//client.pem"} {
+		if _, err := newProviderProfileClient(&Session{}, ProviderProfileConfiguration{TLS: securefiles.TLSFiles{CA: p, Certificate: p, Key: p}}); err == nil {
+			t.Fatal("noncanonical privileged path accepted", p)
+		}
 	}
 }
