@@ -70,6 +70,15 @@ func TestNativePlanningExplicitReadSaveAndSeparateAuthority(t *testing.T) {
 	if send("POST", `{"action":"history","target_id":"one"}`, token, "").Code != 200 {
 		t.Fatal("saved history")
 	}
+	if send("POST", `{"action":"mix-proposal","target_id":"one","selection_digest":"`+strings.Repeat("e", 64)+`","disk_mib":4096}`, token, "").Code != 409 || resolved != 0 {
+		t.Fatal("unsaved proposal reached credentials")
+	}
+	if send("POST", `{"action":"mix-proposal","target_id":"one","selection_digest":"`+strings.Repeat("e", 64)+`","disk_mib":4096}`, read, "").Code != 401 {
+		t.Fatal("proposal used read role")
+	}
+	if send("POST", `{"action":"history","target_id":"one","disk_mib":4096}`, token, "").Code != 400 {
+		t.Fatal("irrelevant mix fields accepted")
+	}
 	if send("POST", `{"action":"save","target_id":"one","review_digest":"bad","choice":{},"confirm_save":true}`, token, "").Code != 409 || resolved != 0 {
 		t.Fatal("forged save")
 	}

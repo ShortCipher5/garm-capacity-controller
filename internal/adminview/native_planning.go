@@ -82,14 +82,16 @@ func (h *Handler) serveNativePlanning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Action        string                 `json:"action"`
-		ID            string                 `json:"target_id"`
-		BindingDigest string                 `json:"binding_digest,omitempty"`
-		RequestID     string                 `json:"request_id,omitempty"`
-		ReviewDigest  string                 `json:"review_digest,omitempty"`
-		Choice        *nativeplanning.Choice `json:"choice,omitempty"`
-		ConfirmRead   bool                   `json:"confirm_read,omitempty"`
-		ConfirmSave   bool                   `json:"confirm_save,omitempty"`
+		SelectionDigest string                 `json:"selection_digest,omitempty"`
+		DiskMiB         int64                  `json:"disk_mib,omitempty"`
+		Action          string                 `json:"action"`
+		ID              string                 `json:"target_id"`
+		BindingDigest   string                 `json:"binding_digest,omitempty"`
+		RequestID       string                 `json:"request_id,omitempty"`
+		ReviewDigest    string                 `json:"review_digest,omitempty"`
+		Choice          *nativeplanning.Choice `json:"choice,omitempty"`
+		ConfirmRead     bool                   `json:"confirm_read,omitempty"`
+		ConfirmSave     bool                   `json:"confirm_save,omitempty"`
 	}
 	d := json.NewDecoder(strings.NewReader(string(raw)))
 	d.DisallowUnknownFields()
@@ -99,6 +101,19 @@ func (h *Handler) serveNativePlanning(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
+	if req.Action == "mix-proposal" && req.SelectionDigest != "" && req.DiskMiB > 0 && !req.ConfirmRead && !req.ConfirmSave && req.Choice == nil && req.ReviewDigest == "" && req.BindingDigest == "" && req.RequestID == "" {
+		p, e := h.nativePlanning.ProposeMix(ctx, req.ID, req.SelectionDigest, req.DiskMiB)
+		if e != nil {
+			fail(409, "saved selection expired, changed or too small; no mix or profiles saved")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"target_id": req.ID, "proposal": p})
+		return
+	}
+	if req.SelectionDigest != "" || req.DiskMiB != 0 {
+		fail(400, "mix inputs only allowed for explicit mix proposal")
+		return
+	}
 	if req.Action == "history" && !req.ConfirmRead && !req.ConfirmSave && req.Choice == nil && req.ReviewDigest == "" && req.BindingDigest == "" && req.RequestID == "" {
 		saved, e := h.nativePlanning.SavedSelections(req.ID)
 		if e != nil {
