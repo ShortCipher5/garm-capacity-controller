@@ -88,12 +88,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveDemand(w, r)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/managed/history" {
+		h.serveHistory(w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/managed/status" {
 		v, e := h.manager.Status(r.Context())
 		if e != nil {
 			fail(503)
 			return
 		}
+		h.sourceHeaders(w)
 		json.NewEncoder(w).Encode(v)
 		return
 	}
@@ -103,7 +108,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(503)
 			return
 		}
+		h.sourceHeaders(w)
 		json.NewEncoder(w).Encode(v)
+		return
+	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/managed/pools/") && strings.HasSuffix(r.URL.Path, "/reduce-maximum") {
+		h.serveMaximumReduction(w, r)
 		return
 	}
 	const prefix = "/v1/managed/pools/"

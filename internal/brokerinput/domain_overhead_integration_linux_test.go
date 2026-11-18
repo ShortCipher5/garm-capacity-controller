@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeartifacts"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeenforcement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/profilesnapshot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 )
@@ -31,7 +34,17 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			var desc nativeidentity.Descriptor
 			var enforcement nativeenforcement.Descriptor
 			var artifact nativeartifacts.Descriptor
+			var pause atomic.Bool
+			entered := make(chan struct{}, 1)
 			native, controllerTLS, ownerTLS := testsupport.NativeTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if pause.Load() {
+					select {
+					case entered <- struct{}{}:
+					default:
+					}
+					<-r.Context().Done()
+					return
+				}
 				if r.URL.Path == nativeartifacts.Path {
 					evidence := artifact
 					evidence.Nonce = r.URL.Query().Get("nonce")
@@ -60,7 +73,14 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			}
 			state, _, _ := ledgerFixture()
 			path := filepath.Join(t.TempDir(), "ledger.db")
-			store, err := admission.OpenSQLite(path, state.Config)
+			if err = os.Chmod(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			identity := filepath.Join(filepath.Dir(path), "identity")
+			if err = admission.InitializeSQLite(path, identity, state.Config); err != nil {
+				t.Fatal(err)
+			}
+			store, err := admission.OpenRuntimeSQLite(path, identity)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,6 +214,78 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			if err != nil || decoded.Accounting.Allocated.ArtifactOverhead != retained.Resources || len(decoded.Accounting.ArtifactOverheads) != 1 || decoded.Accounting.ArtifactOverheads[0].Sequence != retained.Sequence || decoded.Accounting.Allocated.DomainOverhead != recorded.Resources {
 				t.Fatal("actual artifact snapshot", err)
 			}
+
+			targets := []overheadrefresh.Target{{BindingSequence: enrolled.Sequence, Endpoint: native.URL, TLS: controllerTLS, Kind: "both"}}
+			refreshed, e := overheadrefresh.Refresh(ctx, store, targets)
+			if e != nil || len(refreshed) != 1 || refreshed[0].DomainSequence != recorded.Sequence || refreshed[0].ArtifactSequence != retained.Sequence {
+				t.Fatal("actual collector replay", refreshed, e)
+			}
+			targets = append(targets, overheadrefresh.Target{BindingSequence: 999999, Endpoint: native.URL, TLS: controllerTLS, Kind: "domain"})
+			partial, e := overheadrefresh.Refresh(ctx, store, targets)
+			if e == nil || len(partial) != 1 || partial[0].DomainSequence != recorded.Sequence || partial[0].ArtifactSequence != retained.Sequence {
+				t.Fatal("partial collector lost durable sequences", partial, e)
+			}
+
+			// Actual runtime-ledger + pinned owner + durable service path.
+			directory := t.TempDir()
+			if err = os.Chmod(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			recipes := []overheadrefresh.Recipe{{ID: "owner", TrustDigest: strings.Repeat("f", 64), Targets: []overheadrefresh.Target{{BindingSequence: enrolled.Sequence, Endpoint: native.URL, TLS: controllerTLS, Kind: "both"}}}}
+			service, err := overheadrefresh.NewService(ctx, store, directory, recipes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := service.Snapshot()
+			if err != nil || len(view.Recipes) != 1 {
+				t.Fatal(err)
+			}
+			requestID := strings.Repeat("a", 32)
+			op, err := service.Start("owner", view.Recipes[0].Revision, requestID)
+			if err != nil || op.State != "pending" {
+				t.Fatal(op, err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				view, err = service.Snapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !view.Running {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("collector did not complete")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if len(view.Operations) != 1 || view.Operations[0].State != "complete" || len(view.Operations[0].Results) != 1 {
+				t.Fatal(view)
+			}
+			pause.Store(true)
+			nextID := strings.Repeat("b", 32)
+			if _, err = service.Start("owner", view.Recipes[0].Revision, nextID); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("actual owner read not started")
+			}
+			if _, err = service.Start("owner", view.Recipes[0].Revision, strings.Repeat("c", 32)); err == nil {
+				t.Fatal("concurrent collection accepted")
+			}
+			service.Close()
+			pause.Store(false)
+			service, err = overheadrefresh.NewService(ctx, store, directory, recipes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			op, err = service.Start("owner", view.Recipes[0].Revision, requestID)
+			if err != nil || op.State != "complete" {
+				t.Fatal("durable replay lost", op, err)
+			}
+			service.Close()
 
 		})
 	}
