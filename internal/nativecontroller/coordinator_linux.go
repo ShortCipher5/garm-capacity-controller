@@ -192,7 +192,14 @@ func (c *Coordinator) capture(ctx context.Context, claimID string, envelope admi
 		if e != nil {
 			return nativeidentity.OperationRecord{}, ErrUnknown
 		}
-		if e = c.store.RecordNativeOperation(wait, terminal); e != nil {
+		// Repeated pending observations are reads, not new lifecycle events.
+		// Avoid committing the same accepted state under an expiring poll context.
+		// A changed pending tuple still fails closed against the durable ACK.
+		if terminal.Record().Outcome == "accepted" {
+			if terminal.Record() != accepted.Record() {
+				return nativeidentity.OperationRecord{}, ErrUnknown
+			}
+		} else if e = c.store.RecordNativeOperation(wait, terminal); e != nil {
 			return nativeidentity.OperationRecord{}, ErrUnknown
 		}
 		switch terminal.Record().Outcome {

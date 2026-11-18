@@ -4,6 +4,7 @@ package nativecontroller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -165,7 +166,7 @@ func (o *ownerFixture) serve(w http.ResponseWriter, r *http.Request) {
 		if claim.Step == admission.NativeStart {
 			rid = resource
 		}
-		if terminal && o.mode != "pending" {
+		if terminal && o.mode != "pending" && o.mode != "pending-mismatch" {
 			outcome = "succeeded"
 			rid = resource
 			if o.mode == "terminal-failed" {
@@ -174,6 +175,9 @@ func (o *ownerFixture) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		record := nativeidentity.OperationRecord{PermitID: claim.PermitID, EnvelopeDigest: claim.EnvelopeDigest, ParentClaimID: claim.ParentClaimID, Step: claim.Step, StepClaimID: claim.ID, DomainID: o.parent.Envelope.DomainID, PolicyDigest: o.parent.Envelope.PolicyDigest, NativeName: o.parent.Envelope.NativeName, OperationID: op, Outcome: outcome, ResourceID: rid}
+		if terminal && o.mode == "pending-mismatch" {
+			record.OperationID = startOp
+		}
 		json.NewEncoder(w).Encode(record)
 		return
 	}
@@ -200,6 +204,7 @@ type testFixture struct {
 	owner    *ownerFixture
 	config   Configuration
 	userData string
+	path     string
 }
 
 func setup(t *testing.T, mode string) testFixture {
@@ -222,7 +227,8 @@ func setup(t *testing.T, mode string) testFixture {
 	endpoint := nativeidentity.Configuration{Endpoint: server.URL, TLS: controllerTLS, DomainID: domain, PolicyDigest: policy.Digest(), OwnerServerLeaf: owner.descriptor.OwnerServerLeaf, OwnerClientLeaf: owner.descriptor.OwnerClientLeaf}
 	budget := admission.Resources{CPU: 4000, RAM: 8192, Disk: 16384, Runners: 4}
 	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", Healthy: true, ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"app": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Hour}
-	s, e := admission.OpenSQLite(filepath.Join(t.TempDir(), "ledger.db"), config)
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	s, e := admission.OpenSQLite(path, config)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -283,7 +289,7 @@ func setup(t *testing.T, mode string) testFixture {
 	if e != nil {
 		t.Fatal(e)
 	}
-	return testFixture{c, s, plan, host, auth, digest, owner, cconfig, string(payload)}
+	return testFixture{c, s, plan, host, auth, digest, owner, cconfig, string(payload), path}
 }
 func TestCoordinatorRunsCanonicalOwnerSequenceOnce(t *testing.T) {
 	f := setup(t, "")
@@ -307,7 +313,7 @@ func TestCoordinatorRunsCanonicalOwnerSequenceOnce(t *testing.T) {
 	}
 }
 func TestCoordinatorUncertaintyNeverRetriesOrReleases(t *testing.T) {
-	for _, mode := range []string{"create-drop", "start-drop", "bootstrap-drop", "bootstrap-unknown", "bootstrap-wrong-uuid", "redirect", "quota-bad", "terminal-failed", "pending"} {
+	for _, mode := range []string{"create-drop", "start-drop", "bootstrap-drop", "bootstrap-unknown", "bootstrap-wrong-uuid", "redirect", "quota-bad", "terminal-failed", "pending", "pending-mismatch"} {
 		t.Run(mode, func(t *testing.T) {
 			f := setup(t, mode)
 			ctx := context.Background()
@@ -384,5 +390,67 @@ func TestCoordinatorFreezesNestedTLSConfiguration(t *testing.T) {
 	record, e := f.c.Execute(context.Background(), f.plan, f.host, f.auth, f.digest, f.userData)
 	if e != nil || record.State != "confirmed" {
 		t.Fatal("caller config mutation changed frozen client", record, e)
+	}
+}
+
+func TestTerminalReceiptWriteTimeoutNeverReplaysNativeMutation(t *testing.T) {
+	f := setup(t, "")
+	db, e := sql.Open("sqlite3", f.path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	// Delay the actual terminal INSERT after it has entered SQLite. Its bounded
+	// context must interrupt the transaction, never turn the timeout into retry.
+	_, e = db.Exec(`CREATE TRIGGER test_slow_terminal AFTER INSERT ON native_operation_receipts
+ WHEN NEW.kind='succeeded' BEGIN
+ SELECT sum(x) FROM (WITH RECURSIVE delay(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM delay WHERE x<100000000) SELECT x FROM delay);
+ END;`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx := context.Background()
+	if _, e = f.c.Execute(ctx, f.plan, f.host, f.auth, f.digest, f.userData); !errors.Is(e, admission.ErrDispatchUnknown) {
+		t.Fatal(e)
+	}
+	// Reopen validates the durable journal even if cancellation made the old
+	// database handle uncertain. No native mutation may be reissued either way.
+	if e = f.s.Close(); e != nil {
+		t.Fatal(e)
+	}
+	restored, e := admission.OpenSQLite(f.path, admission.Config{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer restored.Close()
+	f.config.Store = restored
+	f.owner.mu.Lock()
+	f.owner.store = restored
+	f.owner.mu.Unlock()
+	c, e := New(ctx, f.config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = c.Execute(ctx, f.plan, f.host, f.auth, f.digest, f.userData); !errors.Is(e, admission.ErrDispatchClaimed) {
+		t.Fatal("terminal timeout replay", e)
+	}
+	var accepted, terminal int
+	if e = db.QueryRow("SELECT count(*) FROM native_operation_receipts WHERE kind='accepted'").Scan(&accepted); e != nil {
+		t.Fatal(e)
+	}
+	if e = db.QueryRow("SELECT count(*) FROM native_operation_receipts WHERE kind='succeeded'").Scan(&terminal); e != nil {
+		t.Fatal(e)
+	}
+	if accepted != 1 || terminal != 0 {
+		t.Fatal("unexpected durable receipt", accepted, terminal)
+	}
+	snap, e := restored.Snapshot(ctx)
+	if e != nil || snap.Allocated.Global.Runners != 1 {
+		t.Fatal("charge lost", e)
+	}
+	f.owner.mu.Lock()
+	defer f.owner.mu.Unlock()
+	if f.owner.createCalls != 1 || f.owner.startCalls != 0 || f.owner.bootstrapCalls != 0 {
+		t.Fatal("mutation replay")
 	}
 }
