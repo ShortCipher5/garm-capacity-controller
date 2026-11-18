@@ -123,7 +123,7 @@ func dialNamespace(ctx context.Context, namespace *os.File) (net.Conn, error) {
 	return dialNamespaceAddress(ctx, namespace, "127.0.0.1:9998")
 }
 func dialNamespaceAddress(ctx context.Context, namespace *os.File, address string) (net.Conn, error) {
-	if address != "127.0.0.1:9998" && address != "127.0.0.1:9443" {
+	if address != "127.0.0.1:9998" && address != "127.0.0.1:9443" && address != "127.0.0.1:9445" {
 		return nil, ErrBoundary
 	}
 
