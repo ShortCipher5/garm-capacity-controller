@@ -95,3 +95,92 @@ func TestSSHTargetSurvivesDatabaseReopen(t *testing.T) {
 		t.Fatal("approval lost after restart", e)
 	}
 }
+
+func TestSSHTargetRevocationIsDurableAtomicAndCannotReactivate(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	config := fixture(time.Now())
+	s, e := OpenSQLite(path, config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.InitializeSSHTargets(ctx); e != nil {
+		t.Fatal(e)
+	}
+	c := sshinventory.Config{Address: "192.0.2.20", Port: 22, User: "inventory", CredentialRef: "alias", HostKey: "public-key-placeholder"}
+	request := "11111111-1111-4111-8111-111111111111"
+	digest := sshinventory.ReviewDigest("candidate", c)
+	if e = s.SaveSSHTarget(ctx, request, "candidate", c, digest, 1); e != nil {
+		t.Fatal(e)
+	}
+	before := sqliteSnapshot(t, s)
+	if s.RevokeSSHTarget(ctx, request, "candidate", "wrong") == nil {
+		t.Fatal("wrong digest revoked")
+	}
+	if _, e = s.db.Exec(`CREATE TRIGGER reject_revocation BEFORE INSERT ON audit WHEN NEW.kind='ssh_target_revoked' BEGIN SELECT RAISE(ABORT,'denied'); END`); e != nil {
+		t.Fatal(e)
+	}
+	if s.RevokeSSHTarget(ctx, request, "candidate", digest) == nil {
+		t.Fatal("audit failure accepted")
+	}
+	list, e := s.ListSSHTargets(ctx)
+	if e != nil || len(list) != 1 {
+		t.Fatal("audit failure partly revoked", e)
+	}
+	if _, e = s.db.Exec(`DROP TRIGGER reject_revocation`); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.RevokeSSHTarget(ctx, request, "candidate", digest); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.RevokeSSHTarget(ctx, request, "candidate", digest); e != nil {
+		t.Fatal("idempotent revocation", e)
+	}
+	list, e = s.ListSSHTargets(ctx)
+	if e != nil || len(list) != 0 {
+		t.Fatal("revoked target still active", e)
+	}
+	if s.SaveSSHTarget(ctx, request, "candidate", c, digest, 1) == nil {
+		t.Fatal("replay resurrected revoked target")
+	}
+	// Exact pre-revocation reader query must not expose the tombstoned target.
+	var oldCount int
+	if e = s.db.QueryRow(`SELECT COUNT(*) FROM ssh_inventory_targets WHERE id='candidate'`).Scan(&oldCount); e != nil || oldCount != 0 {
+		t.Fatal("older reader can see revoked target", e)
+	}
+	var retained string
+	if e = s.db.QueryRow(`SELECT config FROM ssh_inventory_revocations WHERE id='candidate'`).Scan(&retained); e != nil || retained == "" {
+		t.Fatal("revocation lost original configuration", e)
+	}
+	// Old #107 writer checks only its active table; database trigger must reject
+	// its eventual INSERT even though it does not know the revocation table.
+	if _, e = s.db.Exec(`INSERT INTO ssh_inventory_targets(id,config,digest) VALUES('candidate',?,?)`, retained, digest); e == nil {
+		t.Fatal("older writer resurrected revoked ID")
+	}
+	after := sqliteSnapshot(t, s)
+	if !reflect.DeepEqual(before.Config, after.Config) || !reflect.DeepEqual(before.Reservations, after.Reservations) || !reflect.DeepEqual(before.HostBindings, after.HostBindings) || before.Ready != after.Ready || before.Epoch != after.Epoch || len(after.Audit) != len(before.Audit)+1 {
+		t.Fatal("revocation changed admission or repeated audit")
+	}
+	// A new independently approved identity can use the vacated active-list slot.
+	if e = s.SaveSSHTarget(ctx, request, "replacement", c, sshinventory.ReviewDigest("replacement", c), 1); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.Close(); e != nil {
+		t.Fatal(e)
+	}
+	s, e = OpenSQLite(path, config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	if e = s.InitializeSSHTargets(ctx); e != nil {
+		t.Fatal(e)
+	}
+	list, e = s.ListSSHTargets(ctx)
+	if e != nil || len(list) != 1 || list["replacement"] != c {
+		t.Fatal("revocation lost after restart", e)
+	}
+	if s.SaveSSHTarget(ctx, request, "candidate", c, digest, 32) == nil {
+		t.Fatal("restart resurrected revoked identity")
+	}
+}

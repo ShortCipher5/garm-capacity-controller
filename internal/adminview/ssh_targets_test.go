@@ -100,4 +100,28 @@ func TestSSHTargetHTTPRequiresSeparateAuthorityAndExactReviewedIdentity(t *testi
 	if e != nil || len(targets) != 1 || targets[0] != review.Target {
 		t.Fatal("registered target not inspectable", e)
 	}
+	body = map[string]any{"action": "revoke", "target_id": "new", "review_digest": review.Target.ReviewDigest, "request_id": "11111111-1111-4111-8111-111111111111"}
+	if send("POST", encode(), token, "").Code != 400 {
+		t.Fatal("unconfirmed revoke accepted")
+	}
+	body["confirm_revoke"] = true
+	if send("POST", encode(), inventoryToken, "").Code != 401 {
+		t.Fatal("inventory role revoked")
+	}
+	body["review_digest"] = "bad"
+	if send("POST", encode(), token, "").Code != 409 {
+		t.Fatal("stale review revoked")
+	}
+	body["review_digest"] = review.Target.ReviewDigest
+	if w = send("POST", encode(), token, ""); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	targets, e = service.ListTargets(ctx)
+	if e != nil || len(targets) != 0 || calls != 0 {
+		t.Fatal("revoked target remained inspectable or made contact")
+	}
+	if send("POST", encode(), token, "").Code != 200 {
+		t.Fatal("repeat revocation failed")
+	}
+
 }

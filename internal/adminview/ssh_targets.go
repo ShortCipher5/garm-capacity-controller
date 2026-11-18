@@ -50,7 +50,14 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		json.NewEncoder(w).Encode(map[string]any{"scopes": h.sshTargets.Scopes()})
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		targets, e := h.sshTargets.ManagedTargets(ctx)
+		if e != nil {
+			fail(503, "SSH target registry unavailable")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"scopes": h.sshTargets.Scopes(), "targets": targets})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -69,12 +76,13 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Action   string              `json:"action"`
-		ID       string              `json:"target_id"`
-		Config   sshinventory.Config `json:"config"`
-		Digest   string              `json:"review_digest"`
-		Request  string              `json:"request_id"`
-		Verified bool                `json:"verified_host_key"`
+		Action        string              `json:"action"`
+		ID            string              `json:"target_id"`
+		Config        sshinventory.Config `json:"config"`
+		Digest        string              `json:"review_digest"`
+		Request       string              `json:"request_id"`
+		Verified      bool                `json:"verified_host_key"`
+		ConfirmRevoke bool                `json:"confirm_revoke"`
 	}
 	d := json.NewDecoder(strings.NewReader(string(body)))
 	d.DisallowUnknownFields()
@@ -84,6 +92,20 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	var target sshinventory.Target
 	switch request.Action {
+	case "revoke":
+		if !request.ConfirmRevoke {
+			fail(400, "explicit revocation confirmation required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if h.sshTargets.Revoke(ctx, request.Request, request.ID, request.Digest) != nil {
+			fail(409, "target changed or revocation could not be durably recorded")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"target_id": request.ID, "review_digest": request.Digest, "revoked": true})
+		return
+
 	case "review":
 		target, e = h.sshTargets.Review(request.ID, request.Config)
 	case "approve":
@@ -95,7 +117,7 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		target, e = h.sshTargets.Save(ctx, request.Request, request.ID, request.Config, request.Digest)
 	default:
-		fail(400, "review or approve required")
+		fail(400, "review, approve or revoke required")
 		return
 	}
 	if e != nil {

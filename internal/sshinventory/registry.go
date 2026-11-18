@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"slices"
+	"sort"
 )
 
 // Scope restricts the credential's destinations independently of browser input.
@@ -14,6 +15,7 @@ type Scope struct {
 	Ports    []uint16 `json:"ports"`
 }
 type TargetStore interface {
+	RevokeSSHTarget(context.Context, string, string, string) error
 	ListSSHTargets(context.Context) (map[string]Config, error)
 	SaveSSHTarget(context.Context, string, string, Config, string, int) error
 }
@@ -109,4 +111,32 @@ func (r *Registry) targets(ctx context.Context) (map[string]Config, error) {
 		}
 	} // revoked deployment scopes cannot authorize a probe
 	return configs, nil
+}
+
+// ManagedTargets includes active durable records even when the current scope
+// disallows probing, so an operator can still withdraw their local permission.
+func (r *Registry) ManagedTargets(ctx context.Context) ([]Target, error) {
+	configs, e := r.store.ListSSHTargets(ctx)
+	if e != nil || len(configs) > 32 {
+		return nil, ErrInventory
+	}
+	out := make([]Target, 0, len(configs))
+	for id, c := range configs {
+		client, e := New(c, r.resolve)
+		if e != nil || !targetID.MatchString(id) {
+			return nil, ErrInventory
+		}
+		out = append(out, describeTarget(id, c, client))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+func (r *Registry) Revoke(ctx context.Context, request, id, digest string) error {
+	if !requestID.MatchString(request) || !targetID.MatchString(id) || r.reserved[id] || len(digest) != 64 {
+		return ErrReview
+	}
+	if e := r.store.RevokeSSHTarget(ctx, request, id, digest); e != nil {
+		return ErrReview
+	}
+	return nil
 }
