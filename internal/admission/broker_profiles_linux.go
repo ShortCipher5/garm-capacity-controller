@@ -31,6 +31,8 @@ type BrokerPoolProfile struct {
 	Domains                                                        []BrokerProfileDomain
 }
 type BrokerPoolProfileRequest struct {
+	// Optional compatibility guard; browser registration always supplies reviewed size.
+	ExpectedResources           Resources
 	ExpectedProfileSequence     int64
 	SourceIdentity, SizeProfile string
 	Authority                   StockProviderAuthority
@@ -200,6 +202,9 @@ func (s *SQLiteStore) RegisterBrokerPoolProfile(ctx context.Context, r BrokerPoo
 		v := BrokerPoolProfile{Previous: r.ExpectedProfileSequence, Pool: pool.Pool, Repository: pool.Repository, SourceIdentity: r.SourceIdentity,
 			PoolFingerprint: pool.Fingerprint(), SizeProfile: r.SizeProfile, ObservedAt: observed.ObservedAt(), Authority: r.Authority, Execution: r.Execution, Resources: Resources{Runners: 1}}
 		if err = tx.QueryRow("SELECT cpu,ram,disk FROM profiles WHERE name=?", r.SizeProfile).Scan(&v.Resources.CPU, &v.Resources.RAM, &v.Resources.Disk); err != nil {
+			return ErrBrokerProfile
+		}
+		if r.ExpectedResources != (Resources{}) && r.ExpectedResources != v.Resources {
 			return ErrBrokerProfile
 		}
 		for seq, policy := range policies {

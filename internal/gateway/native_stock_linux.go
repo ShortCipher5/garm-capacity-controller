@@ -55,7 +55,15 @@ func NewNativeStock(ctx context.Context, store *admission.SQLiteStore, controlle
 		if !ok || profile.Authority.Controller != controller || config.Metadata == nil || !config.Metadata.AuthorizesControllerPool(controller, id) || config.Metadata.ConfiguredSourceIdentity() != profile.SourceIdentity || len(config.Hosts) != len(profile.Domains) {
 			return nil, ErrPolicy
 		}
-		if config.Ownership.Pool != id || config.Ownership.Provider != profile.Authority.ProviderName || config.Ownership.TLS == nil || config.Ownership.TLS.RootCAs == nil || len(config.Ownership.TLS.Certificates) != 0 {
+		if config.Ownership.Pool != id || config.Ownership.Provider != profile.Authority.ProviderName || config.Ownership.TLS == nil || config.Ownership.TLS.RootCAs == nil {
+			return nil, ErrPolicy
+		}
+		managed := config.Ownership.ManagedServerKeyPin != ""
+		if managed {
+			if config.Ownership.Token != "" || config.Ownership.ManagedControllerID != controller || len(config.Ownership.TLS.Certificates) != 1 {
+				return nil, ErrPolicy
+			}
+		} else if config.Ownership.ManagedControllerID != "" || len(config.Ownership.TLS.Certificates) != 0 {
 			return nil, ErrPolicy
 		}
 		observed, e := stockidentity.Observe(ctx, config.Ownership)
@@ -166,7 +174,7 @@ func (f *NativeStock) CreateStockProvider(ctx context.Context, b common.Bootstra
 	if !ok {
 		return empty, ErrUnavailable
 	}
-	result, e := host.coordinator.Execute(ctx, plan, binding, authority, digest, source.Payload())
+	result, e := host.coordinator.ExecuteProtected(ctx, plan, binding, authority, digest, source)
 	if e != nil || result.State != "confirmed" || result.ResourceID == "" {
 		return empty, ErrUnavailable
 	}

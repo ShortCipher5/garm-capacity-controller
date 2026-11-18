@@ -39,24 +39,25 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
-	AllocatorLoop        *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
-	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
-	StockProviderScopes  []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
-	EnableStockProvider  bool                                     `json:"-"`
-	PreparationPools     map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
-	SourceFingerprints   []string                                 `json:"source_fingerprints,omitempty"`
-	BootstrapMode        string                                   `json:"bootstrap_mode,omitempty"`
-	Admin                *adminConfiguration                      `json:"admin,omitempty"`
-	Listen               string                                   `json:"listen"`
-	Controller           string                                   `json:"controller"`
-	Database             string                                   `json:"database"`
-	IdentityFile         string                                   `json:"identity_file"`
-	InitialPolicy        admission.Config                         `json:"initial_policy"`
-	Pools                map[string]gateway.PoolPolicy            `json:"pools"`
-	Hosts                map[string]hostConfiguration             `json:"hosts"`
-	Garm                 garmConfiguration                        `json:"garm"`
-	ServerTLS            securefiles.TLSFiles                     `json:"server_tls"`
-	ProviderFingerprints []string                                 `json:"provider_fingerprints"`
+	NativeStock                   map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
+	ProviderInspectionFingerprint string                                   `json:"provider_inspection_fingerprint,omitempty"`
+	StockProviderScopes           []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
+	EnableStockProvider           bool                                     `json:"-"`
+	PreparationPools              map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
+	SourceFingerprints            []string                                 `json:"source_fingerprints,omitempty"`
+	BootstrapMode                 string                                   `json:"bootstrap_mode,omitempty"`
+	Admin                         *adminConfiguration                      `json:"admin,omitempty"`
+	Listen                        string                                   `json:"listen"`
+	Controller                    string                                   `json:"controller"`
+	Database                      string                                   `json:"database"`
+	IdentityFile                  string                                   `json:"identity_file"`
+	InitialPolicy                 admission.Config                         `json:"initial_policy"`
+	Pools                         map[string]gateway.PoolPolicy            `json:"pools"`
+	Hosts                         map[string]hostConfiguration             `json:"hosts"`
+	Garm                          garmConfiguration                        `json:"garm"`
+	ServerTLS                     securefiles.TLSFiles                     `json:"server_tls"`
+	ProviderFingerprints          []string                                 `json:"provider_fingerprints"`
+	AllocatorLoop                 *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 }
 
 type redactedConnectionLog struct{}
@@ -102,7 +103,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
-	allocator, closeAllocator, err := startAllocatorLoop(ctx, config.AllocatorLoop, store)
+	allocator, closeAllocator, err := startConfiguredAllocatorLoop(ctx, config, store)
 	if err != nil {
 		return err
 	}
@@ -161,6 +162,10 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	serverCredentials, err := securefiles.LoadTLS(config.ServerTLS)
+	if err != nil {
+		return err
+	}
+	rpcHandler, err = providerProfileHandler(config, rpcHandler, store, serverCredentials.Certificates[0])
 	if err != nil {
 		return err
 	}

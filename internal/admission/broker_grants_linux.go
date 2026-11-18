@@ -38,6 +38,7 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
+	NativeDomains  map[int64]NativeDomainBinding
 	PoolProfiles   map[string]BrokerPoolProfile
 	Allocated      Allocations
 	HostBindings   map[string]HostBinding
@@ -234,6 +235,24 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		}
 		if v.PoolProfiles, e = sqliteBrokerPoolProfiles(tx); e != nil {
 			return e
+		}
+		// Resolve the exact immutable enrollment referenced by each saved profile
+		// inside this transaction, never via a later independently timed read.
+		v.NativeDomains = map[int64]NativeDomainBinding{}
+		for _, profile := range v.PoolProfiles {
+			for _, ref := range profile.Domains {
+				if _, exists := v.NativeDomains[ref.Sequence]; exists {
+					continue
+				}
+				if len(v.NativeDomains) >= 1000 {
+					return ErrBrokerGrant
+				}
+				domain, err := nativeDomainRecord(tx, ref.Sequence)
+				if err != nil {
+					return err
+				}
+				v.NativeDomains[ref.Sequence] = domain
+			}
 		}
 		if v.Policy, e = sqliteBrokerPolicy(tx); e != nil {
 			return e

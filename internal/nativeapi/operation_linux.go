@@ -58,7 +58,7 @@ func (c *Client) Start(ctx context.Context, p Prepared, q StoppedQuota) (Operati
 	return c.submit(ctx, http.MethodPut, "/1.0/instances/"+p.name+"/state", []byte(StartBody), p.name)
 }
 func (c *Client) matches(p Prepared) bool {
-	if c == nil || c.domain == nil || c.http == nil || p.pool.Type != "container" {
+	if c == nil || (c.domain == nil && c.capsule == nil) || c.http == nil || p.pool.Type != "container" {
 		return false
 	}
 	again, e := c.policy.Compile(p.allocation, preparedUserData(p))

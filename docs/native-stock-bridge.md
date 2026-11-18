@@ -67,3 +67,24 @@ The adapter was checked against stock GARM commit
 Protected JIT must already specify an ephemeral runner, disabled self-updates and
 `_work` as work folder. Unsupported source settings fail closed; the bridge does
 not forge flags or claim an upstream atomic snapshot.
+
+## Managed supervisor source
+
+With `garm.managed_proxy` and the exact `proxy_server_key_pin`, native source
+ownership uses authenticated supervisor provenance instead of a URL fingerprint.
+No management token is configured or sent by the controller. Pool and pending
+instance reads use the fixed managed projection; the latter selects exactly one
+name from the bounded instance collection and rejects duplicates or source drift.
+
+The producer sends the instance JWT only inside the fixed read-only metadata
+POST body to the pinned supervisor. The supervisor authenticates the caller,
+checks configured repository/provider scope and the actual stock pending
+instance, then uses the JWT solely for the three fixed stock credential files.
+The metadata URL in the provider command must still match configured stock
+policy; it is never used as a proxy-selected destination. Original credential
+bytes, runner identity and repository URL are checked before and after retrieval.
+The client rejects source drift, redirects, wrong identities and oversized data;
+there is no direct-source fallback or administrative-token substitution.
+
+This closes the managed-source compatibility gap only. Production activation,
+physical host qualification and safe retirement remain independently gated.

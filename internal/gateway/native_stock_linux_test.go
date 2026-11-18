@@ -35,6 +35,8 @@ const bridgeStartOp = "22222222-2222-4222-8222-222222222222"
 const bridgeResource = "33333333-3333-4333-8333-333333333333"
 
 type nativeBridgeOwner struct {
+	beforeQuota func()
+
 	t                       *testing.T
 	mu                      sync.Mutex
 	mode                    string
@@ -186,6 +188,10 @@ func (o *nativeBridgeOwner) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/native/quotas/"+o.create.ID {
+		if o.beforeQuota != nil {
+			o.beforeQuota()
+			o.beforeQuota = nil
+		}
 		envelope := o.parent.Envelope
 		bytes := envelope.Resources.Disk * (1 << 20)
 		enforced := bytes
@@ -292,7 +298,7 @@ func nativeBridgeSetup(t *testing.T, mode string) nativeBridgeFixture {
 }
 
 func TestNativeStockBridgeUsesActualSourceAndCanonicalCoordinator(t *testing.T) {
-	for _, mode := range []string{"", "create-drop", "source-pool", "source-agent"} {
+	for _, mode := range []string{"", "binding-drift", "create-drop", "source-pool", "source-agent"} {
 		t.Run(mode, func(t *testing.T) {
 			f := nativeBridgeSetup(t, mode)
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -345,7 +351,7 @@ func TestNativeStockBridgeUsesActualSourceAndCanonicalCoordinator(t *testing.T) 
 				t.Fatal(e)
 			}
 			execution := admission.ExecutionImage{Controller: "controller", Flavor: "small", Image: "prebuilt", Fingerprint: strings.Repeat("d", 64), Profiles: []string{"runner"}, Type: "container", Arch: "amd64"}
-			_, e = f.s.RegisterBrokerPoolProfile(context.Background(), admission.BrokerPoolProfileRequest{SourceIdentity: observed.SourceIdentity(), SizeProfile: "small", Authority: f.auth, Execution: execution}, observed, map[int64]nativeapi.Policy{f.config.DomainBindingSequence: f.config.Policy})
+			profile, e := f.s.RegisterBrokerPoolProfile(context.Background(), admission.BrokerPoolProfileRequest{SourceIdentity: observed.SourceIdentity(), SizeProfile: "small", Authority: f.auth, Execution: execution}, observed, map[int64]nativeapi.Policy{f.config.DomainBindingSequence: f.config.Policy})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -358,6 +364,22 @@ func TestNativeStockBridgeUsesActualSourceAndCanonicalCoordinator(t *testing.T) 
 			if e != nil {
 				t.Fatal(e)
 			}
+			if mode == "binding-drift" {
+				alternate := httptest.NewTLSServer(server.Config.Handler)
+				defer alternate.Close()
+				other := ownership
+				other.Endpoint = alternate.URL
+				alternateObserved, err := stockidentity.Observe(context.Background(), other)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.owner.beforeQuota = func() {
+					_, err := f.s.RegisterBrokerPoolProfile(context.Background(), admission.BrokerPoolProfileRequest{ExpectedProfileSequence: profile.Sequence, SourceIdentity: alternateObserved.SourceIdentity(), SizeProfile: "small", Authority: f.auth, Execution: execution}, alternateObserved, map[int64]nativeapi.Policy{f.config.DomainBindingSequence: f.config.Policy})
+					if err != nil {
+						t.Error(err)
+					}
+				}
+			}
 			b := bootstrap("runner-test", bridgePool)
 			b.Flavor = "small"
 			b.Image = "prebuilt"
@@ -369,6 +391,13 @@ func TestNativeStockBridgeUsesActualSourceAndCanonicalCoordinator(t *testing.T) 
 				if e != nil || result.Status != common.InstanceRunning || result.ProviderID != b.Name {
 					t.Fatal(result, e)
 				}
+				f.owner.mu.Lock()
+				permit := f.owner.parent.Envelope.PermitID
+				f.owner.mu.Unlock()
+				linked, err := f.s.LookupNativeRunnerBinding(context.Background(), permit)
+				if err != nil || linked.Runner.RunnerID != 123 || linked.Instance.Name != b.Name || linked.StockSourceIdentity != observed.SourceIdentity() || linked.ProfileSequence <= 0 {
+					t.Fatal("authentic runner incarnation not persisted", err, linked)
+				}
 				if _, e = facade.CreateStockProvider(context.Background(), b, f.auth); e == nil {
 					t.Fatal("repeated create reported stale instance as live")
 				}
@@ -376,6 +405,9 @@ func TestNativeStockBridgeUsesActualSourceAndCanonicalCoordinator(t *testing.T) 
 				t.Fatal("uncertain or wrong source succeeded")
 			}
 			f.owner.mu.Lock()
+			if mode == "binding-drift" && (f.owner.bootstrapCalls != 0 || f.owner.startCalls != 0) {
+				t.Error("runner binding failure continued to bootstrap/start")
+			}
 			calls := f.owner.createCalls
 			f.owner.mu.Unlock()
 			want := 1

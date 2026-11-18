@@ -1,0 +1,12 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import React from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
+import {createServer} from 'vite';
+import {validateBrokerStatus} from './broker-status.js';
+const pool='22222222-2222-4222-8222-222222222222',repository='11111111-1111-4111-8111-111111111111';
+const policy={revision:2,repositories:[{id:repository,weight:1,max_runners:3,pools:[{id:pool,max_runners:2,warm_idle:1}]}]};
+const fixture=()=>({source:'saved-policy-and-charged-ledger',sequence:9,policy_revision:2,observed_at:'2026-01-01T00:00:00Z',ledger_ready:false,pools:[{pool,repository,desired:{...policy.repositories[0].pools[0]},mapping:'not-recorded'}]});
+test('missing ledger pool remains unknown, targets exactly match saved policy',()=>{const s=fixture();assert.equal(validateBrokerStatus(s,policy),s);for(const change of [s=>s.policy_revision++,s=>s.pools=[],s=>s.pools[0].desired.warm_idle++,s=>s.pools[0].repository='wrong',s=>s.pools.push(s.pools[0]),s=>s.pools[0].charged={runners:0}]){const v=fixture();change(v);assert.throws(()=>validateBrokerStatus(v,policy));}});
+test('real charged resources may exceed targets without being erased',()=>{const s=fixture();s.pools[0].budget={cpu_millis:2,ram_mib:2,disk_mib:2,runners:2};s.pools[0].charged={cpu_millis:4,ram_mib:4,disk_mib:4,runners:4};validateBrokerStatus(s,policy);s.pools[0].charged.disk_mib=-1;assert.throws(()=>validateBrokerStatus(s,policy));});
+test('comparison labels saved targets and unknowns, not running or available workers',async()=>{const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});try{const {BrokerStatus}=await server.ssrLoadModule('/src/broker-status.jsx');const html=renderToStaticMarkup(React.createElement(BrokerStatus,{status:fixture(),stale:true}));assert.match(html,/Pool not in ledger/);assert.match(html,/not your unsaved draft/);assert.match(html,/not running or idle counts/);assert.match(html,/comparison is stale/);assert.doesNotMatch(html,/<input|<button|<form/);}finally{await server.close();}});
