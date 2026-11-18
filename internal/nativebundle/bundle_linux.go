@@ -26,16 +26,19 @@ import (
 var ErrBundle = errors.New("native bundle unavailable; preserve any partial output and inspect private inputs")
 
 type Configuration struct {
+	RuntimeAssets                                                                              *AssetReference `json:"runtime_assets,omitempty"`
 	ExportDirectory, ExportManifestSHA256, PrivateDirectory, OutputDirectory, ID, Architecture string
 	SelectionFile, ExpectedBindingFile, ExpectedSelectionDigest                                string
 }
 type Result struct {
-	ID                   string `json:"id"`
-	ManifestDigest       string `json:"manifest_digest"`
-	Architecture         string `json:"architecture"`
-	State                string `json:"state"`
-	SelectionDigest      string `json:"selection_digest,omitempty"`
-	ActivationAuthorized bool   `json:"activation_authorized"`
+	RuntimeAssetID             string `json:"runtime_asset_id,omitempty"`
+	RuntimeAssetManifestDigest string `json:"runtime_asset_manifest_digest,omitempty"`
+	ID                         string `json:"id"`
+	ManifestDigest             string `json:"manifest_digest"`
+	Architecture               string `json:"architecture"`
+	State                      string `json:"state"`
+	SelectionDigest            string `json:"selection_digest,omitempty"`
+	ActivationAuthorized       bool   `json:"activation_authorized"`
 }
 
 func digest(b []byte) string { v := sha256.Sum256(b); return hex.EncodeToString(v[:]) }
@@ -150,6 +153,11 @@ func Build(ctx context.Context, c Configuration) (Result, error) {
 	if ctx == nil || ctx.Err() != nil || !hash(c.ID) || !hash(c.ExportManifestSHA256) || (c.Architecture != "amd64" && c.Architecture != "arm64") || protectedDirectory(c.ExportDirectory) != nil || protectedDirectory(c.PrivateDirectory) != nil || protectedDirectory(filepath.Dir(c.OutputDirectory)) != nil || !filepath.IsAbs(c.OutputDirectory) || filepath.Clean(c.OutputDirectory) != c.OutputDirectory {
 		return Result{}, ErrBundle
 	}
+	assets, e := FreezeAssetReference(c.RuntimeAssets, c.Architecture)
+	if e != nil {
+		return Result{}, e
+	}
+	c.RuntimeAssets = assets
 	export, e := os.OpenRoot(c.ExportDirectory)
 	if e != nil {
 		return Result{}, ErrBundle
@@ -176,6 +184,9 @@ func Build(ctx context.Context, c Configuration) (Result, error) {
 	clear(raw)
 	if e != nil {
 		return Result{}, e
+	}
+	if applyAssetReference(config, c.RuntimeAssets, c.Architecture) != nil {
+		return Result{}, ErrBundle
 	}
 	selectionDigest, e := applySelection(config, c)
 	if e != nil {
@@ -252,7 +263,12 @@ func Build(ctx context.Context, c Configuration) (Result, error) {
 	if e != nil {
 		return Result{}, ErrBundle
 	}
-	return Result{c.ID, md, c.Architecture, "bundle_created_not_prepared", selectionDigest, false}, nil
+	result := Result{ID: c.ID, ManifestDigest: md, Architecture: c.Architecture, State: "bundle_created_not_prepared", SelectionDigest: selectionDigest}
+	if c.RuntimeAssets != nil {
+		result.RuntimeAssetID = c.RuntimeAssets.Manifest.ID
+		result.RuntimeAssetManifestDigest = c.RuntimeAssets.ManifestDigest
+	}
+	return result, nil
 }
 
 // Duplicate (including case-aliased) object keys are rejected before rewriting.

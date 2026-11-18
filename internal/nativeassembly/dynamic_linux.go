@@ -4,6 +4,7 @@ package nativeassembly
 
 import (
 	"context"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativebundle"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeplanning"
 )
 
@@ -28,6 +29,11 @@ func (s *Service) AddRecipe(ctx context.Context, id string, r Recipe) error {
 	if !s.dynamic {
 		return ErrAssembly
 	}
+	assets, e := nativebundle.FreezeAssetReference(r.Build.RuntimeAssets, r.Build.Architecture)
+	if e != nil {
+		return ErrAssembly
+	}
+	r.Build.RuntimeAssets = assets
 	b, ok := s.planning.Bindings()[id]
 	if !ok || nativeplanning.Digest(b) != nativeplanning.Digest(r.Binding) || nativeplanning.ValidateBinding(b) != nil || r.Build.ID != b.PreparationID || r.Build.SelectionFile != "" || r.Build.ExpectedSelectionDigest != "" || r.Build.ExpectedBindingFile == "" || r.Build.OutputDirectory != "" || privateDirectory(r.OutputParent) != nil {
 		return ErrAssembly
