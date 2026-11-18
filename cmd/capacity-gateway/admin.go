@@ -19,6 +19,8 @@ import (
 
 type adminConfiguration struct {
 	BrokerProfileRecipesFile           string                     `json:"broker_profile_recipes_file,omitempty"`
+	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
+	EnableRotation                     bool                       `json:"-"`
 	Firstboot                          *firstbootConfiguration    `json:"isolated_inventory_firstboot,omitempty"`
 	EnableFirstboot                    bool                       `json:"-"`
 	Bootstrap                          *bootstrapConfiguration    `json:"prepared_host_bootstrap,omitempty"`
@@ -223,6 +225,34 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		}
 		oldCleanup := cleanup
 		cleanup = func() { service.Close(); oldCleanup() }
+	}
+	if config.EnableRotation {
+		targets, admin, inventory, token, e := loadManagedRotation(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		registry, _, e := newSSHTargetRegistry(config.SSHInventory, store)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = store.InitializeManagedRotation(context.Background()); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		service, e := firstboot.NewManagedRotationService(targets, store, registry, admin, inventory)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetManagedRotation(service, token); e != nil {
+			service.Close()
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { service.Close(); old() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

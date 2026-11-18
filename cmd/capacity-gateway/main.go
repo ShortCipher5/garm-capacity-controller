@@ -302,6 +302,7 @@ func main() {
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
 	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
 	sshTargetManagement := flag.Bool("allow-ssh-target-management", false, "allow separately authorized durable SSH target registration within deployment scopes; no installation or activation")
+	rotation := flag.Bool("allow-inventory-key-rotation", false, "allow separately approved remote inventory key/session revocation and atomic local target replacement")
 	firstboot := flag.Bool("allow-isolated-inventory-firstboot", false, "allow separately approved full-admin first-time isolated listener installation; changes host account, service and owned firewall")
 	bootstrap := flag.Bool("allow-prepared-host-bootstrap", false, "allow separately authorized installation on deployment-approved prepared hosts; no account creation or sshd changes")
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
@@ -351,6 +352,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableSSHTargetManagement = true
+	}
+	if *rotation {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "rotation requires admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableRotation = true
 	}
 	if *firstboot {
 		if config.Admin == nil {

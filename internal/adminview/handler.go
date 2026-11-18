@@ -81,6 +81,8 @@ type Overview struct {
 }
 type Handler struct {
 	brokerProfiles  map[string]BrokerProfileRecipe
+	rotation        *firstboot.ManagedRotationService
+	rotationHash    [32]byte
 	firstboot       *firstboot.Service
 	firstbootHash   [32]byte
 	bootstrap       *hostbootstrap.Service
@@ -152,6 +154,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/capacity-states" {
 		h.serveCapacityStates(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/inventory-key-rotation" {
+		h.serveManagedRotation(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/firstboot" {
