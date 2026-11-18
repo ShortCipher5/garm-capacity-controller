@@ -41,6 +41,10 @@ func fixture(t *testing.T) (*Client, *fixtureState, Configuration) {
 		}
 		w.Header().Set(managedsource.SourceHeader, s.source)
 		w.Header().Set(managedsource.ControllerHeader, controllerID)
+		if r.Method == "GET" && r.URL.Path == "/v1/managed/history" {
+			json.NewEncoder(w).Encode(History{Events: []HistoryEvent{{RequestID: requestID, Kind: "pool", Target: poolID, State: "confirmed", Reason: "limit", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Before: s.pool, Desired: s.pool, Result: &s.pool}}})
+			return
+		}
 		if r.Method == "GET" && r.URL.Path == "/v1/managed/status" {
 			json.NewEncoder(w).Encode(garmmanagement.Status{Pending: []garmmanagement.Intent{}})
 			return
@@ -250,5 +254,31 @@ func TestSupervisorReadOnlyStateRefusesReduction(t *testing.T) {
 	defer s.Unlock()
 	if s.writes != 0 {
 		t.Fatal("disabled supervisor received POST")
+	}
+}
+
+func TestConfirmedHistoryNeverClearsUnknown(t *testing.T) {
+	c, s, _ := fixture(t)
+	s.Lock()
+	s.fail = true
+	s.Unlock()
+	if _, err := c.ReduceMaximum(context.Background(), requestID, poolID, strings.Repeat("a", 64), 2, "limit"); !errors.Is(err, garmapi.ErrManagementOutcomeUnknown) {
+		t.Fatal(err)
+	}
+	h, err := c.History(context.Background())
+	if err != nil || len(h.Events) != 1 {
+		t.Fatal(h, err)
+	}
+	status, err := c.Status(context.Background())
+	if err != nil || !status.WriteBlocked {
+		t.Fatal(status, err)
+	}
+	if _, err = c.ReduceMaximum(context.Background(), requestID, poolID, strings.Repeat("c", 64), 1, "no replay"); !errors.Is(err, garmapi.ErrManagementDisabled) {
+		t.Fatal(err)
+	}
+	s.Lock()
+	defer s.Unlock()
+	if s.writes != 1 {
+		t.Fatal(s.writes)
 	}
 }

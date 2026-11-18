@@ -88,6 +88,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveDemand(w, r)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/managed/history" {
+		h.serveHistory(w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/managed/status" {
 		v, e := h.manager.Status(r.Context())
 		if e != nil {
