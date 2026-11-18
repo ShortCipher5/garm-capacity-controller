@@ -92,6 +92,10 @@ func NewExecutionServer(api *nativeapi.Client, policy nativeapi.Policy, claims *
 			http.Error(w, "owner authentication required", 401)
 			return
 		}
+		if r.URL.Path == cachePath {
+			serveCache(w, r, api)
+			return
+		}
 		if r.URL.Path == nativeartifacts.Path {
 			serveArtifacts(w, r, api, fingerprint(serverTLS), fingerprint(claimTLS))
 			return
