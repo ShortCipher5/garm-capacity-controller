@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"log"
 	"net"
 	"net/http"
@@ -14,12 +15,15 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/jobobserver"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type adminConfiguration struct {
+	nativeRetirementRuntime     *nativecontroller.RetirementService
+	jobObserverRuntime          *jobobserver.Service
 	NativeRegistration          *nativeRegistrationConfiguration `json:"native_registration,omitempty"`
 	EnableNativeRegistration    bool                             `json:"-"`
 	NativeEnrollmentRecipesFile string                           `json:"native_enrollment_recipes_file,omitempty"`
@@ -91,6 +95,8 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		return nil, noop, err
 	}
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
+	handler.SetJobObserver(config.jobObserverRuntime)
+	handler.SetNativeRetirement(config.nativeRetirementRuntime)
 	needsCredential := config.EnableExperimentalManagement || config.EnableExperimentalOnboardingProbes
 	if needsCredential != (config.ManagementTokenFile != "") {
 		cleanup()

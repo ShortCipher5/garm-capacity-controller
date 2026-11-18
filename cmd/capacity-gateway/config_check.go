@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,19 @@ var errStaticConfig = errors.New("static configuration check failed")
 // It cannot establish persisted policy, reachability, fencing or readiness.
 func checkStaticConfig(c configuration, provision bool) error {
 	fail := func() error { return errStaticConfig }
+	adminAddress := ""
+	if c.Admin != nil {
+		adminAddress = c.Admin.Listen
+	}
+	if validateNativeClaimConfiguration(c.NativeClaims, c.Listen, adminAddress) != nil {
+		return fail()
+	}
+	if validateNativeRetirement(c) != nil {
+		return nativecontroller.ErrConfiguration
+	}
+	if validateJobObserver(c) != nil {
+		return fail()
+	}
 	if validateAllocatorLoop(c.AllocatorLoop) != nil {
 		return fail()
 	}
