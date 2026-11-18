@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 )
@@ -20,10 +21,11 @@ type PollOptions struct {
 	Overlap, MinInterval time.Duration
 }
 type checkpoint struct {
-	Version int
-	Binding string
-	Through time.Time
-	Result  Result
+	Version     int
+	Binding     string
+	Through     time.Time
+	LookupAfter string
+	Result      Result
 }
 
 // PollGitHub serializes one scoped poll and atomically checkpoints only a complete
@@ -43,7 +45,7 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 		return Result{}, ErrObservation
 	}
 	sum := sha256.Sum256(raw)
-	return poll(ctx, hex.EncodeToString(sum[:]), options, func(ctx context.Context, history []Item, from, to time.Time) (Result, error) {
+	return poll(ctx, hex.EncodeToString(sum[:]), options, func(ctx context.Context, history []Item, from, to time.Time, cursor *string) (Result, error) {
 		baseline := []Baseline{}
 		seen := map[string]Job{}
 		past := map[string]Item{}
@@ -76,6 +78,10 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 		if err != nil {
 			return Result{}, err
 		}
+		// Older completed runs may be outside both the recent window and the
+		// active-run search. Query a bounded rotating subset of missing history.
+		// Failed/ambiguous lookups remain unknown and are never deleted.
+		*cursor = lookupMissingHistory(ctx, c, repos, result.Items, past, current, *cursor)
 		retainedItems := result.Items[:0]
 		for i := range result.Items {
 			item := &result.Items[i]
@@ -85,7 +91,7 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 			// observation and no current stock queue claim. Missing rows, old
 			// checkpoint status and in-progress jobs do not qualify. This only
 			// forgets an advisory queue item; no resource charge is released.
-			if retained && !current[k] && !item.MissingFromReader && item.ReaderStatus == "completed" {
+			if retained && !current[k] && !item.MissingFromReader && !item.LabelsConflict && item.ReaderStatus == "completed" {
 				continue
 			}
 			if current[k] || !retained {
@@ -108,6 +114,69 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 		return result, nil
 	})
 }
+
+// lookupMissingHistory never changes physical accounting. It rotates across
+// missing entries to avoid permanently starving old jobs behind a 32-request cap.
+func lookupMissingHistory(ctx context.Context, c *GitHubClient, repos []Repository, items []Item, past map[string]Item, current map[string]bool, after string) string {
+	if ctx == nil || c == nil {
+		return after
+	}
+	byID := map[string]Repository{}
+	for _, r := range repos {
+		byID[r.GarmID] = r
+	}
+	candidates := []int{}
+	for i, item := range items {
+		k := key(item.RepositoryID, item.Job.ID)
+		if _, ok := past[k]; ok && !current[k] && item.MissingFromReader {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := items[candidates[i]], items[candidates[j]]
+		return key(a.RepositoryID, a.Job.ID) < key(b.RepositoryID, b.Job.ID)
+	})
+	lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	start := 0
+	for n, i := range candidates {
+		if key(items[i].RepositoryID, items[i].Job.ID) > after {
+			start = n
+			break
+		}
+	}
+	for n := 0; n < len(candidates) && n < 32; n++ {
+		if lookupCtx.Err() != nil {
+			return after
+		}
+		i := candidates[(start+n)%len(candidates)]
+		after = key(items[i].RepositoryID, items[i].Job.ID)
+		repo, ok := byID[items[i].RepositoryID]
+		if !ok {
+			continue
+		}
+		job, err := c.lookupJob(lookupCtx, repo, items[i].Job.ID)
+		if err != nil {
+			continue
+		}
+		// A label mismatch is an identity/conflict warning, not a completion.
+		if !equalLabels(canonical(items[i].Job).Labels, job.Labels) {
+			items[i].Conflict = true
+			items[i].LabelsConflict = true
+			continue
+		}
+		items[i].MissingFromReader = false
+		items[i].ReaderStatus = job.Status
+		if job.Status != "queued" {
+			items[i].Conflict = true
+		}
+	}
+	return after
+}
+
 func privateFile(path string, flags int) (*os.File, error) {
 	fd, e := syscall.Open(path, flags|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
 	if e != nil {
@@ -126,7 +195,7 @@ func privateFile(path string, flags int) (*os.File, error) {
 	}
 	return f, nil
 }
-func poll(ctx context.Context, binding string, o PollOptions, observe func(context.Context, []Item, time.Time, time.Time) (Result, error)) (Result, error) {
+func poll(ctx context.Context, binding string, o PollOptions, observe func(context.Context, []Item, time.Time, time.Time, *string) (Result, error)) (Result, error) {
 	now := time.Now().UTC()
 	if ctx == nil || ctx.Err() != nil || binding == "" || o.Path == "" || o.InitialFrom.IsZero() || !o.InitialFrom.Before(now) || o.Overlap < time.Second || o.Overlap > 24*time.Hour || o.MinInterval < time.Minute || o.MinInterval > 24*time.Hour {
 		return Result{}, ErrObservation
@@ -155,6 +224,7 @@ func poll(ctx context.Context, binding string, o PollOptions, observe func(conte
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	from := o.InitialFrom
 	history := []Item{}
+	cursor := ""
 	if _, e = os.Lstat(path); e == nil {
 		f, e := privateFile(path, syscall.O_RDONLY)
 		if e != nil {
@@ -169,6 +239,10 @@ func poll(ctx context.Context, binding string, o PollOptions, observe func(conte
 		if now.Sub(saved.Through) < o.MinInterval {
 			return Result{}, ErrObservation
 		}
+		if len(saved.LookupAfter) > 512 {
+			return Result{}, ErrObservation
+		}
+		cursor = saved.LookupAfter
 		from = saved.Through.Add(-o.Overlap)
 		if from.Before(o.InitialFrom) {
 			from = o.InitialFrom
@@ -188,11 +262,11 @@ func poll(ctx context.Context, binding string, o PollOptions, observe func(conte
 	} else if !os.IsNotExist(e) {
 		return Result{}, ErrObservation
 	}
-	result, e := observe(ctx, history, from, now)
+	result, e := observe(ctx, history, from, now, &cursor)
 	if e != nil || ctx.Err() != nil || !result.EnumerationComplete {
 		return Result{}, ErrObservation
 	}
-	data, e := json.Marshal(checkpoint{Version: 1, Binding: binding, Through: now, Result: result})
+	data, e := json.Marshal(checkpoint{Version: 1, Binding: binding, Through: now, LookupAfter: cursor, Result: result})
 	if e != nil || len(data) > 8<<20 {
 		return Result{}, ErrObservation
 	}
