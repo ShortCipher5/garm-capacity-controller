@@ -92,6 +92,9 @@ func TestBrokerProfileUsesObservedOwnershipAndSavedSizeAndImmutablePolicy(t *tes
 	if err != nil || state.PoolProfiles[profilePool].Sequence != v.Sequence {
 		t.Fatal("not in coherent snapshot", err)
 	}
+	if len(state.NativeDomains) != 1 || state.NativeDomains[f.binding.Sequence] != f.binding {
+		t.Fatal("immutable enrollment missing or altered in coherent snapshot")
+	}
 	if err = f.store.ProfileUpsert(ctx, "small", 2000, 2048, 8192); err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +206,25 @@ func TestBrokerProfileMigrationFromRealSchema19ClosesReadiness(t *testing.T) {
 	var version int
 	if reopened.db.QueryRow("PRAGMA user_version").Scan(&version) != nil || version != sqliteCurrentVersion {
 		t.Fatal("migration version")
+	}
+}
+
+func TestBrokerProfileReviewedSizeCompareIsTransactional(t *testing.T) {
+	f, r, o, p := poolProfileFixture(t)
+	r.ExpectedResources = Resources{CPU: 1000, RAM: 1024, Disk: 4096, Runners: 1}
+	if err := f.store.ProfileUpsert(context.Background(), r.SizeProfile, 2000, 2048, 8192); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p); err == nil {
+		t.Fatal("size changed since review but registration succeeded")
+	}
+	current, err := f.store.CurrentBrokerPoolProfiles(context.Background())
+	if err != nil || len(current) != 0 {
+		t.Fatal("rejected review mutated mapping", err)
+	}
+	r.ExpectedResources = Resources{CPU: 2000, RAM: 2048, Disk: 8192, Runners: 1}
+	if _, err := f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p); err != nil {
+		t.Fatal(err)
 	}
 }
 

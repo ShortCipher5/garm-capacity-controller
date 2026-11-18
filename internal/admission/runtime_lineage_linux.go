@@ -2,6 +2,7 @@ package admission
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -208,3 +209,14 @@ func sqliteRuntimePrivatePath(path string, exists bool) (string, error) {
 // RuntimeLineageBound reports the already validated local runtime mode only. It
 // is not activation, external-writer fencing or rollback/physical-scope proof.
 func (s *SQLiteStore) RuntimeLineageBound() bool { return s.runtimeID != "" }
+
+// RuntimeLineageFingerprint is a domain-separated public observation of this
+// already-validated handle's lineage, not its private identity-file value or an
+// authorization token. Callers must also perform a current checked read.
+func (s *SQLiteStore) RuntimeLineageFingerprint() string {
+	if s == nil || s.runtimeID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte("provider-profile-lineage/v1\x00" + s.runtimeID))
+	return hex.EncodeToString(digest[:])
+}

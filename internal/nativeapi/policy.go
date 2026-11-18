@@ -19,9 +19,12 @@ var ErrNative = errors.New("native operation outcome unknown; retain charge")
 
 const PolicyVersion = "garm-native-policy/v2"
 const ProtectedPolicyVersion = "garm-native-policy/v3"
+const EgressPolicyVersion = "garm-native-policy/v4"
+const PartitionPolicyVersion = "garm-native-policy/v5"
 const NativeVersion = "6.0.4"
 
 type PolicySpec struct {
+	EgressDigest   string          `json:"egress_digest,omitempty"`
 	Version        string          `json:"version"`
 	Controller     string          `json:"controller"`
 	Host           string          `json:"host"`
@@ -50,11 +53,18 @@ type Policy struct {
 }
 
 func NewPolicy(spec PolicySpec) (Policy, error) {
-	if (spec.Version != PolicyVersion && spec.Version != ProtectedPolicyVersion) || spec.ServerVersion != NativeVersion || !label(spec.Controller) || !label(spec.Host) || !hash(spec.DomainID) || !hash(spec.NativeSHA256) || !hash(spec.LauncherSHA256) || len(spec.Pools) == 0 || len(spec.Pools) > 256 {
+	if (spec.Version != PolicyVersion && spec.Version != ProtectedPolicyVersion && spec.Version != EgressPolicyVersion && spec.Version != PartitionPolicyVersion) || spec.ServerVersion != NativeVersion || !label(spec.Controller) || !label(spec.Host) || !hash(spec.DomainID) || !hash(spec.NativeSHA256) || !hash(spec.LauncherSHA256) || len(spec.Pools) == 0 || len(spec.Pools) > 256 {
+		return Policy{}, ErrPolicy
+	}
+	if spec.Version == EgressPolicyVersion || spec.Version == PartitionPolicyVersion {
+		if !hash(spec.EgressDigest) {
+			return Policy{}, ErrPolicy
+		}
+	} else if spec.EgressDigest != "" {
 		return Policy{}, ErrPolicy
 	}
 	for id, p := range spec.Pools {
-		if spec.Version == ProtectedPolicyVersion {
+		if spec.Version == ProtectedPolicyVersion || spec.Version == EgressPolicyVersion || spec.Version == PartitionPolicyVersion {
 			if p.ProtectedImage == nil || protectedboot.ValidateDescriptor(*p.ProtectedImage) != nil {
 				return Policy{}, ErrPolicy
 			}
@@ -92,12 +102,14 @@ func (p Policy) Host() string       { return p.spec.Host }
 // that a live image or boot environment has been independently qualified.
 func (p Policy) ProtectedImage(pool string) (protectedboot.ImageDescriptor, bool) {
 	v, ok := p.spec.Pools[pool]
-	if !ok || p.spec.Version != ProtectedPolicyVersion || v.ProtectedImage == nil {
+	if !ok || (p.spec.Version != ProtectedPolicyVersion && p.spec.Version != EgressPolicyVersion && p.spec.Version != PartitionPolicyVersion) || v.ProtectedImage == nil {
 		return protectedboot.ImageDescriptor{}, false
 	}
 	return protectedboot.CloneDescriptor(*v.ProtectedImage), true
 }
-func (p Policy) Protected() bool { return p.spec.Version == ProtectedPolicyVersion && hash(p.digest) }
+func (p Policy) Protected() bool {
+	return (p.spec.Version == ProtectedPolicyVersion || p.spec.Version == EgressPolicyVersion || p.spec.Version == PartitionPolicyVersion) && hash(p.digest)
+}
 
 // Allocation must come from the canonical native envelope, not caller-selected
 // free-form labels/resources. The owner verifies that envelope by fresh central
@@ -135,7 +147,7 @@ func (p Policy) Compile(a Allocation, userData string) (Prepared, error) {
 		return Prepared{}, ErrPolicy
 	}
 	pool := p.spec.Pools[a.Pool]
-	if p.spec.Version == ProtectedPolicyVersion {
+	if p.spec.Version == ProtectedPolicyVersion || p.spec.Version == EgressPolicyVersion || p.spec.Version == PartitionPolicyVersion {
 		payload, e := protectedboot.Decode([]byte(userData))
 		if e != nil || payload.RunnerName != a.Name || pool.ProtectedImage == nil || !reflect.DeepEqual(payload.Image, *pool.ProtectedImage) {
 			return Prepared{}, ErrPolicy
@@ -145,6 +157,10 @@ func (p Policy) Compile(a Allocation, userData string) (Prepared, error) {
 		"limits.cpu": strconv.FormatInt(a.CPU/1000, 10), "limits.memory": strconv.FormatInt(a.RAM, 10) + "MiB",
 		"user.user-data": userData, "user.runner-controller-id": a.Controller, "user.runner-pool-id": a.Pool, "user.garm-capacity.reservation": a.RequestKey, "user.garm-capacity.domain": p.spec.DomainID, "user.garm-capacity.policy": p.digest,
 		"boot.autostart": "false", "boot.autorestart": "false", "snapshots.schedule": "", "security.guestapi": "false",
+	}
+	if p.spec.Version == PartitionPolicyVersion {
+		// Closed paths only: name validation forbids separators and raw options.
+		config["raw.lxc"] = "lxc.cgroup.relative = 0\nlxc.cgroup.dir.container = guests/" + a.Name + "\nlxc.cgroup.dir.container.inner = payload\nlxc.cgroup.dir.monitor = monitors/" + a.Name + "\nlxc.cgroup.dir.monitor.pivot = monitors\n"
 	}
 	if pool.Type == "container" {
 		config["limits.memory.enforce"] = "hard"
