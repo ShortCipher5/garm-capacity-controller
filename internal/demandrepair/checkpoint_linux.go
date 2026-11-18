@@ -76,11 +76,20 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 		if err != nil {
 			return Result{}, err
 		}
+		retainedItems := result.Items[:0]
 		for i := range result.Items {
 			item := &result.Items[i]
 			k := key(item.RepositoryID, item.Job.ID)
 			previous, retained := past[k]
+			// Only remove historical demand after a fresh positive completed
+			// observation and no current stock queue claim. Missing rows, old
+			// checkpoint status and in-progress jobs do not qualify. This only
+			// forgets an advisory queue item; no resource charge is released.
+			if retained && !current[k] && !item.MissingFromReader && item.ReaderStatus == "completed" {
+				continue
+			}
 			if current[k] || !retained {
+				retainedItems = append(retainedItems, *item)
 				continue
 			}
 			item.PriorSource = previous.PriorSource
@@ -93,7 +102,9 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 			} else {
 				item.Source = "reader"
 			}
+			retainedItems = append(retainedItems, *item)
 		}
+		result.Items = retainedItems
 		return result, nil
 	})
 }

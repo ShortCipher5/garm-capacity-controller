@@ -45,6 +45,9 @@ type Item struct {
 	Conflict          bool
 	MissingFromReader bool
 	Source            string
+	// ReaderStatus is the status positively observed in this read only. It is
+	// not runner-completion evidence or permission to release physical capacity.
+	ReaderStatus string
 	// PriorSource records provenance retained from an earlier poll, not current stock evidence.
 	PriorSource string
 }
@@ -141,11 +144,12 @@ func Observe(ctx context.Context, r Reader, repos []Repository, baseline []Basel
 				k := key(repo.GarmID, j.ID)
 				if existing, ok := merged[k]; ok {
 					existing.MissingFromReader = false
+					existing.ReaderStatus = j.Status
 					existing.Conflict = j.Status != "queued" || !equalLabels(existing.Job.Labels, j.Labels)
 					existing.Source = "stock+reader"
 					merged[k] = existing
 				} else if j.Status == "queued" {
-					merged[k] = Item{RepositoryID: repo.GarmID, Job: j, Source: "reader"}
+					merged[k] = Item{RepositoryID: repo.GarmID, Job: j, Source: "reader", ReaderStatus: j.Status}
 				}
 			}
 			if page.Terminal {

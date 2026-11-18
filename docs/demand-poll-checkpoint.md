@@ -29,10 +29,16 @@ backlog scans, not from now. Restoring/copying a checkpoint does not grant runti
 authority. The directory and local writer remain operator-trusted, not a security
 boundary against a privileged attacker.
 
-All previous queued observations remain conservatively retained. Confirmed
-terminal/obsolete demand retirement and conflict resolution are not implemented;
-long-running accumulation can reach the bounded history limit and stop polling.
+Historical queued observations are removed only when this complete successful
+reader observation positively reports the same job as `completed` and the current
+stock queue no longer claims it. Current stock/reader disagreement remains visible.
+In-progress or missing jobs remain retained; old checkpoint `ReaderStatus` never
+substitutes for fresh evidence. This prevents confirmed completed history from
+accumulating forever, but unresolved or terminal jobs outside the reader's window
+can still reach the bounded history limit and stop polling. Conflict resolution
+and targeted lookup of those historical jobs remain runtime integration work.
 The result is not safe to feed directly to allocation without that reconciliation.
+Removing an advisory demand item never releases a runner or any resource charge.
 
 Polling is non-atomic across GitHub/GARM. Status transitions can escape one set of
 queries; overlap and future active scans improve observation, not absolute event
