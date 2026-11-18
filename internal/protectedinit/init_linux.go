@@ -252,7 +252,12 @@ func Run(c Config) error {
 
 // Child is the fixed post-credential-drop fd-exec boundary. No arbitrary argv,
 // executable path or environment is accepted. The image launcher owns bootstrap.
-func Child() error {
+func Child() error { return child([]string{"protected-runner-launcher"}) }
+
+// ChildRunner executes only the pinned listener using its fixed run command.
+func ChildRunner() error { return child([]string{"Runner.Listener", "run"}) }
+
+func child(args []string) error {
 	if os.Geteuid() < 1000 || os.Getegid() < 1000 {
 		return ErrRefused
 	}
@@ -277,7 +282,7 @@ func Child() error {
 		return e
 	}
 	unix.CloseOnExec(3)
-	return syscall.Exec("/proc/self/fd/3", []string{"protected-runner-launcher"}, os.Environ())
+	return syscall.Exec("/proc/self/fd/3", args, os.Environ())
 }
 func reap(main int) (int, error) {
 	exit := -1
