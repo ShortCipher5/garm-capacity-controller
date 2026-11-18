@@ -145,6 +145,9 @@ func facadeFixture(t *testing.T) (*Facade, *admission.SQLiteStore, *backendFixtu
 	return facadeFixtureAge(t, time.Minute)
 }
 func facadeFixtureAge(t *testing.T, age time.Duration) (*Facade, *admission.SQLiteStore, *backendFixture, string) {
+	return facadeFixtureReadiness(t, age, true)
+}
+func facadeFixtureReadiness(t *testing.T, age time.Duration, reconcile bool) (*Facade, *admission.SQLiteStore, *backendFixture, string) {
 	t.Helper()
 	budget := admission.Resources{CPU: 4000, RAM: 8192, Runners: 4}
 	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"host-a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"host-a"}}, "pool-b": {Budget: budget, Hosts: []string{"host-a"}}}, MaxObservationAge: age}
@@ -161,8 +164,10 @@ func facadeFixtureAge(t *testing.T, age time.Duration) (*Facade, *admission.SQLi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Reconcile(context.Background(), garmRows{}); err != nil {
-		t.Fatal(err)
+	if reconcile {
+		if err := f.Reconcile(context.Background(), garmRows{}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return f, store, backend, path
 }
@@ -362,9 +367,10 @@ func TestNilSourceAlsoClosesReconciliationBarrier(t *testing.T) {
 	}
 }
 
-type slowGarmSource struct{}
+type slowGarmSource struct{ called bool }
 
-func (slowGarmSource) Instances(ctx context.Context) ([]GarmInstance, error) {
+func (s *slowGarmSource) Instances(ctx context.Context) ([]GarmInstance, error) {
+	s.called = true
 	timer := time.NewTimer(200 * time.Millisecond)
 	defer timer.Stop()
 	select {
@@ -375,9 +381,15 @@ func (slowGarmSource) Instances(ctx context.Context) ([]GarmInstance, error) {
 	}
 }
 func TestSlowCollectionCannotRenewEarlierEvidenceFreshness(t *testing.T) {
-	f, store, _, _ := facadeFixtureAge(t, 100*time.Millisecond)
-	if err := f.Reconcile(context.Background(), slowGarmSource{}); err == nil {
+	// No unrelated 100ms warmup reconciliation: this test must reach the slow
+	// collection itself, even when fixture initialization is slow under -race.
+	f, store, _, _ := facadeFixtureReadiness(t, 100*time.Millisecond, false)
+	source := &slowGarmSource{}
+	if err := f.Reconcile(context.Background(), source); err == nil {
 		t.Fatal("slow collection relabelled stale source evidence as fresh")
+	}
+	if !source.called {
+		t.Fatal("failed before exercising slow collection")
 	}
 	state, _ := store.Snapshot(context.Background())
 	if state.Ready {

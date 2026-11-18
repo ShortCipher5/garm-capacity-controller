@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const nativeBootstrapDowngradeSQL = `
+const nativeBootstrapDowngradeSQL = nativeJobDowngradeSQL + `
 DROP TRIGGER native_start_requires_bootstrap;
 DROP TABLE native_bootstrap_receipts;
 DROP TABLE native_bootstrap_intents;
