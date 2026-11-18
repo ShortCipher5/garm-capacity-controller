@@ -16,6 +16,12 @@ import (
 )
 
 const brokerGrantDowngradeSQL = `
+DROP TRIGGER broker_batch_no_update;
+DROP TRIGGER broker_grant_identity_immutable;
+DROP TABLE broker_grant_archives;
+DROP INDEX broker_grant_audit_kind;
+DELETE FROM audit WHERE kind IN ('broker_grant_batch_archived','schema_migrated_v18');
+
 DROP TRIGGER dispatch_current_accounting;
 ALTER TABLE dispatches DROP COLUMN grant_accounting_version;
 DROP TRIGGER reservation_current_accounting;
@@ -238,7 +244,7 @@ func TestBrokerGrantOldWriterSQLAndVersionRollbackBlocked(t *testing.T) {
 	if _, e = s.Admit(context.Background(), Request{Key: "new", Pool: "app", Host: "a", Resources: placementRequest("x").Resources}); e == nil {
 		t.Fatal("schema rollback accepted")
 	}
-	if _, e = s.db.Exec("PRAGMA user_version=17"); e != nil {
+	if _, e = s.db.Exec("PRAGMA user_version=18"); e != nil {
 		t.Fatal(e)
 	}
 }
