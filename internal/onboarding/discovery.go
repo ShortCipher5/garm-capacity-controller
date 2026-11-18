@@ -86,6 +86,7 @@ type DiscoveryUtilization struct {
 // include physical_capacity_scope_unqualified: no discovery observation is
 // physical-hardware, whole-project, parent-quota or capacity qualification.
 type DiscoveryResult struct {
+	Proposal        *BudgetProposal            `json:"proposal,omitempty"`
 	Review          *admission.DiscoveryReview `json:"review,omitempty"`
 	Profile         string                     `json:"profile_id"`
 	ObservedAt      time.Time                  `json:"observed_at"`

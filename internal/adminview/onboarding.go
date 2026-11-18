@@ -182,6 +182,20 @@ func (h *Handler) serveOnboardingProfileDiscovery(w http.ResponseWriter, r *http
 		h.audit("onboarding discovery or audit unavailable")
 		fail(http.StatusServiceUnavailable, "discovery or its audit unavailable; no enrollment or activation is implemented")
 	default:
+		proposal := onboarding.ProposeBudget(result)
+		profiles, profilesErr := h.store.Profiles(r.Context())
+		if profilesErr != nil || len(profiles) > 512 {
+			proposal.SizeSource = "unavailable"
+			proposal.Sizes = []onboarding.PlanningSize{}
+			proposal.Warnings = append(proposal.Warnings, "Saved runner-size profiles unavailable or exceed the 512-profile planning limit; no profile fit is proposed.")
+		} else if len(profiles) > 0 {
+			proposal.SizeSource = "saved-profiles"
+			proposal.Sizes = []onboarding.PlanningSize{}
+			for _, profile := range profiles {
+				proposal.Sizes = append(proposal.Sizes, onboarding.PlanningSize{Name: profile.Name, CPU: profile.CPUMillis, RAM: profile.RAMMiB, Disk: profile.DiskMiB})
+			}
+		}
+		result.Proposal = &proposal
 		// Persist exactly the sanitized view returned to the reviewer. This is
 		// enrollment provenance only, never a backend binding or health proof.
 		snapshot, encodeErr := json.Marshal(result)

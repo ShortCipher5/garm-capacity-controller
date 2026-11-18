@@ -76,3 +76,15 @@ test('enrollment planner presents headroom warnings, distinct alternatives and u
     assert.match(markup,/not saved profiles/);
   } finally { await server.close(); }
 });
+test('planner uses saved profile snapshot without claiming counts were saved', async () => {
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});
+ try {
+  const {BudgetPlanner}=await server.ssrLoadModule('/src/servers.jsx');
+  const result={...discovery,proposal:{version:1,budget:{cpu_millis:6000,ram_mib:16000,disk_mib:80000},reserve:{},warnings:[],size_source:'saved-profiles',sizes:[{name:'custom-size',cpu_millis:2000,ram_mib:6144,disk_mib:40000}]}};
+  const html=renderToStaticMarkup(React.createElement(BudgetPlanner,{result,budget:{...result.proposal.budget,runners:2},onChange:()=>{}}));
+  assert.match(html,/Saved runner-size profiles from this discovery review/);
+  assert.match(html,/custom-size planned count/);
+  assert.match(html,/does not save counts/);
+  assert.doesNotMatch(html,/small planned count/);
+ }finally{await server.close()}
+});

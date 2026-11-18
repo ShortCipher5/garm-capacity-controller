@@ -290,3 +290,27 @@ func TestEnrollmentRejectsBrowserDetectionWithoutMutation(t *testing.T) {
 		t.Fatal("rejected detection mutated ledger")
 	}
 }
+
+func TestDiscoveryIncludesVersionedProposalAndSavedSizes(t *testing.T) {
+	h, _, store, _, write := discoveryHandler(t, true)
+	if err := store.ProfileUpsert(context.Background(), "custom", 2000, 6144, 40960); err != nil {
+		t.Fatal(err)
+	}
+	response := sendDiscovery(t, h, "GET", "/admin/api/v1/onboarding/profiles/candidate-b/discovery", write, "")
+	var result onboarding.DiscoveryResult
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+		t.Fatal(response.Body.String())
+	}
+	if result.Review == nil || result.Proposal == nil || result.Proposal.Version != 1 || result.Proposal.SizeSource != "saved-profiles" || len(result.Proposal.Sizes) != 1 {
+		t.Fatalf("missing reviewed proposal: %+v", result)
+	}
+	size := result.Proposal.Sizes[0]
+	if size.Name != "custom" || size.CPU != 2000 || size.RAM != 6144 || size.Disk != 40960 {
+		t.Fatal(size)
+	}
+	// This fixture lacks trustworthy disk usage; the server must omit disk,
+	// rather than suggesting unconstrained accounting from an unknown zero.
+	if _, ok := result.Proposal.Budget["disk_mib"]; ok {
+		t.Fatal("unknown disk proposed")
+	}
+}

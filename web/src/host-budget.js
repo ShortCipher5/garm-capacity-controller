@@ -8,6 +8,7 @@ export const RUNNER_PRESETS = [
 const valid = value => Number.isSafeInteger(value) && value >= 0;
 export const DIMENSIONS = ['cpu_millis', 'ram_mib', 'disk_mib'];
 export function hostBudgetGuidance(result) {
+  if (result.proposal) return result.proposal;
   const totals = result.totals || {};
   const warnings = [];
   const reserve = {}, budget = {};
@@ -71,11 +72,11 @@ export function runnerMix(budget, profiles, counts) {
     const count = Number(counts[index]);
     if (counts[index] === '' || !valid(count)) return { invalid: true };
     for (const key of DIMENSIONS) {
-      if (!valid(profiles[index][key]) || profiles[index][key] === 0) return { invalid: true };
+      if (!valid(profiles[index][key]) || profiles[index][key] === 0) { if (count > 0) return { invalid: true }; continue; }
       totals[key] += count * profiles[index][key];
       if (!valid(totals[key])) return { invalid: true };
     }
   }
-  const fits = profiles.map(profile => Math.min(...DIMENSIONS.map(key => Math.floor(Number(budget[key]) / profile[key]))));
+  const fits = profiles.map(profile => DIMENSIONS.some(key => !valid(profile[key]) || profile[key] === 0) ? null : Math.min(...DIMENSIONS.map(key => Math.floor(Number(budget[key]) / profile[key]))));
   return { totals, fits, exceeds: DIMENSIONS.filter(key => totals[key] > Number(budget[key])) };
 }

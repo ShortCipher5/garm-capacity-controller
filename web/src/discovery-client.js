@@ -11,11 +11,19 @@ const positive = (value) => Number.isSafeInteger(value) && value > 0;
 const optionalPositive = (value) => value === undefined || positive(value);
 const time = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
 const profileID = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+const validProposal = (value) => object(value) && value.version === 1 && object(value.budget) && object(value.reserve)
+  && [value.budget,value.reserve].every(values => Object.entries(values).every(([key,n]) => ["cpu_millis","ram_mib","disk_mib"].includes(key) && integer(n)))
+  && value.budget.disk_mib !== 0
+  && Array.isArray(value.warnings) && value.warnings.every(w => typeof w === "string")
+  && ["saved-profiles","illustrative-presets","unavailable"].includes(value.size_source)
+  && Array.isArray(value.sizes) && value.sizes.length <= 512
+  && value.sizes.every(s => object(s) && typeof s.name === "string" && /^[a-z0-9-]{1,64}$/.test(s.name) && positive(s.cpu_millis) && positive(s.ram_mib) && integer(s.disk_mib));
 const bindingClasses = ["not_checked", "match_observed", "no_match_observed"];
 export function validateDiscoveryResult(value) {
   if (
     !object(value) ||
     !profileID(value.profile_id) ||
+    (value.proposal !== undefined && !validProposal(value.proposal)) ||
     !time(value.observed_at) ||
     !object(value.identity) ||
     typeof value.identity.observation_available !== "boolean" ||

@@ -46,3 +46,13 @@ test('exhausted disk never prefills an unconstrained zero', () => {
  assert.equal(g.budget.disk_mib,undefined);
  assert.match(g.warnings.join(' '),/No disk capacity remains/);
 });
+test('versioned server proposal is used verbatim rather than recomputed by browser', () => {
+ const proposal={version:1,budget:{cpu_millis:1234},reserve:{cpu_millis:1000},warnings:['server review'],sizes:[],size_source:'unavailable'};
+ assert.equal(hostBudgetGuidance({...result,proposal}),proposal);
+});
+test('unconstrained saved profile cannot contribute to a bounded mix', () => {
+ const budget={cpu_millis:6000,ram_mib:12288,disk_mib:122880};
+ const profiles=[{name:'unbounded',cpu_millis:1000,ram_mib:2048,disk_mib:0},RUNNER_PRESETS[0]];
+ assert.deepEqual(runnerMix(budget,profiles,[0,1]).fits,[null,6]);
+ assert.equal(runnerMix(budget,profiles,[1,1]).invalid,true);
+});

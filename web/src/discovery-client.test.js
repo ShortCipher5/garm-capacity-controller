@@ -63,3 +63,8 @@ test("enrollHost posts the reviewed enrollment and maps durable outcomes", async
   await assert.rejects(enrollHost(write, { ...request, mode: "enabled" }, { fetcher: async () => ({ ok: true, status: 201 }) }), /disabled or draining/);
   await assert.rejects(enrollHost(write, { ...request, budget: { cpu_millis: -1, ram_mib: 1, disk_mib: 0, runners: 1 } }, { fetcher: async () => ({ ok: true, status: 201 }) }), /non-negative/);
 });
+test('discovery validates versioned server budget and saved size proposal', () => {
+ const proposal={version:1,budget:{cpu_millis:1000,ram_mib:2048,disk_mib:10000},reserve:{cpu_millis:1000},warnings:[],sizes:[{name:'custom',cpu_millis:1000,ram_mib:2048,disk_mib:0}],size_source:'saved-profiles'};
+ assert.deepEqual(validateDiscoveryResult({...result,proposal}).proposal,proposal);
+ for(const change of [{version:2},{budget:{disk_mib:0}},{sizes:[{name:'custom',cpu_millis:0,ram_mib:1,disk_mib:1}]},{size_source:'qualified'}]) assert.throws(()=>validateDiscoveryResult({...result,proposal:{...proposal,...change}}),DiscoveryResponseError);
+});

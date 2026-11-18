@@ -158,8 +158,9 @@ export function DiscoveryResultView({ result }) {
 }
 export function BudgetPlanner({ result, budget, onChange }) {
   const guidance = hostBudgetGuidance(result);
-  const [counts, setCounts] = useState([0, 0, 0]);
-  const mix = runnerMix(budget, RUNNER_PRESETS, counts);
+  const sizes = result.proposal ? result.proposal.sizes : RUNNER_PRESETS;
+  const [counts, setCounts] = useState(() => sizes.map(() => 0));
+  const mix = sizes.length ? runnerMix(budget, sizes, counts) : { unknown: true };
   const warnings = assessBudget(result, budget, guidance);
   return <div className="budget-planner">
     <h4>Plan shared runner capacity</h4>
@@ -170,9 +171,10 @@ export function BudgetPlanner({ result, budget, onChange }) {
     </div>
     <ul className="warning-list">{guidance.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
     {warnings.length > 0 && <div role="status"><strong>Budget needs review</strong><ul>{warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></div>}
-    <p>Illustrative runner sizes below are planning presets, not saved profiles or provisioned runners. Each maximum is an alternative, not additional capacity. Save custom sizes in Runner-size profiles.</p>
+    <p>{result.proposal?.size_source === "saved-profiles" ? "Saved runner-size profiles from this discovery review are shown below; edits elsewhere require fresh discovery." : result.proposal?.size_source === "unavailable" ? "Saved runner-size profiles are unavailable. Refresh discovery before planning a mix." : "Illustrative runner sizes below are planning presets, not saved profiles."} Each maximum is an alternative, not additional capacity. Mix planning does not save counts, change profiles or provision runners. Manage custom sizes in Runner-size profiles.</p>
+    {sizes.some(size => size.disk_mib === 0) && <p className="drain-warning">A saved profile has unconstrained disk. Define a positive disk size before using it for a bounded mix estimate.</p>}
     <div className="table-wrap"><table><thead><tr><th>Size</th><th>CPU / RAM / disk</th><th>Resource-only maximum if used alone</th><th>Planned count</th></tr></thead><tbody>
-      {RUNNER_PRESETS.map((profile,index) => <tr key={profile.name}><td>{profile.name}</td><td>{profile.cpu_millis / 1000} vCPU / {profile.ram_mib / 1024} GiB / {profile.disk_mib / 1024} GiB</td><td>{mix.fits ? mix.fits[index] : "unknown"}</td><td><input aria-label={`${profile.name} planned count`} type="number" min="0" step="1" value={counts[index]} onChange={event => setCounts(counts.map((count,i) => i === index ? event.target.value : count))} /></td></tr>)}
+      {sizes.map((profile,index) => <tr key={profile.name}><td>{profile.name}</td><td>{profile.cpu_millis / 1000} vCPU / {profile.ram_mib / 1024} GiB / {profile.disk_mib / 1024} GiB</td><td>{mix.fits?.[index] ?? "unknown"}</td><td><input aria-label={`${profile.name} planned count`} type="number" min="0" step="1" value={counts[index]} onChange={event => setCounts(counts.map((count,i) => i === index ? event.target.value : count))} /></td></tr>)}
     </tbody></table></div>
     <p role="status">{mix.unknown ? "Mix unavailable: enter explicit positive CPU, RAM and disk budgets." : mix.invalid ? "Enter valid whole-number counts." : `Combined mix: ${mix.totals.cpu_millis} millicores, ${mix.totals.ram_mib} MiB RAM, ${mix.totals.disk_mib} MiB disk. ${mix.exceeds.length ? "Exceeds shared budget: " + mix.exceeds.join(", ") : "Within the entered resource budget; not an admission guarantee."}`}</p>
     {Number(budget.runners) < counts.reduce((sum,count) => sum + Number(count),0) && <p className="drain-warning">Planned count exceeds the entered runner count limit.</p>}
