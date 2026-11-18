@@ -13,16 +13,19 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativedomain"
 )
 
 type Client struct {
-	domain   *nativedomain.Domain
-	policy   Policy
-	http     *http.Client
-	identity Identity
+	boundary     *enforcedBoundary
+	ownerClaimed atomic.Bool
+	domain       *nativedomain.Domain
+	policy       Policy
+	http         *http.Client
+	identity     Identity
 }
 
 // Identity is minted by an actual private Unix root read, authenticated by the
@@ -49,6 +52,15 @@ func (c *Client) PolicyDigest() string {
 	}
 	return c.policy.Digest()
 }
+
+// ClaimOwner prevents accidental reconstruction of surviving-owner memory.
+// No reset exists; this is not a substitute for canonical ledger authorization.
+func (c *Client) ClaimOwner() error {
+	if c == nil || c.domain == nil || !c.ownerClaimed.CompareAndSwap(false, true) {
+		return ErrNative
+	}
+	return nil
+}
 func New(ctx context.Context, domain *nativedomain.Domain, policy Policy) (*Client, error) {
 	if domain == nil || !hash(policy.Digest()) {
 		return nil, ErrPolicy
@@ -56,6 +68,9 @@ func New(ctx context.Context, domain *nativedomain.Domain, policy Policy) (*Clie
 	birth := domain.Birth()
 	if birth.ID != policy.spec.DomainID || birth.BinarySHA256 != policy.spec.NativeSHA256 || birth.LauncherSHA256 != policy.spec.LauncherSHA256 {
 		return nil, ErrPolicy
+	}
+	if domain.ClaimClient() != nil {
+		return nil, ErrNative
 	}
 	c := &Client{domain: domain, policy: policy, http: &http.Client{Transport: domain, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	identity, err := c.Identity(ctx)

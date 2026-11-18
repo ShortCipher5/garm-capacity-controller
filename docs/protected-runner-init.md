@@ -110,3 +110,20 @@ sudo, package installation or network fallback is executed by this code.
 Actual .NET apphost fd-exec path resolution, guest mount behavior and GitHub
 runner lifecycle remain unqualified. Local tests validate the exact manifest/JIT
 codec and refusal outside dedicated PID1; they do not exercise privileged boot.
+
+### Post-exit local network closure
+
+The protected PID1 now clears `IFF_UP` on the fixed guest `eth0` only after
+`wait4` has reaped the runner and every descendant. It first requires exactly
+`lo` and `eth0`, then verifies the same interface index and a down flag after the
+kernel ioctl. Any error keeps the journal unresolved. Only successful readback
+permits durable `guest_network_closed: true` alongside the explicitly unqualified
+process-tree-exit state. The init never restarts the listener.
+
+This is a real local interface operation, not a GitHub deregistration or a claim
+that credentials cannot have escaped the guest. It requires the dedicated guest
+namespace/image contract; root PID1 alone does not establish that contract.
+Host/root intervention, namespace escape, containment qualification and physical
+deletion remain outside this observation. No release authority is added. Tests
+exercise the exact decision/readback path with a disposable injected backend;
+real guest ioctl and image boot have not been qualified here.

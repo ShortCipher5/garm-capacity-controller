@@ -67,7 +67,7 @@ func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture
 			w.WriteHeader(204)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/v1/native/operations/") || strings.HasPrefix(r.URL.Path, "/v1/native/quotas/") || strings.HasPrefix(r.URL.Path, "/v1/native/bootstraps/") {
+		if (strings.HasPrefix(r.URL.Path, "/v1/native/executions/") && strings.HasSuffix(r.URL.Path, "/journal")) || strings.HasPrefix(r.URL.Path, "/v1/native/retirement-operations/") || strings.HasPrefix(r.URL.Path, "/v1/native/operations/") || strings.HasPrefix(r.URL.Path, "/v1/native/quotas/") || strings.HasPrefix(r.URL.Path, "/v1/native/bootstraps/") {
 			evidenceMu.Lock()
 			raw, ok := evidence[r.URL.Path]
 			evidenceMu.Unlock()

@@ -26,7 +26,8 @@ import (
 const unit = "garm-capacity-native-domain.service"
 
 var errOwner = errors.New("independently managed native-domain service required")
-var properties = []string{"Id", "MainPID", "ControlGroup", "ExitType", "Restart", "Delegate", "KillMode", "SendSIGKILL", "TimeoutStopUSec", "StopWhenUnneeded", "PartOf", "BindsTo", "BoundBy", "ConsistsOf", "PropagatesStopTo", "StopPropagatedFrom", "TriggeredBy", "ExecStop", "ExecStopPost", "ExecReload", "WatchdogUSec", "RuntimeMaxUSec", "RestartForceExitStatus", "OOMPolicy", "Requires", "Requisite", "Wants", "Conflicts", "ConflictedBy", "OnFailure", "OnSuccess", "UpheldBy", "Upholds", "WantedBy", "RequiredBy", "RequisiteOf", "Triggers", "Type", "ExecStartPre", "ExecStartPost", "ExecCondition", "FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction"}
+var errConfinement = errors.New("native control activation refused: exclusive native process, device and network confinement is not implemented")
+var properties = []string{"ProtectSystem", "ProtectControlGroups", "Id", "MainPID", "ControlGroup", "ExitType", "Restart", "Delegate", "KillMode", "SendSIGKILL", "TimeoutStopUSec", "StopWhenUnneeded", "PartOf", "BindsTo", "BoundBy", "ConsistsOf", "PropagatesStopTo", "StopPropagatedFrom", "TriggeredBy", "ExecStop", "ExecStopPost", "ExecReload", "WatchdogUSec", "RuntimeMaxUSec", "RestartForceExitStatus", "OOMPolicy", "Requires", "Requisite", "Wants", "Conflicts", "ConflictedBy", "OnFailure", "OnSuccess", "UpheldBy", "Upholds", "WantedBy", "RequiredBy", "RequisiteOf", "Triggers", "Type", "ExecStartPre", "ExecStartPost", "ExecCondition", "FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction"}
 
 func main() {
 	if err := run(os.Args[1:], os.Stderr); err != nil {
@@ -40,22 +41,74 @@ func run(args []string, output io.Writer) error {
 	directory := flags.String("domain-dir", "", "fresh root-owned domain directory")
 	binary := flags.String("incusd", "", "qualified root-owned Incus daemon executable")
 	helper := flags.String("launcher", "", "qualified root-owned capacity-native-launch executable")
+	controlPath := flags.String("control-config", "", "root0600 experimental authenticated owner control configuration")
+	renderUnit := flags.Bool("render-bounded-unit", false, "print required manager unit; never install or start")
+	boundaryPath := flags.String("boundary-config", "", "root0600 finite domain-boundary configuration (experimental, no activation)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *directory == "" || *binary == "" || *helper == "" {
 		return errOwner
 	}
-	if err := verifyManager(); err != nil {
+	if *controlPath != "" && *boundaryPath == "" {
+		return errOwner
+	}
+	if *renderUnit {
+		if *boundaryPath == "" {
+			return errOwner
+		}
+		c, e := loadBoundary(*boundaryPath)
+		if e != nil {
+			return e
+		}
+		unit, e := boundedUnit(c, *directory, *boundaryPath)
+		if e != nil {
+			return e
+		}
+		if *controlPath != "" {
+			if !unitPath(*controlPath) {
+				return errOwner
+			}
+			unit = strings.Replace(unit, " --boundary-config="+*boundaryPath, " --boundary-config="+*boundaryPath+" --control-config="+*controlPath, 1)
+		}
+		_, e = fmt.Fprint(output, unit)
+		return e
+	}
+	// Limit observations are not confinement: native host capabilities can still
+	// reach manager sockets, namespace handles and global storage interfaces.
+	// Refuse BEFORE manager calls, boundary placement or fresh daemon launch.
+	// Rendering is inspection only; no configuration flag bypasses this gate.
+	if *controlPath != "" {
+		return errConfinement
+	}
+	if err := verifyManagerMode(*boundaryPath != ""); err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *controlPath != "" {
+		if _, e := loadControl(*controlPath); e != nil {
+			return e
+		}
+	}
+	var prepared *preparedBoundary
+	if *boundaryPath != "" {
+		c, e := loadBoundary(*boundaryPath)
+		if e != nil {
+			return e
+		}
+		if prepared, e = prepareBoundary(ctx, c, *directory); e != nil {
+			return e
+		}
+	}
 	domain, err := nativedomain.StartFresh(ctx, *directory, *binary, *helper)
 	if err != nil {
 		return err
 	}
 	defer domain.Close()
+	if *controlPath != "" {
+		return serveConfiguredOwner(ctx, *controlPath, domain, prepared)
+	}
 	fmt.Fprintln(output, "Fresh native domain started; allocation and retirement authority remain disabled.")
 	// A controller restart has no relationship to this independent service. An
 	// explicit stop of THIS service may signal Incus/guests and affect jobs.
@@ -74,7 +127,8 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	}
 	return b.Buffer.Write(p)
 }
-func verifyManager() error {
+func verifyManager() error { return verifyManagerMode(false) }
+func verifyManagerMode(private bool) error {
 	if os.Geteuid() != 0 {
 		return errOwner
 	}
@@ -106,7 +160,7 @@ func verifyManager() error {
 	if err != nil {
 		return errOwner
 	}
-	if verifyProperties(out.String(), string(membership), os.Getpid()) != nil {
+	if verifyPropertiesMode(out.String(), string(membership), os.Getpid(), private) != nil || private && !sameManagerCgroup() {
 		return errOwner
 	}
 	var fs unix.Statfs_t
@@ -116,6 +170,9 @@ func verifyManager() error {
 	return nil
 }
 func verifyProperties(data, membership string, pid int) error {
+	return verifyPropertiesMode(data, membership, pid, false)
+}
+func verifyPropertiesMode(data, membership string, pid int, private bool) error {
 	fields := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSuffix(data, "\n"), "\n") {
 		key, value, ok := strings.Cut(line, "=")
@@ -158,7 +215,14 @@ func verifyProperties(data, membership string, pid int) error {
 			}
 		}
 	}
-	if strings.TrimSpace(membership) != "0::/system.slice/"+unit {
+	expectedMembership := "0::/system.slice/" + unit
+	if private {
+		if fields["ProtectControlGroups"] != "private" || fields["ProtectSystem"] != "strict" {
+			return errOwner
+		}
+		expectedMembership = "0::/"
+	}
+	if strings.TrimSpace(membership) != expectedMembership {
 		return errOwner
 	}
 	return nil

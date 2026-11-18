@@ -179,6 +179,10 @@ func Boot() error {
 	if e != nil {
 		return ErrRefused
 	}
+	if e = closeGuestNetwork(); e != nil {
+		return ErrRefused
+	}
+	record.GuestNetworkClosed = true
 	record.State = "process_tree_exited_unqualified"
 	record.At = time.Now().UTC()
 	record.ExitCode = code
