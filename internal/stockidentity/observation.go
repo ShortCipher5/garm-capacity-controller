@@ -118,15 +118,27 @@ func ParseFacts(raw []byte) (Facts, error) {
 	}
 	return f, nil
 }
-func Observe(ctx context.Context, c Configuration) (Observation, error) {
-	fail := func() (Observation, error) { return Observation{}, ErrObservation }
-	if ctx == nil || ctx.Err() != nil || !uuid(c.Pool) || c.Provider == "" || c.Token == "" || strings.ContainsAny(c.Token, "\r\n\x00") || c.TLS == nil || c.TLS.InsecureSkipVerify || c.TLS.RootCAs == nil || c.TLS.VerifyConnection != nil || c.TLS.VerifyPeerCertificate != nil {
-		return fail()
+
+// ValidateConfiguration checks transport syntax without network access or minting provenance.
+func ValidateConfiguration(c Configuration) error {
+	if !uuid(c.Pool) || c.Provider == "" || c.Token == "" || strings.ContainsAny(c.Token, "\r\n\x00") || c.TLS == nil || c.TLS.InsecureSkipVerify || c.TLS.RootCAs == nil || c.TLS.VerifyConnection != nil || c.TLS.VerifyPeerCertificate != nil {
+		return ErrObservation
 	}
 	u, e := url.Parse(c.Endpoint)
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return ErrObservation
+	}
+	if c.TLS.MaxVersion != 0 && (c.TLS.MaxVersion < tls.VersionTLS12 || c.TLS.MaxVersion < c.TLS.MinVersion) {
+		return ErrObservation
+	}
+	return nil
+}
+func Observe(ctx context.Context, c Configuration) (Observation, error) {
+	fail := func() (Observation, error) { return Observation{}, ErrObservation }
+	if ctx == nil || ctx.Err() != nil || ValidateConfiguration(c) != nil {
 		return fail()
 	}
+	u, _ := url.Parse(c.Endpoint)
 	u.Path = "/api/v1"
 	base := u.String()
 	trust := c.TLS.Clone()

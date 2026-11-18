@@ -18,6 +18,7 @@ import (
 )
 
 type adminConfiguration struct {
+	BrokerProfileRecipesFile           string                     `json:"broker_profile_recipes_file,omitempty"`
 	Firstboot                          *firstbootConfiguration    `json:"isolated_inventory_firstboot,omitempty"`
 	EnableFirstboot                    bool                       `json:"-"`
 	Bootstrap                          *bootstrapConfiguration    `json:"prepared_host_bootstrap,omitempty"`
@@ -89,6 +90,17 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		if err := handler.EnableManagement(managementToken); err != nil {
 			cleanup()
 			return nil, noop, err
+		}
+	}
+	if config.BrokerProfileRecipesFile != "" {
+		recipes, e := loadBrokerProfileRecipes(config.BrokerProfileRecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetBrokerProfileRecipes(recipes); e != nil {
+			cleanup()
+			return nil, noop, e
 		}
 	}
 	if config.GarmManagement != nil {
