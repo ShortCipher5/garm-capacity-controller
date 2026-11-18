@@ -50,7 +50,7 @@ func NewService(store *admission.SQLiteStore, source *garmapi.DemandClient, opt 
 		return nil, capacitybroker.ErrSnapshot
 	}
 	runtimeBound := store.RuntimeLineageBound()
-	if !runtimeBound && (source == nil || source.SourceIdentity() == "") {
+	if !runtimeBound && source == nil {
 		return nil, capacitybroker.ErrSnapshot
 	}
 	return &Service{status: LoopStatus{State: "not_started"}, runtimeBound: runtimeBound, interval: interval, cycle: func(ctx context.Context) (GrantCycleResult, error) { return GrantCycle(ctx, store, source, opt, ttl) }}, nil

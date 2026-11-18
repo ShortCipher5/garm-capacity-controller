@@ -6,6 +6,8 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 	"time"
 )
 
@@ -13,8 +15,9 @@ import (
 // Runtime native/management authority is deliberately unavailable in this
 // version; a requested service reports blocked without issuing live grants.
 type allocatorLoopConfiguration struct {
-	IntervalSeconds int `json:"interval_seconds"`
-	GrantTTLSeconds int `json:"grant_ttl_seconds"`
+	RepositoryIDs   []string `json:"repository_ids,omitempty"`
+	IntervalSeconds int      `json:"interval_seconds"`
+	GrantTTLSeconds int      `json:"grant_ttl_seconds"`
 }
 
 func validateAllocatorLoop(c *allocatorLoopConfiguration) error {
@@ -27,6 +30,9 @@ func validateAllocatorLoop(c *allocatorLoopConfiguration) error {
 	return nil
 }
 func startAllocatorLoop(ctx context.Context, c *allocatorLoopConfiguration, store *admission.SQLiteStore) (*brokerinput.Service, func(), error) {
+	return startAllocatorLoopSource(ctx, c, store, nil)
+}
+func startAllocatorLoopSource(ctx context.Context, c *allocatorLoopConfiguration, store *admission.SQLiteStore, source *garmapi.DemandClient) (*brokerinput.Service, func(), error) {
 	noop := func() {}
 	if c == nil {
 		return nil, noop, nil
@@ -34,7 +40,7 @@ func startAllocatorLoop(ctx context.Context, c *allocatorLoopConfiguration, stor
 	if validateAllocatorLoop(c) != nil || ctx == nil || store == nil || !store.RuntimeLineageBound() {
 		return nil, noop, brokerinput.ErrRuntimeAuthority
 	}
-	service, err := brokerinput.NewService(store, nil, capacitybroker.Options{}, time.Duration(c.GrantTTLSeconds)*time.Second, time.Duration(c.IntervalSeconds)*time.Second)
+	service, err := brokerinput.NewService(store, source, capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 1000}, time.Duration(c.GrantTTLSeconds)*time.Second, time.Duration(c.IntervalSeconds)*time.Second)
 	if err != nil {
 		return nil, noop, err
 	}
@@ -47,4 +53,39 @@ func startAllocatorLoop(ctx context.Context, c *allocatorLoopConfiguration, stor
 		return nil, noop, err
 	}
 	return service, noop, nil
+}
+
+// managedAllocatorSource constructs a real read-only transport without observing,
+// activating or writing. Its identity stays empty until an authenticated read.
+func managedAllocatorSource(c configuration) (*garmapi.DemandClient, error) {
+	if c.AllocatorLoop == nil || len(c.AllocatorLoop.RepositoryIDs) == 0 {
+		return nil, nil
+	}
+	if !c.Garm.ManagedProxy || c.Garm.TokenFile != "" {
+		return nil, brokerinput.ErrRuntimeAuthority
+	}
+	trust, err := securefiles.LoadTLS(c.Garm.TLS)
+	if err != nil {
+		return nil, err
+	}
+	return garmapi.NewManagedDemand(c.Garm.Endpoint, c.Garm.ProxyServerKeyPin, c.Controller, trust, c.Garm.Providers, c.AllocatorLoop.RepositoryIDs)
+}
+func startConfiguredAllocatorLoop(ctx context.Context, c configuration, store *admission.SQLiteStore) (*brokerinput.Service, func(), error) {
+	source, err := managedAllocatorSource(c)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	service, stop, err := startAllocatorLoopSource(ctx, c.AllocatorLoop, store, source)
+	if err != nil {
+		if source != nil {
+			source.Close()
+		}
+		return nil, func() {}, err
+	}
+	return service, func() {
+		stop()
+		if source != nil {
+			source.Close()
+		}
+	}, nil
 }

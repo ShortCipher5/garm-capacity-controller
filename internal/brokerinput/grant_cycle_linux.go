@@ -28,12 +28,20 @@ type GrantCycleResult struct {
 // source identity. It does not mutate pool settings, retire physical reservations, or activate
 // native execution. The existing grant batch is the durable cycle intent.
 func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garmapi.DemandClient, opt capacitybroker.Options, ttl time.Duration) (GrantCycleResult, error) {
-	if ctx == nil || ctx.Err() != nil || store == nil || source == nil || source.SourceIdentity() == "" || ttl < time.Minute || ttl > time.Hour {
+	if ctx == nil || ctx.Err() != nil || store == nil || source == nil || ttl < time.Minute || ttl > time.Hour {
 		return GrantCycleResult{}, capacitybroker.ErrSnapshot
 	}
 	observation, err := source.Observe(ctx)
 	if err != nil {
 		return GrantCycleResult{}, err
+	}
+	// Managed-source identity is minted by the first verified response, not
+	// configuration. Capture it only after observation and before ANY ledger
+	// maintenance or issuance; a serialized/caller-built observation cannot
+	// provide the private matching source identity.
+	sourceIdentity := source.SourceIdentity()
+	if sourceIdentity == "" || observation.SourceIdentity() != sourceIdentity {
+		return GrantCycleResult{}, capacitybroker.ErrSnapshot
 	}
 	// The clock is sampled after transport completion, not before its latency.
 	opt.Now = time.Now().UTC()
@@ -42,7 +50,7 @@ func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garma
 		return GrantCycleResult{}, err
 	}
 	// Validate source/profile/freshness before any maintenance write.
-	if _, _, err = enrolledCycle(state, charges, observation, source.SourceIdentity(), opt, ttl); err != nil {
+	if _, _, err = enrolledCycle(state, charges, observation, sourceIdentity, opt, ttl); err != nil {
 		return GrantCycleResult{}, err
 	}
 	// Only the canonical UNUSED→EXPIRED transition can release these charges.
@@ -57,7 +65,7 @@ func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garma
 		return GrantCycleResult{}, err
 	}
 	opt.Now = time.Now().UTC()
-	plan, batch, err := enrolledCycle(state, charges, observation, source.SourceIdentity(), opt, ttl)
+	plan, batch, err := enrolledCycle(state, charges, observation, sourceIdentity, opt, ttl)
 	if err != nil {
 		return GrantCycleResult{}, err
 	}
