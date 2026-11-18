@@ -244,7 +244,7 @@ func TestBrokerGrantOldWriterSQLAndVersionRollbackBlocked(t *testing.T) {
 	if _, e = s.Admit(context.Background(), Request{Key: "new", Pool: "app", Host: "a", Resources: placementRequest("x").Resources}); e == nil {
 		t.Fatal("schema rollback accepted")
 	}
-	if _, e = s.db.Exec("PRAGMA user_version=22"); e != nil {
+	if _, e = s.db.Exec("PRAGMA user_version=23"); e != nil {
 		t.Fatal(e)
 	}
 }
