@@ -101,7 +101,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
-	allocator, closeAllocator, err := startAllocatorLoop(ctx, config.AllocatorLoop, store)
+	allocator, closeAllocator, err := startConfiguredAllocatorLoop(ctx, config, store)
 	if err != nil {
 		return err
 	}
