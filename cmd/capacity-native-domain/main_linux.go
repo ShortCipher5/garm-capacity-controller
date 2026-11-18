@@ -26,8 +26,8 @@ import (
 const unit = "garm-capacity-native-domain.service"
 
 var errOwner = errors.New("independently managed native-domain service required")
-var errConfinement = errors.New("native control activation refused: exclusive native process, device and network confinement is not implemented")
-var properties = []string{"ProtectSystem", "ProtectControlGroups", "Id", "MainPID", "ControlGroup", "ExitType", "Restart", "Delegate", "KillMode", "SendSIGKILL", "TimeoutStopUSec", "StopWhenUnneeded", "PartOf", "BindsTo", "BoundBy", "ConsistsOf", "PropagatesStopTo", "StopPropagatedFrom", "TriggeredBy", "ExecStop", "ExecStopPost", "ExecReload", "WatchdogUSec", "RuntimeMaxUSec", "RestartForceExitStatus", "OOMPolicy", "Requires", "Requisite", "Wants", "Conflicts", "ConflictedBy", "OnFailure", "OnSuccess", "UpheldBy", "Upholds", "WantedBy", "RequiredBy", "RequisiteOf", "Triggers", "Type", "ExecStartPre", "ExecStartPost", "ExecCondition", "FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction"}
+var errConfinement = errors.New("native control activation refused: exclusive native process, device and network confinement is not qualified for activation")
+var properties = []string{"StandardOutput", "StandardError", "ProtectSystem", "ProtectControlGroups", "Id", "MainPID", "ControlGroup", "ExitType", "Restart", "Delegate", "KillMode", "SendSIGKILL", "TimeoutStopUSec", "StopWhenUnneeded", "PartOf", "BindsTo", "BoundBy", "ConsistsOf", "PropagatesStopTo", "StopPropagatedFrom", "TriggeredBy", "ExecStop", "ExecStopPost", "ExecReload", "WatchdogUSec", "RuntimeMaxUSec", "RestartForceExitStatus", "OOMPolicy", "Requires", "Requisite", "Wants", "Conflicts", "ConflictedBy", "OnFailure", "OnSuccess", "UpheldBy", "Upholds", "WantedBy", "RequiredBy", "RequisiteOf", "Triggers", "Type", "ExecStartPre", "ExecStartPost", "ExecCondition", "FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction"}
 
 func main() {
 	if err := run(os.Args[1:], os.Stderr); err != nil {
@@ -41,11 +41,19 @@ func run(args []string, output io.Writer) error {
 	directory := flags.String("domain-dir", "", "fresh root-owned domain directory")
 	binary := flags.String("incusd", "", "qualified root-owned Incus daemon executable")
 	helper := flags.String("launcher", "", "qualified root-owned capacity-native-launch executable")
+	capsulePath := flags.String("capsule-config", "", "root0600 fresh capsule configuration (activation refused)")
 	controlPath := flags.String("control-config", "", "root0600 experimental authenticated owner control configuration")
 	renderUnit := flags.Bool("render-bounded-unit", false, "print required manager unit; never install or start")
 	boundaryPath := flags.String("boundary-config", "", "root0600 finite domain-boundary configuration (experimental, no activation)")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *capsulePath != "" {
+		if flags.NArg() != 0 || *directory != "" || *binary != "" || *helper != "" || *controlPath != "" || *boundaryPath != "" || *renderUnit {
+			return errOwner
+		}
+		// No config read, manager request, device install or native birth.
+		return errConfinement
 	}
 	if flags.NArg() != 0 || *directory == "" || *binary == "" || *helper == "" {
 		return errOwner
@@ -217,7 +225,7 @@ func verifyPropertiesMode(data, membership string, pid int, private bool) error 
 	}
 	expectedMembership := "0::/system.slice/" + unit
 	if private {
-		if fields["ProtectControlGroups"] != "private" || fields["ProtectSystem"] != "strict" {
+		if fields["ProtectControlGroups"] != "private" || fields["ProtectSystem"] != "strict" || fields["StandardOutput"] != "null" || fields["StandardError"] != "null" {
 			return errOwner
 		}
 		expectedMembership = "0::/"

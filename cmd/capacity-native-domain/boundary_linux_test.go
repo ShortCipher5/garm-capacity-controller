@@ -32,11 +32,17 @@ func TestBoundedUnitCreatesFinitePrivateNamespaceWithoutEnable(t *testing.T) {
 }
 func TestPrivateManagerModeDoesNotAcceptHostRootOrUnconfinedUnit(t *testing.T) {
 	good := strings.Replace(strings.Replace(validProperties(), "ProtectControlGroups=\n", "ProtectControlGroups=private\n", 1), "ProtectSystem=\n", "ProtectSystem=strict\n", 1)
+	good = strings.ReplaceAll(strings.ReplaceAll(good, "StandardOutput=\n", "StandardOutput=null\n"), "StandardError=\n", "StandardError=null\n")
 	if verifyPropertiesMode(good, "0::/\n", 42, true) != nil {
 		t.Fatal("private contract")
 	}
 	if verifyPropertiesMode(good, "0::/system.slice/"+unit, 42, true) == nil {
 		t.Fatal("host cg")
+	}
+	for _, key := range []string{"StandardOutput", "StandardError"} {
+		if verifyPropertiesMode(strings.Replace(good, key+"=null", key+"=journal", 1), "0::/", 42, true) == nil {
+			t.Fatal("unbounded external journal", key)
+		}
 	}
 	if verifyPropertiesMode(strings.Replace(good, "ProtectSystem=strict", "ProtectSystem=no", 1), "0::/", 42, true) == nil {
 		t.Fatal("writable host")
