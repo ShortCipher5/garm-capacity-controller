@@ -28,7 +28,10 @@ const bridgeStartOp = "22222222-2222-4222-8222-222222222222"
 const bridgeResource = "33333333-3333-4333-8333-333333333333"
 
 type nativeBridgeOwner struct {
-	payload protectedboot.Payload
+	payload          protectedboot.Payload
+	retirementClaims map[string]admission.NativeRetirementClaim
+	retirementCalls  map[string]int
+	retirementCancel context.CancelFunc
 
 	journalAt    time.Time
 	journalCalls int
@@ -51,6 +54,9 @@ type nativeBridgeOwner struct {
 func (o *nativeBridgeOwner) serve(w http.ResponseWriter, r *http.Request) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.serveRetirement(w, r) {
+		return
+	}
 	if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/journal") {
 		o.journalCalls++
 		env := o.parent.Envelope

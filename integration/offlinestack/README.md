@@ -36,3 +36,13 @@ Cases cover:
 A passing suite proves this offline protocol/accounting composition only. It is
 not a deployment certificate or evidence that the real kernel/owner/boot chain
 has been exercised in this environment.
+
+Retirement coverage extends the same actual managed/JIT/ledger/observer path with
+STOP and DELETE protocol doubles: successful completion, either POST response
+lost after its durable one-use claim, unknown STOP preventing DELETE, and unknown
+DELETE surviving reopen without resubmission. Every case retains the original
+capacity charge; `ReleaseAuthorized` remains false. These observations do not
+prove real process exit, physical storage removal, or a qualified host boundary.
+The retirement fixture uses a 10-second terminal polling budget to accommodate
+complete provenance validation under the race detector; production defaults and
+explicit timeout safety tests are unchanged.

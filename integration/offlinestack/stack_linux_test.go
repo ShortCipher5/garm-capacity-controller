@@ -33,7 +33,7 @@ import (
 // producer and native coordinator are real implementations. The native owner
 // boundary is explicitly a test TLS server: no Incus, ZFS, PID1 or live runner.
 func TestOfflineManagedDemandThroughNativeCreationAndRestart(t *testing.T) {
-	for _, mode := range []string{"success", "grant-result-lost", "journal-ack-lost", "create-ack-lost", "bootstrap-ack-lost", "start-ack-lost"} {
+	for _, mode := range []string{"retire-stop-cancel-restart", "retire-success", "retire-stop-ack-lost", "retire-delete-ack-lost", "retire-stop-unknown", "retire-delete-unknown", "success", "grant-result-lost", "journal-ack-lost", "create-ack-lost", "bootstrap-ack-lost", "start-ack-lost"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			const controller = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -175,7 +175,7 @@ func TestOfflineManagedDemandThroughNativeCreationAndRestart(t *testing.T) {
 			b.InstanceToken = "instance-secret"
 			b.OSType = common.Linux
 			result, e := facade().CreateStockProvider(ctx, b, f.auth)
-			success := mode == "success" || mode == "grant-result-lost" || mode == "journal-ack-lost"
+			success := strings.HasPrefix(mode, "retire-") || mode == "success" || mode == "grant-result-lost" || mode == "journal-ack-lost"
 			if success {
 				if e != nil || result.Status != common.InstanceRunning {
 					t.Fatal("complete offline path failed", e)
@@ -210,6 +210,9 @@ func TestOfflineManagedDemandThroughNativeCreationAndRestart(t *testing.T) {
 			f.owner.mu.Unlock()
 			if success {
 				observeTerminal(t, &f, repository, permit, reopen)
+				if strings.HasPrefix(mode, "retire-") {
+					exerciseRetirement(t, &f, permit, reopen)
+				}
 			}
 			state, e := f.s.ReadBrokerGrantState(ctx)
 			if e != nil || state.Allocated.Global.Runners != 1 || len(state.Grants) != 1 {
