@@ -344,5 +344,8 @@ func sqliteCheckArtifact(ctx context.Context, s *SQLiteStore) error {
 	if err := s.checkBrokerGrantArchives(ctx); err != nil {
 		return err
 	}
+	if err := sqliteCheckNativeExecutions(ctx, s); err != nil {
+		return err
+	}
 	return sqliteCheckPoolRoutes(ctx, s)
 }
