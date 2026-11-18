@@ -14,6 +14,7 @@ import (
 )
 
 type ProviderProfileConfiguration struct {
+	Origin       *ProviderOriginConfiguration
 	TLS          securefiles.TLSFiles
 	ServerKeyPin string
 }
