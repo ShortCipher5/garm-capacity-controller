@@ -27,6 +27,9 @@ func readVersions(r io.ReaderAt) (elfVersions, error) {
 		return elfVersions{}, ErrImage
 	}
 	defer f.Close()
+	if f.SectionByType(elf.SHT_DYNSYM) == nil && (f.SectionByType(elf.SHT_GNU_VERNEED) != nil || f.SectionByType(elf.SHT_GNU_VERDEF) != nil || f.SectionByType(elf.SHT_GNU_VERSYM) != nil) {
+		return elfVersions{}, ErrImage
+	}
 	out := elfVersions{defined: map[string]bool{}, needed: map[string][]string{}, imports: map[string][]versionedSymbol{}, exports: map[string]map[string]elf.SymType{}}
 	if f.SectionByType(elf.SHT_GNU_VERDEF) != nil {
 		defs, e := f.DynamicVersions()
@@ -62,7 +65,26 @@ func readVersions(r io.ReaderAt) (elfVersions, error) {
 		if err != nil {
 			return elfVersions{}, ErrImage
 		}
-		for _, sym := range symbols {
+		var indices []byte
+		if table := f.SectionByType(elf.SHT_GNU_VERSYM); table != nil {
+			indices, err = table.Data()
+			// One entry per dynamic symbol, including the skipped null entry.
+			if err != nil || table.Entsize != 2 || len(indices)/2 != len(symbols)+1 || len(indices)%2 != 0 {
+				return elfVersions{}, ErrImage
+			}
+		} else if len(out.needed) != 0 {
+			return elfVersions{}, ErrImage
+		}
+		for i, sym := range symbols {
+			if indices != nil {
+				index := f.ByteOrder.Uint16(indices[2*(i+1):]) & 0x7fff
+				// debug/elf deliberately returns an empty version for an
+				// unresolved index. Do not treat malformed version metadata
+				// as an unversioned import and silently skip its contract.
+				if index > 1 && (!sym.HasVersion || sym.Version == "") {
+					return elfVersions{}, ErrImage
+				}
+			}
 			if sym.Name == "" {
 				continue
 			}

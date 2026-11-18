@@ -147,3 +147,27 @@ func TestRealELFVersionedExportVisibility(t *testing.T) {
 		t.Fatal("hidden export accepted")
 	}
 }
+
+func TestMalformedGNUIndicesCannotHideRequiredImport(t *testing.T) {
+	for _, mode := range []string{"unknown-index", "truncated-table", "odd-table", "missing-table", "missing-dynsym"} {
+		raw := versionELFFixture()
+		o := binary.LittleEndian
+		section := 64 + 3*64
+		off := o.Uint64(raw[section+24:])
+		switch mode {
+		case "unknown-index":
+			o.PutUint16(raw[off+2:], 99)
+		case "truncated-table":
+			o.PutUint64(raw[section+32:], 2)
+		case "odd-table":
+			o.PutUint64(raw[section+32:], 3)
+		case "missing-table":
+			o.PutUint32(raw[section+4:], uint32(elf.SHT_PROGBITS))
+		case "missing-dynsym":
+			o.PutUint32(raw[64+2*64+4:], uint32(elf.SHT_PROGBITS))
+		}
+		if _, e := readVersions(bytes.NewReader(raw)); e == nil {
+			t.Fatal("malformed GNU metadata accepted", mode)
+		}
+	}
+}
