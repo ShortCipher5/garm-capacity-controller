@@ -87,6 +87,10 @@ func TestFacadeDeleteWithoutQualifiedAuthorityNeverDispatches(t *testing.T) {
 			if after.Reservations[key("controller-a", "pool-a", "runner-1")].State != before.Reservations[key("controller-a", "pool-a", "runner-1")].State {
 				t.Fatal("blocked request mutated lifecycle")
 			}
+			recovery, recoveryErr := fx.store.RecoverRetirement(ctx, key("controller-a", "pool-a", "runner-1"))
+			if recoveryErr != nil || recovery.State != "authority_blocked" {
+				t.Fatal("missing held retirement", recoveryErr)
+			}
 			if _, err := fx.store.LookupRelease(ctx, key("controller-a", "pool-a", "runner-1")); err == nil {
 				t.Fatal("blocked retirement wrote release")
 			}
