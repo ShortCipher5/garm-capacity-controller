@@ -36,3 +36,20 @@ func TestZeroObservationAndReaderRefuse(t *testing.T) {
 		t.Fatal("nil reader")
 	}
 }
+
+func TestFilesystemIdentityDoesNotGrantQuota(t *testing.T) {
+	raw := []byte("tank/birth/runtime\tguid\t123\ntank/birth/runtime\ttype\tfilesystem\ntank/birth/runtime\tquota\t0\n")
+	v, e := parseFilesystem(raw, "tank/birth/runtime")
+	if e != nil || v.GUID() != "123" || v.Quota() != 0 {
+		t.Fatal(v, e)
+	}
+	if _, e := parse(raw, "tank/birth/runtime", 0, time.Now()); e == nil {
+		t.Fatal("zero quota granted")
+	}
+	for _, bad := range []string{"none", "-1", "00"} {
+		r := strings.Replace(string(raw), "quota\t0", "quota\t"+bad, 1)
+		if _, e := parseFilesystem([]byte(r), "tank/birth/runtime"); e == nil {
+			t.Fatal(bad)
+		}
+	}
+}
