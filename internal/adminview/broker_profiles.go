@@ -70,10 +70,11 @@ func brokerRecipeRevision(r BrokerProfileRecipe) string {
 		digests[sequence] = p.Digest()
 	}
 	raw, _ := json.Marshal(struct {
-		ID, Endpoint, TrustIdentity string
-		Request                     admission.BrokerPoolProfileRequest
-		Policies                    map[int64]string
-	}{r.ID, r.Transport.Endpoint, r.TrustIdentity, r.Request, digests})
+		ID, Endpoint, TrustIdentity              string
+		ManagedServerKeyPin, ManagedControllerID string
+		Request                                  admission.BrokerPoolProfileRequest
+		Policies                                 map[int64]string
+	}{r.ID, r.Transport.Endpoint, r.TrustIdentity, r.Transport.ManagedServerKeyPin, r.Transport.ManagedControllerID, r.Request, digests})
 	hash := sha256.Sum256(raw)
 	return hex.EncodeToString(hash[:])
 }
