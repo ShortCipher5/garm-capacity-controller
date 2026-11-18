@@ -38,15 +38,18 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
-	Sequence     int64
-	Policy       BrokerPolicy
-	Config       Config
-	Ready        bool
-	Epoch        int64
-	Reservations map[string]Reservation
-	Inventory    []InventoryResource
-	Released     map[string]bool
-	Grants       []BrokerGrant
+	Allocated      Allocations
+	HostBindings   map[string]HostBinding
+	ExecutionPlans map[string]ExecutionPlan
+	Sequence       int64
+	Policy         BrokerPolicy
+	Config         Config
+	Ready          bool
+	Epoch          int64
+	Reservations   map[string]Reservation
+	Inventory      []InventoryResource
+	Released       map[string]bool
+	Grants         []BrokerGrant
 }
 
 const sqliteBrokerGrantSchema = `
@@ -110,7 +113,7 @@ func grantProfileMatches(g BrokerGrantSpec, r PlacementRequest, a StockProviderA
 	return g.Authority == a && g.Resources == r.Resources && reflect.DeepEqual(g.Execution, e) && contains(r.Hosts, g.Host)
 }
 func sqliteBrokerGrants(tx *sql.Tx) ([]BrokerGrant, error) {
-	rows, e := tx.Query("SELECT grant_id,payload,payload_hash,state,COALESCE(request_key,'') FROM broker_grants ORDER BY grant_id LIMIT 100001")
+	rows, e := tx.Query("SELECT grant_id,payload,payload_hash,state,COALESCE(request_key,'') FROM broker_grants WHERE payload!='' ORDER BY grant_id LIMIT 100001")
 	if e != nil {
 		return nil, e
 	}
@@ -225,6 +228,9 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 			return e
 		}
 		v.Ready = v.Ready && sqliteObservationsFresh(v.Config, s.now())
+		if v.HostBindings, e = sqliteHostBindings(tx, v.Config); e != nil {
+			return e
+		}
 		if v.Policy, e = sqliteBrokerPolicy(tx); e != nil {
 			return e
 		}
@@ -240,8 +246,22 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
 			return e
 		}
-		if _, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {
+		if v.Allocated, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {
 			return e
+		}
+		v.ExecutionPlans = map[string]ExecutionPlan{}
+		for _, g := range v.Grants {
+			if g.State != "consumed" || v.Released[g.RequestKey] {
+				continue
+			}
+			if _, active := v.Reservations[g.RequestKey]; !active {
+				continue
+			}
+			p, err := executionPlanRecord(tx, g.RequestKey)
+			if err != nil {
+				return err
+			}
+			v.ExecutionPlans[g.RequestKey] = p
 		}
 		return tx.QueryRow("SELECT COALESCE(max(sequence),0) FROM audit").Scan(&v.Sequence)
 	})
@@ -285,29 +305,22 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 			if stored != hash {
 				return ErrConflict
 			}
-			all, e := sqliteBrokerGrants(tx)
+			if e := validateBrokerArchiveMetadata(tx); e != nil {
+				return e
+			}
+			loaded, e := loadBrokerBatch(tx, b.ID)
 			if e != nil {
 				return e
 			}
-			for index := range b.Grants {
-				id := brokerGrantID(b.ID, index)
-				for _, g := range all {
-					if g.ID == id {
-						result = append(result, g)
-					}
-				}
-			}
-			if len(result) != len(b.Grants) {
-				return ErrBrokerGrant
-			}
-			return nil
+			result, e = brokerBatchGrantRows(tx, loaded)
+			return e
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 
 		var grantCount, batchCount int
-		if tx.QueryRow("SELECT count(*) FROM broker_grants").Scan(&grantCount) != nil || tx.QueryRow("SELECT count(*) FROM broker_grant_batches").Scan(&batchCount) != nil {
+		if tx.QueryRow("SELECT count(*) FROM broker_grants WHERE payload!=''").Scan(&grantCount) != nil || tx.QueryRow("SELECT count(*) FROM broker_grant_batches WHERE payload!=''").Scan(&batchCount) != nil {
 			return ErrBrokerGrant
 		}
 		if len(b.Grants) > historyLimit || grantCount > historyLimit-len(b.Grants) || batchCount >= historyLimit {
@@ -404,30 +417,24 @@ func (s *SQLiteStore) RetireUnusedBrokerGrant(ctx context.Context, id string, ex
 		return ErrBrokerGrant
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		all, e := sqliteBrokerGrants(tx)
+		g, e := lookupBrokerGrant(tx, id)
 		if e != nil {
 			return e
 		}
-		for _, g := range all {
-			if g.ID != id {
-				continue
-			}
-			target := "revoked"
-			if expire {
-				target = "expired"
-			}
-			if g.State == target {
-				return nil
-			}
-			if g.State != "unused" || (expire && s.now().Before(g.Spec.ExpiresAt)) {
-				return ErrBrokerGrant
-			}
-			if _, e = tx.Exec("UPDATE broker_grants SET state=? WHERE grant_id=? AND state='unused'", target, id); e != nil {
-				return e
-			}
-			return sqliteAudit(tx, "broker_grant_"+target, id, s.now())
+		target := "revoked"
+		if expire {
+			target = "expired"
 		}
-		return ErrBrokerGrant
+		if g.State == target {
+			return nil
+		}
+		if g.State != "unused" || (expire && s.now().Before(g.Spec.ExpiresAt)) {
+			return ErrBrokerGrant
+		}
+		if _, e = tx.Exec("UPDATE broker_grants SET state=? WHERE grant_id=? AND state='unused'", target, id); e != nil {
+			return e
+		}
+		return sqliteAudit(tx, "broker_grant_"+target, id, s.now())
 	})
 }
 
@@ -473,24 +480,27 @@ func checkStockGrantLink(tx *sql.Tx, p ExecutionPlan, origin stockProviderOrigin
 	if legacy == 1 {
 		return nil
 	}
-	all, e := sqliteBrokerGrants(tx)
+	var id string
+	if e := tx.QueryRow("SELECT grant_id FROM broker_grants WHERE request_key=?", p.Request.Key).Scan(&id); e != nil {
+		return ErrBrokerGrant
+	}
+	g, e := lookupBrokerGrant(tx, id)
 	if e != nil {
 		return e
 	}
-	for _, g := range all {
-		if g.State == "consumed" && g.RequestKey == p.Request.Key {
-			if g.Spec.Host != p.Request.Host || g.Spec.HostBindingSequence != p.HostBindingSequence || !grantProfileMatches(g.Spec, PlacementRequest{Execution: p.Execution, Resources: p.Request.Resources, Hosts: []string{p.Request.Host}}, origin.Authority) {
-				return ErrBrokerGrant
-			}
-			return nil
-		}
+	if g.State == "consumed" && g.RequestKey == p.Request.Key && g.Spec.Host == p.Request.Host && g.Spec.HostBindingSequence == p.HostBindingSequence && grantProfileMatches(g.Spec, PlacementRequest{Execution: p.Execution, Resources: p.Request.Resources, Hosts: []string{p.Request.Host}}, origin.Authority) {
+		return nil
 	}
+
 	return ErrBrokerGrant
 }
 
 // Permanent issuance manifests make a missing grant fail closed instead of
 // silently freeing a charge. The manifests and audit sequence are canonical.
 func validateBrokerGrantHistory(tx *sql.Tx, grants []BrokerGrant) error {
+	if e := validateBrokerArchiveMetadata(tx); e != nil {
+		return e
+	}
 	var missing bool
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM audit a LEFT JOIN broker_grant_batches b ON b.sequence=a.sequence AND b.batch_id=a.request_key WHERE a.kind='broker_grants_issued' AND b.batch_id IS NULL LIMIT 1)`).Scan(&missing); err != nil {
 		return err
@@ -503,7 +513,7 @@ func validateBrokerGrantHistory(tx *sql.Tx, grants []BrokerGrant) error {
 	for _, g := range grants {
 		byID[g.ID] = g
 	}
-	rows, e := tx.Query("SELECT b.batch_id,b.payload,b.payload_hash,a.kind,a.request_key FROM broker_grant_batches b LEFT JOIN audit a ON a.sequence=b.sequence ORDER BY b.batch_id LIMIT 100001")
+	rows, e := tx.Query("SELECT b.batch_id,b.payload,b.payload_hash,a.kind,a.request_key FROM broker_grant_batches b LEFT JOIN audit a ON a.sequence=b.sequence WHERE b.payload!='' ORDER BY b.batch_id LIMIT 100001")
 	if e != nil {
 		return e
 	}

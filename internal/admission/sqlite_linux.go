@@ -34,7 +34,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 17
+const sqliteCurrentVersion = 18
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -337,6 +337,18 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 			}
 		}
 
+		if version < 18 {
+			if _, err := tx.Exec(sqliteBrokerArchiveSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v18", "", s.now()); err != nil {
+				return err
+			}
+		}
+
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -345,6 +357,10 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 		return nil, err
 	}
 	s.initialized = true
+	if err := s.checkBrokerGrantArchives(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -665,7 +681,7 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		if !fits(allocated.Global, req.Resources, config.Global) || !fits(allocated.Hosts[req.Host], req.Resources, host.Budget) || !fits(allocated.Pools[req.Pool], req.Resources, pool.Budget) {
 			return deny("denied_capacity", ErrDenied)
 		}
-		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,'creating',?,17)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
+		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,'creating',?,18)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
