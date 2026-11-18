@@ -19,7 +19,9 @@ import (
 )
 
 type adminConfiguration struct {
-	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
+	NativePreparation                  *nativePreparationConfiguration `json:"native_preparation,omitempty"`
+	EnableNativePreparation            bool                            `json:"-"`
+	BrokerProfileRecipesFile           string                          `json:"broker_profile_recipes_file,omitempty"`
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
@@ -256,6 +258,20 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		}
 		old := cleanup
 		cleanup = func() { service.Close(); old() }
+	}
+	if config.EnableNativePreparation {
+		targets, token, closePreparation, e := loadNativePreparation(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativePreparation(targets, token); e != nil {
+			closePreparation()
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { closePreparation(); old() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

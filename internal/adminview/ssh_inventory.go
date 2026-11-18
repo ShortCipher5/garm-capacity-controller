@@ -19,7 +19,7 @@ import (
 func (h *Handler) SetSSHInventory(service *sshinventory.Service, token string) error {
 	raw, e := hex.DecodeString(token)
 	hash := sha256.Sum256([]byte("Bearer " + token))
-	if service == nil || e != nil || subtle.ConstantTimeCompare(hash[:], h.rotationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.firstbootHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.bootstrapHash[:]) == 1 || len(raw) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(hash[:], h.sshTargetsHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.tokenHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.writeHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.onboardingHash[:]) == 1 {
+	if service == nil || e != nil || subtle.ConstantTimeCompare(hash[:], h.nativePreparationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.rotationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.firstbootHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.bootstrapHash[:]) == 1 || len(raw) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(hash[:], h.sshTargetsHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.tokenHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.writeHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.onboardingHash[:]) == 1 {
 		return ErrConfiguration
 	}
 	h.sshInventory = service

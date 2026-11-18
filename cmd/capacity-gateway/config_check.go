@@ -206,6 +206,13 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
+	if a.EnableNativePreparation {
+		_, token, closePreparation, e := loadNativePreparation(a)
+		closePreparation()
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
 	if a.EnableFirstboot {
 		_, _, token, e := loadFirstboot(a)
 		if e != nil || !validToken([]byte(token)) {

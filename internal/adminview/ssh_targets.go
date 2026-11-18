@@ -22,7 +22,7 @@ func (h *Handler) SetSSHTargetManagement(registry *sshinventory.Registry, token 
 	if registry == nil || e != nil || len(raw) != 32 || token != strings.ToLower(token) {
 		return ErrConfiguration
 	}
-	for _, other := range [][32]byte{h.rotationHash, h.firstbootHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.bootstrapHash} {
+	for _, other := range [][32]byte{h.nativePreparationHash, h.rotationHash, h.firstbootHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.bootstrapHash} {
 		if subtle.ConstantTimeCompare(hash[:], other[:]) == 1 {
 			return ErrConfiguration
 		}
