@@ -15,9 +15,10 @@ import (
 // This operator-only configuration never comes from a browser or job payload.
 // The explicit acknowledgement is not an implemented external writer fence.
 type garmManagementConfiguration struct {
-	ManagedSupervisor bool   `json:"managed_supervisor,omitempty"`
-	ProxyServerKeyPin string `json:"proxy_server_key_pin,omitempty"`
-	ControllerID      string `json:"controller_id,omitempty"`
+	PolicyCapIntervalSeconds int    `json:"policy_cap_interval_seconds,omitempty"`
+	ManagedSupervisor        bool   `json:"managed_supervisor,omitempty"`
+	ProxyServerKeyPin        string `json:"proxy_server_key_pin,omitempty"`
+	ControllerID             string `json:"controller_id,omitempty"`
 	// DiscoveryOnly permits provider-scoped reads with no enrolled targets or journal.
 	DiscoveryOnly  bool                 `json:"discovery_only"`
 	Endpoint       string               `json:"endpoint"`
@@ -53,6 +54,9 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 		return nil, noop, nil
 	}
 	remote := config.GarmManagement
+	if remote.PolicyCapIntervalSeconds != 0 && !remote.ManagedSupervisor {
+		return nil, noop, adminview.ErrConfiguration
+	}
 	if remote.ManagedSupervisor {
 		client, e := managedSettingsClient(config)
 		if e != nil {

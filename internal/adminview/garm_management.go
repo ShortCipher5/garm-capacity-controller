@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"io"
 	"mime"
 	"net/http"
@@ -32,6 +33,7 @@ type GarmChangeEvent struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 }
 type GarmOverview struct {
+	PolicyCapReconciler     *brokerinput.CapStatus     `json:"policy_cap_reconciler,omitempty"`
 	ManagedHistoryAvailable bool                       `json:"managed_history_available,omitempty"`
 	MaximumReductionOnly    bool                       `json:"maximum_reduction_only,omitempty"`
 	ScaleSetInventory       *garmapi.ScaleSetDiscovery `json:"scaleset_inventory,omitempty"`

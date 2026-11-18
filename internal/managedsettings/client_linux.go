@@ -5,6 +5,7 @@ package managedsettings
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -32,11 +33,11 @@ type Configuration struct {
 	AllowReductions                      bool
 }
 type Client struct {
-	base, controller, source string
-	transport                *http.Transport
-	gate                     chan struct{}
-	providers, pools         map[string]bool
-	writes, unknown, revoked bool
+	base, controller, source, pin string
+	transport                     *http.Transport
+	gate                          chan struct{}
+	providers, pools              map[string]bool
+	writes, unknown, revoked      bool
 }
 
 func uuid(s string) bool {
@@ -77,7 +78,7 @@ func New(c Configuration) (*Client, error) {
 	if e != nil {
 		return nil, ErrSettings
 	}
-	client := &Client{base: strings.TrimSuffix(u.String(), "/"), controller: c.ControllerID, gate: make(chan struct{}, 1), providers: map[string]bool{}, pools: map[string]bool{}, writes: c.AllowReductions, transport: &http.Transport{TLSClientConfig: trust, Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 5 * time.Second}}
+	client := &Client{base: strings.TrimSuffix(u.String(), "/"), controller: c.ControllerID, pin: c.ServerKeyPin, gate: make(chan struct{}, 1), providers: map[string]bool{}, pools: map[string]bool{}, writes: c.AllowReductions, transport: &http.Transport{TLSClientConfig: trust, Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 5 * time.Second}}
 	for _, p := range c.Providers {
 		if p == "" || len(p) > 256 || client.providers[p] {
 			return nil, ErrSettings
@@ -274,4 +275,18 @@ func equalTags(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// ObservedSource returns only identity learned from authenticated responses.
+// It is provenance for matching enrollment, never a capacity-increase permit.
+func (c *Client) ObservedSource(ctx context.Context) (string, string, error) {
+	if e := c.enter(ctx); e != nil {
+		return "", "", e
+	}
+	defer c.leave()
+	if c.revoked || c.source == "" {
+		return "", "", ErrSettings
+	}
+	hash := sha256.Sum256([]byte("managed-stock-source/v1\x00" + c.base + "\x00" + c.pin + "\x00" + c.source + "\x00" + c.controller))
+	return hex.EncodeToString(hash[:]), c.controller, nil
 }

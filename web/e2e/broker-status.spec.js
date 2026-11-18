@@ -11,7 +11,7 @@ test('saved-target comparison stays separate from draft edits and becomes stale 
  await page.getByLabel('Pool runner cap',{exact:true}).fill('3');
  await expect(comparison.getByRole('cell',{name:'4',exact:true})).toHaveCount(1);
  unavailable=true;await page.getByRole('button',{name:'Reload policy (discard edits)'}).click();
- await expect(comparison).toContainText('comparison is stale');await expect(page.getByRole('button',{name:'Save advisory policy'})).toBeDisabled();
+ await expect(comparison).toContainText('comparison is stale');await expect(page.getByRole('button',{name:'Save capacity policy'})).toBeDisabled();
  unavailable=false;await page.getByRole('button',{name:'Reload policy (discard edits)'}).click();
  await expect(page.getByLabel('Pool runner cap',{exact:true})).toHaveValue('4');await expect(comparison).not.toContainText('comparison is stale');expect(puts).toBe(0);
 });

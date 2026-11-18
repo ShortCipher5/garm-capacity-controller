@@ -18,6 +18,8 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/garmmanagement"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsettings"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
@@ -93,6 +95,8 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	}
 	poolRow := map[string]any{"id": pool, "repo_id": repo, "provider_name": "capacity", "generation": 1, "max_runners": 4, "enabled": true, "tags": []map[string]string{{"name": "linux"}}, "flavor": "small", "image": "image", "os_arch": "amd64", "os_type": "linux"}
 	var drift atomic.Bool
+	var reductions atomic.Int32
+	var reductionFailure atomic.Bool
 	stock := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expectedAuth := "Bearer token"
 		if managed {
@@ -106,6 +110,27 @@ func publicCycleTransport(t *testing.T, managed bool) {
 			}
 			w.Header().Set(managedsource.SourceHeader, source)
 			w.Header().Set(managedsource.ControllerHeader, controllerID)
+		}
+
+		if managed && r.URL.Path == "/v1/managed/settings" {
+			json.NewEncoder(w).Encode(garmmanagement.Snapshot{ManagementSnapshot: garmapi.ManagementSnapshot{WritesEnabled: true, Pools: []garmapi.ManagedPool{{ID: pool, RepositoryID: repo, ProviderName: "capacity", MaxRunners: uint64(poolRow["max_runners"].(int)), MinIdleRunners: 0, Enabled: true, Fingerprint: strings.Repeat("a", 64), Tags: []string{"linux"}}}, Repositories: []garmapi.ManagedRepository{}}, Status: garmmanagement.Status{Pending: []garmmanagement.Intent{}}})
+			return
+		}
+		if managed && r.URL.Path == "/v1/managed/pools/"+pool+"/reduce-maximum" && r.Method == "POST" {
+			var body struct {
+				Maximum uint64 `json:"maximum"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Maximum != 2 {
+				t.Error("unsafe reduction")
+			}
+			reductions.Add(1)
+			poolRow["max_runners"] = 2
+			if reductionFailure.Load() {
+				w.WriteHeader(503)
+				return
+			}
+			json.NewEncoder(w).Encode(garmapi.ManagedPool{ID: pool, RepositoryID: repo, ProviderName: "capacity", MaxRunners: 2, MinIdleRunners: 0, Enabled: true, Fingerprint: strings.Repeat("a", 64), Tags: []string{"linux"}})
+			return
 		}
 		if r.Method != "GET" || r.Header.Get("Authorization") != expectedAuth {
 			t.Error("unexpected mutation/auth")
@@ -241,6 +266,45 @@ func publicCycleTransport(t *testing.T, managed bool) {
 		t.Fatal("service duplicated grants", err)
 	}
 
+	if managed {
+		config := managedsettings.Configuration{Endpoint: stock.URL, ServerKeyPin: serverPin, ControllerID: controllerID, TLS: trust, Providers: []string{"capacity"}, PoolIDs: []string{pool}, AllowReductions: true}
+		client, e := managedsettings.New(config)
+		if e != nil {
+			t.Fatal(e)
+		}
+		before, e := store.ReadBrokerGrantState(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		poolRow["max_runners"] = 8
+		result, e := ReconcilePolicyCaps(ctx, store, client)
+		if e != nil || result.Confirmed != 1 || reductions.Load() != 1 {
+			t.Fatal(result, e)
+		}
+		client.Close()
+		client, e = managedsettings.New(config)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer client.Close()
+		result, e = ReconcilePolicyCaps(ctx, store, client)
+		if e != nil || result.Confirmed != 0 || reductions.Load() != 1 {
+			t.Fatal("restart reissued", result, e)
+		}
+		poolRow["max_runners"] = 8
+		reductionFailure.Store(true)
+		result, e = ReconcilePolicyCaps(ctx, store, client)
+		if e == nil || result.LastRequestID == "" || reductions.Load() != 2 {
+			t.Fatal("unknown not retained", result, e)
+		}
+		if _, e = ReconcilePolicyCaps(ctx, store, client); e == nil || reductions.Load() != 2 {
+			t.Fatal("unknown replayed", e)
+		}
+		after, e := store.ReadBrokerGrantState(ctx)
+		if e != nil || after.Sequence != before.Sequence || after.Allocated.Global != before.Allocated.Global {
+			t.Fatal("reduction changed ledger", e)
+		}
+	}
 	if managed {
 		drift.Store(true)
 		if _, err = GrantCycle(ctx, store, source, opt, time.Minute); err == nil {

@@ -26,12 +26,13 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
     catch (error) { setMessage(error.message); if (token.current) token.current.value = ''; return; }
     const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);setComparisonStale(true);
     const timer=setTimeout(()=>controller.abort(),15000);
-    try{await saveBrokerPolicy(credential,view.policy,{signal:controller.signal});if(alive.current)setMessage('Advisory policy saved. No GARM settings, grants or runners changed. Reload before further edits.');}
+    try{await saveBrokerPolicy(credential,view.policy,{signal:controller.signal});if(alive.current)setMessage('Capacity policy saved. If the managed cap reconciler is enabled, lower positive pool caps may asynchronously reduce GARM maxima. No runner drain or capacity release is implied. Reload before further edits.');}
     catch(e){if(alive.current){setMessage(e.message);setComparisonStale(true);}}
     finally{clearTimeout(timer);active.current=null;if(token.current)token.current.value='';if(alive.current)setBusy(false);}
   }
   return <section id="broker-policy"><h2>Repository capacity policy</h2><div className="card">
     <p>Saved allocation inputs, not an activation switch. The grant planner consumes saved policy only when its separate runtime prerequisites permit. Saving alone does not enroll pools, reserve capacity, drain runners or change existing charges.</p>
+    <p>If the deployment enables managed saved-cap reconciliation, saving a lower positive pool cap may asynchronously lower that GARM pool maximum. It never raises the maximum; zero caps and values below current idle minimums are skipped. <a href="#garm-management">Read actual reconciler status and journal</a> before relying on remote changes. This policy page alone cannot establish whether the service is configured or running.</p>
     <p>Equal fairness uses weight 1. Caps are ceilings, not guarantees; zero means no new capacity. Warm idle is a soft spare-runner target per pool. Pool ownership is not yet verified here.</p>
     <button type="button" disabled={busy||!readPolicy} onClick={load}>Reload policy (discard edits)</button>
     {message&&<p role="status">{message}</p>}
@@ -53,7 +54,7 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
       </div>)}
       <button type="button" onClick={()=>edit(rows=>[...rows,{id:'',weight:1,max_runners:0,pools:[]}])}>Add repository</button>
       <label>Separate management token<input type="password" autoComplete="off" ref={token}/></label>
-      <button type="submit">Save advisory policy</button>
+      <button type="submit">Save capacity policy</button>
     </fieldset></form>}
   </div></section>;
 }

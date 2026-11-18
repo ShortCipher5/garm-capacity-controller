@@ -3,6 +3,7 @@ package adminview
 import (
 	"context"
 	"encoding/json"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmmanagement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsettings"
@@ -11,6 +12,7 @@ import (
 
 type managedSettingsView struct {
 	client *managedsettings.Client
+	caps   *brokerinput.CapService
 	writes bool
 	pools  map[string]bool
 }
@@ -25,12 +27,17 @@ func NewManagedSettingsView(c *managedsettings.Client, writes bool, pools []stri
 	}
 	return v, nil
 }
+func (v *managedSettingsView) SetPolicyCapService(s *brokerinput.CapService) { v.caps = s }
 func (v *managedSettingsView) Snapshot(ctx context.Context) (GarmOverview, error) {
 	status, e := v.client.Status(ctx)
 	if e != nil {
 		return GarmOverview{}, e
 	}
 	out := GarmOverview{MaximumReductionOnly: true, History: []GarmChangeEvent{}, HistoryTruncated: true, Settings: garmapi.ManagementSnapshot{Pools: []garmapi.ManagedPool{}, Repositories: []garmapi.ManagedRepository{}}}
+	if v.caps != nil {
+		state := v.caps.Snapshot()
+		out.PolicyCapReconciler = &state
+	}
 	apply := func(s garmmanagement.Status) error {
 		out.Pending = nil
 		out.WriteBlocked = s.WriteBlocked
