@@ -26,7 +26,7 @@ type nativeFixture struct {
 }
 
 // Reconstruct a genuine pre-native schema in historical migration fixtures.
-const nativeExecutionDowngradeSQL = `
+const nativeExecutionDowngradeSQL = brokerProfileDowngradeSQL + `
 DROP TRIGGER native_outcome_requires_consumption;
 DROP TRIGGER native_owner_not_stock_origin;
 DROP TRIGGER native_owner_not_preparation;
@@ -36,7 +36,7 @@ DROP TABLE native_domain_bindings;
 DELETE FROM audit WHERE kind IN ('native_domain_enrolled','native_execution_bound','native_execution_consumed','schema_migrated_v19');
 `
 
-func nativeExecutionFixture(t *testing.T) nativeFixture {
+func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture {
 	t.Helper()
 	ctx := context.Background()
 	config := fixture(time.Now())
@@ -61,6 +61,9 @@ func nativeExecutionFixture(t *testing.T) nativeFixture {
 	}))
 	domain := strings.Repeat("a", 64)
 	descriptor = nativeidentity.Descriptor{DomainID: domain, PolicyDigest: strings.Repeat("b", 64), OwnerServerLeaf: nativeidentity.Fingerprint(server.TLS.Certificates[0].Certificate[0]), OwnerClientLeaf: nativeidentity.Fingerprint(ownerTLS.Certificates[0].Certificate[0]), NativeServerKey: strings.Repeat("c", 64), NativeOrigin: nativeidentity.Fingerprint([]byte("garm-owned-domain/v1\x00" + domain)), NativeScope: nativeidentity.Fingerprint([]byte("garm-owned-domain/v1\x00" + domain + "\x00default")), NativeServerName: "private-native-domain", NativeServerVersion: "6.0.4"}
+	if len(policyDigests) > 0 {
+		descriptor.PolicyDigest = policyDigests[0]
+	}
 	observation, e := nativeidentity.Observe(ctx, nativeidentity.Configuration{Endpoint: server.URL, TLS: controllerTLS, OwnerServerLeaf: descriptor.OwnerServerLeaf, OwnerClientLeaf: descriptor.OwnerClientLeaf, PolicyDigest: descriptor.PolicyDigest, DomainID: domain})
 	if e != nil {
 		t.Fatal(e)
