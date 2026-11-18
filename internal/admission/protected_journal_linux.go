@@ -24,9 +24,18 @@ func (s *SQLiteStore) CorrelateProtectedJournal(ctx context.Context, observation
 	if !observation.Valid() {
 		return ProtectedJobCorrelation{}, ErrNativeJob
 	}
-	r := observation.Record()
 	var out ProtectedJobCorrelation
 	e := s.readTransaction(ctx, func(tx *sql.Tx) error {
+		var e error
+		out, e = s.correlateProtectedJournal(tx, observation, policy)
+		return e
+	})
+	return out, e
+}
+func (s *SQLiteStore) correlateProtectedJournal(tx *sql.Tx, observation nativeidentity.ProtectedJournalObservation, policy nativeapi.Policy) (ProtectedJobCorrelation, error) {
+	r := observation.Record()
+	var out ProtectedJobCorrelation
+	e := func() error {
 		binding, e := nativeRunnerBinding(tx, r.PermitID)
 		if e != nil {
 			return e
@@ -62,7 +71,7 @@ func (s *SQLiteStore) CorrelateProtectedJournal(ctx context.Context, observation
 		// Retain the exact journal classification; even a zero exit is not completion
 		// authority. No writes, lease renewal, claim or charge changes occur here.
 		return nil
-	})
+	}()
 	if e != nil {
 		return ProtectedJobCorrelation{}, e
 	}

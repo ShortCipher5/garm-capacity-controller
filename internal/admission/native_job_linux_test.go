@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +24,8 @@ import (
 	"time"
 )
 
-const nativeJobDowngradeSQL = `
+const nativeFenceDowngradeSQL = `DROP TABLE native_root_fences; DELETE FROM audit WHERE kind='schema_migrated_v24';`
+const nativeJobDowngradeSQL = nativeFenceDowngradeSQL + `
 DROP TABLE native_job_observations;
 DROP TABLE native_runner_bindings;
 DELETE FROM audit WHERE kind IN ('native_runner_bound','native_job_in_progress','native_job_completed','schema_migrated_v23');
@@ -299,6 +301,66 @@ func TestNativeJobAuthenticBindingTerminalReplayAndChargeRetention(t *testing.T)
 	if e != nil || !correlation.RootJournalAndTerminalJobObserved || correlation.ReleaseAuthorized || correlation.AcceptanceFenceQualified || correlation.PhysicalDeletionProven {
 		t.Fatal("unqualified correlation", correlation, e)
 	}
+	if e = s.RecordNativeRootFence(ctx, jo, policy); e == nil {
+		t.Fatal("unclosed network became fence")
+	}
+	journal.GuestNetworkClosed = true
+	f.setEvidence("/v1/native/executions/"+permit+"/journal", journal)
+	jo, e = nativeidentity.ObserveProtectedJournal(ctx, f.evidenceConfig, permit)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.db.Exec("CREATE TRIGGER fence_audit_failure BEFORE INSERT ON audit WHEN NEW.kind='native_root_fence_observed' BEGIN SELECT RAISE(ABORT,'fault'); END;"); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.RecordNativeRootFence(ctx, jo, policy); e == nil {
+		t.Fatal("audit failure accepted")
+	}
+	if _, e = s.LookupNativeRootFence(ctx, permit); !errors.Is(e, sql.ErrNoRows) {
+		t.Fatal("partial fence", e)
+	}
+	if _, e = s.db.Exec("DROP TRIGGER fence_audit_failure"); e != nil {
+		t.Fatal(e)
+	}
+	for i := 0; i < 2; i++ {
+		if e = s.RecordNativeRootFence(ctx, jo, policy); e != nil {
+			t.Fatal(e)
+		}
+	}
+	var fenceWG sync.WaitGroup
+	fenceErrors := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		fenceWG.Add(1)
+		go func() { defer fenceWG.Done(); fenceErrors <- s.RecordNativeRootFence(ctx, jo, policy) }()
+	}
+	fenceWG.Wait()
+	close(fenceErrors)
+	for err := range fenceErrors {
+		if err != nil {
+			t.Fatal("concurrent receipt retry", err)
+		}
+	}
+	changedJournal := journal
+	changedJournal.ExitCode = 1
+	f.setEvidence("/v1/native/executions/"+permit+"/journal", changedJournal)
+	changedProof, err := nativeidentity.ObserveProtectedJournal(ctx, f.evidenceConfig, permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecordNativeRootFence(ctx, changedProof, policy); !errors.Is(err, ErrConflict) {
+		t.Fatal("changed closure replaced original", err)
+	}
+	f.setEvidence("/v1/native/executions/"+permit+"/journal", journal)
+	rootFence, e := s.LookupNativeRootFence(ctx, permit)
+	if e != nil || rootFence.JobID != o.Record().JobID || rootFence.Qualification != "local_network_closed_containment_unqualified" {
+		t.Fatal(rootFence, e)
+	}
+	if e = copy.RecordNativeRootFence(ctx, jo, policy); !errors.Is(e, ErrFence) {
+		t.Fatal("restored lineage minted fence", e)
+	}
+	if e = s.checkNativeRootFences(ctx); e != nil {
+		t.Fatal(e)
+	}
 	journal.ResourceID = "22222222-2222-4222-8222-222222222222"
 	f.setEvidence("/v1/native/executions/"+permit+"/journal", journal)
 	jo, e = nativeidentity.ObserveProtectedJournal(ctx, f.evidenceConfig, permit)
@@ -321,6 +383,9 @@ func TestNativeJobAuthenticBindingTerminalReplayAndChargeRetention(t *testing.T)
 		t.Fatal(e)
 	}
 	defer reopened.Close()
+	if _, e = reopened.LookupNativeRootFence(ctx, permit); e != nil {
+		t.Fatal("fence lost on reopen", e)
+	}
 	if e = reopened.RecordNativeJob(ctx, permit, o); e != nil {
 		t.Fatal("restart retry", e)
 	}
@@ -332,6 +397,9 @@ func TestNativeJobAuthenticBindingTerminalReplayAndChargeRetention(t *testing.T)
 	}
 	if e = reopened.RecordNativeJob(ctx, permit, o); e == nil {
 		t.Fatal("recreated deleted terminal evidence")
+	}
+	if e = reopened.checkNativeRootFences(ctx); e == nil {
+		t.Fatal("fence retained without terminal job")
 	}
 	if e = reopened.checkNativeJobs(ctx); e == nil {
 		t.Fatal("missing history ignored")
@@ -354,5 +422,24 @@ func TestNativeJobMigration22PreservesChargeAndClosesReadiness(t *testing.T) {
 	snap := sqliteSnapshot(t, copy)
 	if snap.Ready || snap.Allocated.Global.Runners != 1 {
 		t.Fatal("migration lost charge/retained readiness")
+	}
+}
+
+func TestNativeFenceMigration23PreservesCharge(t *testing.T) {
+	s := placementFixture(t)
+	stockPlan(t, s, "fence-migrate")
+	if _, e := s.db.Exec(nativeFenceDowngradeSQL + "PRAGMA user_version=23"); e != nil {
+		t.Fatal(e)
+	}
+	path := s.path
+	s.Close()
+	v, e := OpenSQLite(path, Config{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer v.Close()
+	snap := sqliteSnapshot(t, v)
+	if snap.Ready || snap.Allocated.Global.Runners != 1 {
+		t.Fatal("migration lost charge or readiness gate", snap)
 	}
 }
