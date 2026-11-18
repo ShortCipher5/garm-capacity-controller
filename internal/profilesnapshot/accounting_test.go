@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeenforcement"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
 )
 
 func accountingFixture() admission.BrokerGrantState {
@@ -88,5 +90,64 @@ func TestAccountingRejectsRehashedInconsistentPayload(t *testing.T) {
 	state.Grants = append(state.Grants, admission.BrokerGrant{ID: "overflow", State: "unused", Spec: state.Grants[0].Spec})
 	if _, err := New("controller", strings.Repeat("a", 64), strings.Repeat("b", 64), state, time.Now()); err == nil {
 		t.Fatal("overflow accepted")
+	}
+}
+
+func overheadFixture() admission.BrokerGrantState {
+	s := accountingFixture()
+	r := admission.Resources{CPU: 500, RAM: 512, Disk: 10}
+	limits := nativeenforcement.Limits{CPUMilli: 500, MemoryBytes: 512 << 20, DiskBytes: 10 << 20, Tasks: 64}
+	digest, _ := nativeenforcement.DigestLimits(limits)
+	d := nativeenforcement.Descriptor{Version: nativeenforcement.Version, Nonce: strings.Repeat("a", 64), IssuedAt: time.Now().Add(-time.Hour), CapsuleBirthID: strings.Repeat("d", 64), RootImageSHA256: strings.Repeat("1", 64), DeviceProgramSHA256: strings.Repeat("2", 64), EgressPolicySHA256: strings.Repeat("3", 64), Owner: nativeidentity.Descriptor{PolicyDigest: strings.Repeat("4", 64), NativeServerKey: strings.Repeat("5", 64), NativeOrigin: "https://native.invalid", NativeScope: "domain", NativeServerName: "native.invalid", NativeServerVersion: "v1", DomainID: strings.Repeat("d", 64), OwnerClientLeaf: strings.Repeat("b", 64), OwnerServerLeaf: strings.Repeat("c", 64)}, Limits: limits, LimitsDigest: digest}
+	s.DomainOverheads = []admission.NativeDomainOverhead{{Sequence: 10, DomainBindingSequence: 8, Host: "host", DomainID: d.Owner.DomainID, CapsuleBirthID: d.CapsuleBirthID, Resources: r, Evidence: d, RecordedAt: time.Now().Add(-time.Hour)}}
+	s.Allocated.DomainOverhead = r
+	s.Allocated.Global, _ = addResources(s.Allocated.Global, r)
+	s.Allocated.Hosts["host"], _ = addResources(s.Allocated.Hosts["host"], r)
+	return s
+}
+func TestDomainOverheadRemainsExplicitGlobalHostCharge(t *testing.T) {
+	s := overheadFixture()
+	snap := accountingSnapshot(t, s)
+	if snap.Accounting.Allocated.Pools["pool"] != accountingFixture().Allocated.Pools["pool"] || snap.Accounting.UnusedGrants.DomainOverhead != (admission.Resources{}) || snap.Accounting.Allocated.DomainOverhead != s.DomainOverheads[0].Resources {
+		t.Fatal("overhead became pool charge or runner supply")
+	}
+	raw, _ := json.Marshal(snap)
+	if _, err := Decode(raw, snap.Controller, snap.Nonce, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"missing", "duplicate-binding", "duplicate-sequence", "duplicate", "wrong-host", "wrong-subtotal", "wrong-limit-digest", "runner-supply"} {
+		t.Run(mode, func(t *testing.T) {
+			s := overheadFixture()
+			switch mode {
+			case "missing":
+				s.DomainOverheads = nil
+			case "duplicate-sequence", "duplicate-binding":
+				second := s.DomainOverheads[0]
+				if mode == "duplicate-binding" {
+					second.Sequence++
+				}
+				second.DomainID = strings.Repeat("e", 64)
+				second.CapsuleBirthID = second.DomainID
+				second.Evidence.Owner.DomainID = second.DomainID
+				second.Evidence.CapsuleBirthID = second.DomainID
+				s.DomainOverheads = append(s.DomainOverheads, second)
+				s.Allocated.DomainOverhead, _ = addResources(s.Allocated.DomainOverhead, second.Resources)
+				s.Allocated.Global, _ = addResources(s.Allocated.Global, second.Resources)
+				s.Allocated.Hosts["host"], _ = addResources(s.Allocated.Hosts["host"], second.Resources)
+			case "duplicate":
+				s.DomainOverheads = append(s.DomainOverheads, s.DomainOverheads[0])
+			case "wrong-host":
+				s.DomainOverheads[0].Host = "unknown"
+			case "wrong-subtotal":
+				s.Allocated.DomainOverhead.RAM++
+			case "wrong-limit-digest":
+				s.DomainOverheads[0].Evidence.Limits.MemoryBytes++
+			case "runner-supply":
+				s.DomainOverheads[0].Resources.Runners = 1
+			}
+			if _, err := projectAccounting(s); err == nil {
+				t.Fatal("inconsistent overhead accepted")
+			}
+		})
 	}
 }

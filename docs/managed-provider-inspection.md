@@ -107,3 +107,18 @@ transaction as the profiles and accounting. Missing, extra or mismatched domain
 records are refused. This is enrollment history, not a fresh native enforcement
 observation: stale host bindings remain visible rather than being promoted into
 current authority.
+
+
+## Domain overhead extension (protocol v3)
+
+Schema26's durable whole-domain overhead is explicit in canonical allocations.
+The authenticated snapshot carries the latest validated domain records, their
+audit revisions and the exact global/host-only subtotal. Pool totals plus this
+subtotal must equal global charges; host totals must equal global charges.
+Overhead never becomes pool runner supply, a synthetic pool, or unused grants.
+Historical evidence expiry cannot erase the monotonic retained charge. The
+shared canonical record validator checks finite-resource floors; snapshot
+validation additionally reconstructs totals and rejects duplicated identities
+or audit sequences. v3 refuses incompatible older payloads rather than treating
+missing overhead as zero. These records remain accounting, not release-safe
+readiness or capacity-increase authority.

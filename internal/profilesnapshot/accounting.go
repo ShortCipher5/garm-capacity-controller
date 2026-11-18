@@ -12,15 +12,16 @@ import (
 // add UnusedGrants to it again. Counts describe ledger entries, not idle runners,
 // usable grants, native execution permission or confirmed physical completion.
 type Accounting struct {
-	Sequence                      int64                  `json:"sequence"`
-	ReconciliationEpoch           int64                  `json:"reconciliation_epoch"`
-	LedgerReady                   bool                   `json:"ledger_ready"`
-	Policy                        admission.BrokerPolicy `json:"policy"`
-	Budgets                       admission.Allocations  `json:"budgets"`
-	Allocated                     admission.Allocations  `json:"allocated"`
-	UnusedGrants                  admission.Allocations  `json:"unused_grants"`
-	UnusedGrantCounts             map[string]int64       `json:"unused_grant_counts"`
-	ConsumedUnreleasedGrantCounts map[string]int64       `json:"consumed_unreleased_grant_counts"`
+	DomainOverheads               []admission.NativeDomainOverhead `json:"domain_overheads"`
+	Sequence                      int64                            `json:"sequence"`
+	ReconciliationEpoch           int64                            `json:"reconciliation_epoch"`
+	LedgerReady                   bool                             `json:"ledger_ready"`
+	Policy                        admission.BrokerPolicy           `json:"policy"`
+	Budgets                       admission.Allocations            `json:"budgets"`
+	Allocated                     admission.Allocations            `json:"allocated"`
+	UnusedGrants                  admission.Allocations            `json:"unused_grants"`
+	UnusedGrantCounts             map[string]int64                 `json:"unused_grant_counts"`
+	ConsumedUnreleasedGrantCounts map[string]int64                 `json:"consumed_unreleased_grant_counts"`
 }
 
 func AccountingDigest(a Accounting) string { b, _ := json.Marshal(a); return digestBytes(b) }
@@ -63,7 +64,7 @@ func within(a, b admission.Resources) bool {
 	return a.CPU <= b.CPU && a.RAM <= b.RAM && a.Disk <= b.Disk && a.Runners <= b.Runners
 }
 func projectAccounting(s admission.BrokerGrantState) (Accounting, error) {
-	a := Accounting{Sequence: s.Sequence, ReconciliationEpoch: s.Epoch, LedgerReady: s.Ready, Policy: s.Policy, Budgets: emptyAllocations(), Allocated: s.Allocated, UnusedGrants: emptyAllocations(), UnusedGrantCounts: map[string]int64{}, ConsumedUnreleasedGrantCounts: map[string]int64{}}
+	a := Accounting{DomainOverheads: append([]admission.NativeDomainOverhead(nil), s.DomainOverheads...), Sequence: s.Sequence, ReconciliationEpoch: s.Epoch, LedgerReady: s.Ready, Policy: s.Policy, Budgets: emptyAllocations(), Allocated: s.Allocated, UnusedGrants: emptyAllocations(), UnusedGrantCounts: map[string]int64{}, ConsumedUnreleasedGrantCounts: map[string]int64{}}
 	a.Policy.Repositories = append([]admission.BrokerRepositoryPolicy{}, s.Policy.Repositories...)
 	a.Budgets.Global = s.Config.Global
 	for id, h := range s.Config.Hosts {
@@ -118,7 +119,7 @@ func projectAccounting(s admission.BrokerGrantState) (Accounting, error) {
 	return a, nil
 }
 func validateAccounting(a Accounting, sequence int64) error {
-	if a.Sequence != sequence || a.Sequence < 0 || a.ReconciliationEpoch < 0 || a.Policy.Revision > a.Sequence || admission.ValidateBrokerPolicy(a.Policy) != nil || len(a.Budgets.Hosts) > 1000 || len(a.Budgets.Pools) > 256 || !nonnegative(a.Budgets.Global) {
+	if len(a.DomainOverheads) > 1000 || a.Budgets.DomainOverhead != (admission.Resources{}) || a.UnusedGrants.DomainOverhead != (admission.Resources{}) || a.Sequence != sequence || a.Sequence < 0 || a.ReconciliationEpoch < 0 || a.Policy.Revision > a.Sequence || admission.ValidateBrokerPolicy(a.Policy) != nil || len(a.Budgets.Hosts) > 1000 || len(a.Budgets.Pools) > 256 || !nonnegative(a.Budgets.Global) {
 		return ErrSnapshot
 	}
 	for _, r := range a.Budgets.Hosts {
@@ -156,7 +157,48 @@ func validateAccounting(a Accounting, sequence int64) error {
 				return ErrSnapshot
 			}
 		}
-		if hostTotal != v.Global || poolTotal != v.Global {
+		poolTotal, ok := addResources(poolTotal, v.DomainOverhead)
+		if !ok || v.DomainOverhead.Runners != 0 || hostTotal != v.Global || poolTotal != v.Global {
+			return ErrSnapshot
+		}
+	}
+	// Reconstruct the explicit global/host-only charge from durable records.
+	// Historical evidence may be expired: expiry never erases a persisted charge.
+	overhead := admission.Resources{}
+	byHost := map[string]admission.Resources{}
+	seenDomains := map[string]bool{}
+	seenSequences := map[int64]bool{}
+	seenBindings := map[int64]bool{}
+	for _, record := range a.DomainOverheads {
+		if admission.ValidateNativeDomainOverhead(record) != nil || seenSequences[record.Sequence] || seenBindings[record.DomainBindingSequence] || record.Sequence > a.Sequence || record.DomainBindingSequence > record.Sequence || seenDomains[record.DomainID] {
+			return ErrSnapshot
+		}
+		if _, ok := a.Budgets.Hosts[record.Host]; !ok {
+			return ErrSnapshot
+		}
+		evidence := record.Evidence
+		if !Hex(evidence.Owner.OwnerClientLeaf) || !Hex(evidence.Owner.OwnerServerLeaf) || evidence.Owner.OwnerClientLeaf == evidence.Owner.OwnerServerLeaf {
+			return ErrSnapshot
+		}
+
+		seenDomains[record.DomainID] = true
+		seenSequences[record.Sequence] = true
+		seenBindings[record.DomainBindingSequence] = true
+		var ok bool
+		overhead, ok = addResources(overhead, record.Resources)
+		if !ok {
+			return ErrSnapshot
+		}
+		byHost[record.Host], ok = addResources(byHost[record.Host], record.Resources)
+		if !ok {
+			return ErrSnapshot
+		}
+	}
+	if overhead != a.Allocated.DomainOverhead {
+		return ErrSnapshot
+	}
+	for host, r := range byHost {
+		if !within(r, a.Allocated.Hosts[host]) {
 			return ErrSnapshot
 		}
 	}

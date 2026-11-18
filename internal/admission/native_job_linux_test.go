@@ -24,7 +24,13 @@ import (
 	"time"
 )
 
-const nativeRetirementDowngradeSQL = `DROP TRIGGER native_operation_not_retirement;DROP TABLE native_retirement_receipts;DROP TABLE native_retirement_claims;DROP TABLE native_retirement_intents;DELETE FROM audit WHERE kind='schema_migrated_v25';`
+const nativeDomainOverheadDowngradeSQL = `
+DROP TRIGGER reservation_current_accounting;
+CREATE TRIGGER reservation_current_accounting BEFORE INSERT ON reservations WHEN NEW.accounting_version!=18 BEGIN SELECT RAISE(ABORT,'current shared grant accounting required'); END;
+DROP TRIGGER dispatch_current_accounting;
+CREATE TRIGGER dispatch_current_accounting BEFORE INSERT ON dispatches WHEN NEW.grant_accounting_version!=18 BEGIN SELECT RAISE(ABORT,'current shared grant accounting required'); END;
+DROP TABLE native_domain_overheads;DELETE FROM audit WHERE kind='schema_migrated_v26';`
+const nativeRetirementDowngradeSQL = nativeDomainOverheadDowngradeSQL + `DROP TRIGGER native_operation_not_retirement;DROP TABLE native_retirement_receipts;DROP TABLE native_retirement_claims;DROP TABLE native_retirement_intents;DELETE FROM audit WHERE kind='schema_migrated_v25';`
 const nativeFenceDowngradeSQL = nativeRetirementDowngradeSQL + `DROP TABLE native_root_fences; DELETE FROM audit WHERE kind='schema_migrated_v24';`
 const nativeJobDowngradeSQL = nativeFenceDowngradeSQL + `
 DROP TABLE native_job_observations;

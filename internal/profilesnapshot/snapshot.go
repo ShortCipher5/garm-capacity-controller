@@ -47,7 +47,7 @@ func Digest(p Payload) string {
 }
 func digestBytes(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 func New(controller, nonce, lineage string, state admission.BrokerGrantState, now time.Time) (Snapshot, error) {
-	s := Snapshot{Lineage: lineage, Version: "provider-path-profiles/v2", Controller: controller, Nonce: nonce, IssuedAt: now.UTC(), Sequence: state.Sequence, Payload: Payload{NativeDomains: state.NativeDomains, Profiles: state.PoolProfiles, PoolHosts: map[string][]string{}, HostBindings: map[string]int64{}}}
+	s := Snapshot{Lineage: lineage, Version: "provider-path-profiles/v3", Controller: controller, Nonce: nonce, IssuedAt: now.UTC(), Sequence: state.Sequence, Payload: Payload{NativeDomains: state.NativeDomains, Profiles: state.PoolProfiles, PoolHosts: map[string][]string{}, HostBindings: map[string]int64{}}}
 	for name, p := range state.Config.Pools {
 		s.Payload.PoolHosts[name] = append([]string(nil), p.Hosts...)
 	}
@@ -67,7 +67,7 @@ func New(controller, nonce, lineage string, state admission.BrokerGrantState, no
 	return s, nil
 }
 func validate(s Snapshot, controller, nonce string, now time.Time) error {
-	if validateAccounting(s.Accounting, s.Sequence) != nil || s.AccountingDigest != AccountingDigest(s.Accounting) || !Hex(s.Lineage) || s.Version != "provider-path-profiles/v2" || s.Controller != controller || controller == "" || !Hex(nonce) || s.Nonce != nonce || s.Sequence < 0 || s.IssuedAt.IsZero() || now.Sub(s.IssuedAt) > 5*time.Second || s.IssuedAt.After(now.Add(time.Second)) || s.ProfileDigest != Digest(s.Payload) || len(s.Payload.NativeDomains) > 1000 || len(s.Payload.Profiles) > 256 || len(s.Payload.PoolHosts) > 256 || len(s.Payload.HostBindings) > 1000 {
+	if validateAccounting(s.Accounting, s.Sequence) != nil || s.AccountingDigest != AccountingDigest(s.Accounting) || !Hex(s.Lineage) || s.Version != "provider-path-profiles/v3" || s.Controller != controller || controller == "" || !Hex(nonce) || s.Nonce != nonce || s.Sequence < 0 || s.IssuedAt.IsZero() || now.Sub(s.IssuedAt) > 5*time.Second || s.IssuedAt.After(now.Add(time.Second)) || s.ProfileDigest != Digest(s.Payload) || len(s.Payload.NativeDomains) > 1000 || len(s.Payload.Profiles) > 256 || len(s.Payload.PoolHosts) > 256 || len(s.Payload.HostBindings) > 1000 {
 		return ErrSnapshot
 	}
 	referenced := map[int64]bool{}
