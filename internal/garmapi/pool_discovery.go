@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/stockidentity"
 	"io"
 	"net/http"
 	"sort"
@@ -19,6 +20,7 @@ import (
 // Fingerprint is empty: DiscoveryFingerprint covers only redacted fields and is
 // NOT a write precondition. Fetch Pool separately before an authorized edit.
 type DiscoveredPool struct {
+	OwnershipFingerprint string `json:"ownership_fingerprint,omitempty"`
 	ManagedPool
 	OwnerKind            string `json:"owner_kind"`
 	OwnerID              string `json:"owner_id,omitempty"`
@@ -150,6 +152,9 @@ func (m *ManagementClient) DiscoverPools(ctx context.Context) (PoolDiscovery, er
 		}
 		digest := sha256.Sum256(canonical)
 		entry := DiscoveredPool{ManagedPool: pool, OwnerKind: ownerKind, OwnerID: ownerID, Configured: m.pools[id], DiscoveryFingerprint: hex.EncodeToString(digest[:])}
+		if facts, e := stockidentity.ParseFacts(rawRow); e == nil {
+			entry.OwnershipFingerprint = facts.Fingerprint()
+		}
 		encoded, err := json.Marshal(entry)
 		if err != nil {
 			return PoolDiscovery{}, ErrManagement

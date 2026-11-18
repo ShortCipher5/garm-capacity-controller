@@ -47,17 +47,20 @@ type ObservedRunner struct {
 	RowID, Name, ProviderName, PoolID, Kind string
 }
 type DemandObservation struct {
-	Runners    []ObservedRunner `json:"runners"`
-	StartedAt  time.Time        `json:"started_at"`
-	FinishedAt time.Time        `json:"finished_at"`
-	Digest     string           `json:"digest"`
-	Pools      []DiscoveredPool `json:"pools"`
-	Jobs       []QueuedJob      `json:"jobs"`
-	Supply     []RunnerSupply   `json:"supply"`
+	sourceIdentity string
+	Runners        []ObservedRunner `json:"runners"`
+	StartedAt      time.Time        `json:"started_at"`
+	FinishedAt     time.Time        `json:"finished_at"`
+	Digest         string           `json:"digest"`
+	Pools          []DiscoveredPool `json:"pools"`
+	Jobs           []QueuedJob      `json:"jobs"`
+	Supply         []RunnerSupply   `json:"supply"`
 	// These reads are never atomic and do not cover webhooks GARM missed.
 	Atomic                bool `json:"atomic"`
 	MissedWebhookCoverage bool `json:"missed_webhook_coverage"`
 }
+
+func (o DemandObservation) SourceIdentity() string { return o.sourceIdentity }
 
 func NewDemand(endpoint, token string, trust *tls.Config, providers, repositoryIDs []string) (*DemandClient, error) {
 	if len(repositoryIDs) == 0 || len(repositoryIDs) > 1000 {
@@ -302,7 +305,7 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 			}
 		}
 	}
-	out := DemandObservation{Runners: observedRunners, StartedAt: start, FinishedAt: time.Now().UTC(), Pools: after, Jobs: jobs, Supply: []RunnerSupply{}}
+	out := DemandObservation{sourceIdentity: c.discovery.management.ManagementIdentity(), Runners: observedRunners, StartedAt: start, FinishedAt: time.Now().UTC(), Pools: after, Jobs: jobs, Supply: []RunnerSupply{}}
 	for _, p := range after {
 		out.Supply = append(out.Supply, *supplies[p.ID])
 	}
