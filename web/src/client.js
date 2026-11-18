@@ -1,4 +1,5 @@
 import {validateOverhead} from "./overhead.js";
+import {validateAllocatorPlan} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
 import { validateCapacityStates } from "./capacity-states.js";
@@ -89,6 +90,8 @@ export function validateOverview(value) {
   return value;
 }
 export class ReadSession {
+  #planRequest;
+ #planGeneration=0;
   #allocatorRequest;
   #allocatorGeneration=0;
   #token = "";
@@ -115,6 +118,7 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+ this.#planGeneration++;this.#planRequest?.abort();this.#planRequest=undefined;
     this.#allocatorGeneration++; this.#allocatorRequest?.abort(); this.#allocatorRequest=undefined;
     this.#entityGeneration++;
     this.#entityRequest?.abort();
@@ -192,6 +196,22 @@ export class ReadSession {
       if(error instanceof SessionEnded) throw error;
       throw new Error("Existing Garm scope observation unavailable.");
     } finally {clearTimeout(timeout);signal?.removeEventListener("abort",abort);}
+  }
+  async allocatorPlanSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#planRequest?.abort(); const generation=++this.#planGeneration;
+    const controller=new AbortController();this.#planRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/allocator-plan',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Allocation plan unavailable.');
+      const result=validateAllocatorPlan(await response.json());
+      if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
   }
   async allocatorStatusSnapshot({signal}={}) {
     if(!this.#token) throw new SessionEnded();

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/stockjit"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -384,5 +385,12 @@ func TestCoordinatorFreezesNestedTLSConfiguration(t *testing.T) {
 	record, e := f.c.Execute(context.Background(), f.plan, f.host, f.auth, f.digest, f.userData)
 	if e != nil || record.State != "confirmed" {
 		t.Fatal("caller config mutation changed frozen client", record, e)
+	}
+}
+
+func TestExecuteProtectedRejectsAbsentSourceBeforeMutation(t *testing.T) {
+	var c *Coordinator
+	if _, e := c.ExecuteProtected(context.Background(), admission.ExecutionPlan{}, admission.HostBinding{}, admission.StockProviderAuthority{}, "", stockjit.ProtectedBootstrap{}); e == nil {
+		t.Fatal("absent source accepted")
 	}
 }

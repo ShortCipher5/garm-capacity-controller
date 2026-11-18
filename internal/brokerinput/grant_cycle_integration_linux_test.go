@@ -175,6 +175,31 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	}
 
 	opt := capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 100}
+	beforePreview, err := store.ReadBrokerGrantState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewService, err := NewService(store, source, opt, time.Minute, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := previewService.ReadPlan(ctx)
+	if err != nil || len(preview.Pools) != 1 || preview.Pools[0].Additional != 1 || preview.Pools[0].Supply == nil || preview.SourceIdentity != source.SourceIdentity() || preview.Atomic {
+		t.Fatalf("real read-only plan %+v %v", preview, err)
+	}
+	afterPreview, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || beforePreview.Sequence != afterPreview.Sequence || len(afterPreview.Grants) != 0 {
+		t.Fatal("read plan mutated ledger", err)
+	}
+	poolRow["flavor"] = "changed-outside-controller"
+	if _, err := previewService.ReadPlan(ctx); err == nil {
+		t.Fatal("drifted pool ownership produced a plan")
+	}
+	poolRow["flavor"] = "small"
+	afterDrift, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || afterDrift.Sequence != beforePreview.Sequence || len(afterDrift.Grants) != 0 {
+		t.Fatal("failed read plan mutated ledger", err)
+	}
 	first, err := GrantCycle(ctx, store, source, opt, time.Minute)
 	if err != nil || len(first.Grants) != 1 {
 		t.Fatalf("public first cycle %+v %v", first, err)

@@ -26,15 +26,17 @@ import (
 )
 
 type configuration struct {
-	ClientCertificateFile string                    `json:"client_certificate_file"`
-	Boundary              managedgarm.Specification `json:"boundary"`
-	TLS                   securefiles.TLSFiles      `json:"tls"`
-	ClientLeaf            string                    `json:"client_leaf"`
-	Journal               string                    `json:"journal"`
-	JournalLineage        string                    `json:"journal_lineage"`
-	Providers             []string                  `json:"providers"`
-	Pools                 []string                  `json:"pools"`
-	Repositories          []string                  `json:"repositories"`
+	SourceInspectorLeaf            string                    `json:"source_inspector_leaf,omitempty"`
+	SourceInspectorCertificateFile string                    `json:"source_inspector_certificate_file,omitempty"`
+	ClientCertificateFile          string                    `json:"client_certificate_file"`
+	Boundary                       managedgarm.Specification `json:"boundary"`
+	TLS                            securefiles.TLSFiles      `json:"tls"`
+	ClientLeaf                     string                    `json:"client_leaf"`
+	Journal                        string                    `json:"journal"`
+	JournalLineage                 string                    `json:"journal_lineage"`
+	Providers                      []string                  `json:"providers"`
+	Pools                          []string                  `json:"pools"`
+	Repositories                   []string                  `json:"repositories"`
 }
 
 func run(ctx context.Context, args []string) error {
@@ -82,6 +84,15 @@ func run(ctx context.Context, args []string) error {
 	if e != nil || !separateRoleKeys(clientCert, serverCert, stockCert) {
 		return managedgarm.ErrBoundary
 	}
+	if (c.SourceInspectorLeaf == "") != (c.SourceInspectorCertificateFile == "") {
+		return managedgarm.ErrBoundary
+	}
+	if c.SourceInspectorLeaf != "" {
+		inspector, e := readRoleCertificate(c.SourceInspectorCertificateFile, c.SourceInspectorLeaf)
+		if e != nil || !separateRoleKeys(inspector, serverCert, stockCert) || bytes.Equal(inspector.RawSubjectPublicKeyInfo, clientCert.RawSubjectPublicKeyInfo) {
+			return managedgarm.ErrBoundary
+		}
+	}
 	trust.ClientCAs = trust.RootCAs
 	trust.ClientAuth = tls.RequireAndVerifyClientCert
 	session, e := managedgarm.OpenSession(ctx, c.Boundary)
@@ -97,6 +108,11 @@ func run(ctx context.Context, args []string) error {
 	handler, e := managedwriter.New(session, journal, c.ClientLeaf, c.Providers, c.Pools, c.Repositories)
 	if e != nil {
 		return e
+	}
+	if c.SourceInspectorLeaf != "" {
+		if e := handler.SetSourceInspector(c.SourceInspectorLeaf); e != nil {
+			return e
+		}
 	}
 	listener, e := session.Listen(ctx)
 	if e != nil {
