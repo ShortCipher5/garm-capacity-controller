@@ -34,7 +34,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 22
+const sqliteCurrentVersion = 23
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -393,6 +393,17 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 23 {
+			if _, err := tx.Exec(sqliteNativeJobSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v23", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -415,6 +426,10 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 	}
 	if err := s.checkNativeOperations(context.Background()); err != nil {
 		s.Close()
+		return nil, err
+	}
+	if err := s.checkNativeJobs(context.Background()); err != nil {
+		db.Close()
 		return nil, err
 	}
 	if err := s.checkNativeBootstraps(context.Background()); err != nil {
