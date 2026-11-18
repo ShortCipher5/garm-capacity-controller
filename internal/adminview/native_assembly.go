@@ -123,7 +123,17 @@ func (h *Handler) serveNativeAssembly(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(ids)
 		views := []nativeprovision.View{}
+		pending := []any{}
 		for _, id := range ids {
+			if _, ok := h.nativePreparation[id]; !ok {
+				m, exists := h.nativeConfigured[id]
+				if !exists {
+					fail(503, "pending configuration unavailable")
+					return
+				}
+				pending = append(pending, map[string]any{"target_id": id, "registration_digest": m.RegistrationDigest, "binding": m.Binding, "state": "registered_configuration_without_preparation_plan"})
+				continue
+			}
 			v, e := h.nativePreparation[id].Service.View(id)
 			if e != nil {
 				fail(503, "current registered plan unavailable")
@@ -131,7 +141,7 @@ func (h *Handler) serveNativeAssembly(w http.ResponseWriter, r *http.Request) {
 			}
 			views = append(views, v)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"targets": views})
+		json.NewEncoder(w).Encode(map[string]any{"targets": views, "pending_targets": pending})
 		return
 	}
 	if r.Method != http.MethodPost {

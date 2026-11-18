@@ -42,71 +42,10 @@ func loadNativePreparation(a *adminConfiguration) (map[string]adminview.NativePr
 	if c == nil || len(c.Targets) < 1 || len(c.Targets) > 8 || len(c.Credentials) < 1 || len(c.Credentials) > 8 {
 		return fail()
 	}
-	raw, e := securefiles.Read(c.TokenFile, 256)
+	token, resolve, forbidden, e := nativePreparationAccess(a, c)
 	if e != nil {
 		return fail()
 	}
-	token := strings.TrimSpace(string(raw))
-	// This is a separate privilege from both normal management and restricted
-	// inventory/helper access. Full-admin firstboot credentials may be reused.
-	paths := []string{a.TokenFile, a.ManagementTokenFile}
-	if a.Firstboot != nil {
-		paths = append(paths, a.Firstboot.TokenFile)
-	}
-	if a.Bootstrap != nil {
-		paths = append(paths, a.Bootstrap.TokenFile)
-	}
-	if a.SSHInventory != nil {
-		paths = append(paths, a.SSHInventory.TokenFile, a.SSHInventory.TargetManagementTokenFile)
-	}
-	for _, path := range paths {
-		if path != "" {
-			v, e := securefiles.Read(path, 256)
-			if e != nil || strings.TrimSpace(string(v)) == token {
-				return fail()
-			}
-		}
-	}
-	forbidden := map[string]bool{}
-	if a.SSHInventory != nil {
-		resolve := sshinventory.PrivateKeyFiles(a.SSHInventory.Keys)
-		for alias := range a.SSHInventory.Keys {
-			k, e := resolve(context.Background(), alias)
-			if e != nil {
-				return fail()
-			}
-			forbidden[ssh.FingerprintSHA256(k.PublicKey())] = true
-		}
-	}
-	if a.Bootstrap != nil {
-		resolve := sshinventory.PrivateKeyFiles(a.Bootstrap.Credentials)
-		for alias := range a.Bootstrap.Credentials {
-			k, e := resolve(context.Background(), alias)
-			if e != nil {
-				return fail()
-			}
-			forbidden[ssh.FingerprintSHA256(k.PublicKey())] = true
-		}
-	}
-	if a.Bootstrap != nil {
-		for _, target := range a.Bootstrap.Targets {
-			k, e := hostbootstrap.PublicKey(target.Plan.InventoryKey)
-			if e != nil {
-				return fail()
-			}
-			forbidden[ssh.FingerprintSHA256(k)] = true
-		}
-	}
-	if a.Firstboot != nil {
-		for _, target := range a.Firstboot.Targets {
-			k, e := hostbootstrap.PublicKey(target.Plan.Base.InventoryKey)
-			if e != nil {
-				return fail()
-			}
-			forbidden[ssh.FingerprintSHA256(k)] = true
-		}
-	}
-	resolve := sshinventory.PrivateKeyFiles(c.Credentials)
 	targets := map[string]adminview.NativePreparationTarget{}
 	seenID := map[string]bool{}
 	for id, t := range c.Targets {
@@ -141,4 +80,78 @@ func loadNativePreparation(a *adminConfiguration) (map[string]adminview.NativePr
 		targets[id] = adminview.NativePreparationTarget{Service: service, Resolve: func() (ssh.Signer, error) { return resolve(context.Background(), alias) }}
 	}
 	return targets, token, closeAll, nil
+}
+
+// nativePreparationAccess validates the same privilege separation for both
+// static preparation and explicitly enabled fresh-target registration.
+func nativePreparationAccess(a *adminConfiguration, c *nativePreparationConfiguration) (string, func(context.Context, string) (ssh.Signer, error), map[string]bool, error) {
+	if a == nil || c == nil || len(c.Credentials) < 1 || len(c.Credentials) > 64 {
+		return "", nil, nil, adminview.ErrConfiguration
+	}
+	raw, e := securefiles.Read(c.TokenFile, 256)
+	if e != nil {
+		return "", nil, nil, adminview.ErrConfiguration
+	}
+	token := strings.TrimSpace(string(raw))
+	// This is a separate privilege from both normal management and restricted
+	// inventory/helper access. Full-admin firstboot credentials may be reused.
+	paths := []string{a.TokenFile, a.ManagementTokenFile}
+	if a.Firstboot != nil {
+		paths = append(paths, a.Firstboot.TokenFile)
+	}
+	if a.Bootstrap != nil {
+		paths = append(paths, a.Bootstrap.TokenFile)
+	}
+	if a.SSHInventory != nil {
+		paths = append(paths, a.SSHInventory.TokenFile, a.SSHInventory.TargetManagementTokenFile)
+	}
+	for _, path := range paths {
+		if path != "" {
+			v, e := securefiles.Read(path, 256)
+			if e != nil || strings.TrimSpace(string(v)) == token {
+				return "", nil, nil, adminview.ErrConfiguration
+			}
+		}
+	}
+	forbidden := map[string]bool{}
+	if a.SSHInventory != nil {
+		resolve := sshinventory.PrivateKeyFiles(a.SSHInventory.Keys)
+		for alias := range a.SSHInventory.Keys {
+			k, e := resolve(context.Background(), alias)
+			if e != nil {
+				return "", nil, nil, adminview.ErrConfiguration
+			}
+			forbidden[ssh.FingerprintSHA256(k.PublicKey())] = true
+		}
+	}
+	if a.Bootstrap != nil {
+		resolve := sshinventory.PrivateKeyFiles(a.Bootstrap.Credentials)
+		for alias := range a.Bootstrap.Credentials {
+			k, e := resolve(context.Background(), alias)
+			if e != nil {
+				return "", nil, nil, adminview.ErrConfiguration
+			}
+			forbidden[ssh.FingerprintSHA256(k.PublicKey())] = true
+		}
+	}
+	if a.Bootstrap != nil {
+		for _, target := range a.Bootstrap.Targets {
+			k, e := hostbootstrap.PublicKey(target.Plan.InventoryKey)
+			if e != nil {
+				return "", nil, nil, adminview.ErrConfiguration
+			}
+			forbidden[ssh.FingerprintSHA256(k)] = true
+		}
+	}
+	if a.Firstboot != nil {
+		for _, target := range a.Firstboot.Targets {
+			k, e := hostbootstrap.PublicKey(target.Plan.Base.InventoryKey)
+			if e != nil {
+				return "", nil, nil, adminview.ErrConfiguration
+			}
+			forbidden[ssh.FingerprintSHA256(k)] = true
+		}
+	}
+	resolve := sshinventory.PrivateKeyFiles(c.Credentials)
+	return token, resolve, forbidden, nil
 }

@@ -26,6 +26,10 @@ type RegisteredPlan struct {
 }
 
 func (s *Service) registeredPlan() (*RegisteredPlan, error) {
+	initial, initialErr := s.initialPlan()
+	if initialErr != nil {
+		return nil, initialErr
+	}
 	f, e := os.Open(s.dir)
 	if e != nil {
 		return nil, ErrInvalid
@@ -57,6 +61,9 @@ func (s *Service) registeredPlan() (*RegisteredPlan, error) {
 		if d.Decode(&r) != nil || d.Decode(new(any)) != io.EOF || r.Sequence != uint64(i) || r.PreparationID != s.plan.Manifest.ID || r.TargetDigest != targetDigest(s.plan.Target) || !registryHash(r.PreviousReviewDigest) || !registryHash(r.ReviewDigest) || !registryHash(r.SelectionDigest) || r.PreviousReviewDigest == r.ReviewDigest || (last != nil && r.PreviousReviewDigest != last.ReviewDigest) {
 			return nil, ErrInvalid
 		}
+		if i == 1 && initial != nil && r.PreviousReviewDigest != initial.ReviewDigest {
+			return nil, ErrInvalid
+		}
 		canonical, _ := json.Marshal(r)
 		if string(canonical) != string(raw) {
 			return nil, ErrInvalid
@@ -67,9 +74,16 @@ func (s *Service) registeredPlan() (*RegisteredPlan, error) {
 }
 
 func (s *Service) currentRegisteredPlan() error {
+	initial, e := s.initialPlan()
+	if e != nil {
+		return e
+	}
 	r, e := s.registeredPlan()
 	if e != nil {
 		return e
+	}
+	if r == nil && initial != nil && initial.ReviewDigest != s.ReviewDigest() {
+		return ErrInvalid
 	}
 	if r != nil && r.ReviewDigest != s.ReviewDigest() {
 		return ErrInvalid
@@ -110,6 +124,9 @@ func (s *Service) RegisterReviewedReplacement(ctx context.Context, previous *Ser
 		return RegisteredPlan{}, e
 	}
 	n := uint64(1)
+	if last == nil && previous.currentRegisteredPlan() != nil {
+		return RegisteredPlan{}, ErrInvalid
+	}
 	if last != nil {
 		if last.ReviewDigest == s.ReviewDigest() && last.PreviousReviewDigest == previous.ReviewDigest() && last.SelectionDigest == selectionDigest {
 			return *last, nil

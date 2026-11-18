@@ -51,7 +51,7 @@ func (h *Handler) serveNativePreparation(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(code)
 		json.NewEncoder(w).Encode(map[string]string{"error": msg})
 	}
-	if len(h.nativePreparation) == 0 {
+	if len(h.nativePreparation) == 0 && h.nativeRegistration == nil {
 		fail(404, "native preparation disabled")
 		return
 	}
