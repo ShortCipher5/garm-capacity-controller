@@ -81,6 +81,7 @@ type Overview struct {
 }
 type Handler struct {
 	allocatorStatus AllocatorStatusSource
+	jobObserver     JobObserverStatusSource
 	rotation        *firstboot.ManagedRotationService
 	rotationHash    [32]byte
 	firstboot       *firstboot.Service
@@ -150,6 +151,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-h.inFlight }()
 	default:
 		fail(http.StatusServiceUnavailable)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/job-observer-status" {
+		h.serveJobObserverStatus(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/allocator-status" {

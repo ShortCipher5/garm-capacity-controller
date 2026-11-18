@@ -39,6 +39,8 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	JobObserver          *jobObserverConfiguration                `json:"job_observer,omitempty"`
+	EnableJobObserver    bool                                     `json:"-"`
 	AllocatorLoop        *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
 	StockProviderScopes  []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
@@ -102,6 +104,14 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
+	observer, closeObserver, err := buildJobObserver(config, store)
+	if err != nil {
+		return err
+	}
+	defer closeObserver()
+	if config.Admin != nil {
+		config.Admin.jobObserverRuntime = observer
+	}
 	allocator, closeAllocator, err := startAllocatorLoop(ctx, config.AllocatorLoop, store)
 	if err != nil {
 		return err
@@ -259,7 +269,13 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	} else {
 		close(monitorDone)
 	}
-	defer func() { cancel(); <-loopDone; <-monitorDone }()
+	observerDone := make(chan struct{})
+	if observer != nil {
+		go func() { defer close(observerDone); _ = observer.Run(runctx) }()
+	} else {
+		close(observerDone)
+	}
+	defer func() { cancel(); <-loopDone; <-monitorDone; <-observerDone }()
 	var adminDone chan error
 	if adminServer != nil {
 		adminDone = make(chan error, 1)
@@ -305,6 +321,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
+	jobObserver := flag.Bool("allow-job-observer", false, "enable positive authenticated job/root journal correlation only; no retirement or release")
 	stockProvider := flag.Bool("allow-experimental-stock-provider", false, "enable distinct post-JIT stock-provider admission; no original-preparation guarantee or physical release")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
@@ -377,6 +394,7 @@ func main() {
 		config.Admin.EnableFirstboot = true
 	}
 	config.EnableStockProvider = *stockProvider
+	config.EnableJobObserver = *jobObserver
 	if *bootstrap {
 		if config.Admin == nil {
 			fmt.Fprintln(os.Stderr, "bootstrap requires separate admin configuration")

@@ -25,6 +25,9 @@ var errStaticConfig = errors.New("static configuration check failed")
 // It cannot establish persisted policy, reachability, fencing or readiness.
 func checkStaticConfig(c configuration, provision bool) error {
 	fail := func() error { return errStaticConfig }
+	if validateJobObserver(c) != nil {
+		return fail()
+	}
 	if validateAllocatorLoop(c.AllocatorLoop) != nil {
 		return fail()
 	}

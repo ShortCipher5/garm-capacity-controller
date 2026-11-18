@@ -14,11 +14,13 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/jobobserver"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type adminConfiguration struct {
+	jobObserverRuntime                 *jobobserver.Service
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
@@ -76,6 +78,7 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		return nil, noop, err
 	}
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
+	handler.SetJobObserver(config.jobObserverRuntime)
 	needsCredential := config.EnableExperimentalManagement || config.EnableExperimentalOnboardingProbes
 	if needsCredential != (config.ManagementTokenFile != "") {
 		cleanup()
