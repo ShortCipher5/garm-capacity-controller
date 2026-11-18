@@ -22,6 +22,17 @@ func TestProtectedPolicyPinsImageAndCanonicalBootPayload(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	if e := p.ValidateAllocation(a); e != nil {
+		t.Fatalf("template must validate without JIT: %v", e)
+	}
+	invalid := a
+	invalid.Fingerprint = strings.Repeat("9", 64)
+	if p.ValidateAllocation(invalid) == nil {
+		t.Fatal("changed image accepted in template")
+	}
+	if _, e := p.Compile(a, "profile-validation"); e == nil {
+		t.Fatal("template placeholder accepted as executable bootstrap")
+	}
 	got, ok := p.ProtectedImage(a.Pool)
 	if !ok || !p.Protected() {
 		t.Fatal("missing descriptor")

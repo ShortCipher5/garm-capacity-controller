@@ -119,11 +119,22 @@ type Prepared struct {
 func (p Prepared) Body() []byte   { return []byte(p.body) }
 func (p Prepared) Digest() string { return p.digest }
 func (p Prepared) Name() string   { return p.name }
-func (p Policy) Compile(a Allocation, userData string) (Prepared, error) {
+
+// ValidateAllocation checks only immutable template/resource compatibility. It
+// does not accept bootstrap data, produce a native body, or grant execution.
+// Pool registration uses this method without manufacturing a job/JIT payload.
+func (p Policy) ValidateAllocation(a Allocation) error {
 	pool, ok := p.spec.Pools[a.Pool]
-	if !hash(p.digest) || !ok || a.Controller != p.spec.Controller || a.Host != p.spec.Host || !name(a.Name) || !hash(a.RequestKey) || a.CPU <= 0 || a.CPU%1000 != 0 || a.RAM <= 0 || a.RAM > (1<<63-1)/(1<<20) || a.Disk <= 0 || a.Disk > (1<<63-1)/(1<<20) || a.Runners != 1 || a.Flavor != pool.Flavor || a.Image != pool.Image || a.Fingerprint != pool.Fingerprint || a.Type != pool.Type || a.Arch != pool.Arch || !reflect.DeepEqual(a.Profiles, pool.ExpectedProfiles) || len(userData) == 0 || len(userData) > 1<<20 || !utf8.ValidString(userData) {
+	if !hash(p.digest) || !ok || a.Controller != p.spec.Controller || a.Host != p.spec.Host || !name(a.Name) || !hash(a.RequestKey) || a.CPU <= 0 || a.CPU%1000 != 0 || a.RAM <= 0 || a.RAM > (1<<63-1)/(1<<20) || a.Disk <= 0 || a.Disk > (1<<63-1)/(1<<20) || a.Runners != 1 || a.Flavor != pool.Flavor || a.Image != pool.Image || a.Fingerprint != pool.Fingerprint || a.Type != pool.Type || a.Arch != pool.Arch || !reflect.DeepEqual(a.Profiles, pool.ExpectedProfiles) {
+		return ErrPolicy
+	}
+	return nil
+}
+func (p Policy) Compile(a Allocation, userData string) (Prepared, error) {
+	if p.ValidateAllocation(a) != nil || len(userData) == 0 || len(userData) > 1<<20 || !utf8.ValidString(userData) {
 		return Prepared{}, ErrPolicy
 	}
+	pool := p.spec.Pools[a.Pool]
 	if p.spec.Version == ProtectedPolicyVersion {
 		payload, e := protectedboot.Decode([]byte(userData))
 		if e != nil || payload.RunnerName != a.Name || pool.ProtectedImage == nil || !reflect.DeepEqual(payload.Image, *pool.ProtectedImage) {
