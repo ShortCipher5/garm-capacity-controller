@@ -117,6 +117,7 @@ type DeletedInstanceObservation struct {
 	valid     bool
 }
 
+func (o DeletedInstanceObservation) ObservedAt() time.Time   { return o.observed }
 func (o DeletedInstanceObservation) Valid() bool             { return o.valid }
 func (o DeletedInstanceObservation) ResourceID() string      { return o.operation.resource }
 func (o DeletedInstanceObservation) ReleaseAuthorized() bool { return false }
