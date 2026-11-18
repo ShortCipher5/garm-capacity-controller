@@ -113,7 +113,8 @@ func NewOwnerServer(api *nativeapi.Client, serverCredentials, claimCredentials *
 }
 
 // NewClaimServer exposes only same-ledger first consumption. It has no enrollment,
-// cancellation, retry, native proxy, deletion or release endpoint. Authenticated
+// cancellation, retry, native proxy or release endpoint. Retirement claim routes
+// are first-use only and retain the store runtime-capability refusal. Authenticated
 // owner scope is checked against the immutable enrolled leaf in the transaction.
 func NewClaimServer(store *admission.SQLiteStore, credentials *tls.Config) (*http.Server, error) {
 	if store == nil {
@@ -124,6 +125,9 @@ func NewClaimServer(store *admission.SQLiteStore, credentials *tls.Config) (*htt
 		auth, err := admission.AuthenticateNativeOwner(r.TLS)
 		if err != nil {
 			http.Error(w, "native owner authentication required", http.StatusUnauthorized)
+			return
+		}
+		if serveRetirement(w, r, store, auth) {
 			return
 		}
 		if serveBootstrap(w, r, store, auth) {

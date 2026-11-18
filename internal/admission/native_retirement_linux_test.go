@@ -208,6 +208,15 @@ func exerciseNativeRetirement(t *testing.T, f nativeFixture, permit string, jour
 	}); !errors.Is(e, rollback) {
 		t.Fatal("stored unknown validation", e)
 	}
+	if got, e := s.LookupNativeRetirementClaim(ctx, permit, NativeRetireDelete); e != nil || got != deleted {
+		t.Fatal("historical claim lookup", e)
+	}
+	if got, e := s.LookupNativeRetirementReceipt(ctx, deleted.ID, "unknown"); e != nil || got.Record.OperationID != deleteID {
+		t.Fatal("historical unknown lookup", e)
+	}
+	if got, e := s.LookupNativeRetirementClaim(ctx, permit, "create"); e == nil || got != (NativeRetirementClaim{}) {
+		t.Fatal("invalid lookup returned claim")
+	}
 	if _, e = s.LookupRelease(ctx, intent.RequestKey); e == nil {
 		t.Fatal("native delete is not physical release")
 	}
