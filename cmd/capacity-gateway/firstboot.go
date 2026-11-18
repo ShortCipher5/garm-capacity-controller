@@ -21,6 +21,7 @@ type firstbootConfiguration struct {
 	Targets     map[string]firstbootTarget `json:"targets"`
 }
 type firstbootTarget struct {
+	PreflightSHA256 string         `json:"preflight_sha256,omitempty"`
 	Plan            firstboot.Plan `json:"plan"`
 	Digest          string         `json:"review_digest"`
 	CredentialAlias string         `json:"admin_credential_alias"`
@@ -122,7 +123,7 @@ func loadFirstboot(a *adminConfiguration) (map[string]firstboot.DeploymentTarget
 		if firstboot.Validate(req) != nil {
 			return fail()
 		}
-		targets[id] = firstboot.DeploymentTarget{Request: req, CredentialAlias: t.CredentialAlias}
+		targets[id] = firstboot.DeploymentTarget{Request: req, CredentialAlias: t.CredentialAlias, PreflightSHA256: t.PreflightSHA256}
 	}
 	return targets, firstboot.Resolver(resolve), token, nil
 }

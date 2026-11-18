@@ -44,6 +44,26 @@ func TestFirstbootAPISeparateAuthorityAndExactReview(t *testing.T) {
 		h.ServeHTTP(w, req)
 		return w
 	}
+	for _, tc := range []struct {
+		token, origin, body string
+		status              int
+	}{
+		{read, "", `{"confirm_read":true}`, 401},
+		{token, "https://other.invalid", `{"confirm_read":true}`, 403},
+		{token, "", `{"confirm_read":false}`, 400},
+		{token, "", `{"confirm_read":true,"command":"id"}`, 400},
+		{token, "", `{"confirm_read":true,"target_id":"one","review_digest":"wrong"}`, 409},
+	} {
+		req := httptest.NewRequest("POST", "https://127.0.0.1/admin/api/v1/firstboot/preflight", strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+tc.token)
+		req.Header.Set("Origin", tc.origin)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != tc.status {
+			t.Fatalf("preflight auth/request: %d %s", w.Code, w.Body.String())
+		}
+	}
 	if send("GET", "", read, "").Code != 401 || send("GET", "", token, "https://other.invalid").Code != 403 {
 		t.Fatal("authority/origin escaped")
 	}
