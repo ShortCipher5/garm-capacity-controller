@@ -338,5 +338,8 @@ func sqliteCheckArtifact(ctx context.Context, s *SQLiteStore) error {
 	if err := sqliteCheckOriginalPreparations(ctx, s); err != nil {
 		return err
 	}
+	if err := sqliteCheckStockProviderOrigins(ctx, s); err != nil {
+		return err
+	}
 	return sqliteCheckPoolRoutes(ctx, s)
 }

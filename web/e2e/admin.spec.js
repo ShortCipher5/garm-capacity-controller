@@ -34,7 +34,7 @@ test("real TLS handler + SQLite snapshot, read-only requests, refresh and reload
   const capacity = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Charged capacity breakdown", exact: true }),
   });
-  await expect(capacity).toContainText("Broker grants: unavailable");
+  await expect(capacity).toContainText("Unused grants are capacity charges");
   await page.getByRole("button", { name: "Refresh charged capacity" }).click();
   await expect(capacity.getByRole("cell", { name: "unknown", exact: true })).toBeVisible();
   await expect(capacity).toContainText("Read at");

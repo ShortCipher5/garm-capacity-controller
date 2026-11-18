@@ -26,6 +26,8 @@ import (
 const exitCodeNotFound = 30
 
 type configuration struct {
+	StockTLS      *securefiles.TLSFiles `json:"stock_tls,omitempty"`
+	CreateOrigin  string                `json:"create_origin,omitempty"`
 	Gateway       string                `json:"gateway"`
 	Controller    string                `json:"controller"`
 	TLS           securefiles.TLSFiles  `json:"tls"`
@@ -49,7 +51,7 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	case "GetConfigJSONSchema":
 		schema := map[string]any{"type": "object", "required": []string{"gateway", "controller", "tls"}, "additionalProperties": false}
 		tlsSchema := map[string]any{"type": "object", "required": []string{"ca", "certificate", "key"}, "additionalProperties": false, "properties": map[string]any{"ca": map[string]string{"type": "string"}, "certificate": map[string]string{"type": "string"}, "key": map[string]string{"type": "string"}}}
-		schema["properties"] = map[string]any{"gateway": map[string]string{"type": "string"}, "controller": map[string]string{"type": "string"}, "tls": tlsSchema, "source_tls": tlsSchema, "bootstrap_mode": map[string]string{"type": "string", "const": "gateway-owned-default-cloudinit/v1"}}
+		schema["properties"] = map[string]any{"gateway": map[string]string{"type": "string"}, "controller": map[string]string{"type": "string"}, "tls": tlsSchema, "source_tls": tlsSchema, "stock_tls": tlsSchema, "create_origin": map[string]any{"type": "string", "enum": []string{"prepared", "stock-provider-v1"}}, "bootstrap_mode": map[string]string{"type": "string", "const": "gateway-owned-default-cloudinit/v1"}}
 		if json.NewEncoder(output).Encode(schema) != nil {
 			return 1
 		}
@@ -77,7 +79,19 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 	if gatewayrpc.Decode(bytes.NewReader(raw), &config) != nil || config.Controller == "" || config.Controller != getenv("GARM_CONTROLLER_ID") {
 		return 1
 	}
+	if config.CreateOrigin != "" && config.CreateOrigin != "prepared" && config.CreateOrigin != "stock-provider-v1" {
+		return 1
+	}
+	if config.CreateOrigin == "stock-provider-v1" && (config.StockTLS == nil || config.SourceTLS != nil || config.BootstrapMode != "") {
+		return 1
+	}
+	if config.CreateOrigin == "stock-provider-v1" && (command == "AdmitInstance" || command == "CancelAdmission" || command == "RecordPreparation" || command == "ValidatePreparation") {
+		return 1
+	}
 	files := config.TLS
+	if config.CreateOrigin == "stock-provider-v1" && command == "CreateInstance" {
+		files = *config.StockTLS
+	}
 	sourceCommand := command == "RecordPreparation" || command == "ValidatePreparation"
 	if sourceCommand {
 		if config.SourceTLS == nil || config.BootstrapMode != "gateway-owned-default-cloudinit/v1" {
@@ -160,7 +174,12 @@ func run(ctx context.Context, getenv func(string) string, input io.Reader, outpu
 		if gatewayrpc.Decode(input, &request) != nil || request.PoolID != pool {
 			return 1
 		}
-		instance, err := client.Create(ctx, request)
+		var instance common.ProviderInstance
+		if config.CreateOrigin == "stock-provider-v1" {
+			instance, err = client.CreateStockProvider(ctx, request)
+		} else {
+			instance, err = client.Create(ctx, request)
+		}
 		if err != nil {
 			return 1
 		}

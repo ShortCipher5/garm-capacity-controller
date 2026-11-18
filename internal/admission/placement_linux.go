@@ -102,6 +102,10 @@ func (s *SQLiteStore) LookupExecutionPlan(ctx context.Context, key string) (Exec
 // A plan is a reservation, never permission to repeat a physical create.
 // Legacy reservations lacking plans cannot be reinterpreted or auto-imported.
 func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementRequest) (ExecutionPlan, error) {
+	return s.admitPlacement(ctx, request, nil)
+}
+
+func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementRequest, stock *stockProviderOrigin) (ExecutionPlan, error) {
 	var result ExecutionPlan
 	var outcome error
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
@@ -134,6 +138,9 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 			r, exists := reservations[request.Key]
 			if !exists || r.Request != p.Request {
 				return deny("placement_denied_missing_charge", ErrExecutionPlan)
+			}
+			if err := checkStockProviderOrigin(tx, p, stock); err != nil {
+				return deny("placement_denied_origin", err)
 			}
 			p.Replay = true
 			result = p
@@ -178,9 +185,24 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 		if err != nil {
 			return err
 		}
-		allocated, err := sqliteAllocations(config, reservations, inventory, released)
+		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
+		}
+
+		var stockGrant *BrokerGrant
+		if stock != nil {
+			selectedGrant, err := selectStockGrant(tx, request, stock.Authority, now)
+			if err != nil {
+				return deny("placement_denied_broker_grant", err)
+			}
+			stockGrant = &selectedGrant
+			// Replace exactly one existing grant charge, never add a second or
+			// ignore other unused grants. Rollback retains it on any later error.
+			allocated.Global = subtractGrant(allocated.Global, stockGrant.Spec.Resources)
+			allocated.Hosts[stockGrant.Spec.Host] = subtractGrant(allocated.Hosts[stockGrant.Spec.Host], stockGrant.Spec.Resources)
+			allocated.Pools[request.Pool] = subtractGrant(allocated.Pools[request.Pool], stockGrant.Spec.Resources)
+			request.Hosts = []string{stockGrant.Spec.Host}
 		}
 		if !fits(allocated.Global, request.Resources, config.Global) || !fits(allocated.Pools[request.Pool], request.Resources, pool.Budget) {
 			return deny("placement_denied_capacity", ErrDenied)
@@ -222,11 +244,30 @@ func (s *SQLiteStore) AdmitPlacement(ctx context.Context, request PlacementReque
 			return ErrExecutionPlan
 		}
 		sum := sha256.Sum256(raw)
-		if _, err := tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at) VALUES(?,?,?,?,?,?,?,? ,?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, "creating", result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,? ,?,17)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, "creating", result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 		if _, err := tx.Exec("INSERT INTO execution_plans(request_key,payload,payload_hash,host_binding_sequence,created_at) VALUES(?,?,?,?,?)", req.Key, string(raw), hex.EncodeToString(sum[:]), result.HostBindingSequence, result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 			return err
+		}
+
+		if stockGrant != nil {
+			changed, err := tx.Exec("UPDATE broker_grants SET state='consumed',request_key=? WHERE grant_id=? AND state='unused'", req.Key, stockGrant.ID)
+			if err != nil {
+				return err
+			}
+			n, err := changed.RowsAffected()
+			if err != nil || n != 1 {
+				return ErrBrokerGrant
+			}
+			if err := sqliteAudit(tx, "broker_grant_consumed", stockGrant.ID, now); err != nil {
+				return err
+			}
+		}
+		if stock != nil {
+			if err := insertStockProviderOrigin(tx, result, *stock, now); err != nil {
+				return err
+			}
 		}
 		return sqliteAudit(tx, "placement_reserved", req.Key, now)
 	})

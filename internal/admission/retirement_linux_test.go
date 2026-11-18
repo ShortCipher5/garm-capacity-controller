@@ -169,7 +169,7 @@ func TestRetirementMigrationFrom14RetainsReservations(t *testing.T) {
 	ctx := context.Background()
 	f := retirementFixture(t)
 	// Remove only empty v15 schema to exercise a genuine v14-shaped ledger.
-	for _, statement := range []string{"DROP TABLE retirement_attempts", "DROP TABLE retirement_intents", "PRAGMA user_version=14"} {
+	for _, statement := range []string{stockMigrationDowngradeSQL, "DROP TABLE retirement_attempts", "DROP TABLE retirement_intents", "PRAGMA user_version=14"} {
 		if _, err := f.store.db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -187,7 +187,7 @@ func TestRetirementMigrationFrom14RetainsReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := reopened.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 15 {
+	if err := reopened.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != sqliteCurrentVersion {
 		t.Fatal("migration failed", err)
 	}
 	if sqliteSnapshot(t, reopened).Allocated.Global.Runners != 1 {

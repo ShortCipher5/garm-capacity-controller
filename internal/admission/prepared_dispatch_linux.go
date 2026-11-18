@@ -58,5 +58,5 @@ func (s *SQLiteStore) ExecutePreparedDispatch(ctx context.Context, plan Executio
 	if !validHostBinding(binding) || binding.Sequence <= 0 || binding.Host != plan.Request.Host || plan.HostBindingSequence != binding.Sequence {
 		return DispatchRecord{}, ErrHostBinding
 	}
-	return s.executeDispatch(ctx, plan.Request, &binding, &plan, &preparedDispatch{Receipt: receipt, Row: row}, execute)
+	return s.executeDispatch(ctx, plan.Request, &binding, &plan, &preparedDispatch{Receipt: receipt, Row: row}, nil, execute)
 }

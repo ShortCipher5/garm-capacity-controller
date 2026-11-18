@@ -47,6 +47,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 			seenFP[fp] = true
 		}
 	}
+	if validateStockProviderScopes(c) != nil {
+		return fail()
+	}
 	if len(c.ProviderFingerprints) == 0 {
 		return fail()
 	}

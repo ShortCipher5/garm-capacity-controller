@@ -31,9 +31,10 @@ type SQLiteStore struct {
 	now         func() time.Time
 	runtimeID   string
 	runtimeFile os.FileInfo
+	initialized bool
 }
 
-const sqliteCurrentVersion = 15
+const sqliteCurrentVersion = 17
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -312,6 +313,30 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 			}
 		}
 
+		if version < 16 {
+			if _, err := tx.Exec(sqliteStockProviderSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v16", "", s.now()); err != nil {
+				return err
+			}
+		}
+
+		if version < 17 {
+			if _, err := tx.Exec(sqliteBrokerGrantSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v17", "", s.now()); err != nil {
+				return err
+			}
+		}
+
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -319,6 +344,7 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 		db.Close()
 		return nil, err
 	}
+	s.initialized = true
 	return s, nil
 }
 
@@ -396,6 +422,12 @@ func (s *SQLiteStore) transaction(ctx context.Context, fn func(*sql.Tx) error) e
 	}()
 	if s.poisoned.Load() {
 		return ErrUncertain
+	}
+	if s.initialized {
+		var version int
+		if tx.QueryRow("PRAGMA user_version").Scan(&version) != nil || version != sqliteCurrentVersion {
+			return ErrBrokerGrant
+		}
 	}
 	if s.runtimeID != "" {
 		if err := sqliteRuntimeIdentity(tx.QueryRow, s.runtimeID); err != nil {
@@ -626,14 +658,14 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		if err != nil {
 			return err
 		}
-		allocated, err := sqliteAllocations(config, reservations, inventory, released)
+		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}
 		if !fits(allocated.Global, req.Resources, config.Global) || !fits(allocated.Hosts[req.Host], req.Resources, host.Budget) || !fits(allocated.Pools[req.Pool], req.Resources, pool.Budget) {
 			return deny("denied_capacity", ErrDenied)
 		}
-		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at) VALUES(?,?,?,?,?,?,?,'creating',?)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
+		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,'creating',?,17)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
@@ -810,7 +842,7 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 		if err != nil {
 			return err
 		}
-		if _, err := sqliteAllocations(config, reservations, inventory, released); err != nil {
+		if _, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released); err != nil {
 			return err
 		}
 		encoded, err := json.Marshal(config)
@@ -901,7 +933,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 		if err != nil {
 			return err
 		}
-		result.Allocated, err = sqliteAllocations(result.Config, result.Reservations, result.Inventory, released)
+		result.Allocated, err = sqliteAllocationsWithGrants(tx, result.Config, result.Reservations, result.Inventory, released)
 		if err != nil {
 			return err
 		}
