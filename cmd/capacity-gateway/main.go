@@ -38,6 +38,7 @@ type garmConfiguration struct {
 	ScaleSets map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
 	StockProviderScopes  []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
 	EnableStockProvider  bool                                     `json:"-"`
 	PreparationPools     map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
@@ -147,7 +148,12 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	handler.Audit = func(event string) { log.Print(event) }
-	rpcHandler, err := stockProviderHandler(config, handler)
+	nativeStock, closeNative, err := buildNativeStock(ctx, store, config, string(bytes.TrimSpace(token)), garmTLS)
+	if err != nil {
+		return err
+	}
+	defer closeNative()
+	rpcHandler, err := stockProviderHandler(config, handler, nativeStock)
 	if err != nil {
 		return err
 	}

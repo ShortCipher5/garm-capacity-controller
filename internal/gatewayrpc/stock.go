@@ -23,6 +23,7 @@ type StockScope struct {
 }
 type StockHandler struct {
 	facade   *gateway.Facade
+	native   *gateway.NativeStock
 	scopes   map[string]StockScope
 	inFlight chan struct{}
 }
@@ -61,6 +62,27 @@ func NewStockHandler(base *Handler, scopes []StockScope) (*StockHandler, error) 
 	}
 	return h, nil
 }
+
+// NewNativeStockHandler selects the concrete protected native coordinator. It
+// retains the prepared handler's role separation and runtime refusal, and never
+// falls back to the old direct-Incus create implementation after a failure.
+func NewNativeStockHandler(base *Handler, native *gateway.NativeStock, scopes []StockScope) (*StockHandler, error) {
+	if native == nil || native.RuntimeOriginalPreparationRequired() {
+		return nil, ErrConfiguration
+	}
+	h, e := NewStockHandler(base, scopes)
+	if e != nil {
+		return nil, e
+	}
+	for _, scope := range scopes {
+		if !native.AuthorizesStockAuthority(admission.StockProviderAuthority{Controller: scope.Controller, PoolID: scope.PoolID, ProviderName: scope.ProviderName, ClientFingerprint: scope.ClientFingerprint}) {
+			return nil, ErrConfiguration
+		}
+	}
+	h.native = native
+	return h, nil
+}
+
 func (h *StockHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -114,7 +136,14 @@ func (h *StockHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden)
 		return
 	}
-	result, err := h.facade.CreateStockProvider(r.Context(), b, admission.StockProviderAuthority{Controller: scope.Controller, PoolID: scope.PoolID, ProviderName: scope.ProviderName, ClientFingerprint: scope.ClientFingerprint})
+	authority := admission.StockProviderAuthority{Controller: scope.Controller, PoolID: scope.PoolID, ProviderName: scope.ProviderName, ClientFingerprint: scope.ClientFingerprint}
+	var result common.ProviderInstance
+	var err error
+	if h.native != nil {
+		result, err = h.native.CreateStockProvider(r.Context(), b, authority)
+	} else {
+		result, err = h.facade.CreateStockProvider(r.Context(), b, authority)
+	}
 	if err != nil {
 		fail(http.StatusServiceUnavailable)
 		return
