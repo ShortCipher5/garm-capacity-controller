@@ -160,6 +160,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.OverheadRefresh != nil {
+		if !a.EnableExperimentalManagement || a.OverheadRefresh.JournalDirectory == "" {
+			return fail()
+		}
+		if _, e := loadOverheadRecipes(a.OverheadRefresh.RecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if a.BrokerProfileRecipesFile != "" {
 		if !a.EnableExperimentalManagement {
 			return fail()
