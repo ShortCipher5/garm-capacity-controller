@@ -1,3 +1,5 @@
+import { reconcileGarmRead } from "./garm-read-reconciliation.js";
+import { GarmReadChanges } from "./garm-read-reconciliation.jsx";
 import { ExistingEntityOnboardingPanel } from "./entity-onboarding-flow.jsx";
 import { GarmScaleSetInventory } from "./garm-scalesets.jsx";
 import React, { useEffect, useRef, useState } from "react";
@@ -12,6 +14,8 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
   const [formEpoch,setFormEpoch] = useState(0), [draftDirty,setDraftDirty] = useState(false);
   const [conflictLatest,setConflictLatest] = useState(null);
   const [needsRefresh,setNeedsRefresh] = useState(false), [syncError,setSyncError] = useState(false);
+  const [readChanges,setReadChanges] = useState(null);
+  const lastObservation = useRef(null);
   const dirty = useRef(false), latestLoad = useRef(null);
   const resolutionToken = useRef(null);
   const active = useRef(null), token = useRef(null), mounted = useRef(true), uncertain = useRef(false), readGeneration=useRef(0);
@@ -25,6 +29,9 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
       const next=await read();
       if(mounted.current && generation===readGeneration.current){
         setSyncError(false);
+        const changes=reconcileGarmRead(lastObservation.current,next);
+        lastObservation.current=next;
+        if(changes)setReadChanges(changes);
         if(background && retainGarmDraftConflict(snapshot,next,needsRefresh,Boolean(dirty.current || review),garmSettingsChanged)) {
           setConflictLatest(next);setSnapshot(previous=>preserveDraftWithLatestInventory(previous,next));setNeedsRefresh(true);if(token.current)token.current.value="";
         } else if(!needsRefresh || !background) {
@@ -96,6 +103,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
   const blocked=needsRefresh||syncError||busy||!canEditGarm(snapshot)||snapshot?.write_blocked||uncertain.current||stale;
   return <section className="card management" id="garm-management">
     <h2>Garm settings</h2>
+    <p><strong>Existing installation: observe, do not adopt.</strong> Keep your existing stock Garm pools. Changes made in Garm are read back here; discovery does not transfer ownership, enroll a host, or enable automatic two-way writes. The separately provisioned managed single-writer installation is a different mode.</p>
     {typeof readEntities === "function" && typeof readEntityPools === "function" && <ExistingEntityOnboardingPanel readEntities={readEntities} readEntityPools={readEntityPools} />}
     <p>Actual settings on explicitly configured Garm pools and repositories, separate from ledger budgets. No registration, deletion, runner placement or drain controls.</p>
     <p>New demand is ledger-enforced only for separately qualified gateway-routed pools. Repository balancing can affect other eligible pools outside this allowlist; its routing acknowledgement must cover that complete pool/provider graph.</p>
@@ -103,6 +111,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     <button className="quiet" onClick={()=>load(false)} disabled={busy}>{busy?"Working…":(needsRefresh||draftDirty||review)?"Discard draft and refresh Garm settings":snapshot?"Refresh Garm settings":"Load Garm settings"}</button>
     {snapshot && <button className="quiet" type="button" onClick={()=>load(true)} disabled={busy}>Refresh observations, keep draft</button>}
     <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. No automatic writes or recreation.</p>
+    {readChanges && <GarmReadChanges changes={readChanges} stale={syncError} onDismiss={()=>setReadChanges(null)} />}
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
     {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings and journal details may be stale; pool and scaleset inventories are unavailable. Editing is blocked until a successful refresh.</p>}

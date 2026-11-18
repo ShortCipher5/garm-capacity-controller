@@ -1,6 +1,7 @@
 package adminview
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
@@ -8,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func (h *Handler) serveBrokerPolicy(w http.ResponseWriter, r *http.Request) {
@@ -22,12 +24,19 @@ func (h *Handler) serveBrokerPolicy(w http.ResponseWriter, r *http.Request) {
 			fail(401, "token rejected")
 			return
 		}
-		p, err := h.store.BrokerPolicy(r.Context())
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		state, err := h.store.ReadBrokerGrantState(ctx)
 		if err != nil {
 			fail(503, "advisory policy unavailable")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"policy": p, "advisory_only": true, "writes_enabled": h.management})
+		raw, err := json.Marshal(map[string]any{"policy": state.Policy, "status": projectBrokerStatus(state, time.Now()), "advisory_only": true, "writes_enabled": h.management})
+		if err != nil || len(raw) > 2<<20 {
+			fail(503, "policy comparison unavailable")
+			return
+		}
+		_, _ = w.Write(raw)
 	case http.MethodPut:
 		if !h.profileWriteAuthenticated(w, r) {
 			return
