@@ -363,7 +363,10 @@ func (m *ManagementClient) UpdatePool(ctx context.Context, id, expected string, 
 	if update.MinIdleRunners != nil {
 		minimum = *update.MinIdleRunners
 	}
-	if maximum == 0 || maximum > 1000000 || minimum > maximum || minimum < before.MinIdleRunners {
+	// Stock UPDATE accepts max=0 with min_idle=0. This pauses future starts,
+	// not existing/in-flight runners or accounting. Keep the idle-decrease guard:
+	// a positive idle target cannot be lowered without qualified retirement.
+	if maximum > 1000000 || minimum > maximum || minimum < before.MinIdleRunners {
 		return ManagedPool{}, ErrManagementUnsafe
 	}
 	if update.Priority != nil && *update.Priority > 1000000 {
