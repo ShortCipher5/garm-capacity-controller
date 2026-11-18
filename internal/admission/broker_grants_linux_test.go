@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const brokerGrantDowngradeSQL = `
+const brokerGrantDowngradeSQL = nativeExecutionDowngradeSQL + `
 DROP TRIGGER broker_batch_no_update;
 DROP TRIGGER broker_grant_identity_immutable;
 DROP TABLE broker_grant_archives;
@@ -244,7 +244,7 @@ func TestBrokerGrantOldWriterSQLAndVersionRollbackBlocked(t *testing.T) {
 	if _, e = s.Admit(context.Background(), Request{Key: "new", Pool: "app", Host: "a", Resources: placementRequest("x").Resources}); e == nil {
 		t.Fatal("schema rollback accepted")
 	}
-	if _, e = s.db.Exec("PRAGMA user_version=18"); e != nil {
+	if _, e = s.db.Exec("PRAGMA user_version=19"); e != nil {
 		t.Fatal(e)
 	}
 }

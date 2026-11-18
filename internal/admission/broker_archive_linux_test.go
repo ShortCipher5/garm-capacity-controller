@@ -269,7 +269,7 @@ func TestBrokerArchiveInflationAndTrailingBytesAreBounded(t *testing.T) {
 	}
 }
 
-const restoreSchema17ArchiveFixture = `
+const restoreSchema17ArchiveFixture = nativeExecutionDowngradeSQL + `
 DROP TRIGGER broker_batch_no_update;
 DROP TRIGGER broker_grant_identity_immutable;
 DROP TRIGGER broker_grant_terminal;
