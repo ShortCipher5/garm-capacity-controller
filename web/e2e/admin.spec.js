@@ -392,7 +392,8 @@ test("audit filters stay snapshot-local across clear, refresh and disconnect", a
   await page.getByRole("button", { name: "Clear filters", exact: true }).click();
   await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
   await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toBeDisabled();
-  expect(requests.length).toBe(initial);
+  console.info("audit filter network diagnostic", JSON.stringify({ initial, requests }));
+  expect(requests, JSON.stringify(requests)).toHaveLength(initial);
   await page.getByLabel("Event host", { exact: true }).selectOption("host-b");
   refreshed = true;
   await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
