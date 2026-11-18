@@ -92,6 +92,9 @@ func TestBrokerProfileUsesObservedOwnershipAndSavedSizeAndImmutablePolicy(t *tes
 	if err != nil || state.PoolProfiles[profilePool].Sequence != v.Sequence {
 		t.Fatal("not in coherent snapshot", err)
 	}
+	if len(state.NativeDomains) != 1 || state.NativeDomains[f.binding.Sequence] != f.binding {
+		t.Fatal("immutable enrollment missing or altered in coherent snapshot")
+	}
 	if err = f.store.ProfileUpsert(ctx, "small", 2000, 2048, 8192); err != nil {
 		t.Fatal(err)
 	}

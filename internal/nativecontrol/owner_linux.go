@@ -13,6 +13,8 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeartifacts"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeenforcement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativequota"
 )
@@ -23,16 +25,21 @@ const maxOwnerExecutions = 65536
 // ownerExecution is never reconstructed from PID, disk JSON or controller input.
 // Losing this process quarantines its domain; StartFresh cannot adopt it.
 type ownerExecution struct {
-	mu              sync.Mutex
-	prepared        nativeapi.Prepared
-	parent          admission.FreshNativeClaim
-	create, start   *ownerStep
-	startUsed       bool
-	quota           nativeapi.StoppedQuota
-	userData        string
-	bootstrapUsed   bool
-	bootstrapClaim  admission.NativeBootstrapClaim
-	bootstrapRecord nativeidentity.BootstrapRecord
+	mu                  sync.Mutex
+	prepared            nativeapi.Prepared
+	parent              admission.FreshNativeClaim
+	create, start       *ownerStep
+	startUsed           bool
+	quota               nativeapi.StoppedQuota
+	guest               nativeapi.GuestIncarnation
+	datasetLife         nativeapi.DatasetLifetime
+	reclamation         nativeapi.StorageReclamationTracker
+	reclamationCaptured bool
+	retirement          *ownerRetirement
+	userData            string
+	bootstrapUsed       bool
+	bootstrapClaim      admission.NativeBootstrapClaim
+	bootstrapRecord     nativeidentity.BootstrapRecord
 }
 type ownerStep struct {
 	claim    admission.NativeOperationClaim
@@ -41,25 +48,27 @@ type ownerStep struct {
 	current  nativeidentity.OperationRecord
 }
 type executionOwner struct {
-	api     *nativeapi.Client
-	policy  nativeapi.Policy
-	claims  *ClaimClient
-	quota   *nativequota.Reader
-	mu      sync.Mutex
-	permits map[string]*ownerExecution
-	names   map[string]bool
-	steps   map[string]*ownerExecution
+	retirementSteps map[string]*ownerExecution
+	api             *nativeapi.Client
+	policy          nativeapi.Policy
+	claims          *ClaimClient
+	quota           *nativequota.Reader
+	pools           *nativequota.PoolReader
+	mu              sync.Mutex
+	permits         map[string]*ownerExecution
+	names           map[string]bool
+	steps           map[string]*ownerExecution
 }
 type executionRequest struct {
 	Envelope admission.NativeExecutionEnvelope `json:"envelope"`
 	UserData string                            `json:"user_data"`
 }
 
-// NewExecutionServer builds an explicitly experimental, unwired owner service.
-// The command does NOT call it. Callers must qualify the dedicated domain/host
-// boundary first. It never adopts an owner, retries mutations or releases charge.
-func NewExecutionServer(api *nativeapi.Client, policy nativeapi.Policy, claims *ClaimClient, quota *nativequota.Reader, serverTLS, claimTLS *tls.Config, controllerLeaf string) (*http.Server, error) {
-	if !policy.Protected() || api == nil || claims == nil || quota == nil || api.PolicyDigest() != policy.Digest() || claims.config.DomainID != policy.DomainID() || claims.config.PolicyDigest != policy.Digest() || fingerprint(claimTLS) != claims.config.OwnerClientLeaf {
+// NewExecutionServer builds the owner service behind the still-closed execution
+// boundary. Both pinned quota and pool readers are mandatory. It never adopts
+// an owner, retries mutations or releases charge from accounting diagnostics.
+func NewExecutionServer(api *nativeapi.Client, policy nativeapi.Policy, claims *ClaimClient, quota *nativequota.Reader, pools *nativequota.PoolReader, serverTLS, claimTLS *tls.Config, controllerLeaf string) (*http.Server, error) {
+	if !policy.Protected() || api == nil || claims == nil || quota == nil || pools == nil || api.PolicyDigest() != policy.Digest() || claims.config.DomainID != policy.DomainID() || claims.config.PolicyDigest != policy.Digest() || fingerprint(claimTLS) != claims.config.OwnerClientLeaf {
 		return nil, ErrControl
 	}
 	if claims.config.ControllerServerLeaf == fingerprint(serverTLS) || claims.config.ControllerServerLeaf == controllerLeaf {
@@ -75,12 +84,20 @@ func NewExecutionServer(api *nativeapi.Client, policy nativeapi.Policy, claims *
 	if api.ClaimOwner() != nil {
 		return nil, ErrControl
 	}
-	owner := &executionOwner{api: api, policy: policy, claims: claims, quota: quota, permits: map[string]*ownerExecution{}, names: map[string]bool{}, steps: map[string]*ownerExecution{}}
+	owner := &executionOwner{api: api, policy: policy, claims: claims, quota: quota, pools: pools, permits: map[string]*ownerExecution{}, names: map[string]bool{}, steps: map[string]*ownerExecution{}}
 	discovery := server.Handler
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if !peer(r.TLS, controllerLeaf) {
 			http.Error(w, "owner authentication required", 401)
+			return
+		}
+		if r.URL.Path == nativeartifacts.Path {
+			serveArtifacts(w, r, api, fingerprint(serverTLS), fingerprint(claimTLS))
+			return
+		}
+		if r.URL.Path == nativeenforcement.Path {
+			serveEnforcement(w, r, api, fingerprint(serverTLS), fingerprint(claimTLS))
 			return
 		}
 		if r.URL.Path == nativeidentity.Path {
@@ -96,6 +113,9 @@ func NewExecutionServer(api *nativeapi.Client, policy nativeapi.Policy, claims *
 	return server, nil
 }
 func (o *executionOwner) serve(w http.ResponseWriter, r *http.Request) {
+	if o.serveRetirementOperation(w, r) {
+		return
+	}
 	if r.URL.Path == ExecutionPath && r.Method == http.MethodPost {
 		if r.Header.Get("Content-Type") != "application/json" {
 			http.Error(w, "JSON required", 415)
@@ -116,6 +136,15 @@ func (o *executionOwner) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/native/"), "/")
+	if len(parts) == 3 && parts[0] == "executions" && parts[2] == "journal" && r.Method == http.MethodGet {
+		record, e := o.protectedJournal(r.Context(), parts[1])
+		if e != nil {
+			http.Error(w, "protected journal unavailable", 503)
+			return
+		}
+		respond(w, 200, record)
+		return
+	}
 	if len(parts) == 3 && parts[0] == "executions" && (parts[2] == "start" || parts[2] == "bootstrap") && r.Method == http.MethodPost {
 		raw, e := io.ReadAll(io.LimitReader(r.Body, 3))
 		if e != nil || string(raw) != "{}" || r.Header.Get("Content-Type") != "application/json" {
@@ -268,6 +297,14 @@ func (o *executionOwner) observe(ctx context.Context, execution *ownerExecution,
 			return
 		}
 		step.current.ResourceID = id
+		if step.claim.Step == admission.NativeStart {
+			guest, err := o.api.ObserveGuestIncarnation(ctx, execution.prepared, id)
+			if err != nil {
+				step.current.Outcome = "unknown"
+				return
+			}
+			execution.guest = guest
+		}
 	}
 	step.current.Outcome = op.Outcome()
 }
@@ -294,6 +331,22 @@ func (o *executionOwner) start(ctx context.Context, permit string) (string, erro
 	if e != nil || q.ResourceID() != execution.quota.ResourceID() || q.DatasetGUID() != execution.quota.DatasetGUID() || q.Dataset() != execution.quota.Dataset() {
 		return "", ErrControl
 	}
+	lifetime, e := o.api.CaptureDatasetLifetime(ctx, execution.prepared, q, o.quota)
+	if e != nil {
+		return "", ErrControl
+	}
+	execution.datasetLife = lifetime
+	// Capture once before START. Failure consumes startUsed and cannot establish
+	// a later baseline after the workload may have created retained references.
+	if o.pools == nil {
+		return "", ErrControl
+	}
+	reclamation, e := o.api.CaptureStorageReclamation(ctx, execution.prepared, q, o.quota, o.pools)
+	if e != nil {
+		return "", ErrControl
+	}
+	execution.reclamation = reclamation
+	execution.reclamationCaptured = true
 	claim, e := o.claims.step(ctx, execution.parent, admission.NativeStart)
 	if e != nil {
 		return "", e

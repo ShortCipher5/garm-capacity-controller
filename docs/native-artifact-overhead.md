@@ -1,0 +1,11 @@
+# Permanent host-only artifact accounting
+
+Schema 27 records a genuine pinned-owner artifact-root observation as permanent conservative disk debt. The host is derived from the canonical enrolled owner and exact host binding, never a caller-provided host label. The observation originates from the separately constructed host-only finite quota root; detached JSON records cannot authorize recording.
+
+An artifact root is shared infrastructure, not a runner or a per-domain allocation. The physical deduplication key is pool GUID plus root GUID. The original artifact birth, pool load, dataset, host, owner and enrollment anchor cannot change through a retry. A different root adds a charge without removing old debt. The original owner's unavailable identity does not permit cross-domain adoption. Each root's charge is the maximum observed quota rounded up to MiB; smaller observations and expired evidence cannot erase it.
+
+`ArtifactOverhead` is separate from `DomainOverhead`. Canonical global and host charges include both; pool charges include neither. The invariant is `sum(pool charges) + DomainOverhead + ArtifactOverhead == global`, and `sum(host charges) == global`. Planner and authenticated snapshot consumers must preserve both subtotals. Neither creates runner supply. History is permanent with bounded 128-row reads, 16 KiB records and 1,000 current roots. Total historical validation cost may grow. Overflow fails transactionally; genuine over-budget debt remains visible.
+
+Migration closes readiness. SQL admission/dispatch accounting markers advance to 27 so older writers cannot omit this new debt. Supported backup/restore retains charges and closes readiness; arbitrary raw rollback or competing unfenced writers are not supported.
+
+No guest reservation is released by an artifact observation. This component does not prove a deleted guest's physical completion, containment of historical shared extents, or complete accounting of deployment input originals, TLS configuration, fixed birth latches, kernel objects and other host system resources outside the artifact dataset. Those require their own real bounded construction/accounting. No native activation or live host operation is performed by this change.

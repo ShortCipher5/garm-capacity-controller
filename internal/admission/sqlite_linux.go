@@ -34,7 +34,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 23
+const sqliteCurrentVersion = 27
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -404,6 +404,50 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 24 {
+			if _, err := tx.Exec(sqliteNativeFenceSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v24", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 25 {
+			if _, err := tx.Exec(sqliteNativeRetirementSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v25", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 26 {
+			if _, err := tx.Exec(sqliteNativeDomainOverheadSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v26", "", s.now()); err != nil {
+				return err
+			}
+		}
+		if version < 27 {
+			if _, err := tx.Exec(sqliteNativeArtifactOverheadSchema); err != nil {
+				return err
+			}
+			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v27", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -433,6 +477,22 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 		return nil, err
 	}
 	if err := s.checkNativeBootstraps(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.checkNativeRootFences(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.checkNativeRetirements(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.checkNativeDomainOverheads(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.checkNativeArtifactOverheads(context.Background()); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -613,9 +673,11 @@ func sqliteInventory(tx *sql.Tx) ([]InventoryResource, error) {
 }
 
 type Allocations struct {
-	Global Resources            `json:"global"`
-	Hosts  map[string]Resources `json:"hosts"`
-	Pools  map[string]Resources `json:"pools"`
+	ArtifactOverhead Resources            `json:"artifact_overhead"`
+	DomainOverhead   Resources            `json:"domain_overhead"`
+	Global           Resources            `json:"global"`
+	Hosts            map[string]Resources `json:"hosts"`
+	Pools            map[string]Resources `json:"pools"`
 }
 
 func sqliteAllocations(config Config, reservations map[string]Reservation, inventory []InventoryResource, released map[string]bool) (Allocations, error) {
@@ -756,7 +818,7 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		if !fits(allocated.Global, req.Resources, config.Global) || !fits(allocated.Hosts[req.Host], req.Resources, host.Budget) || !fits(allocated.Pools[req.Pool], req.Resources, pool.Budget) {
 			return deny("denied_capacity", ErrDenied)
 		}
-		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,'creating',?,18)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
+		_, err = tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,'creating',?,27)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, now.UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}

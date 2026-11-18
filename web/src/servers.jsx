@@ -1,3 +1,5 @@
+import {NativeEnrollment} from "./native-enrollment.jsx";
+import {OverheadCollection} from "./overhead-collection.jsx";
 import { SSHTargetRegistration } from "./ssh-targets.jsx";
 import { SSHInventory } from "./ssh-inventory.jsx";
 import { ConnectionManager } from "./connections.jsx";
@@ -203,7 +205,7 @@ function EnrollForm({ result, busy, onSubmit, onCancel }) {
     </form>
   );
 }
-export function Servers({ data, readOnboarding, readUsage, refresh }) {
+export function Servers({ data, readOnboarding, readUsage, refresh, readOverheadRefresh, readNativeEnrollment }) {
   const [profiles, setProfiles] = useState(null);
   const [results, setResults] = useState({});
   const [message, setMessage] = useState("");
@@ -278,6 +280,8 @@ export function Servers({ data, readOnboarding, readUsage, refresh }) {
       </div>
       <SSHTargetRegistration />
       <SSHInventory />
+      <NativeEnrollment read={readNativeEnrollment} onRecorded={refresh}/>
+      <OverheadCollection read={readOverheadRefresh} onRecorded={refresh}/>
       {data.management_enabled && <ConnectionManager onChanged={()=>{setResults({});setEnrolling("");setProfiles(null)}} />}
       <div className="card management" id="server-discovery">
         <h2>Server discovery</h2>

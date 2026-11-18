@@ -12,6 +12,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontrol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativedomain"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativequota"
 	"io"
 	"net"
 	"os"
@@ -23,16 +24,17 @@ import (
 )
 
 type controlConfig struct {
-	Listen               string               `json:"listen"`
-	Policy               nativeapi.PolicySpec `json:"policy"`
-	ControllerClientLeaf string               `json:"controller_client_leaf"`
-	ControllerServerLeaf string               `json:"controller_server_leaf"`
-	ControllerURL        string               `json:"controller_url"`
-	ServerCertificate    string               `json:"server_certificate"`
-	ServerKey            string               `json:"server_key"`
-	OwnerCertificate     string               `json:"owner_certificate"`
-	OwnerKey             string               `json:"owner_key"`
-	ControllerCA         string               `json:"controller_ca"`
+	PoolReader           nativequota.Configuration `json:"pool_reader"`
+	Listen               string                    `json:"listen"`
+	Policy               nativeapi.PolicySpec      `json:"policy"`
+	ControllerClientLeaf string                    `json:"controller_client_leaf"`
+	ControllerServerLeaf string                    `json:"controller_server_leaf"`
+	ControllerURL        string                    `json:"controller_url"`
+	ServerCertificate    string                    `json:"server_certificate"`
+	ServerKey            string                    `json:"server_key"`
+	OwnerCertificate     string                    `json:"owner_certificate"`
+	OwnerKey             string                    `json:"owner_key"`
+	ControllerCA         string                    `json:"controller_ca"`
 }
 
 func rootData(path string, secret bool, limit int64) ([]byte, error) {
@@ -118,6 +120,10 @@ func serveConfiguredOwner(ctx context.Context, path string, domain *nativedomain
 	if e != nil {
 		return e
 	}
+	pools, e := nativequota.NewPoolReader(config.PoolReader)
+	if e != nil {
+		return e
+	}
 	config.Policy.DomainID = domain.Birth().ID
 	policy, e := nativeapi.NewPolicy(config.Policy)
 	if e != nil {
@@ -150,7 +156,7 @@ func serveConfiguredOwner(ctx context.Context, path string, domain *nativedomain
 		return e
 	}
 	defer claims.Close()
-	server, e := nativecontrol.NewExecutionServer(api, policy, claims, boundary.reader, serverTLS, ownerTLS, config.ControllerClientLeaf)
+	server, e := nativecontrol.NewExecutionServer(api, policy, claims, boundary.reader, pools, serverTLS, ownerTLS, config.ControllerClientLeaf)
 	if e != nil {
 		return e
 	}
