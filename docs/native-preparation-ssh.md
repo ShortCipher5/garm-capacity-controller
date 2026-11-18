@@ -59,3 +59,21 @@ Tests use fake bundle bytes and disposable local SSH servers only. Python tests
 exercise bounded harmless child output; they do not install anything or contact a
 server. Actual Linux preparation, sudo/Python availability and live deployment
 have not been qualified by these tests.
+
+## Exact inspection outcomes
+
+State now includes optional `attempt`: `sequence`, `mode` (`prepare` or `inspect`),
+`review_digest`, `status`, `started_at`, optional `completed_at` and `receipt`.
+Each target has a bounded append-only history (at most1024 attempts). Its unknown
+intent is durable before credential resolution/network and before HTTP202. The
+202 returns that exact attempt sequence. A completed matching receipt records
+`prepared_not_activated`; a failed observation records `observation_unavailable`,
+which does not prove no remote effects. A hard crash leaves that attempt unknown.
+
+The original preparation receipt remains historical. Consumers must correlate
+`attempt.sequence` and review digest to the accepted action before saying the
+inspection succeeded. In particular an old top-level prepared receipt plus a new
+unavailable/unknown attempt must not be displayed as inspection success. Timestamps
+are local operation bookkeeping, not fresh physical authority. Restart preserves
+these distinctions. Malformed/gapped/orphan journal state fails closed. Reaching
+the bound requires operator investigation; records are not automatically removed.

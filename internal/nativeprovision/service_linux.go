@@ -17,6 +17,7 @@ import (
 )
 
 type State struct {
+	Attempt      *Attempt               `json:"attempt,omitempty"`
 	ReviewDigest string                 `json:"review_digest"`
 	Status       string                 `json:"status"`
 	Receipt      *nativeprepare.Receipt `json:"receipt,omitempty"`
@@ -119,11 +120,11 @@ func (s *Service) read(name string) ([]byte, error) {
 func (s *Service) Apply(ctx context.Context, review string, inspect bool, resolve func() (ssh.Signer, error)) (State, error) {
 	return s.apply(ctx, review, inspect, resolve, nil)
 }
-func (s *Service) apply(ctx context.Context, review string, inspect bool, resolve func() (ssh.Signer, error), ready chan bool) (State, error) {
+func (s *Service) apply(ctx context.Context, review string, inspect bool, resolve func() (ssh.Signer, error), ready chan State) (State, error) {
 	signalled := false
 	defer func() {
 		if ready != nil && !signalled {
-			ready <- false
+			ready <- State{}
 		}
 	}()
 	if s == nil || ctx == nil || ctx.Err() != nil || review != s.ReviewDigest() || resolve == nil {
@@ -142,6 +143,9 @@ func (s *Service) apply(ctx context.Context, review string, inspect bool, resolv
 	raw, _ := json.Marshal(state)
 	previous, e := s.read(intent)
 	if os.IsNotExist(e) {
+		if seq, se := s.latestSequence(); se != nil || seq != 0 {
+			return state, ErrInvalid
+		}
 		if inspect {
 			return state, ErrInvalid
 		}
@@ -153,22 +157,33 @@ func (s *Service) apply(ctx context.Context, review string, inspect bool, resolv
 	} else if !inspect {
 		return state, ErrUnknown
 	}
+	attempt, e := s.beginAttempt(inspect)
+	if e != nil {
+		return state, e
+	}
+	state.Attempt = &attempt
+	failed := func() (State, error) {
+		if result, e := s.finishAttempt(attempt, nil); e == nil {
+			state.Attempt = &result
+		}
+		return state, ErrUnknown
+	}
 	if ready != nil {
-		ready <- true
+		ready <- state
 		signalled = true
 	}
 	// Completed state remains historical. Inspection deliberately rechecks remote
 	// bytes instead of trusting this receipt as current target attestation.
 	key, e := resolve()
 	if e != nil {
-		return state, ErrUnknown
+		return failed()
 	}
 	receipt, e := s.execute(ctx, s.plan, review, key, inspect)
 	if e != nil {
-		return state, ErrUnknown
+		return failed()
 	}
 	if nativeprepare.ValidateReceipt(s.plan.Manifest, receipt) != nil {
-		return state, ErrUnknown
+		return failed()
 	}
 	complete := State{ReviewDigest: review, Status: "prepared_not_activated", Receipt: &receipt}
 	out, _ := json.Marshal(complete)
@@ -176,11 +191,16 @@ func (s *Service) apply(ctx context.Context, review string, inspect bool, resolv
 	old, e := s.read(name)
 	if os.IsNotExist(e) {
 		if s.write(name, out) != nil {
-			return state, ErrUnknown
+			return failed()
 		}
 	} else if e != nil || string(old) != string(out) {
+		return failed()
+	}
+	result, e := s.finishAttempt(attempt, &receipt)
+	if e != nil {
 		return state, ErrUnknown
 	}
+	complete.Attempt = &result
 	return complete, nil
 }
 
@@ -190,7 +210,7 @@ func (s *Service) Start(ctx context.Context, review string, inspect bool, resolv
 	if s == nil || ctx == nil || ctx.Err() != nil || review != s.ReviewDigest() || resolve == nil || s.closed.Load() || !s.busy.CompareAndSwap(false, true) {
 		return State{}, ErrInvalid
 	}
-	ready := make(chan bool, 1)
+	ready := make(chan State, 1)
 	done := make(chan struct{})
 	go func() {
 		defer func() { s.busy.Store(false); close(done) }()
@@ -202,19 +222,23 @@ func (s *Service) Start(ctx context.Context, review string, inspect bool, resolv
 		}
 		s.apply(work, review, inspect, resolve, ready)
 	}()
-	if !<-ready {
+	state := <-ready
+	if state.Status != "unknown" {
 		<-done
 		return State{}, ErrInvalid
 	}
-	return State{ReviewDigest: review, Status: "unknown"}, nil
+	return state, nil
 }
-func (s *Service) Status() (State, error) {
+func (s *Service) historicalStatus() (State, error) {
 	if s == nil {
 		return State{}, ErrInvalid
 	}
 	state := State{ReviewDigest: s.ReviewDigest(), Status: "not_started"}
 	raw, e := s.read(s.plan.Manifest.ID + ".intent.json")
 	if os.IsNotExist(e) {
+		if seq, se := s.latestSequence(); se != nil || seq != 0 {
+			return State{}, ErrInvalid
+		}
 		return state, nil
 	}
 	if e != nil {
@@ -280,4 +304,26 @@ func (s *Service) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.bundle.Close()
+}
+
+func (s *Service) Status() (State, error) {
+	state, e := s.historicalStatus()
+	if e != nil {
+		return State{}, e
+	}
+	attempt, e := s.latestAttempt()
+	if e != nil {
+		return State{}, e
+	}
+	again, e := s.historicalStatus()
+	if e != nil {
+		return State{}, e
+	}
+	before, _ := json.Marshal(state)
+	after, _ := json.Marshal(again)
+	if string(before) != string(after) || (state.Status == "not_started" && attempt != nil) {
+		return State{}, ErrInvalid
+	}
+	state.Attempt = attempt
+	return state, nil
 }
