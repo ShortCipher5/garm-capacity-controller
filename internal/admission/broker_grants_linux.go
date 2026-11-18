@@ -289,9 +289,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		return nil, ErrBrokerGrant
 	}
 	// Own a detached canonical copy before entering the transaction.
-	if json.Unmarshal([]byte(raw), &b) != nil {
+	var owned BrokerGrantBatch
+	if json.Unmarshal([]byte(raw), &owned) != nil {
 		return nil, ErrBrokerGrant
 	}
+	b = owned
 	for _, g := range b.Grants {
 		if !validGrantSpec(g) {
 			return nil, ErrBrokerGrant
