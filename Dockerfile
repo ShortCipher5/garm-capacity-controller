@@ -57,6 +57,17 @@ COPY --from=go-build --chmod=0555 /out/capacity-ledger /usr/local/bin/capacity-l
 ENTRYPOINT ["/usr/local/bin/capacity-ledger"]
 CMD ["--help"]
 
+# Separate offline runtime-asset preparation helper. This does not expand the
+# existing native-owner flat bundle or install any system tool/runtime image.
+FROM go-build AS native-runtime-assets-build
+RUN mkdir -p /runtime-assets-out && \
+    CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /runtime-assets-out/capacity-native-assets ./cmd/capacity-native-assets && \
+    cd /runtime-assets-out && sha256sum capacity-native-assets > SHA256SUMS && \
+    chmod 0555 capacity-native-assets && chmod 0444 SHA256SUMS
+FROM scratch AS native-runtime-assets-helper
+COPY --from=native-runtime-assets-build /runtime-assets-out/ /
+
+
 FROM runtime-base AS gateway
 COPY --from=go-build --chmod=0555 /out/capacity-gateway /usr/local/bin/capacity-gateway
 COPY --from=web-build /src/web/dist /usr/local/share/capacity-admin
