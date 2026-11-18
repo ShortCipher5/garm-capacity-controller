@@ -37,6 +37,7 @@ type LoopStatus struct {
 // blocked until a real native/management activation capability exists; neither
 // enrollment records nor caller configuration can override that boundary.
 type Service struct {
+	reader       *planReader
 	mu           sync.Mutex
 	status       LoopStatus
 	running      bool
@@ -53,7 +54,7 @@ func NewService(store *admission.SQLiteStore, source *garmapi.DemandClient, opt 
 	if !runtimeBound && source == nil {
 		return nil, capacitybroker.ErrSnapshot
 	}
-	return &Service{status: LoopStatus{State: "not_started"}, runtimeBound: runtimeBound, interval: interval, cycle: func(ctx context.Context) (GrantCycleResult, error) { return GrantCycle(ctx, store, source, opt, ttl) }}, nil
+	return &Service{reader: &planReader{store: store, source: source, opt: opt}, status: LoopStatus{State: "not_started"}, runtimeBound: runtimeBound, interval: interval, cycle: func(ctx context.Context) (GrantCycleResult, error) { return GrantCycle(ctx, store, source, opt, ttl) }}, nil
 }
 func (s *Service) Snapshot() LoopStatus {
 	if s == nil {
