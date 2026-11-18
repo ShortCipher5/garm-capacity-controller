@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -336,7 +337,9 @@ func (s *Session) ReadCollection(ctx context.Context, path string) ([]byte, erro
 	switch path {
 	case "/api/v1/instances", "/api/v1/pools", "/api/v1/jobs":
 	default:
-		return nil, ErrBoundary
+		if !strings.HasPrefix(path, "/api/v1/pools/") || !stockUUID(strings.TrimPrefix(path, "/api/v1/pools/")) {
+			return nil, ErrBoundary
+		}
 	}
 	return s.exchange(ctx, http.MethodGet, path, s.token, nil)
 }

@@ -9,6 +9,9 @@ import (
 // never to a bearer token. Credential rotation preserves write history. Endpoint
 // changes require operator recovery, not silently starting with an empty journal.
 func (m *ManagementClient) ManagementIdentity() string {
+	if m.managedSource != nil {
+		return m.managedSource.Identity()
+	}
 	if m.managedIdentity != "" {
 		return m.managedIdentity
 	}

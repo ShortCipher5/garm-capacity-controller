@@ -19,6 +19,7 @@ func (h *Handler) serveInventory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "managed inventory unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	h.sourceHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	w.Write(raw)
 }
