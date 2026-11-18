@@ -272,6 +272,10 @@ func (s *Service) InspectCompleted(ctx context.Context, id, selectionDigest stri
 		return Completed{}, e
 	}
 	defer held.Close()
+	return inspectCompletedLocked(ctx, id, selectionDigest, r)
+}
+
+func inspectCompletedLocked(ctx context.Context, id, selectionDigest string, r Recipe) (Completed, error) {
 	intent, e := readRecord(filepath.Join(r.OutputParent, r.stem(selectionDigest)+".intent.json"))
 	expected := record{Version: version, RecipeDigest: nativeplanning.Digest(r), Report: Report{TargetID: id, PreparationID: r.Binding.PreparationID, SelectionDigest: selectionDigest, State: "assembly_unknown"}}
 	if e != nil || intent != expected {

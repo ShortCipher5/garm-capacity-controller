@@ -261,6 +261,16 @@ func TestNativeAssemblyReviewReloadAndRestart(t *testing.T) {
 	if w := call(http.MethodGet, "", token); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
+	statusBody, _ := json.Marshal(map[string]any{"action": "status", "target_id": "host", "selection_digest": saved.SelectionDigest})
+	statusResponse := call(http.MethodPost, string(statusBody), token)
+	var recovery struct{ Recovery nativeassembly.RecoveryStatus }
+	if statusResponse.Code != 200 || json.Unmarshal(statusResponse.Body.Bytes(), &recovery) != nil || recovery.Recovery.State != "never_attempted" || recovery.Recovery.ActivationAuthorized {
+		t.Fatal(statusResponse.Code, statusResponse.Body.String())
+	}
+	invalidStatus, _ := json.Marshal(map[string]any{"action": "status", "target_id": "host", "selection_digest": saved.SelectionDigest, "confirm_build": true})
+	if bad := call(http.MethodPost, string(invalidStatus), token); bad.Code != 400 {
+		t.Fatal("status accepted write approval fields", bad.Code)
+	}
 	raw, _ := json.Marshal(map[string]any{"action": "build", "target_id": "host", "selection_digest": saved.SelectionDigest, "confirm_build": true})
 	w := call(http.MethodPost, string(raw), token)
 	if w.Code != 200 {
@@ -269,6 +279,10 @@ func TestNativeAssemblyReviewReloadAndRestart(t *testing.T) {
 	var built struct{ Assembly nativeassembly.Report }
 	if e = json.Unmarshal(w.Body.Bytes(), &built); e != nil {
 		t.Fatal(e)
+	}
+	statusResponse = call(http.MethodPost, string(statusBody), token)
+	if statusResponse.Code != 200 || json.Unmarshal(statusResponse.Body.Bytes(), &recovery) != nil || recovery.Recovery.State != "completed_bundle" || recovery.Recovery.Assembly == nil || *recovery.Recovery.Assembly != built.Assembly {
+		t.Fatal(statusResponse.Code, statusResponse.Body.String())
 	}
 	oldReview := original.ReviewDigest()
 	raw, _ = json.Marshal(map[string]any{"action": "reload", "target_id": "host", "selection_digest": saved.SelectionDigest, "assembly_digest": built.Assembly.AssemblyDigest, "current_review_digest": oldReview, "confirm_reload": true})

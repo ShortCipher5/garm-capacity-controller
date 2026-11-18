@@ -164,12 +164,21 @@ func (h *Handler) serveNativeAssembly(w http.ResponseWriter, r *http.Request) {
 		fail(400, "exact reviewed action required")
 		return
 	}
-	if (req.Action == "build" && (!req.ConfirmBuild || req.ConfirmReload || req.AssemblyDigest != "" || req.CurrentReview != "")) || (req.Action == "inspect" && (req.ConfirmBuild || req.ConfirmReload || req.AssemblyDigest != "" || req.CurrentReview != "")) || (req.Action == "reload" && (!req.ConfirmReload || req.ConfirmBuild || req.AssemblyDigest == "" || req.CurrentReview == "")) || (req.Action != "build" && req.Action != "inspect" && req.Action != "reload") {
+	if (req.Action == "build" && (!req.ConfirmBuild || req.ConfirmReload || req.AssemblyDigest != "" || req.CurrentReview != "")) || ((req.Action == "inspect" || req.Action == "status") && (req.ConfirmBuild || req.ConfirmReload || req.AssemblyDigest != "" || req.CurrentReview != "")) || (req.Action == "reload" && (!req.ConfirmReload || req.ConfirmBuild || req.AssemblyDigest == "" || req.CurrentReview == "")) || (req.Action != "build" && req.Action != "inspect" && req.Action != "status" && req.Action != "reload") {
 		fail(400, "explicit assembly or exact registry reload approval required")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	if req.Action == "status" {
+		status, e := h.nativeAssembly.Status(ctx, req.TargetID, req.SelectionDigest)
+		if e != nil {
+			fail(503, "local assembly status unavailable or inconsistent; do not infer that a build can be retried")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"target_id": req.TargetID, "recovery": status})
+		return
+	}
 	var completed nativeassembly.Completed
 	if req.Action == "build" {
 		completed, e = h.nativeAssembly.Build(ctx, req.TargetID, req.SelectionDigest)

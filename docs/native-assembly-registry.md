@@ -47,3 +47,24 @@ plan as a fallback or erases previous unknown work.
 Registry reload is configuration-only. It does not install/start/enable a service,
 modify global SSH, create runners, enroll capacity or refund reservations. The
 native runtime boundary and physical-release gates remain unchanged.
+
+## Read-only recovery after a missing response
+
+POST action `status` takes only target_id and selection_digest under the same
+native-preparation token. It returns `{target_id, recovery}` with exact target,
+preparation and selection identity, `activation_authorized:false`, and one of:
+
+* `never_attempted`: no intent, receipt or output exists for this actual saved
+  selection. This is a snapshot, not permission to build without review.
+* `assembly_unknown`: exact consumed intent exists but no completion receipt.
+  `partial_output_present` states only whether the expected protected directory
+  exists. It does not count files, explain failure, assert a worker is active or
+  grant permission to retry/overwrite/delete. Preserve evidence for operator review.
+* `completed_bundle`: historical receipt and current actual bundle bytes/plan match;
+  `assembly` contains the verified report. No registry reload or SSH preparation is
+  inferred, and discovery freshness is not renewed.
+
+Malformed/orphan/drifted evidence or a busy snapshot returns unavailable, never
+`never_attempted`. Status requires an actual protected saved selection and creates
+no files, even when no lock file exists. The report exposes no filesystem paths,
+private config, secrets or raw errors. There is no cleanup/retry action in this API.

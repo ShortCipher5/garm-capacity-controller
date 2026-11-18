@@ -54,7 +54,9 @@ func preparationFixture(t *testing.T) *nativeprovision.Service {
 func TestNativePreparationSeparateAuthorityAndDurableUnknown(t *testing.T) {
 	h, _, read := fixture(t)
 	s := preparationFixture(t)
-	targets := map[string]NativePreparationTarget{"one": {Service: s, Resolve: func() (ssh.Signer, error) { return nil, nativeprovision.ErrInvalid }}}
+	wait := make(chan struct{})
+	defer close(wait) // Release resolver before the fixture joins Service.Close.
+	targets := map[string]NativePreparationTarget{"one": {Service: s, Resolve: func() (ssh.Signer, error) { <-wait; return nil, nativeprovision.ErrInvalid }}}
 	token := strings.Repeat("b", 64)
 	if h.SetNativePreparation(targets, read) == nil {
 		t.Fatal("read token reused")
