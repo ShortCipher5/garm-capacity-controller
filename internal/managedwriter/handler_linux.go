@@ -19,6 +19,7 @@ import (
 )
 
 type Handler struct {
+	inspector    *[32]byte
 	providers    map[string]bool
 	repositories map[string]bool
 	pools        map[string]bool
@@ -67,6 +68,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leaf := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+	if r.URL.Path == "/v1/managed/source" {
+		h.serveSource(w, r, leaf)
+		return
+	}
 	if subtle.ConstantTimeCompare(leaf[:], h.leaf[:]) != 1 {
 		fail(403)
 		return
