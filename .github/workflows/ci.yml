@@ -22,6 +22,8 @@ jobs:
       - run: gofmt -d .
       - run: test -z "$(gofmt -l .)"
       - run: test "$(go env CGO_ENABLED)" = 1
+      - name: Prepared diagnostic parser and hash checks (no root execution)
+        run: python3 -B -m unittest discover -s internal/nativeprovision -p diagnostic_test.py -v
       - name: Validate bounded native asset upload recipe
         run: python3 -B -m unittest discover -s internal/nativeassettransfer -p '*test.py' -v
       - run: go vet ./...

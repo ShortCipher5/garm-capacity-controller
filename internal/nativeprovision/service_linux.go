@@ -267,19 +267,20 @@ func (s *Service) historicalStatus() (State, error) {
 }
 
 type View struct {
-	AdminUser            string `json:"admin_user"`
-	HostKeyFingerprint   string `json:"host_key_fingerprint"`
-	AdminKeyFingerprint  string `json:"admin_key_fingerprint"`
-	ManifestDigest       string `json:"manifest_digest"`
-	ScriptSHA256         string `json:"script_sha256"`
-	TargetID             string `json:"target_id"`
-	Address              string `json:"address"`
-	Port                 uint16 `json:"port"`
-	PreparationID        string `json:"preparation_id"`
-	ReviewDigest         string `json:"review_digest"`
-	BundleBytes          int64  `json:"bundle_bytes"`
-	State                State  `json:"state"`
-	ActivationAuthorized bool   `json:"activation_authorized"`
+	Diagnostic           *DiagnosticRecipe `json:"diagnostic,omitempty"`
+	AdminUser            string            `json:"admin_user"`
+	HostKeyFingerprint   string            `json:"host_key_fingerprint"`
+	AdminKeyFingerprint  string            `json:"admin_key_fingerprint"`
+	ManifestDigest       string            `json:"manifest_digest"`
+	ScriptSHA256         string            `json:"script_sha256"`
+	TargetID             string            `json:"target_id"`
+	Address              string            `json:"address"`
+	Port                 uint16            `json:"port"`
+	PreparationID        string            `json:"preparation_id"`
+	ReviewDigest         string            `json:"review_digest"`
+	BundleBytes          int64             `json:"bundle_bytes"`
+	State                State             `json:"state"`
+	ActivationAuthorized bool              `json:"activation_authorized"`
 }
 
 func (s *Service) View(id string) (View, error) {
@@ -293,7 +294,12 @@ func (s *Service) View(id string) (View, error) {
 	}
 	host, _ := hostbootstrap.PublicKey(s.plan.Target.HostKey)
 	md, _ := nativeprepare.ManifestDigest(s.plan.Manifest)
-	return View{TargetID: id, Address: s.plan.Target.Address, Port: s.plan.Target.Port, PreparationID: s.plan.Manifest.ID, ReviewDigest: s.ReviewDigest(), BundleBytes: total, State: state, AdminUser: s.plan.Target.AdminUser, HostKeyFingerprint: ssh.FingerprintSHA256(host), AdminKeyFingerprint: s.plan.Target.AdminKeyFingerprint, ManifestDigest: md, ScriptSHA256: s.plan.ScriptSHA256}, nil
+	var diagnostic *DiagnosticRecipe
+	if state.Status == "prepared_not_activated" && state.Receipt != nil {
+		recipe := s.diagnosticRecipe()
+		diagnostic = &recipe
+	}
+	return View{Diagnostic: diagnostic, TargetID: id, Address: s.plan.Target.Address, Port: s.plan.Target.Port, PreparationID: s.plan.Manifest.ID, ReviewDigest: s.ReviewDigest(), BundleBytes: total, State: state, AdminUser: s.plan.Target.AdminUser, HostKeyFingerprint: ssh.FingerprintSHA256(host), AdminKeyFingerprint: s.plan.Target.AdminKeyFingerprint, ManifestDigest: md, ScriptSHA256: s.plan.ScriptSHA256}, nil
 }
 
 func (s *Service) Close() {

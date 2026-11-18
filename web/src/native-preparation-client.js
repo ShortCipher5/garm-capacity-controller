@@ -1,3 +1,4 @@
+import {validPreflightRecipe,validateNativePreflight} from './native-preflight-client.js';
 const hash = v => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
 const fingerprint = v => typeof v === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/.test(v);
 const text = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/.test(v);
@@ -15,8 +16,9 @@ export function validPreparationState(v, target) {
   if (v.attempt !== undefined && (!validPreparationAttempt(v.attempt,target) || v.status === 'not_started')) return false;
   return v.status === 'prepared_not_activated' ? validReceipt(v.receipt,target) : v.receipt === undefined;
 }
+export function validPreparedDiagnostic(t){return validPreflightRecipe(t?.diagnostic)&&t.diagnostic.preparation_id===t.preparation_id&&t.diagnostic.manifest_digest===t.manifest_digest&&t.state?.status==='prepared_not_activated'&&validReceipt(t.state.receipt,t);}
 export function validatePreparationView(v) {
-  if (!Array.isArray(v?.targets) || v.targets.length > 8 || new Set(v.targets.map(t => t?.target_id)).size !== v.targets.length || !v.targets.every(t => text(t.target_id, 64) && text(t.address, 45) && text(t.admin_user, 32) && fingerprint(t.host_key_fingerprint) && fingerprint(t.admin_key_fingerprint) && hash(t.manifest_digest) && hash(t.script_sha256) && Number.isInteger(t.port) && t.port > 0 && t.port <= 65535 && hash(t.preparation_id) && hash(t.review_digest) && Number.isSafeInteger(t.bundle_bytes) && t.bundle_bytes > 0 && t.bundle_bytes <= 512 * 1024 * 1024 && t.activation_authorized === false && validPreparationState(t.state, t))) throw new Error('Unsupported native preparation status. Clear the review and reload.');
+  if (!Array.isArray(v?.targets) || v.targets.length > 8 || new Set(v.targets.map(t => t?.target_id)).size !== v.targets.length || !v.targets.every(t => text(t.target_id, 64) && text(t.address, 45) && text(t.admin_user, 32) && fingerprint(t.host_key_fingerprint) && fingerprint(t.admin_key_fingerprint) && hash(t.manifest_digest) && hash(t.script_sha256) && Number.isInteger(t.port) && t.port > 0 && t.port <= 65535 && hash(t.preparation_id) && hash(t.review_digest) && Number.isSafeInteger(t.bundle_bytes) && t.bundle_bytes > 0 && t.bundle_bytes <= 512 * 1024 * 1024 && t.activation_authorized === false && validPreparationState(t.state, t) && (t.diagnostic===undefined||validPreparedDiagnostic(t)))) throw new Error('Unsupported native preparation status. Clear the review and reload.');
   return v;
 }
 export async function nativePreparationRequest(token, target = null, inspectOnly = false, {fetcher = fetch, signal} = {}) {
@@ -34,4 +36,13 @@ export async function nativePreparationRequest(token, target = null, inspectOnly
   const attempt = value.state.attempt;
   if ((target.state.attempt && !attempt) || (attempt && (attempt.sequence !== (target.state.attempt?.sequence || 0) + 1 || attempt.mode !== (inspectOnly ? 'inspect' : 'prepare') || attempt.status !== 'unknown'))) throw new Error('Preparation outcome unknown: accepted attempt does not match the reviewed action. Reload durable status without repeating the upload.');
   return value;
+}
+
+export async function preparedDiagnosticRequest(token,target,{fetcher=fetch,signal}={}){
+ if(!hash(token)||!validPreparedDiagnostic(target))throw Error('Load the exact prepared diagnostic recipe and enter the separate preparation token.');
+ validatePreparationView({targets:[target]});
+ const unavailable='Prepared diagnostic unavailable or cancelled. No report is confirmed. Reload the reviewed target before another explicit read; no automatic retry was made.';
+ let r,v;try{r=await fetcher('/admin/api/v1/native-preparation/diagnostic',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({target_id:target.target_id,preparation_id:target.preparation_id,review_digest:target.diagnostic.review_digest,confirm_read:true}),credentials:'omit',redirect:'error',cache:'no-store',signal});if(r.status!==200||signal?.aborted)throw Error();v=await r.json();if(signal?.aborted)throw Error();}catch{throw Error(unavailable);}
+ if(v?.target_id!==target.target_id||v.preparation_id!==target.preparation_id||v.review_digest!==target.diagnostic.review_digest)throw Error('Diagnostic response does not match the reviewed prepared bundle. No report is confirmed.');
+ return validateNativePreflight(v.report);
 }
