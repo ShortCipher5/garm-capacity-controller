@@ -68,7 +68,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readMix, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -257,7 +257,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           <PoolMappings readMappings={readPoolMappings} readProfiles={readProfiles} />
         </section>
         <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} readOverheadRefresh={readOverheadRefresh} readNativeEnrollment={readNativeEnrollment} />
-        <Profiles readProfiles={readProfiles} />
+        <Profiles readProfiles={readProfiles} readMix={readMix} hosts={data.hosts} />
         <BrokerPolicy readPolicy={readBrokerPolicy} readPlan={readAllocatorPlan} />
         <div className="bottom-grid">
           <CapacityStates read={readCapacityStates} />
@@ -349,6 +349,10 @@ export function App() {
  }}
         readBrokerPolicy={async () => {
           try { return await session.current.brokerPolicySnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
+        readMix={async (host) => {
+          try { return await session.current.runnerMixSnapshot(host); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
         readProfiles={async () => {
