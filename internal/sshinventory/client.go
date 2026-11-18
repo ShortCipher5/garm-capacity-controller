@@ -21,13 +21,13 @@ import (
 var ErrInventory = errors.New("authenticated SSH inventory unavailable")
 
 type Config struct {
-	Address string
-	Port    uint16
-	User    string
+	Address string `json:"address"`
+	Port    uint16 `json:"port"`
+	User    string `json:"user"`
 	// HostKey is an independently verified, exact authorized_keys public-key line.
 	// Trust-on-first-use and certificate host keys are deliberately unsupported.
-	HostKey       string
-	CredentialRef string
+	HostKey       string `json:"host_key"`
+	CredentialRef string `json:"credential_ref"`
 }
 type KeyResolver func(context.Context, string) (ssh.Signer, error)
 type Client struct {

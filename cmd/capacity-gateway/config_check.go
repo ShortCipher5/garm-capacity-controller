@@ -188,6 +188,18 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
+	if a.EnableSSHInventory {
+		_, sshToken, e := newSSHInventory(a.SSHInventory, nil)
+		if e != nil || !validToken([]byte(sshToken)) || bytes.Equal([]byte(sshToken), adminToken) {
+			return fail()
+		}
+		if a.ManagementTokenFile != "" {
+			write, e := securefiles.Read(a.ManagementTokenFile, 256)
+			if e != nil || bytes.Equal(bytes.TrimSpace(write), []byte(sshToken)) {
+				return fail()
+			}
+		}
+	}
 	if a.EnableExperimentalGarmManagement && (!a.EnableExperimentalManagement || a.GarmManagement == nil) {
 		return fail()
 	}
