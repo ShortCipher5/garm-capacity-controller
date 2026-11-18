@@ -550,3 +550,33 @@ test("charged capacity refresh error removes stale rows rather than presenting o
   await expect(capacity.getByRole("alert")).toContainText("could not be read");
   await expect(capacity.getByRole("table")).toHaveCount(0);
 });
+
+test('pool mapping reads stay in pool section and do not invent registration capability',async({page})=>{
+ await connect(page);
+ const section=page.locator('#pools');
+ await section.getByRole('button',{name:'Load mappings and saved sizes'}).click();
+ await expect(section.getByText('No immutable pool mappings recorded.')).toBeVisible();
+ await expect(section.getByText(/Registration unavailable: an operator/)).toBeVisible();
+ await expect(section.getByRole('button',{name:'Review mapping'})).toBeDisabled();
+ await page.getByRole('button',{name:'Disconnect'}).click();
+ await expect(page.getByRole('heading',{name:'Pool runner-size mappings'})).toHaveCount(0);
+});
+
+test('pool mapping review cancellation and unknown save require reload',async({page})=>{
+ // UI interaction fixture only: actual TLS handler/storage registration is
+ // covered separately. This does not claim native enrollment or live writes.
+ const pool='11111111-1111-4111-8111-111111111111';let posts=0;
+ await page.route('**/admin/api/v1/broker-profiles',async route=>{
+  if(route.request().method()==='POST'){posts++;await route.abort();return;}
+  await route.fulfill({contentType:'application/json',body:JSON.stringify({configuration_only:true,writes_enabled:true,profiles:[],recipes:[{id:'small-template',pool,revision:'f'.repeat(64)}]})});
+ });
+ await page.route('**/admin/api/v1/profiles',async route=>route.fulfill({contentType:'application/json',body:JSON.stringify({profiles:[{name:'small',cpu_millis:1000,ram_mib:1024,disk_mib:4096,created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z',estimates:[]}]})}));
+ await connect(page);const section=page.locator('#pools');
+ await section.getByRole('button',{name:'Load mappings and saved sizes'}).click();
+ await section.getByLabel('Configured pool template').selectOption('small-template');await section.getByLabel('Saved runner size').selectOption('small');
+ await section.getByRole('button',{name:'Review mapping'}).click();await section.getByLabel('Separate management token').fill('b'.repeat(64));await section.getByRole('button',{name:'Cancel',exact:true}).click();expect(posts).toBe(0);
+ await section.getByRole('button',{name:'Review mapping'}).click();await expect(section.getByLabel('Separate management token')).toHaveValue('');await section.getByLabel('Separate management token').fill('b'.repeat(64));await section.getByRole('button',{name:'Record mapping'}).click();
+ await expect(section.getByRole('status')).toContainText('Registration outcome unknown');expect(posts).toBe(1);await expect(section.getByRole('button',{name:'Review mapping'})).toBeDisabled();
+ await page.screenshot({path:'test-results/screenshots/pool-mapping-unknown.png',fullPage:true});
+ await page.getByRole('button',{name:'Disconnect'}).click();await expect(page.getByRole('heading',{name:'Pool runner-size mappings'})).toHaveCount(0);
+});

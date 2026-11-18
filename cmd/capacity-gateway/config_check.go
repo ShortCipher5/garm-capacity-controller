@@ -28,6 +28,13 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if validateAllocatorLoop(c.AllocatorLoop) != nil {
 		return fail()
 	}
+	allocatorSource, sourceErr := managedAllocatorSource(c)
+	if sourceErr != nil {
+		return fail()
+	}
+	if allocatorSource != nil {
+		allocatorSource.Close()
+	}
 	loopback := func(address string) bool {
 		host, port, e := net.SplitHostPort(address)
 		ip := net.ParseIP(host)
@@ -153,6 +160,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.BrokerProfileRecipesFile != "" {
+		if !a.EnableExperimentalManagement {
+			return fail()
+		}
+		if _, e := loadBrokerProfileRecipes(a.BrokerProfileRecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if !loopback(a.Listen) {
 		return fail()
 	}
