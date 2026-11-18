@@ -1,3 +1,4 @@
+import { validateAllocatorStatus } from "./allocator-status.js";
 import { validateCapacityStates } from "./capacity-states.js";
 import { validateBrokerView } from "./broker-policy-client.js";
 import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboarding-client.js";
@@ -85,6 +86,8 @@ export function validateOverview(value) {
   return value;
 }
 export class ReadSession {
+  #allocatorRequest;
+  #allocatorGeneration=0;
   #token = "";
   #generation = 0;
   #request;
@@ -107,6 +110,7 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+    this.#allocatorGeneration++; this.#allocatorRequest?.abort(); this.#allocatorRequest=undefined;
     this.#entityGeneration++;
     this.#entityRequest?.abort();
     this.#entityRequest = undefined;
@@ -182,6 +186,22 @@ export class ReadSession {
       if(error instanceof SessionEnded) throw error;
       throw new Error("Existing Garm scope observation unavailable.");
     } finally {clearTimeout(timeout);signal?.removeEventListener("abort",abort);}
+  }
+  async allocatorStatusSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#allocatorRequest?.abort(); const generation=++this.#allocatorGeneration;
+    const controller=new AbortController();this.#allocatorRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/allocator-status',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#allocatorGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Allocator status unavailable.');
+      const result=validateAllocatorStatus(await response.json());
+      if(generation!==this.#allocatorGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
   }
   async garmSnapshot() {
     if (!this.#token) throw new SessionEnded();

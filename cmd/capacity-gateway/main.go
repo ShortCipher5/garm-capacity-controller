@@ -40,6 +40,7 @@ type garmConfiguration struct {
 }
 type configuration struct {
 	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
+	AllocatorLoop        *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	StockProviderScopes  []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
 	EnableStockProvider  bool                                     `json:"-"`
 	PreparationPools     map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
@@ -101,6 +102,15 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
+	allocator, closeAllocator, err := startAllocatorLoop(ctx, config.AllocatorLoop, store)
+	if err != nil {
+		return err
+	}
+	defer closeAllocator()
+	if config.Admin != nil {
+		config.Admin.allocatorRuntime = allocator
+	}
+
 	backends := map[string]gateway.Backend{}
 	monitors := map[string]hostmetrics.Source{}
 	for id, host := range config.Hosts {

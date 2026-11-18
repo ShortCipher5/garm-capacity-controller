@@ -1,3 +1,4 @@
+import { AllocatorStatus } from "./allocator-status.jsx";
 import { Lifecycle } from "./lifecycle.jsx";
 import { CapacityStates } from "./capacity-states.jsx";
 import { BrokerPolicy } from "./broker-policy.jsx";
@@ -66,7 +67,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readAllocatorStatus }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -134,6 +135,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
             · Admission barrier {data.admission_ready ? "ready" : "not ready"}
           </span>
         </div>
+        <AllocatorStatus read={readAllocatorStatus} />
         <Lifecycle data={data} />
         <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
@@ -284,6 +286,7 @@ export function App() {
     try { return await session.current.entityInventorySnapshot(options); }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
+  const readAllocatorStatus=useCallback(async(options)=>{try{return await session.current.allocatorStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   // Refresh measured history once per committed overview snapshot, not on busy
   // transitions. Stable identity also prevents unrelated renders aborting reads.
   const readUsage = useCallback(async (host, options) => {
@@ -319,6 +322,7 @@ export function App() {
     return (
       <Dashboard
         data={data}
+        readAllocatorStatus={readAllocatorStatus}
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
