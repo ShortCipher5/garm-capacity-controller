@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
@@ -79,6 +80,8 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	firstboot       *firstboot.Service
+	firstbootHash   [32]byte
 	bootstrap       *hostbootstrap.Service
 	bootstrapHash   [32]byte
 	sshTargets      *sshinventory.Registry
@@ -148,6 +151,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/capacity-states" {
 		h.serveCapacityStates(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/firstboot" {
+		h.serveFirstboot(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/bootstrap" {

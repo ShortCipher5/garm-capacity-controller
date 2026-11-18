@@ -191,6 +191,12 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
+	if a.EnableFirstboot {
+		_, _, token, e := loadFirstboot(a)
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
 	if a.EnableBootstrap {
 		_, _, token, e := loadBootstrap(a)
 		if e != nil || !validToken([]byte(token)) {

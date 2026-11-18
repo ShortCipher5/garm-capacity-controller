@@ -11,12 +11,15 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type adminConfiguration struct {
+	Firstboot                          *firstbootConfiguration    `json:"isolated_inventory_firstboot,omitempty"`
+	EnableFirstboot                    bool                       `json:"-"`
 	Bootstrap                          *bootstrapConfiguration    `json:"prepared_host_bootstrap,omitempty"`
 	EnableBootstrap                    bool                       `json:"-"`
 	SSHInventory                       *sshInventoryConfiguration `json:"ssh_inventory,omitempty"`
@@ -179,6 +182,29 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			return nil, noop, e
 		}
 		if e = handler.SetBootstrap(service, token); e != nil {
+			service.Close()
+			cleanup()
+			return nil, noop, e
+		}
+		oldCleanup := cleanup
+		cleanup = func() { service.Close(); oldCleanup() }
+	}
+	if config.EnableFirstboot {
+		targets, resolve, token, e := loadFirstboot(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = store.InitializeFirstboot(context.Background()); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		service, e := firstboot.NewService(targets, store, resolve)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetFirstboot(service, token); e != nil {
 			service.Close()
 			cleanup()
 			return nil, noop, e
