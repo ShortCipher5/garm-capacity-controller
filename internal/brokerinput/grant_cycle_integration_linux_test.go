@@ -2,19 +2,23 @@ package brokerinput
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/stockidentity"
@@ -22,10 +26,21 @@ import (
 )
 
 func TestPublicGrantCycleRealEnrollmentTransportAndRestart(t *testing.T) {
+	publicCycleTransport(t, false)
+}
+func TestManagedGrantCycleFirstObservedIdentityAndRestart(t *testing.T) {
+	publicCycleTransport(t, true)
+}
+func publicCycleTransport(t *testing.T, managed bool) {
+	controllerID := "controller"
+	if managed {
+		controllerID = "11111111-1111-4111-8111-111111111111"
+	}
+
 	ctx := context.Background()
 	domain := strings.Repeat("a", 64)
-	execution := admission.ExecutionImage{Controller: "controller", Flavor: "small", Image: "image", Fingerprint: strings.Repeat("b", 64), Type: "container", Profiles: []string{"runner"}, Arch: "amd64"}
-	policy, err := nativeapi.NewPolicy(nativeapi.PolicySpec{Version: nativeapi.PolicyVersion, Controller: "controller", Host: "host", DomainID: domain, NativeSHA256: strings.Repeat("c", 64), LauncherSHA256: strings.Repeat("d", 64), ServerVersion: nativeapi.NativeVersion, Pools: map[string]nativeapi.Pool{pool: {Flavor: execution.Flavor, Image: execution.Image, Fingerprint: execution.Fingerprint, Type: execution.Type, Arch: execution.Arch, ExpectedProfiles: execution.Profiles, StoragePool: "storage", Bridge: "bridge"}}})
+	execution := admission.ExecutionImage{Controller: controllerID, Flavor: "small", Image: "image", Fingerprint: strings.Repeat("b", 64), Type: "container", Profiles: []string{"runner"}, Arch: "amd64"}
+	policy, err := nativeapi.NewPolicy(nativeapi.PolicySpec{Version: nativeapi.PolicyVersion, Controller: controllerID, Host: "host", DomainID: domain, NativeSHA256: strings.Repeat("c", 64), LauncherSHA256: strings.Repeat("d", 64), ServerVersion: nativeapi.NativeVersion, Pools: map[string]nativeapi.Pool{pool: {Flavor: execution.Flavor, Image: execution.Image, Fingerprint: execution.Fingerprint, Type: execution.Type, Arch: execution.Arch, ExpectedProfiles: execution.Profiles, StoragePool: "storage", Bridge: "bridge"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +87,27 @@ func TestPublicGrantCycleRealEnrollmentTransportAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enrolled, err := store.EnrollNativeDomain(ctx, admission.NativeDomainSpec{Controller: "controller", Host: "host", HostBindingSequence: binding.Sequence, DomainID: domain, PolicyDigest: policy.Digest(), OwnerClientLeaf: desc.OwnerClientLeaf, OwnerServerLeaf: desc.OwnerServerLeaf}, nativeObserved)
+	enrolled, err := store.EnrollNativeDomain(ctx, admission.NativeDomainSpec{Controller: controllerID, Host: "host", HostBindingSequence: binding.Sequence, DomainID: domain, PolicyDigest: policy.Digest(), OwnerClientLeaf: desc.OwnerClientLeaf, OwnerServerLeaf: desc.OwnerServerLeaf}, nativeObserved)
 	if err != nil {
 		t.Fatal(err)
 	}
 	poolRow := map[string]any{"id": pool, "repo_id": repo, "provider_name": "capacity", "generation": 1, "max_runners": 4, "enabled": true, "tags": []map[string]string{{"name": "linux"}}, "flavor": "small", "image": "image", "os_arch": "amd64", "os_type": "linux"}
-	stock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.Header.Get("Authorization") != "Bearer token" {
+	var drift atomic.Bool
+	stock := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expectedAuth := "Bearer token"
+		if managed {
+			expectedAuth = ""
+			if r.TLS == nil || len(r.TLS.PeerCertificates) != 1 {
+				t.Error("missing client certificate")
+			}
+			source := strings.Repeat("1", 64)
+			if drift.Load() {
+				source = strings.Repeat("2", 64)
+			}
+			w.Header().Set(managedsource.SourceHeader, source)
+			w.Header().Set(managedsource.ControllerHeader, controllerID)
+		}
+		if r.Method != "GET" || r.Header.Get("Authorization") != expectedAuth {
 			t.Error("unexpected mutation/auth")
 			w.WriteHeader(500)
 			return
@@ -97,15 +126,29 @@ func TestPublicGrantCycleRealEnrollmentTransportAndRestart(t *testing.T) {
 			w.WriteHeader(404)
 		}
 	}))
+	if managed {
+		stock.TLS = &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.RequireAnyClientCert}
+	}
+	stock.StartTLS()
 	defer stock.Close()
 	roots := x509.NewCertPool()
 	roots.AddCert(stock.Certificate())
 	trust := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
-	observed, err := stockidentity.Observe(ctx, stockidentity.Configuration{Endpoint: stock.URL, Token: "token", Provider: "capacity", Pool: pool, TLS: trust})
+	identityConfig := stockidentity.Configuration{Endpoint: stock.URL, Token: "token", Provider: "capacity", Pool: pool, TLS: trust}
+	serverPin := ""
+	if managed {
+		sum := sha256.Sum256(stock.Certificate().RawSubjectPublicKeyInfo)
+		serverPin = hex.EncodeToString(sum[:])
+		trust.Certificates = []tls.Certificate{stock.TLS.Certificates[0]}
+		identityConfig.Token = ""
+		identityConfig.ManagedServerKeyPin = serverPin
+		identityConfig.ManagedControllerID = controllerID
+	}
+	observed, err := stockidentity.Observe(ctx, identityConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.RegisterBrokerPoolProfile(ctx, admission.BrokerPoolProfileRequest{SourceIdentity: observed.SourceIdentity(), SizeProfile: "small", Authority: admission.StockProviderAuthority{Controller: "controller", PoolID: pool, ProviderName: "capacity", ClientFingerprint: strings.Repeat("f", 64)}, Execution: execution}, observed, map[int64]nativeapi.Policy{enrolled.Sequence: policy})
+	_, err = store.RegisterBrokerPoolProfile(ctx, admission.BrokerPoolProfileRequest{SourceIdentity: observed.SourceIdentity(), SizeProfile: "small", Authority: admission.StockProviderAuthority{Controller: controllerID, PoolID: pool, ProviderName: "capacity", ClientFingerprint: strings.Repeat("f", 64)}, Execution: execution}, observed, map[int64]nativeapi.Policy{enrolled.Sequence: policy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,12 +160,46 @@ func TestPublicGrantCycleRealEnrollmentTransportAndRestart(t *testing.T) {
 	if err = store.CompleteReconciliation(ctx, fence, admission.InventorySnapshot{Hosts: []admission.HostObservation{{Host: "host", ObservedAt: time.Now(), Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true}}}); err != nil {
 		t.Fatal(err)
 	}
-	source, err := garmapi.NewDemand(stock.URL, "token", trust, []string{"capacity"}, []string{repo})
+	var source *garmapi.DemandClient
+	if managed {
+		source, err = garmapi.NewManagedDemand(stock.URL, serverPin, controllerID, trust, []string{"capacity"}, []string{repo})
+	} else {
+		source, err = garmapi.NewDemand(stock.URL, "token", trust, []string{"capacity"}, []string{repo})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer source.Close()
+	if managed && source.SourceIdentity() != "" {
+		t.Fatal("configuration minted source")
+	}
+
 	opt := capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 100}
+	beforePreview, err := store.ReadBrokerGrantState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewService, err := NewService(store, source, opt, time.Minute, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := previewService.ReadPlan(ctx)
+	if err != nil || len(preview.Pools) != 1 || preview.Pools[0].Additional != 1 || preview.Pools[0].Supply == nil || preview.SourceIdentity != source.SourceIdentity() || preview.Atomic {
+		t.Fatalf("real read-only plan %+v %v", preview, err)
+	}
+	afterPreview, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || beforePreview.Sequence != afterPreview.Sequence || len(afterPreview.Grants) != 0 {
+		t.Fatal("read plan mutated ledger", err)
+	}
+	poolRow["flavor"] = "changed-outside-controller"
+	if _, err := previewService.ReadPlan(ctx); err == nil {
+		t.Fatal("drifted pool ownership produced a plan")
+	}
+	poolRow["flavor"] = "small"
+	afterDrift, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || afterDrift.Sequence != beforePreview.Sequence || len(afterDrift.Grants) != 0 {
+		t.Fatal("failed read plan mutated ledger", err)
+	}
 	first, err := GrantCycle(ctx, store, source, opt, time.Minute)
 	if err != nil || len(first.Grants) != 1 {
 		t.Fatalf("public first cycle %+v %v", first, err)
@@ -162,6 +239,24 @@ func TestPublicGrantCycleRealEnrollmentTransportAndRestart(t *testing.T) {
 	final, err = store.ReadBrokerGrantState(ctx)
 	if err != nil || len(final.Grants) != 1 || final.Allocated.Global.Runners != 1 {
 		t.Fatal("service duplicated grants", err)
+	}
+
+	if managed {
+		drift.Store(true)
+		if _, err = GrantCycle(ctx, store, source, opt, time.Minute); err == nil {
+			t.Fatal("changed supervisor source accepted")
+		}
+		if source.SourceIdentity() != "" {
+			t.Fatal("source drift did not revoke")
+		}
+		drift.Store(false)
+		if _, err = GrantCycle(ctx, store, source, opt, time.Minute); err == nil {
+			t.Fatal("source revocation reset")
+		}
+		final, err = store.ReadBrokerGrantState(ctx)
+		if err != nil || len(final.Grants) != 1 || final.Allocated.Global.Runners != 1 {
+			t.Fatal("source failure changed grants", err)
+		}
 	}
 
 }

@@ -11,7 +11,7 @@ export function garmConflictDetails(previous, latest) {
     return text.length > 512 ? text.slice(0, 512) + '… (truncated)' : text;
   };
   for (const [kind, collection, fields] of [
-    ['Pool', 'pools', ['provider_name', 'enabled', 'max_runners', 'min_idle_runners', 'priority', 'generation', 'tags']],
+    ['Pool', 'pools', ['provider_name', 'owner_kind', 'owner_id', 'configured', 'enabled', 'max_runners', 'min_idle_runners', 'priority', 'generation', 'tags']],
     ['Repository', 'repositories', ['owner', 'name', 'pool_balancing_type']],
   ]) {
     const before = new Map(previous.settings[collection].map(value => [value.id, value]));

@@ -120,6 +120,13 @@ func (s *Session) check(ctx context.Context) (Observation, error) {
 // fails, the goroutine exits without unlocking so Go destroys that thread rather
 // than returning it to the scheduler in the wrong network namespace.
 func dialNamespace(ctx context.Context, namespace *os.File) (net.Conn, error) {
+	return dialNamespaceAddress(ctx, namespace, "127.0.0.1:9998")
+}
+func dialNamespaceAddress(ctx context.Context, namespace *os.File, address string) (net.Conn, error) {
+	if address != "127.0.0.1:9998" && address != "127.0.0.1:9443" {
+		return nil, ErrBoundary
+	}
+
 	type result struct {
 		connection net.Conn
 		err        error
@@ -139,7 +146,7 @@ func dialNamespace(ctx context.Context, namespace *os.File) (net.Conn, error) {
 			done <- result{err: ErrBoundary}
 			return
 		}
-		connection, e := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp4", "127.0.0.1:9998")
+		connection, e := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp4", address)
 		if unix.Setns(int(original.Fd()), unix.CLONE_NEWNET) != nil {
 			if connection != nil {
 				connection.Close()
@@ -197,10 +204,8 @@ func (s *Session) exchange(ctx context.Context, method, path, token string, body
 	if _, e = s.check(ctx); e != nil {
 		return nil, ErrBoundary
 	}
-	if response.StatusCode != 200 {
-		s.revoked = true
-		s.token = ""
-		return nil, ErrBoundary
+	if e := s.checkResponseStatus(method, path, response.StatusCode); e != nil {
+		return nil, e
 	}
 	return raw, nil
 }
