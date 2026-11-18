@@ -158,3 +158,22 @@ func TestStartReturnsDurableUnknownBeforeNetwork(t *testing.T) {
 	close(wait)
 	<-done
 }
+func TestRejectedStartReleasesBusyBeforeReturn(t *testing.T) {
+	b, target := fixture(t)
+	p, _ := b.Plan(target)
+	s := &Service{bundle: b, plan: p, dir: t.TempDir(), uid: uint32(os.Geteuid()), execute: b.Execute}
+	defer s.Close()
+	resolver := func() (ssh.Signer, error) { return nil, ErrInvalid }
+	for i := 0; i < 100; i++ {
+		if _, e := s.Start(context.Background(), "invalid", false, resolver); e != ErrInvalid || s.busy.Load() {
+			t.Fatal("invalid review retained busy", e)
+		}
+		if _, e := s.Start(context.Background(), Digest(p), true, resolver); e != ErrInvalid || s.busy.Load() {
+			t.Fatal("failed inspect retained busy", e)
+		}
+	}
+	state, e := s.Start(context.Background(), Digest(p), false, resolver)
+	if e != nil || state.Status != "unknown" {
+		t.Fatal("valid start rejected after failed requests", state, e)
+	}
+}

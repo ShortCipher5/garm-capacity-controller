@@ -187,12 +187,13 @@ func (s *Service) apply(ctx context.Context, review string, inspect bool, resolv
 // Start returns only once unknown has been synced. Work is bounded independently
 // of a dismissed browser; a failed response never authorizes a second upload.
 func (s *Service) Start(ctx context.Context, review string, inspect bool, resolve func() (ssh.Signer, error)) (State, error) {
-	if s == nil || ctx == nil || ctx.Err() != nil || s.closed.Load() || !s.busy.CompareAndSwap(false, true) {
+	if s == nil || ctx == nil || ctx.Err() != nil || review != s.ReviewDigest() || resolve == nil || s.closed.Load() || !s.busy.CompareAndSwap(false, true) {
 		return State{}, ErrInvalid
 	}
 	ready := make(chan bool, 1)
+	done := make(chan struct{})
 	go func() {
-		defer s.busy.Store(false)
+		defer func() { s.busy.Store(false); close(done) }()
 		work, cancel := context.WithCancel(ctx)
 		defer cancel()
 		if s.life != nil {
@@ -202,6 +203,7 @@ func (s *Service) Start(ctx context.Context, review string, inspect bool, resolv
 		s.apply(work, review, inspect, resolve, ready)
 	}()
 	if !<-ready {
+		<-done
 		return State{}, ErrInvalid
 	}
 	return State{ReviewDigest: review, Status: "unknown"}, nil
