@@ -1,7 +1,8 @@
+import {AllocatorPlan} from "./allocator-plan.jsx";
 import {BrokerStatus} from "./broker-status.jsx";
 import React, { useEffect, useRef, useState } from 'react';
 import { saveBrokerPolicy, validateBrokerSaveInput } from './broker-policy-client.js';
-export function BrokerPolicy({ readPolicy }) {
+export function BrokerPolicy({ readPolicy, readPlan }) {
   const [comparisonStale,setComparisonStale]=useState(false);
   const [view,setView]=useState(null), [message,setMessage]=useState(''), [busy,setBusy]=useState(false), [blocked,setBlocked]=useState(true);
   const active=useRef(null), alive=useRef(true), token=useRef(null);
@@ -35,6 +36,7 @@ export function BrokerPolicy({ readPolicy }) {
     <button type="button" disabled={busy||!readPolicy} onClick={load}>Reload policy (discard edits)</button>
     {message&&<p role="status">{message}</p>}
     {view&&<BrokerStatus status={view.status} stale={comparisonStale} />}
+    <AllocatorPlan readPlan={readPlan} policyRevision={view?.policy.revision} policyStale={comparisonStale}/ >
     {view&&<form onSubmit={save}><p>Revision {view.policy.revision}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
       {view.policy.repositories.map((r,i)=><div className="card" key={i}>
         <label>GARM repository UUID<input required value={r.id} onChange={e=>repo(i,'id',e.target.value)}/></label>
