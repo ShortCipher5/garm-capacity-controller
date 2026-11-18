@@ -1,3 +1,4 @@
+import { Lifecycle } from "./lifecycle.jsx";
 import { CapacityStates } from "./capacity-states.jsx";
 import { BrokerPolicy } from "./broker-policy.jsx";
 import { createEntityInventoryReader } from "./entity-inventory-client.js";
@@ -133,6 +134,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
             · Admission barrier {data.admission_ready ? "ready" : "not ready"}
           </span>
         </div>
+        <Lifecycle data={data} />
         <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
         {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}

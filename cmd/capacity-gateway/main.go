@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gatewayrpc"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostmetrics"
@@ -31,11 +30,13 @@ type hostConfiguration struct {
 	TLS      securefiles.TLSFiles `json:"tls"`
 }
 type garmConfiguration struct {
-	Endpoint  string               `json:"endpoint"`
-	TokenFile string               `json:"token_file"`
-	TLS       securefiles.TLSFiles `json:"tls"`
-	Providers []string             `json:"providers"`
-	ScaleSets map[uint64]string    `json:"scalesets"`
+	ManagedProxy      bool                 `json:"managed_proxy,omitempty"`
+	ProxyServerKeyPin string               `json:"proxy_server_key_pin,omitempty"`
+	Endpoint          string               `json:"endpoint"`
+	TokenFile         string               `json:"token_file"`
+	TLS               securefiles.TLSFiles `json:"tls"`
+	Providers         []string             `json:"providers"`
+	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
 	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
@@ -122,15 +123,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 			return err
 		}
 	}
-	token, err := securefiles.Read(config.Garm.TokenFile, 16384)
-	if err != nil {
-		return err
-	}
-	garmTLS, err := securefiles.LoadTLS(config.Garm.TLS)
-	if err != nil {
-		return err
-	}
-	garm, err := garmapi.New(config.Garm.Endpoint, string(bytes.TrimSpace(token)), garmTLS, config.Garm.Providers, config.Garm.ScaleSets)
+	garm, token, err := inventoryClient(config, provision)
 	if err != nil {
 		return err
 	}
@@ -148,7 +141,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	handler.Audit = func(event string) { log.Print(event) }
-	nativeStock, closeNative, err := buildNativeStock(ctx, store, config, string(bytes.TrimSpace(token)), garmTLS)
+	nativeStock, closeNative, err := buildNativeStock(ctx, store, config, string(bytes.TrimSpace(token)), nil)
 	if err != nil {
 		return err
 	}

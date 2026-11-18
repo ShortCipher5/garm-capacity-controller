@@ -40,6 +40,13 @@ func buildNativeStock(ctx context.Context, store *admission.SQLiteStore, c confi
 	if !c.EnableStockProvider || store == nil || store.RuntimeLineageBound() {
 		return nil, closeAll, gatewayrpc.ErrConfiguration
 	}
+	if trust == nil {
+		var e error
+		trust, e = securefiles.LoadTLS(c.Garm.TLS)
+		if e != nil {
+			return nil, closeAll, gatewayrpc.ErrConfiguration
+		}
+	}
 	scopes := map[string]gatewayrpc.StockScope{}
 	for _, scope := range c.StockProviderScopes {
 		if _, duplicate := scopes[scope.PoolID]; duplicate {

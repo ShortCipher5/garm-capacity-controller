@@ -9,6 +9,9 @@ import (
 // never to a bearer token. Credential rotation preserves write history. Endpoint
 // changes require operator recovery, not silently starting with an empty journal.
 func (m *ManagementClient) ManagementIdentity() string {
+	if m.managedIdentity != "" {
+		return m.managedIdentity
+	}
 	hash := sha256.Sum256([]byte("garm-v0.2.1-management\x00" + m.base))
 	return hex.EncodeToString(hash[:])
 }
