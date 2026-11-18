@@ -10,7 +10,7 @@ import (
 // NewManagedLocal reuses the reviewed stock settings parser/guards over the
 // concrete root-supervisor session. No arbitrary custom transport or HTTP URL
 // can gain this route. Session itself rechecks actual topology each operation
-// and refuses anything except reads and max-zero/disabled pause writes.
+// and refuses anything except reads, pauses and freshly checked strict maximum reductions.
 func NewManagedLocal(session *managedgarm.Session, providers, pools, repositories []string) (*ManagementClient, error) {
 	if session == nil || session.Identity() == "" {
 		return nil, ErrManagement

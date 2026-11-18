@@ -11,13 +11,11 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmmanagement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedgarm"
@@ -95,38 +93,19 @@ func run(ctx context.Context, args []string) error {
 	}
 	trust.ClientCAs = trust.RootCAs
 	trust.ClientAuth = tls.RequireAndVerifyClientCert
-	session, e := managedgarm.OpenSession(ctx, c.Boundary)
-	if e != nil {
-		return e
-	}
-	defer session.Close()
 	journal, e := garmmanagement.OpenJournal(c.Journal, c.JournalLineage)
 	if e != nil {
 		return e
 	}
 	defer journal.Close()
-	handler, e := managedwriter.New(session, journal, c.ClientLeaf, c.Providers, c.Pools, c.Repositories)
+	service, e := managedwriter.NewService(ctx, c.Boundary, journal, trust, c.ClientLeaf, c.SourceInspectorLeaf, c.Providers, c.Pools, c.Repositories)
 	if e != nil {
 		return e
 	}
-	if c.SourceInspectorLeaf != "" {
-		if e := handler.SetSourceInspector(c.SourceInspectorLeaf); e != nil {
-			return e
-		}
-	}
-	listener, e := session.Listen(ctx)
-	if e != nil {
-		return e
-	}
-	defer listener.Close()
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second, MaxHeaderBytes: 16384}
-	go func() { <-ctx.Done(); server.Close() }()
-	e = server.Serve(tls.NewListener(listener, trust))
-	if e == http.ErrServerClosed {
-		return nil
-	}
-	return e
+	defer service.Close()
+	return service.Wait(ctx)
 }
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

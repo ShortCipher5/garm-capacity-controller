@@ -8,7 +8,7 @@ import (
 
 func inventoryClient(c configuration, provision bool) (*garmapi.Client, []byte, error) {
 	if c.Garm.ManagedProxy {
-		if c.Garm.TokenFile != "" || c.Garm.ProxyServerKeyPin == "" || provision || len(c.PreparationPools) > 0 || c.Admin != nil && (c.Admin.GarmManagement != nil || c.Admin.EnableExperimentalGarmManagement) {
+		if c.Garm.TokenFile != "" || c.Garm.ProxyServerKeyPin == "" || provision || len(c.PreparationPools) > 0 || c.Admin != nil && (c.Admin.GarmManagement != nil || c.Admin.EnableExperimentalGarmManagement) && validateManagedSettingsRouting(c) != nil {
 			return nil, nil, garmapi.ErrInventory
 		}
 		trust, err := securefiles.LoadTLS(c.Garm.TLS)

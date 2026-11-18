@@ -123,7 +123,7 @@ func dialNamespace(ctx context.Context, namespace *os.File) (net.Conn, error) {
 	return dialNamespaceAddress(ctx, namespace, "127.0.0.1:9998")
 }
 func dialNamespaceAddress(ctx context.Context, namespace *os.File, address string) (net.Conn, error) {
-	if address != "127.0.0.1:9998" && address != "127.0.0.1:9443" {
+	if address != "127.0.0.1:9998" && address != "127.0.0.1:9443" && address != "127.0.0.1:9445" {
 		return nil, ErrBoundary
 	}
 
@@ -213,7 +213,8 @@ func (s *Session) exchange(ctx context.Context, method, path, token string, body
 // RoundTrip is used only by the scoped management adapter in the root process.
 // No arbitrary upstream endpoint, login/token read or pass-through route exists.
 // Full capacity increases require a future genuine native authority contract;
-// this concrete implementation permits only max=0 or enabled=false pauses.
+// this implementation permits pauses and fresh-read strict maximum reductions.
+// Reductions do not release charges or change the minimum-idle target.
 func (s *Session) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -243,8 +244,18 @@ func (s *Session) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		d := json.NewDecoder(bytes.NewReader(raw))
 		d.DisallowUnknownFields()
-		if d.Decode(&update) != nil || d.Decode(new(any)) != io.EOF || (update.Maximum == nil && update.Enabled == nil) || (update.Maximum != nil && *update.Maximum != 0) || (update.Enabled != nil && *update.Enabled) {
+		if d.Decode(&update) != nil || d.Decode(new(any)) != io.EOF || (update.Maximum == nil && update.Enabled == nil) || (update.Maximum != nil && *update.Maximum > 1000000) || (update.Enabled != nil && *update.Enabled) {
 			return nil, ErrBoundary
+		}
+		if update.Maximum != nil && *update.Maximum > 0 {
+			// Serialize fresh GET + reduction PUT with every other managed
+			// request. Stock has no CAS; exclusive managed topology must remain
+			// valid across both authenticated exchanges. Never use this path
+			// to raise a maximum or lower min-idle.
+			current, e := s.exchange(r.Context(), http.MethodGet, path, s.token, nil)
+			if e != nil || validateMaximumReduction(current, path[len(prefix):], *update.Maximum) != nil {
+				return nil, ErrBoundary
+			}
 		}
 		body = update
 	} else if r.Method != http.MethodGet {
