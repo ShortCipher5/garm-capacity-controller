@@ -19,7 +19,13 @@ type JobPlan struct {
 	// CoveredByIdle and assignment JobIDs are planning correlations only, never
 	// claims that GitHub assigned a particular job or permission to delete a runner.
 	CoveredByIdle map[string]string
-	RemainingJobs []QueuedDemand
+	// CoveredByGrant is provisional demand coverage by an outstanding pool
+	// grant, not proof of a running worker or a grant-to-job binding.
+	CoveredByGrant map[string]string
+	// DeferredByInflight is not fulfilled demand. Provisioning is withheld
+	// pending identity-correlated creating/unknown outcomes, without job binding.
+	DeferredByInflight map[string]string
+	RemainingJobs      []QueuedDemand
 }
 type jobQueue struct {
 	rows       []QueuedDemand
@@ -43,12 +49,12 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 	copyPools := make(map[string]Pool, len(s.Pools))
 	idle := map[string]int{}
 	for id, p := range s.Pools {
-		if p.Waiting != 0 || !p.OldestWaiting.IsZero() || p.AvailableIdle < 0 || p.AvailableIdle > 1000 {
+		if p.Waiting != 0 || !p.OldestWaiting.IsZero() || p.AvailableIdle < 0 || p.AvailableIdle > 1000 || p.OutstandingGrants < 0 || p.OutstandingGrants > 1000 || p.OutstandingGrants > p.PendingWarm || p.Inflight < 0 || p.Inflight > 1000 || p.Inflight > p.PendingWarm-p.OutstandingGrants || p.OutstandingGrants+p.AvailableIdle+p.Inflight > 1000 {
 			return JobPlan{}, ErrSnapshot
 		}
 		p.Hosts = append([]string(nil), p.Hosts...)
 		copyPools[id] = p
-		idle[id] = int(p.AvailableIdle)
+		idle[id] = int(p.AvailableIdle + p.OutstandingGrants + p.Inflight)
 	}
 	// Validate idle against original charges before matching reduces spare supply.
 	charged := map[string]int64{}
@@ -95,10 +101,28 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 	if e != nil {
 		return JobPlan{}, e
 	}
-	for id, pool := range match.Covered {
+	coveredIdle, coveredGrant, deferred := map[string]string{}, map[string]string{}, map[string]string{}
+	matchedIDs := make([]string, 0, len(match.Covered))
+	for id := range match.Covered {
+		matchedIDs = append(matchedIDs, id)
+	}
+	sort.Strings(matchedIDs)
+	for _, id := range matchedIDs {
+		pool := match.Covered[id]
 		q.done[id] = true
 		p := s.Pools[pool]
-		p.AvailableIdle-- // Planned job use consumes spare supply, not its charge.
+		if p.AvailableIdle > 0 {
+			p.AvailableIdle-- // Planned use consumes spare supply, not its charge.
+			coveredIdle[id] = pool
+		} else if p.OutstandingGrants > 0 {
+			p.OutstandingGrants--
+			p.PendingWarm--
+			coveredGrant[id] = pool
+		} else {
+			p.Inflight--
+			p.PendingWarm--
+			deferred[id] = pool
+		}
 		s.Pools[pool] = p
 	}
 	for _, j := range q.rows {
@@ -127,7 +151,7 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 	}
 	// Per-pool candidate counts overlap. Do not expose them as additive queue size.
 	plan.RemainingQueued = nil
-	return JobPlan{Plan: plan, CoveredByIdle: match.Covered, RemainingJobs: remaining}, nil
+	return JobPlan{Plan: plan, CoveredByIdle: coveredIdle, CoveredByGrant: coveredGrant, DeferredByInflight: deferred, RemainingJobs: remaining}, nil
 }
 
 // jobStep is an advisory correlation change, never a resource movement.

@@ -110,8 +110,28 @@ func token(path string) (string, error) {
 // redirect/proxy handling from the underlying read-only clients. All network
 // calls and checkpoint work share one cancellation/90-second deadline.
 func Observe(ctx context.Context, c Config) Event {
+	event, _ := ObserveSnapshot(ctx, c)
+	return event
+}
+
+// Snapshot preserves the full scoped source observations for an in-process
+// planner. It is deliberately not included in Event or the CLI summary stream.
+// Stock and Repair remain distinct: repaired jobs have no proven stock pool
+// assignment, conflicts are not silently resolved, and neither source grants
+// physical capacity or proves completion.
+type Snapshot struct {
+	Stock  garmapi.DemandObservation
+	Repair demandrepair.Result
+}
+
+// ObserveSnapshot performs the same real transport/checkpoint poll as Observe.
+// A failed or cancelled poll returns nil, never partial or previously cached
+// demand. Successful empty demand returns a non-nil snapshot. Callers must
+// enforce freshness and retain all source provenance before planning.
+func ObserveSnapshot(ctx context.Context, c Config) (Event, *Snapshot) {
+	var snapshot *Snapshot
 	event := Event{Mode: "observation_only", Status: "configuration_unavailable", StartedAt: time.Now().UTC()}
-	finish := func() Event { event.FinishedAt = time.Now().UTC(); return event }
+	finish := func() (Event, *Snapshot) { event.FinishedAt = time.Now().UTC(); return event, snapshot }
 	if ctx == nil || ctx.Err() != nil || c.validate() != nil {
 		return finish()
 	}
@@ -188,6 +208,7 @@ func Observe(ctx context.Context, c Config) Event {
 	}
 	event.Status = "observed"
 	event.Counts = counts
+	snapshot = &Snapshot{Stock: stock, Repair: repaired}
 	return finish()
 }
 

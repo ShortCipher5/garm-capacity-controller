@@ -49,6 +49,10 @@ func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 	cp := map[string]capacitybroker.Pool{}
 	cr := map[string]capacitybroker.Repository{}
 	for id, p := range capacity.Pools {
+		if p.Budget != nil {
+			budget := *p.Budget
+			p.Budget = &budget
+		}
 		p.Waiting = 0
 		p.OldestWaiting = capacitybroker.Pool{}.OldestWaiting
 		p.MaxRunners = 0

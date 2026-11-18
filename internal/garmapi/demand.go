@@ -40,7 +40,14 @@ type RunnerSupply struct {
 	Busy     int64  `json:"busy"`
 	Other    int64  `json:"other"`
 }
+
+// ObservedRunner is scoped stock identity evidence for planning deduplication.
+// It is not native incarnation/completion evidence or a job assignment.
+type ObservedRunner struct {
+	RowID, Name, ProviderName, PoolID, Kind string
+}
 type DemandObservation struct {
+	Runners    []ObservedRunner `json:"runners"`
 	StartedAt  time.Time        `json:"started_at"`
 	FinishedAt time.Time        `json:"finished_at"`
 	Digest     string           `json:"digest"`
@@ -256,6 +263,22 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 			supply.Other++
 		}
 	}
+	observedRunners := []ObservedRunner{}
+	for _, r := range runners {
+		if supplies[r.PoolID] == nil {
+			continue
+		}
+		kind := "other"
+		if r.Busy {
+			kind = "busy"
+		} else if r.Idle && r.State == "running" {
+			kind = "idle"
+		} else if r.SourcePreparationPending {
+			kind = "creating"
+		}
+		observedRunners = append(observedRunners, ObservedRunner{r.RowID, r.Name, r.ProviderName, r.PoolID, kind})
+	}
+	sort.Slice(observedRunners, func(i, j int) bool { return observedRunners[i].RowID < observedRunners[j].RowID })
 	comparisons := 0
 	for i := range jobs {
 		for _, p := range after {
@@ -279,15 +302,16 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 			}
 		}
 	}
-	out := DemandObservation{StartedAt: start, FinishedAt: time.Now().UTC(), Pools: after, Jobs: jobs, Supply: []RunnerSupply{}}
+	out := DemandObservation{Runners: observedRunners, StartedAt: start, FinishedAt: time.Now().UTC(), Pools: after, Jobs: jobs, Supply: []RunnerSupply{}}
 	for _, p := range after {
 		out.Supply = append(out.Supply, *supplies[p.ID])
 	}
 	canonical, _ := json.Marshal(struct {
-		Pools  []DiscoveredPool
-		Jobs   []QueuedJob
-		Supply []RunnerSupply
-	}{out.Pools, out.Jobs, out.Supply})
+		Pools   []DiscoveredPool
+		Jobs    []QueuedJob
+		Supply  []RunnerSupply
+		Runners []ObservedRunner
+	}{out.Pools, out.Jobs, out.Supply, out.Runners})
 	if len(canonical) > 4<<20 || ctx.Err() != nil {
 		return DemandObservation{}, ErrManagement
 	}
