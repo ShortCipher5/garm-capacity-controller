@@ -94,9 +94,9 @@ func (c *GitHubClient) get(ctx context.Context, path string, q url.Values, out a
 	return nil
 }
 
-// Read enumerates runs created in [from,to], then jobs from all attempts. It
-// deliberately rejects the documented 1000-run filtered-search ceiling. This
-// interval is not complete historical backlog coverage or an atomic snapshot.
+// Read enumerates recent runs plus every supported active run status regardless
+// of creation age, then all-attempt job pages. Search ceilings and non-atomic
+// status transitions still prevent an authoritative completeness claim.
 func (c *GitHubClient) Read(ctx context.Context, repo Repository, from, to time.Time) ([]Job, error) {
 	if c == nil || ctx == nil || ctx.Err() != nil || from.IsZero() || !from.Before(to) || to.After(time.Now()) {
 		return nil, ErrObservation
@@ -109,41 +109,22 @@ func (c *GitHubClient) Read(ctx context.Context, repo Repository, from, to time.
 	root := "/repos/" + repo.Owner + "/" + repo.Name
 	runs := []int64{}
 	seenRuns := map[int64]bool{}
-	total := -1
-	for page := 1; page <= 10; page++ {
-		var response struct {
-			Total *int `json:"total_count"`
-			Runs  []struct {
-				ID         int64 `json:"id"`
-				Repository struct {
-					FullName string `json:"full_name"`
-				} `json:"repository"`
-			} `json:"workflow_runs"`
+	// Recent history catches terminal transitions; status scans recover active
+	// jobs in old runs, including re-runs older than the polling window.
+	for _, status := range []string{"", "queued", "in_progress", "requested", "waiting", "pending"} {
+		found, e := c.runIDs(ctx, root, repo, status, from, to)
+		if e != nil {
+			return nil, e
 		}
-		q := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}, "created": {from.UTC().Format(time.RFC3339) + ".." + to.UTC().Format(time.RFC3339)}}
-		if c.get(ctx, root+"/actions/runs", q, &response) != nil || response.Total == nil || response.Runs == nil || *response.Total < 0 || *response.Total >= 1000 || (total >= 0 && total != *response.Total) || len(response.Runs) > 100 {
-			return nil, ErrObservation
-		}
-		total = *response.Total
-		for _, r := range response.Runs {
-			if r.ID <= 0 || seenRuns[r.ID] || !strings.EqualFold(r.Repository.FullName, repo.Owner+"/"+repo.Name) {
-				return nil, ErrObservation
+		for _, id := range found {
+			if !seenRuns[id] {
+				if len(runs) >= 999 {
+					return nil, ErrObservation
+				}
+				seenRuns[id] = true
+				runs = append(runs, id)
 			}
-			seenRuns[r.ID] = true
-			runs = append(runs, r.ID)
 		}
-		if len(runs) > total {
-			return nil, ErrObservation
-		}
-		if len(runs) == total {
-			break
-		}
-		if len(response.Runs) != 100 {
-			return nil, ErrObservation
-		}
-	}
-	if len(runs) != total {
-		return nil, ErrObservation
 	}
 	result := []Job{}
 	seenJobs := map[int64]bool{}
@@ -254,4 +235,51 @@ func (s collectedJobs) ListJobs(_ context.Context, r Repository, _, _ time.Time,
 		p.Next = strconv.Itoa(end)
 	}
 	return p, nil
+}
+
+func (c *GitHubClient) runIDs(ctx context.Context, root string, repo Repository, status string, from, to time.Time) ([]int64, error) {
+	ids := []int64{}
+	seen := map[int64]bool{}
+	total := -1
+	for page := 1; page <= 10; page++ {
+		var response struct {
+			Total *int `json:"total_count"`
+			Runs  []struct {
+				ID         int64 `json:"id"`
+				Repository struct {
+					FullName string `json:"full_name"`
+				} `json:"repository"`
+			} `json:"workflow_runs"`
+		}
+		q := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		if status == "" {
+			q.Set("created", from.UTC().Format(time.RFC3339)+".."+to.UTC().Format(time.RFC3339))
+		} else {
+			q.Set("status", status)
+		}
+		if c.get(ctx, root+"/actions/runs", q, &response) != nil || response.Total == nil || response.Runs == nil || *response.Total < 0 || *response.Total >= 1000 || (total >= 0 && total != *response.Total) || len(response.Runs) > 100 {
+			return nil, ErrObservation
+		}
+		total = *response.Total
+		for _, r := range response.Runs {
+			if r.ID <= 0 || seen[r.ID] || !strings.EqualFold(r.Repository.FullName, repo.Owner+"/"+repo.Name) {
+				return nil, ErrObservation
+			}
+			seen[r.ID] = true
+			ids = append(ids, r.ID)
+		}
+		if len(ids) > total {
+			return nil, ErrObservation
+		}
+		if len(ids) == total {
+			break
+		}
+		if len(response.Runs) != 100 {
+			return nil, ErrObservation
+		}
+	}
+	if len(ids) != total {
+		return nil, ErrObservation
+	}
+	return ids, nil
 }

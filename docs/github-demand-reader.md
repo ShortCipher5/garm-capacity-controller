@@ -5,8 +5,11 @@ mapping, verified CA trust and an injected credential-reference resolver. It has
 only read methods. No real credentials, secret storage, app installation,
 permission changes, scheduler or runtime activation are included.
 
-`Read` enumerates repository workflow runs in a run-created interval, then job
-pages using `filter=all` (all attempts). `ObserveGitHub` feeds those observations
+`Read` enumerates repository workflow runs in a run-created interval and all
+supported active statuses without a creation-age filter (queued, in_progress,
+requested, waiting, pending), then job pages using `filter=all` (all attempts).
+Runs found in multiple status/history scans are read once; the combined set is
+bounded to999 unique runs. Each scan independently rejects the1000-result ceiling. `ObserveGitHub` feeds those observations
 into the conservative adapter; stock demand is not deleted because jobs disappear.
 
 Transport protections: exact constructed paths, strict repository allowlist,
@@ -28,9 +31,9 @@ results. Backoff/retry belongs to the outer durable reconciler, not a busy loop.
 
 ## Not completeness or production readiness
 
-This does not discover old queued runs created before the requested interval.
-Initial backlog enumeration and a durable overlap/checkpoint strategy remain to
-be implemented. Pagination is not an atomic snapshot: totals/duplicates detect
+Active-status scans now discover old queued/retried runs outside the history
+interval. This closes the specific creation-age blind spot, not every possible
+missed-event race. A durable overlap/checkpoint strategy remains to be implemented. Pagination is not an atomic snapshot: totals/duplicates detect
 some drift, not every replacement or state transition. EnumerationComplete is
 still only successful bounded traversal, not complete missed-webhook coverage.
 
@@ -42,6 +45,6 @@ from an untrusted job. Credentials are resolved per request and never returned i
 errors; resolver failures and HTTP response bodies are not surfaced to callers.
 
 Remaining: operational credential configuration, authoritative repository mapping,
-initial backlog, durable checkpoints/rate-limit scheduling, conflict resolution,
+durable checkpoints/rate-limit scheduling, conflict resolution,
 grant reconciliation and activation wiring. Tests contact only local synthetic
 TLS fixtures. No live GitHub/GARM/Incus infrastructure was accessed by tests.

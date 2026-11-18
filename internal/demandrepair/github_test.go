@@ -59,7 +59,7 @@ func TestGitHubReadPaginatesAllAttempts(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"total_count": 101, "jobs": jobs})
 	})
 	got, e := readTest(c)
-	if e != nil || len(got) != 101 || calls != 3 {
+	if e != nil || len(got) != 101 || calls != 8 {
 		t.Fatalf("%d %v calls %d", len(got), e, calls)
 	}
 }
@@ -128,5 +128,34 @@ func TestGitHubRejectsMixedAuthoritiesBeforeCredentials(t *testing.T) {
 	}
 	if called {
 		t.Fatal("resolved credential during rejected configuration")
+	}
+}
+
+func TestGitHubReadsOldActiveRunWithoutCreatedFilter(t *testing.T) {
+	jobsCalls := 0
+	states := map[string]bool{}
+	c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/owner/repo/actions/runs" {
+			status := r.URL.Query().Get("status")
+			states[status] = true
+			if status != "" && r.URL.Query().Get("created") != "" {
+				t.Fatal("active backlog limited by creation age")
+			}
+			if status == "queued" || status == "in_progress" {
+				fmt.Fprint(w, `{"total_count":1,"workflow_runs":[{"id":9,"repository":{"full_name":"owner/repo"}}]}`)
+			} else {
+				fmt.Fprint(w, `{"total_count":0,"workflow_runs":[]}`)
+			}
+			return
+		}
+		jobsCalls++
+		if r.URL.Path != "/repos/owner/repo/actions/runs/9/jobs" {
+			t.Error("wrong run")
+		}
+		fmt.Fprint(w, `{"total_count":1,"jobs":[{"id":90,"run_id":9,"status":"queued","labels":["linux"]}]}`)
+	})
+	jobs, e := readTest(c)
+	if e != nil || len(jobs) != 1 || jobs[0].ID != 90 || jobsCalls != 1 || len(states) != 6 {
+		t.Fatalf("%+v %v calls%d states%v", jobs, e, jobsCalls, states)
 	}
 }
