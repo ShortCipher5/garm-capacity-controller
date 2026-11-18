@@ -170,3 +170,54 @@ func TestOnceFailureAndOutputFailure(t *testing.T) {
 type badWriter struct{}
 
 func (badWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestSnapshotPortReturnsRealScopedDataWithoutSummaryDisclosure(t *testing.T) {
+	c, _, _ := fixture(t)
+	event, snapshot := ObserveSnapshot(context.Background(), c)
+	if event.Status != "observed" || snapshot == nil {
+		t.Fatalf("missing successful snapshot: %+v", event)
+	}
+	if snapshot.Stock.Digest == "" || snapshot.Stock.StartedAt.IsZero() ||
+		snapshot.Stock.FinishedAt.Before(snapshot.Stock.StartedAt) ||
+		!snapshot.Repair.EnumerationComplete || snapshot.Repair.StartedAt.IsZero() {
+		t.Fatalf("lost source observations: %+v", snapshot)
+	}
+	if snapshot.Stock.Atomic || snapshot.Stock.MissedWebhookCoverage {
+		t.Fatal("invented authority")
+	}
+	raw, err := json.Marshal(event)
+	if err != nil || strings.Contains(string(raw), snapshot.Stock.Digest) ||
+		strings.Contains(string(raw), "Stock") || strings.Contains(string(raw), "Repair") {
+		t.Fatal("full data leaked into public summary")
+	}
+	// Checkpoint throttling must not return the last successful snapshot.
+	event, snapshot = ObserveSnapshot(context.Background(), c)
+	if event.Status == "observed" || snapshot != nil {
+		t.Fatal("failed refresh returned old or partial source data")
+	}
+}
+
+func TestSnapshotPortFailuresNeverReturnPartialDemand(t *testing.T) {
+	for _, failure := range []string{"garm", "github", "cancelled"} {
+		t.Run(failure, func(t *testing.T) {
+			c, failed, _ := fixture(t)
+			ctx := context.Background()
+			switch failure {
+			case "garm":
+				*failed = true
+			case "github":
+				// GARM succeeds, then the independently refreshed GitHub
+				// credential fails. Even complete stock rows must be discarded.
+				c.GitHubTokenFile = filepath.Join(filepath.Dir(c.CheckpointPath), "missing")
+			case "cancelled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			event, snapshot := ObserveSnapshot(ctx, c)
+			if event.Status == "observed" || event.Counts != nil || snapshot != nil {
+				t.Fatalf("partial snapshot escaped: %+v", event)
+			}
+		})
+	}
+}

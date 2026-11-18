@@ -38,15 +38,18 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
-	Sequence     int64
-	Policy       BrokerPolicy
-	Config       Config
-	Ready        bool
-	Epoch        int64
-	Reservations map[string]Reservation
-	Inventory    []InventoryResource
-	Released     map[string]bool
-	Grants       []BrokerGrant
+	Allocated      Allocations
+	HostBindings   map[string]HostBinding
+	ExecutionPlans map[string]ExecutionPlan
+	Sequence       int64
+	Policy         BrokerPolicy
+	Config         Config
+	Ready          bool
+	Epoch          int64
+	Reservations   map[string]Reservation
+	Inventory      []InventoryResource
+	Released       map[string]bool
+	Grants         []BrokerGrant
 }
 
 const sqliteBrokerGrantSchema = `
@@ -225,6 +228,9 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 			return e
 		}
 		v.Ready = v.Ready && sqliteObservationsFresh(v.Config, s.now())
+		if v.HostBindings, e = sqliteHostBindings(tx, v.Config); e != nil {
+			return e
+		}
 		if v.Policy, e = sqliteBrokerPolicy(tx); e != nil {
 			return e
 		}
@@ -240,8 +246,22 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
 			return e
 		}
-		if _, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {
+		if v.Allocated, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {
 			return e
+		}
+		v.ExecutionPlans = map[string]ExecutionPlan{}
+		for _, g := range v.Grants {
+			if g.State != "consumed" || v.Released[g.RequestKey] {
+				continue
+			}
+			if _, active := v.Reservations[g.RequestKey]; !active {
+				continue
+			}
+			p, err := executionPlanRecord(tx, g.RequestKey)
+			if err != nil {
+				return err
+			}
+			v.ExecutionPlans[g.RequestKey] = p
 		}
 		return tx.QueryRow("SELECT COALESCE(max(sequence),0) FROM audit").Scan(&v.Sequence)
 	})

@@ -1,6 +1,7 @@
 package capacitybroker
 
 import (
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -207,5 +208,36 @@ func TestPendingWarmGrantSatisfiesTargetAcrossFreshSnapshots(t *testing.T) {
 	s.Pools["a"] = policy
 	if _, e = Build(s, o); e != ErrSnapshot {
 		t.Fatalf("double-counted warm coverage accepted: %v", e)
+	}
+}
+
+func TestPoolResourceBudgetsPreserveFairnessAndHistoricalCharges(t *testing.T) {
+	for dimension := 0; dimension < 4; dimension++ {
+		t.Run(fmt.Sprint(dimension), func(t *testing.T) {
+			s, o := fixture()
+			a := s.Pools["a"]
+			budget := Resources{6000, 6000, 6000, 6}
+			budget[dimension] = a.Size[dimension]
+			a.Budget = &budget
+			s.Pools["a"] = a
+			p, err := Build(s, o)
+			if err != nil || counts(p)["a"] != 1 || counts(p)["b"] != 5 {
+				t.Fatalf("pool ceiling ignored: %+v %v", p, err)
+			}
+			// Unknown historical usage uses its actual size, not the new profile.
+			s.Charges = []Charge{{ID: "unknown", Host: "h", Pool: "a", Resources: Resources{1500, 1500, 1500, 1}}}
+			p, err = Build(s, o)
+			if err != nil || counts(p)["a"] != 0 || counts(p)["b"] != 4 {
+				t.Fatalf("existing charge bypassed ceiling: %+v %v", p, err)
+			}
+			// Lowering a budget to zero never releases existing usage.
+			zero := Resources{}
+			a.Budget = &zero
+			s.Pools["a"] = a
+			p, err = Build(s, o)
+			if err != nil || counts(p)["a"] != 0 || counts(p)["b"] != 4 {
+				t.Fatalf("zero ceiling released usage: %+v %v", p, err)
+			}
+		})
 	}
 }

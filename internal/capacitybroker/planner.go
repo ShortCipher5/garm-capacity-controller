@@ -26,6 +26,9 @@ type Repository struct {
 	MaxRunners int64
 }
 type Pool struct {
+	// Budget is an optional additional pool resource ceiling. Ledger adapters
+	// always set it; nil preserves purely advisory callers without pool limits.
+	Budget     *Resources
 	Repository string
 	Size       Resources
 	Hosts      []string
@@ -39,6 +42,13 @@ type Pool struct {
 	AvailableIdle int64
 	// PendingWarm counts outstanding/creating warm grants included in Charges.
 	// Keep unresolved warm grants here until authoritatively retired or resolved.
+	// OutstandingGrants are unused durable grants, not idle runners. They may
+	// cover demand for planning only and must also be included in PendingWarm
+	// and Charges. Matching one never redeems it or binds it to a GitHub job.
+	OutstandingGrants int64
+	// Inflight supply defers demand while creation/unknown outcome resolves.
+	// It is already charged and must be disjoint from idle and unused grants.
+	Inflight      int64
 	PendingWarm   int64
 	OldestWaiting time.Time
 }
@@ -147,6 +157,7 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 	hosts := map[string]Resources{}
 	repos := map[string]Resources{}
 	pools := map[string]int64{}
+	poolResources := map[string]Resources{}
 	ids := map[string]bool{}
 	keys := []string{}
 	for id, h := range s.Hosts {
@@ -160,7 +171,7 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 		}
 	}
 	for id, p := range s.Pools {
-		if id == "" || !valid(p.Size) || p.Size[0] == 0 || p.Size[1] == 0 || p.Size[2] == 0 || p.Size[3] != 1 || p.MaxRunners < 0 || p.Waiting < 0 || p.WarmIdle < 0 || p.AvailableIdle < 0 || p.PendingWarm < 0 || p.OldestWaiting.After(opt.Now) || (p.Waiting > 0 && p.OldestWaiting.IsZero()) {
+		if (p.Budget != nil && !valid(*p.Budget)) || id == "" || !valid(p.Size) || p.Size[0] == 0 || p.Size[1] == 0 || p.Size[2] == 0 || p.Size[3] != 1 || p.MaxRunners < 0 || p.Waiting < 0 || p.WarmIdle < 0 || p.AvailableIdle < 0 || p.PendingWarm < 0 || p.OutstandingGrants < 0 || p.OutstandingGrants > p.PendingWarm || p.Inflight < 0 || p.Inflight > p.PendingWarm-p.OutstandingGrants || p.OldestWaiting.After(opt.Now) || (p.Waiting > 0 && p.OldestWaiting.IsZero()) {
 			return Plan{}, ErrSnapshot
 		}
 		if _, ok := s.Repositories[p.Repository]; !ok {
@@ -206,6 +217,10 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				return Plan{}, ErrSnapshot
 			}
 			pools[c.Pool] += c.Resources[3]
+			poolResources[c.Pool], ok = add(poolResources[c.Pool], c.Resources)
+			if !ok {
+				return Plan{}, ErrSnapshot
+			}
 		}
 	}
 	out := Plan{Revision: s.Revision, ObservedAt: s.ObservedAt, Assignments: []Assignment{}, RemainingQueued: map[string]int64{}}
@@ -232,7 +247,7 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 			for _, id := range keys {
 				p := s.Pools[id]
 				r := s.Repositories[p.Repository]
-				if pools[id] >= p.MaxRunners || repos[p.Repository][3] >= r.MaxRunners || !fits(global, p.Size, s.Global) {
+				if (p.Budget != nil && !fits(poolResources[id], p.Size, *p.Budget)) || pools[id] >= p.MaxRunners || repos[p.Repository][3] >= r.MaxRunners || !fits(global, p.Size, s.Global) {
 					continue
 				}
 				eligible := append([]string(nil), p.Hosts...)
@@ -279,6 +294,7 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 			hosts[host], _ = add(hosts[host], p.Size)
 			repos[p.Repository], _ = add(repos[p.Repository], p.Size)
 			pools[selected]++
+			poolResources[selected], _ = add(poolResources[selected], p.Size)
 			jobID := ""
 			if phase == 0 && jobs != nil {
 				jobID = jobs.consume(selected, queued, s.Pools)

@@ -234,3 +234,53 @@ func TestJobPlanAugmentationCannotBypassHostCapacity(t *testing.T) {
 		t.Fatalf("%+v %v", plan, e)
 	}
 }
+
+func TestOutstandingGrantsReusedOnceWithoutPretendingIdle(t *testing.T) {
+	s, opt := fixture()
+	p := s.Pools["a"]
+	p.Waiting, p.OldestWaiting = 0, time.Time{}
+	p.OutstandingGrants, p.PendingWarm = 1, 1
+	s.Pools = map[string]Pool{"a": p}
+	s.Charges = []Charge{{ID: "durable-unused", Host: "h", Pool: "a", Resources: p.Size}}
+	jobs := []QueuedDemand{{ID: "one", Candidates: []string{"a"}, CreatedAt: opt.Now}}
+	first, err := BuildForJobs(s, opt, jobs)
+	if err != nil || len(first.Assignments) != 0 || len(first.CoveredByIdle) != 0 || first.CoveredByGrant["one"] != "a" {
+		t.Fatalf("unused grant not reused: %+v %v", first, err)
+	}
+	// A restarted/repeated read with the same durable grant creates no second grant.
+	second, err := BuildForJobs(s, opt, jobs)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatal("poll minted duplicate planned capacity")
+	}
+	jobs = append(jobs, QueuedDemand{ID: "two", Candidates: []string{"a"}, CreatedAt: opt.Now})
+	next, err := BuildForJobs(s, opt, jobs)
+	if err != nil || len(next.CoveredByGrant) != 1 || len(next.Assignments) != 1 {
+		t.Fatalf("one grant covered twice: %+v %v", next, err)
+	}
+	// Consumed/unknown capacity remains charged, never presented as unused grant.
+	p.OutstandingGrants, p.PendingWarm = 0, 0
+	s.Pools["a"] = p
+	next, err = BuildForJobs(s, opt, jobs[:1])
+	if err != nil || len(next.CoveredByGrant) != 0 || len(s.Charges) != 1 {
+		t.Fatal("consumed charge treated as unused")
+	}
+}
+
+func TestOutstandingGrantWarmAndQueueReuse(t *testing.T) {
+	s, opt := jobsFixture()
+	p := s.Pools["a"]
+	p.OutstandingGrants, p.PendingWarm, p.WarmIdle = 1, 1, 1
+	s.Pools = map[string]Pool{"a": p}
+	s.Charges = []Charge{{ID: "unused", Host: "h", Pool: "a", Resources: p.Size}}
+	noQueue, err := BuildForJobs(s, opt, nil)
+	if err != nil || len(noQueue.Assignments) != 0 {
+		t.Fatalf("duplicated warm grant: %+v %v", noQueue, err)
+	}
+	queued, err := BuildForJobs(s, opt, []QueuedDemand{{ID: "job", Candidates: []string{"a"}, CreatedAt: opt.Now}})
+	if err != nil || len(queued.CoveredByGrant) != 1 || len(queued.Assignments) != 1 || !queued.Assignments[0].Warm {
+		t.Fatalf("queued/warm accounting wrong: %+v %v", queued, err)
+	}
+	if s.Pools["a"].OutstandingGrants != 1 || len(s.Charges) != 1 {
+		t.Fatal("planning changed durable input")
+	}
+}

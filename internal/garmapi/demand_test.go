@@ -278,3 +278,22 @@ func TestDemandAllowsJobsCreatedDuringRead(t *testing.T) {
 		t.Fatalf("%+v %v", o, e)
 	}
 }
+
+func TestDemandPreservesScopedRunnerIdentityAndDigest(t *testing.T) {
+	rowID := "11111111-1111-4111-8111-111111111111"
+	c := demandFixture(t, encodeJobs(t, demandJob(1)), func(path string, n int) any {
+		if path != "/api/v1/instances" {
+			return nil
+		}
+		return []any{map[string]any{"id": rowID, "name": "runner", "provider_name": "capacity", "pool_id": managedPoolID, "status": "running", "runner_status": "idle"}}
+	})
+	first, err := c.Observe(context.Background())
+	if err != nil || len(first.Runners) != 1 || first.Runners[0].RowID != rowID || first.Runners[0].Name != "runner" || first.Runners[0].Kind != "idle" {
+		t.Fatalf("identity lost: %+v %v", first, err)
+	}
+	rowID = "22222222-2222-4222-8222-222222222222"
+	second, err := c.Observe(context.Background())
+	if err != nil || first.Digest == second.Digest {
+		t.Fatal("stock row identity not bound to digest")
+	}
+}
