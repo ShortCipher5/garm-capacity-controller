@@ -21,6 +21,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeplanning"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/sshinventory"
@@ -80,6 +81,8 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	nativePlanning        *nativeplanning.Service
+	nativePlanningHash    [32]byte
 	nativePreparation     map[string]NativePreparationTarget
 	nativePreparationHash [32]byte
 	brokerProfiles        map[string]BrokerProfileRecipe
@@ -169,6 +172,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/inventory-key-rotation" {
 		h.serveManagedRotation(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-planning" {
+		h.serveNativePlanning(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/native-preparation" {
