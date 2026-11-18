@@ -41,8 +41,8 @@ type garmConfiguration struct {
 type configuration struct {
 	JobObserver          *jobObserverConfiguration                `json:"job_observer,omitempty"`
 	EnableJobObserver    bool                                     `json:"-"`
-	AllocatorLoop        *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
+	AllocatorLoop        *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	StockProviderScopes  []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
 	EnableStockProvider  bool                                     `json:"-"`
 	PreparationPools     map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
@@ -112,7 +112,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if config.Admin != nil {
 		config.Admin.jobObserverRuntime = observer
 	}
-	allocator, closeAllocator, err := startAllocatorLoop(ctx, config.AllocatorLoop, store)
+	allocator, closeAllocator, err := startConfiguredAllocatorLoop(ctx, config, store)
 	if err != nil {
 		return err
 	}

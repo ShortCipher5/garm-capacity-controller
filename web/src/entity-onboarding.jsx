@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { entityOnboardingView, existingEntityChoice } from "./entity-onboarding.js";
 // Unmounted read-only component: host supplies authenticated observation and a
 // read-only inspection callback. This does not configure/enroll a write client.
@@ -7,7 +7,8 @@ export function ExistingEntityOnboarding({ snapshot, onInspect }) {
   const selected = selection?.snapshot === snapshot ? selection.key : "";
   const view = entityOnboardingView(snapshot);
   const choice = existingEntityChoice(snapshot, selected);
-  useEffect(() => { if (!choice) setSelection(null); }, [snapshot, selected, !!choice]);
+  // Snapshot identity invalidates stale selections during render. A passive
+  // reset here could erase a newer selection queued after that stale render.
   return <section aria-label="Existing GARM entities">
     <h3>Choose existing GARM scope</h3>
     <p>Viewing existing pools does not recreate them or authorize changes. Counts cover only configured providers, not all pools on the GARM server.</p>
