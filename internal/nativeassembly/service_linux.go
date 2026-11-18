@@ -57,6 +57,7 @@ type record struct {
 	Report                Report
 }
 type Service struct {
+	dynamic  bool
 	mu       sync.Mutex
 	planning *nativeplanning.Service
 	recipes  map[string]Recipe

@@ -42,6 +42,7 @@ type cached struct {
 	began    time.Time
 }
 type Service struct {
+	dynamic   bool
 	mu        sync.Mutex
 	inventory *sshinventory.Service
 	bindings  map[string]Binding
@@ -84,6 +85,11 @@ func NewService(inventory *sshinventory.Service, bindings map[string]Binding, di
 }
 func (s *Service) Bindings() map[string]Binding {
 	out := map[string]Binding{}
+	if s == nil {
+		return out
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for id, b := range s.bindings {
 		out[id] = b
 	}
