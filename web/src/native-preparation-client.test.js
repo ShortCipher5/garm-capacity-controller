@@ -25,3 +25,21 @@ test('unknown or prepared outcomes only permit explicit inspection',async()=>{
 test('preparation rejects unexpected status, response correlation and receipts on unknown',async()=>{
  for(const response of [{status:200,json:reply().json},{status:202,json:async()=>({target_id:'other',state:{review_digest:review,status:'unknown'}})},{status:202,json:async()=>({target_id:'server',state:{review_digest:token,status:'unknown'}})},{status:202,json:async()=>({target_id:'server',state:{review_digest:review,status:'unknown',receipt:{}}})}])await assert.rejects(nativePreparationRequest(token,target,false,{fetcher:async()=>response}));
 });
+
+test('latest attempt is separate from historical receipt and strict about outcome shape',()=>{
+ const receipt={version:'native-owner-preparation/v1',id,state:'prepared_not_activated',manifest_digest:token,unit_digest:token,activation_authorized:false};
+ const attempt={sequence:2,mode:'inspect',review_digest:review,status:'observation_unavailable',started_at:'2026-11-18T15:00:00Z',completed_at:'2026-11-18T15:01:00Z'};
+ const current={...target,state:{review_digest:review,status:'prepared_not_activated',receipt,attempt}};
+ assert.equal(validatePreparationView({targets:[current]}).targets[0],current);
+ for(const bad of [{...attempt,sequence:1025},{...attempt,review_digest:token},{...attempt,completed_at:'2026-11-18T14:00:00Z'},{...attempt,status:'observation_unavailable',receipt},{...attempt,status:'unknown'},{...attempt,status:'prepared_not_activated'}])assert.throws(()=>validatePreparationView({targets:[{...current,state:{...current.state,attempt:bad}}]}));
+ assert.throws(()=>validatePreparationView({targets:[{...target,state:{...target.state,attempt:{...attempt,status:'unknown',completed_at:undefined}}}]}));
+});
+test('accepted attempts must advance exact review and requested mode; full history cannot start',async()=>{
+ const attempt={sequence:1,mode:'prepare',review_digest:review,status:'unknown',started_at:'2026-11-18T15:00:00Z'};
+ const unknown={...target,state:{review_digest:review,status:'unknown',attempt}};
+ const accepted={...attempt,sequence:2,mode:'inspect'};
+ const fetcher=a=>async()=>({status:202,json:async()=>({target_id:'server',state:{review_digest:review,status:'unknown',...(a?{attempt:a}:{})}})});
+ assert.equal((await nativePreparationRequest(token,unknown,true,{fetcher:fetcher(accepted)})).state.attempt.sequence,2);
+ for(const a of [undefined,{...accepted,sequence:1},{...accepted,mode:'prepare'},{...accepted,sequence:3}])await assert.rejects(nativePreparationRequest(token,unknown,true,{fetcher:fetcher(a)}),/accepted attempt/);
+ await assert.rejects(nativePreparationRequest(token,{...unknown,state:{...unknown.state,attempt:{...attempt,sequence:1024}}},true,{fetcher:fetcher(accepted)}),/Reload and review/);
+});
