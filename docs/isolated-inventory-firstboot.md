@@ -2,7 +2,7 @@
 
 `capacity-firstboot` is a separate Linux CLI for first-time inventory setup on a
 trusted **Ubuntu 24.04, systemd, distro OpenSSH, Python3 and nftables** host. It is
-not yet integrated into the Servers browser form. It requires an independently
+also available through the separately enabled Servers review form. It requires an independently
 pinned existing administrator SSH endpoint and a separate **full-administrator**
 credential able to run noninteractive sudo Python. It must never use inventory
 credentials or the limited helper authority from prepared-host bootstrap.
@@ -107,3 +107,34 @@ not execute real sudo, useradd, sshd, systemd or nftables. Ubuntu locked-passwor
 UsePAM behavior, systemd hardening, nft JSON normalization, boot ordering and real
 network reachability still require disposable supported-host qualification before
 production rollout. Do not call this deployment-qualified based on unit tests.
+
+## Optional Servers panel integration
+
+The gateway enables browser review/execution only with the explicit
+`--allow-isolated-inventory-firstboot` startup flag and deployment-owned
+`admin.isolated_inventory_firstboot` configuration. This has its own `token_file`,
+`admin_credential_files` alias map and `targets` map. Every target fixes `plan`,
+`review_digest`, `admin_credential_alias`, `artifact_file` and `manifest_file`.
+Manifest/artifact bytes and plans are read through owner-private checks,
+validated and frozen at startup. The approved alias is resolved again only after
+a durable operation starts; its signer fingerprint must still match the plan. Full-admin keys must differ from prepared-helper and inventory keys;
+tokens must differ from every other admin capability. Loading status never opens
+SSH. The browser cannot upload a key, change a destination, supply a command or
+substitute an artifact/hash.
+
+The existing Servers registration panel contains the separate first-time review.
+Read the entire immutable plan and explicitly approve its administrator identity,
+account/listener/firewall changes and boot choice. The gateway audits and commits
+`unknown` before resolving any key or starting SSH. Cancellation/navigation only
+stops the browser wait, never claims rollback. After interruption/restart, reload
+status; an uncertain attempt requires explicit identical-plan retry using the
+same request ID. The remote installer serializes retries. A recorded success and
+its authenticated host-key receipt are committed together; failed completion
+persistence remains unknown. A receipt is historical, not present host health or
+capacity authority. Register/probe the returned inventory identity separately.
+
+The optional `host_firstboot_operations` table is separate from prepared-host
+operations and created only when this capability starts. No schema version bump
+or existing operation reinterpretation is performed. Browser regression sources
+cover exact approval, explicit retry and cancelling pending responses; local
+browser execution was unavailable, so hosted CI must supply that qualification.

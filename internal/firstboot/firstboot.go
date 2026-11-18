@@ -153,10 +153,7 @@ func execute(ctx context.Context, r Request, key ssh.Signer, dial func(context.C
 	var receipt Receipt
 	d := json.NewDecoder(bytes.NewReader(out.Bytes()))
 	d.DisallowUnknownFields()
-	if d.Decode(&receipt) != nil || d.Decode(new(any)) != io.EOF || receipt.State != "installed" || receipt.Digest != r.ReviewDigest || receipt.ListenAddress != r.Plan.ListenAddress || receipt.ListenPort != ListenerPort || receipt.InventoryAddress != r.Plan.InventoryAddress || receipt.InventoryPort != r.Plan.InventoryPort || receipt.BootEnabled != r.Plan.EnableAtBoot || receipt.NetworkReachabilityVerified {
-		return fail()
-	}
-	if _, e = hostbootstrap.PublicKey(receipt.HostKey); e != nil {
+	if d.Decode(&receipt) != nil || d.Decode(new(any)) != io.EOF || ValidateReceipt(r.Plan, r.ReviewDigest, receipt) != nil {
 		return fail()
 	}
 	return receipt, nil
@@ -175,4 +172,15 @@ func (w *limited) Write(p []byte) (int, error) {
 		return 0, ErrInvalid
 	}
 	return w.Buffer.Write(p)
+}
+
+// ValidateReceipt binds the historical result to every approved endpoint and boot choice.
+func ValidateReceipt(p Plan, digest string, r Receipt) error {
+	if r.State != "installed" || r.Digest != digest || r.ListenAddress != p.ListenAddress || r.ListenPort != ListenerPort || r.InventoryAddress != p.InventoryAddress || r.InventoryPort != p.InventoryPort || r.BootEnabled != p.EnableAtBoot || r.NetworkReachabilityVerified {
+		return ErrInvalid
+	}
+	if _, e := hostbootstrap.PublicKey(r.HostKey); e != nil {
+		return ErrInvalid
+	}
+	return nil
 }
