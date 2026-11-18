@@ -1,6 +1,7 @@
 package capacitybroker
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -36,5 +37,35 @@ func TestDemandMatchingNoSupplyRetainsDemand(t *testing.T) {
 	got, err := MatchDemand([]DemandJob{{"x", []string{"p", "q"}}, {"y", nil}}, map[string]int{"p": 0, "q": 0})
 	if err != nil || len(got.Covered) != 0 || len(got.Unmet) != 2 {
 		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+func TestDemandMatchingBudgetsEmptyPoolVisits(t *testing.T) {
+	idle := map[string]int{}
+	candidates := []string{}
+	for i := 0; i < 999; i++ {
+		id := fmt.Sprintf("p%03d", i)
+		idle[id] = 0
+		candidates = append(candidates, id)
+	}
+	idle["z"] = 1
+	candidates = append(candidates, "z")
+	jobs := make([]DemandJob, 1000)
+	for i := range jobs {
+		jobs[i] = DemandJob{ID: fmt.Sprintf("j%04d", i), Candidates: candidates}
+	}
+	got, err := MatchDemand(jobs, idle)
+	if err != ErrSnapshot || got.Covered != nil || got.Unmet != nil {
+		t.Fatalf("expected bounded failure without partial result: %+v %v", got, err)
+	}
+}
+func TestDemandMatchingBudgetsDenseSlotVisits(t *testing.T) {
+	jobs := make([]DemandJob, 400)
+	for i := range jobs {
+		jobs[i] = DemandJob{ID: fmt.Sprintf("j%04d", i), Candidates: []string{"p"}}
+	}
+	got, err := MatchDemand(jobs, map[string]int{"p": 100})
+	if err != ErrSnapshot || got.Covered != nil || got.Unmet != nil {
+		t.Fatalf("expected bounded failure without partial result: %+v %v", got, err)
 	}
 }

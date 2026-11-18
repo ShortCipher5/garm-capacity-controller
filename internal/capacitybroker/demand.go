@@ -76,6 +76,12 @@ func MatchDemand(jobs []DemandJob, idle map[string]int) (DemandMatch, error) {
 	var visit func(int, []bool) bool
 	visit = func(job int, visited []bool) bool {
 		for _, p := range ordered[job].Candidates {
+			// Empty pools still consume matching work, including recursive visits.
+			operations++
+			if operations > 1000000 {
+				exhausted = true
+				return false
+			}
 			for _, slot := range poolSlots[p] {
 				operations++
 				if operations > 1000000 {
