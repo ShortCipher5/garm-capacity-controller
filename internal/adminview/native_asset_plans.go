@@ -45,6 +45,9 @@ func (h *Handler) SetNativeAssetRegistry(reg *nativeassettransfer.Registry) erro
 			return ErrConfiguration
 		}
 	}
+	if reg.AnchorCatalog() != nil {
+		return ErrConfiguration
+	}
 	h.nativeAssetSlots = map[string]string{}
 	for id := range h.nativePreparation {
 		c, e := h.assetAssembly(id)

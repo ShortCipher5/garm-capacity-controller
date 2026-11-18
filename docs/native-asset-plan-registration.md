@@ -34,9 +34,13 @@ the owner plan cannot silently retain the old asset association.
 
 On restart only exact completed registrations are reopened. Partial or unknown
 reservations consume the slot permanently; there is no reset, deletion, retry,
-ID rewrite, or implicit repair. Preserve the directory. The catalog is frozen
-once a slot is consumed: renaming/removing/changing slots is rejected against
-its history, rather than freeing capacity. Operator-approved new manifests and
+ID rewrite, or implicit repair. Preserve the directory. Catalog versions are retained as immutable commitments. New versions may add
+previously unconfigured slots within the existing eight-entry combined bound;
+renaming/removing/changing any old slot (including unused slots) is rejected.
+Old completed and unknown records retain their original catalog and review
+digests, rather than being rewritten or freeing capacity. See
+[native asset catalog evolution](native-asset-catalog-evolution.md) for the
+required exact-baseline migration of pre-snapshot history. Operator-approved new manifests and
 catalog configuration remain necessary for new IDs. This removes per-target
 SSH recipe edits/restarts for preapproved slots, not artifact preparation itself.
 

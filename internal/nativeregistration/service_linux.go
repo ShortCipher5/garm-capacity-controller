@@ -76,10 +76,13 @@ type Configured struct {
 func (c Configured) Metadata() nativebundle.RegistrationMetadata { return c.metadata }
 
 type Service struct {
-	mu        sync.Mutex
-	compiler  *nativebundle.RegistrationCompiler
-	inventory *sshinventory.Service
-	directory string
+	catalogs     map[string]*nativebundle.RegistrationCompiler
+	catalogHead  string
+	catalogCount int
+	mu           sync.Mutex
+	compiler     *nativebundle.RegistrationCompiler
+	inventory    *sshinventory.Service
+	directory    string
 }
 
 func privateDirectory(p string) error {
@@ -140,8 +143,8 @@ func (s *Service) read(name string, v any) error {
 	if checkedFile(f) != nil {
 		return ErrRegistration
 	}
-	b, e := io.ReadAll(io.LimitReader(f, 65537))
-	if e != nil || len(b) > 65536 {
+	b, e := io.ReadAll(io.LimitReader(f, catalogFileLimit(name)+1))
+	if e != nil || int64(len(b)) > catalogFileLimit(name) {
 		return ErrRegistration
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
@@ -157,7 +160,7 @@ func (s *Service) read(name string, v any) error {
 }
 func (s *Service) write(name string, v any) error {
 	b, e := json.Marshal(v)
-	if e != nil || len(b) > 65536 {
+	if e != nil || int64(len(b)) > catalogFileLimit(name) {
 		return ErrRegistration
 	}
 	f, e := os.OpenFile(filepath.Join(s.directory, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY|unix.O_NOFOLLOW, 0600)
@@ -177,6 +180,9 @@ func (s *Service) write(name string, v any) error {
 	return syncDir(s.directory)
 }
 func (s *Service) compile(ctx context.Context, r Request) (nativebundle.Registration, error) {
+	return s.compileAt(ctx, r, false)
+}
+func (s *Service) compileAt(ctx context.Context, r Request, historical bool) (nativebundle.Registration, error) {
 	if ctx == nil || ctx.Err() != nil || !idPattern.MatchString(r.PreparationID) || !idPattern.MatchString(r.InventoryTargetDigest) {
 		return nativebundle.Registration{}, ErrRegistration
 	}
@@ -194,6 +200,9 @@ func (s *Service) compile(ctx context.Context, r Request) (nativebundle.Registra
 	}
 	if matches != 1 || nativeplanning.Digest(t) != r.InventoryTargetDigest {
 		return nativebundle.Registration{}, ErrRegistration
+	}
+	if historical {
+		return s.compileHistoricalPinned(r, t)
 	}
 	return s.compilePinned(r, t)
 }
@@ -213,15 +222,18 @@ func (s *Service) records() ([]intent, map[string]bool, error) {
 	if e != nil {
 		return nil, nil, ErrRegistration
 	}
-	names, e := f.Readdirnames(maxRegistrations*2 + 2)
+	names, e := f.Readdirnames(maxRegistrations*2 + maxCatalogRevisions + 2)
 	f.Close()
-	if (e != nil && e != io.EOF) || len(names) > maxRegistrations*2+1 {
+	if (e != nil && e != io.EOF) || len(names) > maxRegistrations*2+maxCatalogRevisions+1 {
 		return nil, nil, ErrRegistration
+	}
+	if e := s.readCatalogHistory(names); e != nil {
+		return nil, nil, e
 	}
 	ids := map[string]bool{}
 	done := map[string]bool{}
 	for _, n := range names {
-		if n == "registration.lock" {
+		if n == "registration.lock" || strings.HasPrefix(n, "catalog-") {
 			continue
 		}
 		switch {
@@ -261,7 +273,7 @@ func (s *Service) records() ([]intent, map[string]bool, error) {
 		if s.read(id+".intent.json", &in) != nil || in.Version != version || in.Request.PreparationID != id || in.Metadata.Binding.PreparationID != id {
 			return nil, nil, ErrRegistration
 		}
-		r, e := s.compilePinned(in.Request, in.Metadata.Binding.InventoryTarget)
+		r, e := s.compileHistoricalPinned(in.Request, in.Metadata.Binding.InventoryTarget)
 		if e != nil || nativeplanning.Digest(r.Metadata()) != nativeplanning.Digest(in.Metadata) {
 			return nil, nil, ErrRegistration
 		}
@@ -327,6 +339,9 @@ func (s *Service) Register(ctx context.Context, r Request, reviewDigest string) 
 			return Configured{}, ErrRegistration
 		}
 	}
+	if s.checkpointCatalog() != nil {
+		return Configured{}, ErrRegistration
+	}
 	if ctx.Err() != nil || s.write(r.PreparationID+".intent.json", intent{version, r, m}) != nil {
 		return Configured{}, ErrRegistration
 	}
@@ -351,6 +366,13 @@ func (s *Service) Register(ctx context.Context, r Request, reviewDigest string) 
 // Restore verifies completed private bytes; unknown entries remain consumed.
 // It grants configuration access only and does not renew OS observation age.
 func (s *Service) Restore(ctx context.Context) ([]Configured, []Report, error) {
+	return s.restore(ctx, false)
+}
+
+// AnchorCatalog is an explicit startup metadata migration, not a GET action.
+// It validates exact legacy state and completed materialization before writing.
+func (s *Service) AnchorCatalog(ctx context.Context) error { _, _, e := s.restore(ctx, true); return e }
+func (s *Service) restore(ctx context.Context, anchor bool) ([]Configured, []Report, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ctx == nil || ctx.Err() != nil {
@@ -370,7 +392,7 @@ func (s *Service) Restore(ctx context.Context) ([]Configured, []Report, error) {
 	for _, in := range records {
 		state := "registration_unknown"
 		if done[in.Request.PreparationID] {
-			r, e := s.compile(ctx, in.Request)
+			r, e := s.compileAt(ctx, in.Request, true)
 			if e != nil || r.InspectMaterialized(ctx) != nil || privateDirectory(in.Metadata.JournalDirectory) != nil {
 				return nil, nil, ErrRegistration
 			}
@@ -378,6 +400,11 @@ func (s *Service) Restore(ctx context.Context) ([]Configured, []Report, error) {
 			state = "configuration_registered"
 		}
 		history = append(history, report(in.Metadata, state))
+	}
+	// Legacy migration is permitted only after all exact original records and
+	// materialized outputs were validated under the unchanged original catalog.
+	if anchor && s.checkpointCatalog() != nil {
+		return nil, nil, ErrRegistration
 	}
 	return out, history, nil
 }
