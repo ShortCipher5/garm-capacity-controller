@@ -19,11 +19,15 @@ import (
 )
 
 type profileRegistrationConfig struct {
-	Endpoint  string                             `json:"endpoint"`
-	CAFile    string                             `json:"ca_file"`
-	TokenFile string                             `json:"token_file"`
-	Request   admission.BrokerPoolProfileRequest `json:"request"`
-	Domains   []struct {
+	ManagedServerKeyPin   string                             `json:"managed_server_key_pin"`
+	ManagedControllerID   string                             `json:"managed_controller_id"`
+	ClientCertificateFile string                             `json:"client_certificate_file"`
+	ClientKeyFile         string                             `json:"client_key_file"`
+	Endpoint              string                             `json:"endpoint"`
+	CAFile                string                             `json:"ca_file"`
+	TokenFile             string                             `json:"token_file"`
+	Request               admission.BrokerPoolProfileRequest `json:"request"`
+	Domains               []struct {
 		Sequence int64                `json:"sequence"`
 		Policy   nativeapi.PolicySpec `json:"policy"`
 	} `json:"domains"`
@@ -81,20 +85,35 @@ func registerProfile(ctx context.Context, args []string, out, diagnostic io.Writ
 	if !roots.AppendCertsFromPEM(ca) {
 		return fail()
 	}
-	secret, err := securefiles.Read(c.TokenFile, 16384)
-	if err != nil {
-		return fail()
-	}
-	token := strings.TrimSpace(string(secret))
-	if token == "" || strings.ContainsAny(token, "\r\n\x00") {
-		return fail()
+	trust := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	token := ""
+	if c.ManagedServerKeyPin != "" {
+		if c.TokenFile != "" || c.ManagedControllerID == "" {
+			return fail()
+		}
+		trust, err = securefiles.LoadTLS(securefiles.TLSFiles{CA: c.CAFile, Certificate: c.ClientCertificateFile, Key: c.ClientKeyFile})
+		if err != nil {
+			return fail()
+		}
+	} else {
+		if c.ManagedControllerID != "" || c.ClientCertificateFile != "" || c.ClientKeyFile != "" {
+			return fail()
+		}
+		secret, e := securefiles.Read(c.TokenFile, 16384)
+		if e != nil {
+			return fail()
+		}
+		token = strings.TrimSpace(string(secret))
+		if token == "" || strings.ContainsAny(token, "\r\n\x00") {
+			return fail()
+		}
 	}
 	store, err := admission.OpenRuntimeSQLite(*source, *identity)
 	if err != nil {
 		return fail()
 	}
 	defer store.Close()
-	observation, err := stockidentity.Observe(ctx, stockidentity.Configuration{Endpoint: c.Endpoint, Token: token, Provider: c.Request.Authority.ProviderName, Pool: c.Request.Authority.PoolID, TLS: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}})
+	observation, err := stockidentity.Observe(ctx, stockidentity.Configuration{Endpoint: c.Endpoint, Token: token, Provider: c.Request.Authority.ProviderName, Pool: c.Request.Authority.PoolID, TLS: trust, ManagedServerKeyPin: c.ManagedServerKeyPin, ManagedControllerID: c.ManagedControllerID})
 	if err != nil {
 		return fail()
 	}

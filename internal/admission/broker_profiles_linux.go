@@ -157,7 +157,7 @@ func (s *SQLiteStore) checkBrokerProfiles(ctx context.Context) error {
 // independently authenticated GARM controller identity or a remote write fence.
 func (s *SQLiteStore) RegisterBrokerPoolProfile(ctx context.Context, r BrokerPoolProfileRequest, observed stockidentity.Observation, policies map[int64]nativeapi.Policy) (BrokerPoolProfile, error) {
 	var out BrokerPoolProfile
-	if !observed.Valid() || r.ExpectedProfileSequence < 0 || !profileName(r.SizeProfile) || !bindingFingerprint(r.SourceIdentity) ||
+	if (observed.ControllerID() != "" && observed.ControllerID() != r.Authority.Controller) || !observed.Valid() || r.ExpectedProfileSequence < 0 || !profileName(r.SizeProfile) || !bindingFingerprint(r.SourceIdentity) ||
 		r.SourceIdentity != observed.SourceIdentity() || r.Execution.Name != "" || len(policies) == 0 || len(policies) > 1000 {
 		return out, ErrBrokerProfile
 	}
