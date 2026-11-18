@@ -1,4 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
+import {InventoryRotation} from './rotation.jsx';
 import {Firstboot} from './firstboot.jsx';
 import {PreparedBootstrap} from './bootstrap.jsx';
 import {sshTargetsRequest} from './ssh-targets-client.js';
@@ -29,7 +30,7 @@ export function SSHTargetRegistration(){
  }
  const scope=scopes?.[form.credential_ref];
  return <details className="card management" id="ssh-target-registration" onToggle={e=>{if(!e.currentTarget.open)reset()}}><summary>Add an SSH server configuration</summary>
- <PreparedBootstrap key={bootstrapEpoch}/><Firstboot key={"firstboot-"+bootstrapEpoch}/>
+ <PreparedBootstrap key={bootstrapEpoch}/><Firstboot key={"firstboot-"+bootstrapEpoch}/><InventoryRotation key={"rotation-"+bootstrapEpoch}/>
  <p>Save a new server within administrator-approved credential and network scopes. This does not install software, contact the server, enroll capacity or upload private keys. Existing target IDs cannot be overwritten.</p>
  <label>SSH target-management token<input aria-label="SSH target-management token" type="password" autoComplete="off" ref={token} disabled={busy}/></label>
  <button type="button" disabled={busy} onClick={()=>run('scopes')}>Load permitted server scopes</button>
