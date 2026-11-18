@@ -34,7 +34,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 27
+const sqliteCurrentVersion = 28
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -448,6 +448,14 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 28 {
+			if _, err := tx.Exec(sqliteRunnerMixSchema); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v28", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -456,6 +464,10 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 		return nil, err
 	}
 	s.initialized = true
+	if err := s.checkRunnerMixes(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
 	if err := s.checkBrokerProfiles(context.Background()); err != nil {
 		s.Close()
 		return nil, err

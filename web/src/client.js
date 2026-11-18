@@ -1,3 +1,4 @@
+import { mixHost, validateMixView } from "./runner-mix-client.js";
 import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
 import {validateAllocatorPlan} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
@@ -112,6 +113,8 @@ export class ReadSession {
   #mappingGeneration=0;
   #brokerRequest;
   #brokerGeneration = 0;
+  #mixRequest;
+  #mixGeneration = 0;
   #profilesRequest;
   #profilesGeneration = 0;
   #usageInFlight = new Set();
@@ -142,6 +145,9 @@ export class ReadSession {
     this.#brokerGeneration++;
     this.#brokerRequest?.abort();
     this.#brokerRequest = undefined;
+    this.#mixGeneration++;
+    this.#mixRequest?.abort();
+    this.#mixRequest = undefined;
     this.#profilesGeneration++;
     this.#profilesRequest?.abort();
     this.#profilesRequest = undefined;
@@ -286,6 +292,29 @@ export class ReadSession {
       if (generation !== this.#remoteGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
       if (error instanceof SessionEnded || error.message?.includes("Garm")) throw error;
       throw new Error("Garm settings could not be read. Refresh before editing.");
+    } finally { clearTimeout(timeout); }
+  }
+  async runnerMixSnapshot(host) {
+    mixHost(host);
+    if (!this.#token) throw new SessionEnded();
+    this.#mixRequest?.abort();
+    const generation = ++this.#mixGeneration;
+    const controller = new AbortController(); this.#mixRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await this.fetcher(`/admin/api/v1/runner-mix/${encodeURIComponent(host)}`, { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (generation !== this.#mixGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error("Saved runner mix are unavailable. No saved configuration was rendered.");
+      const result = validateMixView(await response.json(), host);
+      if (generation !== this.#mixGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      return result;
+    } catch (error) {
+      if (generation !== this.#mixGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
+      if (error instanceof SessionEnded) throw error;
+      throw new Error("Saved runner mix could not be read. Refresh before reviewing desired sizes.");
     } finally { clearTimeout(timeout); }
   }
   async profilesSnapshot() {

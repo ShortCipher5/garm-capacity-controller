@@ -347,6 +347,9 @@ func sqliteCheckArtifact(ctx context.Context, s *SQLiteStore) error {
 	if err := sqliteCheckNativeExecutions(ctx, s); err != nil {
 		return err
 	}
+	if err := s.checkRunnerMixes(ctx); err != nil {
+		return err
+	}
 	if err := s.checkBrokerProfiles(ctx); err != nil {
 		return err
 	}
