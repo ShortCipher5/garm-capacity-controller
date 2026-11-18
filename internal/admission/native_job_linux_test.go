@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/demandrepair"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/protectedboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/stockidentity"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/stockjit"
@@ -283,6 +284,29 @@ func TestNativeJobAuthenticBindingTerminalReplayAndChargeRetention(t *testing.T)
 	}
 	if e = copy.RecordNativeJob(ctx, permit, o); !errors.Is(e, ErrFence) {
 		t.Fatal("restored old lineage wrote lifecycle", e)
+	}
+	bound, e := s.LookupNativeRunnerBinding(ctx, permit)
+	if e != nil {
+		t.Fatal(e)
+	}
+	journal := nativeidentity.ProtectedJournalRecord{PermitID: permit, EnvelopeDigest: bound.EnvelopeDigest, DomainID: bound.DomainID, PolicyDigest: bound.PolicyDigest, NativeName: name, ResourceID: nativeResource, ImageFingerprint: strings.Repeat("a", 64), InitSHA256: image.InitSHA256, State: "process_tree_exited_unqualified", RecordAt: time.Now().UTC(), ExitCode: 0}
+	f.setEvidence("/v1/native/executions/"+permit+"/journal", journal)
+	jo, e := nativeidentity.ObserveProtectedJournal(ctx, f.evidenceConfig, permit)
+	if e != nil {
+		t.Fatal(e)
+	}
+	correlation, e := s.CorrelateProtectedJournal(ctx, jo, policy)
+	if e != nil || !correlation.RootJournalAndTerminalJobObserved || correlation.ReleaseAuthorized || correlation.AcceptanceFenceQualified || correlation.PhysicalDeletionProven {
+		t.Fatal("unqualified correlation", correlation, e)
+	}
+	journal.ResourceID = "22222222-2222-4222-8222-222222222222"
+	f.setEvidence("/v1/native/executions/"+permit+"/journal", journal)
+	jo, e = nativeidentity.ObserveProtectedJournal(ctx, f.evidenceConfig, permit)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.CorrelateProtectedJournal(ctx, jo, policy); e == nil {
+		t.Fatal("wrong incarnation correlated")
 	}
 	if e = s.checkNativeJobs(ctx); e != nil {
 		t.Fatal(e)

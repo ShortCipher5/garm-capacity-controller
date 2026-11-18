@@ -142,4 +142,26 @@ func TestPublicGrantCycleRealEnrollmentTransportAndRestart(t *testing.T) {
 	if err != nil || len(final.Grants) != 1 || final.Allocated.Global.Runners != 1 {
 		t.Fatal("public cycle duplicate accounting", err)
 	}
+	service, err := NewService(store, source, opt, time.Minute, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- service.Run(runctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for service.Snapshot().SuccessCount == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	status := service.Snapshot()
+	cancel()
+	<-done
+	if status.SuccessCount != 1 || status.AttemptCount != 1 || status.LastGrantCount != 0 || status.LastSuccessAt.IsZero() {
+		t.Fatalf("actual service status %+v", status)
+	}
+	final, err = store.ReadBrokerGrantState(ctx)
+	if err != nil || len(final.Grants) != 1 || final.Allocated.Global.Runners != 1 {
+		t.Fatal("service duplicated grants", err)
+	}
+
 }
