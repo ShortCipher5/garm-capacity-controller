@@ -70,13 +70,29 @@ func buildNativeStock(ctx context.Context, store *admission.SQLiteStore, c confi
 			cleanup()
 			return nil, closeAll, gatewayrpc.ErrConfiguration
 		}
-		metadata, e := stockjit.New(stockjit.Policy{MetadataURL: configured.MetadataURL, ControllerID: c.Controller, PoolID: id, GitHubURL: configured.GitHubURL}, trust)
+
+		ownership := stockidentity.Configuration{Endpoint: c.Garm.Endpoint, Token: token, Provider: scope.ProviderName, Pool: id, TLS: trust}
+		policy := stockjit.Policy{MetadataURL: configured.MetadataURL, ControllerID: c.Controller, PoolID: id, GitHubURL: configured.GitHubURL}
+		var metadata *stockjit.Client
+		var e error
+		if c.Garm.ManagedProxy {
+			if token != "" || c.Garm.TokenFile != "" {
+				cleanup()
+				return nil, closeAll, gatewayrpc.ErrConfiguration
+			}
+			ownership.ManagedServerKeyPin = c.Garm.ProxyServerKeyPin
+			ownership.ManagedControllerID = c.Controller
+			metadata, e = stockjit.NewManaged(ctx, policy, ownership)
+		} else {
+			metadata, e = stockjit.New(policy, trust)
+		}
 		if e != nil {
 			cleanup()
 			return nil, closeAll, gatewayrpc.ErrConfiguration
 		}
 		clients = append(clients, metadata)
-		pool := gateway.NativeStockPool{Metadata: metadata, Ownership: stockidentity.Configuration{Endpoint: c.Garm.Endpoint, Token: token, Provider: scope.ProviderName, Pool: id, TLS: trust}, Hosts: map[string]nativecontroller.Configuration{}}
+		pool := gateway.NativeStockPool{Metadata: metadata, Ownership: ownership, Hosts: map[string]nativecontroller.Configuration{}}
+
 		for host, config := range configured.Hosts {
 			policy, e := nativeapi.NewPolicy(config.Policy)
 			if e != nil || !policy.Protected() || policy.Controller() != c.Controller || policy.Host() != host {

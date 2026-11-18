@@ -30,7 +30,7 @@ type Client struct {
 
 func New(endpoint, pin, controller string, trust *tls.Config) (*Client, error) {
 	u, e := url.Parse(endpoint)
-	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || (u.Path != "" && u.Path != "/") || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() || !uuid(controller) || trust == nil || len(trust.Certificates) != 1 {
+	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || (u.Path != "" && u.Path != "/") || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() || !uuid(controller) || trust == nil || len(trust.Certificates) != 1 || trust.VerifyConnection != nil || trust.VerifyPeerCertificate != nil || trust.GetClientCertificate != nil || (trust.MaxVersion != 0 && trust.MaxVersion < tls.VersionTLS13) {
 		return nil, ErrSource
 	}
 	t, e := securefiles.WithServerKeyPin(trust, pin)
@@ -74,6 +74,13 @@ func (c *Client) RoundTrip(r *http.Request) (*http.Response, error) {
 	if res.StatusCode != http.StatusOK {
 		return res, nil
 	}
+	if e = c.verifySource(res); e != nil {
+		res.Body.Close()
+		return nil, e
+	}
+	return res, nil
+}
+func (c *Client) verifySource(res *http.Response) error {
 	source := res.Header.Get(SourceHeader)
 	controller := res.Header.Get(ControllerHeader)
 	c.mu.Lock()
@@ -81,15 +88,17 @@ func (c *Client) RoundTrip(r *http.Request) (*http.Response, error) {
 	raw, e := hex.DecodeString(source)
 	if c.revoked || e != nil || len(raw) != 32 || hex.EncodeToString(raw) != source || len(res.Header.Values(SourceHeader)) != 1 || len(res.Header.Values(ControllerHeader)) != 1 || controller != c.controller || (c.source != "" && c.source != source) {
 		c.revoked = true
-		res.Body.Close()
-		return nil, ErrSource
+		return ErrSource
 	}
 	c.source = source
 	digest := sha256.Sum256([]byte("managed-stock-source/v1\x00" + c.base + "\x00" + c.pin + "\x00" + source + "\x00" + controller))
 	c.identity = hex.EncodeToString(digest[:])
-	return res, nil
+	return nil
 }
 func readPath(p string) bool {
+	if p == SourcePath {
+		return true
+	}
 	if p == "/api/v1/instances" || p == "/api/v1/pools" || p == "/api/v1/jobs" {
 		return true
 	}

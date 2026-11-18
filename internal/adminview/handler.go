@@ -80,6 +80,7 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	brokerProfiles  map[string]BrokerProfileRecipe
 	allocatorStatus AllocatorStatusSource
 	rotation        *firstboot.ManagedRotationService
 	rotationHash    [32]byte
@@ -152,6 +153,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/allocator-plan" {
+		h.serveAllocatorPlan(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/allocator-status" {
 		h.serveAllocatorStatus(w, r)
 		return
@@ -186,6 +191,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/garm" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/garm/") {
 		h.serveGarm(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/broker-profiles" {
+		h.serveBrokerProfiles(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/broker-policy" {
