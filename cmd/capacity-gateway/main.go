@@ -317,6 +317,10 @@ func main() {
 	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
 	sshTargetManagement := flag.Bool("allow-ssh-target-management", false, "allow separately authorized durable SSH target registration within deployment scopes; no installation or activation")
 	rotation := flag.Bool("allow-inventory-key-rotation", false, "allow separately approved remote inventory key/session revocation and atomic local target replacement")
+	nativeRegistration := flag.Bool("allow-native-target-registration", false, "allow scoped new-target configuration, discovery, bundle assembly and separately approved disabled preparation; never activation")
+	nativeAssembly := flag.Bool("allow-native-bundle-assembly", false, "allow explicit fixed-recipe local assembly and reviewed preparation registry reload; no SSH or activation")
+	nativePlanning := flag.Bool("allow-native-discovery-planning", false, "allow separately approved SSH discovery and saved native resource configuration; no activation")
+	nativePreparation := flag.Bool("allow-native-owner-preparation", false, "allow separately approved private configuration transfer and disabled owner preparation; never activation")
 	firstboot := flag.Bool("allow-isolated-inventory-firstboot", false, "allow separately approved full-admin first-time isolated listener installation; changes host account, service and owned firewall")
 	bootstrap := flag.Bool("allow-prepared-host-bootstrap", false, "allow separately authorized installation on deployment-approved prepared hosts; no account creation or sshd changes")
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
@@ -373,6 +377,34 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableRotation = true
+	}
+	if *nativeRegistration {
+		if config.Admin == nil || !*sshInventory || *nativeAssembly || *nativePlanning || *nativePreparation {
+			fmt.Fprintln(os.Stderr, "native target registration requires SSH inventory and separate dynamic configuration, without static native workflow flags")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativeRegistration = true
+	}
+	if *nativeAssembly {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "native assembly requires admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativeAssembly = true
+	}
+	if *nativePlanning {
+		if config.Admin == nil || !*sshInventory {
+			fmt.Fprintln(os.Stderr, "native planning requires SSH inventory and separate admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativePlanning = true
+	}
+	if *nativePreparation {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "native preparation requires separate admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativePreparation = true
 	}
 	if *firstboot {
 		if config.Admin == nil {

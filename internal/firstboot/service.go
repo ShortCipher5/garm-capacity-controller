@@ -30,15 +30,17 @@ type Store interface {
 type DeploymentTarget struct {
 	Request         Request
 	CredentialAlias string
+	PreflightSHA256 string
 }
 type Target struct {
-	ID              string     `json:"id"`
-	CredentialAlias string     `json:"credential_alias"`
-	Plan            Plan       `json:"plan"`
-	Digest          string     `json:"review_digest"`
-	ArtifactBytes   int        `json:"artifact_bytes"`
-	Operation       *Operation `json:"operation,omitempty"`
-	Running         bool       `json:"running"`
+	ID              string           `json:"id"`
+	CredentialAlias string           `json:"credential_alias"`
+	Plan            Plan             `json:"plan"`
+	Digest          string           `json:"review_digest"`
+	ArtifactBytes   int              `json:"artifact_bytes"`
+	Operation       *Operation       `json:"operation,omitempty"`
+	Running         bool             `json:"running"`
+	Preflight       *PreflightRecipe `json:"preflight,omitempty"`
 }
 type Resolver func(context.Context, string) (ssh.Signer, error)
 type Service struct {
@@ -64,7 +66,7 @@ func newService(targets map[string]DeploymentTarget, store Store, resolve Resolv
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{targets: map[string]DeploymentTarget{}, store: store, resolve: resolve, execute: run, running: map[string]bool{}, ctx: ctx, cancel: cancel}
 	for id, t := range targets {
-		if !targetName.MatchString(id) || !targetName.MatchString(t.CredentialAlias) || Validate(t.Request) != nil {
+		if !targetName.MatchString(id) || !targetName.MatchString(t.CredentialAlias) || Validate(t.Request) != nil || t.PreflightSHA256 != "" && !preflightHash(t.PreflightSHA256) {
 			cancel()
 			return nil, ErrState
 		}
@@ -84,6 +86,10 @@ func (s *Service) Targets(ctx context.Context) ([]Target, error) {
 	out := []Target{}
 	for id, t := range s.targets {
 		v := Target{ID: id, CredentialAlias: t.CredentialAlias, Plan: t.Request.Plan, Digest: t.Request.ReviewDigest, ArtifactBytes: len(t.Request.Artifact), Running: s.running[id]}
+		if t.PreflightSHA256 != "" {
+			recipe := preflightRecipe(t)
+			v.Preflight = &recipe
+		}
 		if op, ok := ops[id]; ok {
 			if op.Receipt != nil && op.Digest == t.Request.ReviewDigest && ValidateReceipt(t.Request.Plan, op.Digest, *op.Receipt) != nil {
 				return nil, ErrState

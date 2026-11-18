@@ -20,9 +20,17 @@ import (
 )
 
 type adminConfiguration struct {
-	NativeEnrollmentRecipesFile        string                        `json:"native_enrollment_recipes_file,omitempty"`
-	OverheadRefresh                    *overheadRefreshConfiguration `json:"owner_overhead_refresh,omitempty"`
-	BrokerProfileRecipesFile           string                        `json:"broker_profile_recipes_file,omitempty"`
+	NativeRegistration          *nativeRegistrationConfiguration `json:"native_registration,omitempty"`
+	EnableNativeRegistration    bool                             `json:"-"`
+	NativeEnrollmentRecipesFile string                           `json:"native_enrollment_recipes_file,omitempty"`
+	OverheadRefresh             *overheadRefreshConfiguration    `json:"owner_overhead_refresh,omitempty"`
+	EnableNativeAssembly        bool                             `json:"-"`
+	NativePlanning              *nativePlanningConfiguration     `json:"native_planning,omitempty"`
+	EnableNativePlanning        bool                             `json:"-"`
+	NativePreparation           *nativePreparationConfiguration  `json:"native_preparation,omitempty"`
+	EnableNativePreparation     bool                             `json:"-"`
+	BrokerProfileRecipesFile    string                           `json:"broker_profile_recipes_file,omitempty"`
+
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
@@ -51,6 +59,9 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	noop := func() {}
 	if config == nil {
 		return nil, noop, nil
+	}
+	if !nativeRegistrationModeAllowed(config) {
+		return nil, noop, adminview.ErrConfiguration
 	}
 	host, _, err := net.SplitHostPort(config.Listen)
 	ip := net.ParseIP(host)
@@ -289,6 +300,57 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		}
 		old := cleanup
 		cleanup = func() { service.Close(); old() }
+	}
+	if config.EnableNativePreparation {
+		targets, token, closePreparation, e := loadNativePreparation(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativePreparation(targets, token); e != nil {
+			closePreparation()
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { closePreparation(); old() }
+	}
+	if config.EnableNativePlanning {
+		token, e := loadNativePlanning(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.ConfigureNativePlanning(config.NativePlanning.Bindings, config.NativePlanning.SelectionDirectory, token); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+	}
+	if config.EnableNativeAssembly {
+		if !config.EnableNativePreparation || !config.EnableNativePlanning || config.NativePreparation == nil {
+			cleanup()
+			return nil, noop, adminview.ErrConfiguration
+		}
+		if e := handler.ConfigureNativeAssembly(config.NativePreparation.AssemblyRecipes); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { handler.CloseNativePreparation(); old() }
+	}
+	if config.EnableNativeRegistration {
+		planningToken, preparationToken, resolvers, e := loadNativeRegistration(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		c := config.NativeRegistration
+		if e = handler.ConfigureNativeRegistration(c.Catalog, c.Directory, c.SelectionDirectory, planningToken, preparationToken, resolvers); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { handler.CloseNativePreparation(); old() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

@@ -58,3 +58,15 @@ artifact export nor this check generates gateway authority, changes pool maxima,
 removes runtime refusal or couples the owner's lifetime to gateway restarts. A
 capsule systemd rendering/install path still requires the real qualified filesystem
 mount contract; this package intentionally does not invent writable ZFS paths.
+
+## Read-only diagnostic artifacts
+
+The export also includes `capacity-native-preflight` and
+`capacity-native-memory-plan`, with their exact SHA256 entries. The preflight
+binary can be installed by an authorized operator at the fixed protected
+`/usr/local/libexec/capacity-native-preflight` path required by the separate
+onboarding recipe. Exporting it does not install it, grant SSH/sudo access or
+run it on a host. Its output remains unqualified. The memory planner reports
+configured arithmetic and always exits 3; it cannot authorize execution or
+release. No runtime settings or service start is performed by this artifact
+target. This joins the reviewed packaging and diagnostic source parents.

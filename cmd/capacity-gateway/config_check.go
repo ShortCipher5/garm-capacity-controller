@@ -214,6 +214,27 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
+	if a.EnableNativeRegistration {
+		if _, _, _, e := loadNativeRegistration(a); e != nil {
+			return fail()
+		}
+	}
+	if a.EnableNativeAssembly && (!a.EnableNativePlanning || !a.EnableNativePreparation || a.NativePreparation == nil || len(a.NativePreparation.AssemblyRecipes) < 1 || len(a.NativePreparation.AssemblyRecipes) > 8) {
+		return fail()
+	}
+	if a.EnableNativePlanning {
+		token, e := loadNativePlanning(a)
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
+	if a.EnableNativePreparation {
+		_, token, closePreparation, e := loadNativePreparation(a)
+		closePreparation()
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
 	if a.EnableFirstboot {
 		_, _, token, e := loadFirstboot(a)
 		if e != nil || !validToken([]byte(token)) {
