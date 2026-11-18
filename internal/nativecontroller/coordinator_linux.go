@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/stockjit"
 	"io"
 	"net"
 	"net/http"
@@ -91,6 +92,18 @@ func New(ctx context.Context, c Configuration) (*Coordinator, error) {
 // are rechecked by that ledger before this code can send an owner mutation.
 // No exported callback accepts detached native execution receipts.
 func (c *Coordinator) Execute(ctx context.Context, plan admission.ExecutionPlan, host admission.HostBinding, authority admission.StockProviderAuthority, commandDigest, userData string) (admission.DispatchRecord, error) {
+	return c.execute(ctx, plan, host, authority, commandDigest, userData, nil)
+}
+
+// ExecuteProtected preserves authentic source proof through native incarnation
+// binding. The raw payload-only API cannot fabricate this optional correlation.
+func (c *Coordinator) ExecuteProtected(ctx context.Context, plan admission.ExecutionPlan, host admission.HostBinding, authority admission.StockProviderAuthority, commandDigest string, source stockjit.ProtectedBootstrap) (admission.DispatchRecord, error) {
+	if !source.Valid() {
+		return admission.DispatchRecord{}, ErrConfiguration
+	}
+	return c.execute(ctx, plan, host, authority, commandDigest, source.Payload(), &source)
+}
+func (c *Coordinator) execute(ctx context.Context, plan admission.ExecutionPlan, host admission.HostBinding, authority admission.StockProviderAuthority, commandDigest, userData string, source *stockjit.ProtectedBootstrap) (admission.DispatchRecord, error) {
 	if c == nil || c.store == nil {
 		return admission.DispatchRecord{}, ErrConfiguration
 	}
@@ -140,6 +153,11 @@ func (c *Coordinator) Execute(ctx context.Context, plan admission.ExecutionPlan,
 		bootstrapPlan, e := c.store.BindNativeBootstrap(ctx, permit.ID(), userData, c.policy)
 		if e != nil {
 			return admission.DispatchReceipt{}, ErrUnknown
+		}
+		if source != nil {
+			if _, e = c.store.BindNativeRunner(ctx, permit.ID(), *source, c.policy); e != nil {
+				return admission.DispatchReceipt{}, ErrUnknown
+			}
 		}
 		bootstrap, e := c.post(ctx, "/v1/native/executions/"+permit.ID()+"/bootstrap", []byte("{}"), "bootstrap_claim_id")
 		if e != nil {

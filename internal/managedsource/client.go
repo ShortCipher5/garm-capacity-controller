@@ -30,7 +30,7 @@ type Client struct {
 
 func New(endpoint, pin, controller string, trust *tls.Config) (*Client, error) {
 	u, e := url.Parse(endpoint)
-	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || (u.Path != "" && u.Path != "/") || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() || !uuid(controller) || trust == nil || len(trust.Certificates) != 1 {
+	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || (u.Path != "" && u.Path != "/") || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() || !uuid(controller) || trust == nil || len(trust.Certificates) != 1 || trust.VerifyConnection != nil || trust.VerifyPeerCertificate != nil || trust.GetClientCertificate != nil || (trust.MaxVersion != 0 && trust.MaxVersion < tls.VersionTLS13) {
 		return nil, ErrSource
 	}
 	t, e := securefiles.WithServerKeyPin(trust, pin)
@@ -96,6 +96,9 @@ func (c *Client) verifySource(res *http.Response) error {
 	return nil
 }
 func readPath(p string) bool {
+	if p == SourcePath {
+		return true
+	}
 	if p == "/api/v1/instances" || p == "/api/v1/pools" || p == "/api/v1/jobs" {
 		return true
 	}

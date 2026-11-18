@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/stockjit"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -452,5 +453,12 @@ func TestTerminalReceiptWriteTimeoutNeverReplaysNativeMutation(t *testing.T) {
 	defer f.owner.mu.Unlock()
 	if f.owner.createCalls != 1 || f.owner.startCalls != 0 || f.owner.bootstrapCalls != 0 {
 		t.Fatal("mutation replay")
+	}
+}
+
+func TestExecuteProtectedRejectsAbsentSourceBeforeMutation(t *testing.T) {
+	var c *Coordinator
+	if _, e := c.ExecuteProtected(context.Background(), admission.ExecutionPlan{}, admission.HostBinding{}, admission.StockProviderAuthority{}, "", stockjit.ProtectedBootstrap{}); e == nil {
+		t.Fatal("absent source accepted")
 	}
 }
