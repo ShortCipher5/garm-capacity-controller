@@ -44,19 +44,21 @@ type ProviderPathObserver struct {
 	session  *Session
 	profiles *providerProfileClient
 	pins     ProviderPathPins
+	origin   *ProviderOriginConfiguration
 	initial  string
 	revoked  bool
 }
 
 func NewProviderPathObserver(ctx context.Context, s *Session, source ProviderProfileConfiguration, pins ProviderPathPins) (*ProviderPathObserver, error) {
-	if os.Geteuid() != 0 || s == nil || !digest.MatchString(pins.GarmSHA256) || !digest.MatchString(pins.BridgeSHA256) {
+	if os.Geteuid() != 0 || s == nil || source.Origin == nil || !digest.MatchString(pins.GarmSHA256) || !digest.MatchString(pins.BridgeSHA256) {
 		return nil, ErrBoundary
 	}
 	profiles, err := newProviderProfileClient(s, source)
 	if err != nil {
 		return nil, err
 	}
-	o := &ProviderPathObserver{session: s, profiles: profiles, pins: pins}
+	origin := *source.Origin
+	o := &ProviderPathObserver{session: s, profiles: profiles, pins: pins, origin: &origin}
 	if _, err := o.Check(ctx); err != nil {
 		return nil, err
 	}
@@ -88,6 +90,15 @@ func (o *ProviderPathObserver) Check(ctx context.Context) (ProviderPathObservati
 	}
 	if validateProviderBindings(state.Payload) != nil {
 		return fail()
+	}
+	actualOrigin, err := observeProviderOrigin(ctx, o.session, o.origin)
+	if err != nil {
+		return fail()
+	}
+	for _, profile := range state.Payload.Profiles {
+		if profile.SourceIdentity != actualOrigin {
+			return fail()
+		}
 	}
 	controller := o.session.ControllerID()
 	names, err := providerNames(state.Payload.Profiles, controller)
