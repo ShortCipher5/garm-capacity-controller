@@ -138,7 +138,7 @@ func (m *Manager) complete(id string, result any, remoteErr error) error {
 	var data []byte
 	if remoteErr == nil {
 		data = encoded(result)
-	} else if errors.Is(remoteErr, garmapi.ErrManagementDisabled) || errors.Is(remoteErr, garmapi.ErrManagementConflict) || errors.Is(remoteErr, garmapi.ErrManagementUnsafe) ||
+	} else if errors.Is(remoteErr, garmapi.ErrManagementNotDispatched) || errors.Is(remoteErr, garmapi.ErrManagementDisabled) || errors.Is(remoteErr, garmapi.ErrManagementConflict) || errors.Is(remoteErr, garmapi.ErrManagementUnsafe) ||
 		// Definitive conditional-write rejections: the server refused this
 		// exact request before (or instead of) any effect. They are not
 		// uncertain outcomes and must not linger as unknown.

@@ -61,3 +61,24 @@ credential configuration, live deployment and UI enablement are unchanged.
 Tests use synthetic TLS stock-shaped responses and the real existing local
 settings journal, including ambiguous response, restart and matching-read hold.
 No live or installed stock GARM qualification is claimed.
+
+## Local dispatch boundary and concurrency
+
+The stock update handler performs a read followed by an update, and the SQL
+transaction does not compare a caller-supplied settings revision. A client
+fingerprint is therefore not remote CAS, even when local operations are
+serialized. The existing durable settings manager remains the single intent
+journal; no second pool-settings writer is introduced.
+
+Queued settings writes now honor context cancellation while awaiting the local
+management lock. A failed pre-PUT GET or cancelled queue entry returns a typed
+`ErrManagementNotDispatched`; the live manager can durably record that exact
+attempt as rejected. This classification is minted only before calling the PUT
+transport. Every possibly-sent PUT, failed post-read, or crash before a durable
+outcome record remains unknown/pending. A later matching GET cannot resolve it.
+
+This does not supply exclusive settings ownership, bypass the provider/native
+runtime guard, lower the positive-idle safety restriction, authorize maximum
+increases, or activate a deployment. Automated pool target writes still require
+an enforceable single-writer authority path. Native domain enrollment and a
+fresh capacity ledger alone are not that authority.
