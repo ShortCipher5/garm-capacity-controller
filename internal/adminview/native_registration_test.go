@@ -42,7 +42,20 @@ func TestDynamicRegistrationDiscoveryAssemblyInitialPlanAndRestart(t *testing.T)
 	cfg["network"] = nativeegress.Specification{Mode: nativeegress.PublicInternet, TransitCIDR: "10.240.0.0/30", RunnerCIDR: "10.241.0.0/24", DNS: []string{"1.1.1.1"}, ControlPlaneCIDRs: []string{"8.8.8.8/32"}}
 	raw, _ = json.Marshal(cfg)
 	os.WriteFile(filepath.Join(base.PrivateDirectory, "capsule.json"), raw, 0600)
-	dir := func() string { p := t.TempDir(); os.Chmod(p, 0700); return p }
+	cwd, e := os.Getwd()
+	if e != nil {
+		t.Fatal(e)
+	}
+	dir := func() string {
+		// The production registry rejects writable ancestors, including /tmp.
+		// Keep this fixture beneath the protected checkout on every runner.
+		p, err := os.MkdirTemp(cwd, ".registration-test-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(p) })
+		return p
+	}
 	base.ID = ""
 	base.ExpectedBindingFile = ""
 	catalog := nativebundle.RegistrationCatalog{Templates: map[string]nativebundle.RegistrationTemplate{"standard": {Configuration: base, ArtifactReference: "image", StorageReference: "storage", NetworkReference: "network"}}, Identities: map[string]nativebundle.RegistrationIdentity{"owner": {Directory: base.PrivateDirectory, Template: "standard", Administrator: "admin"}}, Administrators: map[string]nativebundle.RegistrationAdministrator{"admin": {Networks: []string{"192.0.2.0/24"}, Users: []string{binding.NativeTarget.AdminUser}, Ports: []uint16{binding.NativeTarget.Port}, AdminKeyFingerprint: binding.NativeTarget.AdminKeyFingerprint}}, PrivateParent: dir(), OutputParent: dir(), JournalParent: dir()}
