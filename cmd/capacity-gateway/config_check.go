@@ -25,6 +25,9 @@ var errStaticConfig = errors.New("static configuration check failed")
 // It cannot establish persisted policy, reachability, fencing or readiness.
 func checkStaticConfig(c configuration, provision bool) error {
 	fail := func() error { return errStaticConfig }
+	if validateAllocatorLoop(c.AllocatorLoop) != nil {
+		return fail()
+	}
 	loopback := func(address string) bool {
 		host, port, e := net.SplitHostPort(address)
 		ip := net.ParseIP(host)

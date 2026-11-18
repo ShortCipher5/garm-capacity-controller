@@ -11,6 +11,7 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
@@ -18,7 +19,8 @@ import (
 )
 
 type adminConfiguration struct {
-	BrokerProfileRecipesFile           string                     `json:"broker_profile_recipes_file,omitempty"`
+	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
+	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
 	Firstboot                          *firstbootConfiguration    `json:"isolated_inventory_firstboot,omitempty"`
@@ -74,6 +76,7 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		cleanup()
 		return nil, noop, err
 	}
+	handler.SetAllocatorStatusSource(config.allocatorRuntime)
 	needsCredential := config.EnableExperimentalManagement || config.EnableExperimentalOnboardingProbes
 	if needsCredential != (config.ManagementTokenFile != "") {
 		cleanup()
