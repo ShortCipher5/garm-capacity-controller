@@ -1,3 +1,4 @@
+import { PoolMappings } from "./broker-profiles.jsx";
 import { AllocatorStatus } from "./allocator-status.jsx";
 import { Lifecycle } from "./lifecycle.jsx";
 import { CapacityStates } from "./capacity-states.jsx";
@@ -67,7 +68,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readAllocatorStatus }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -252,6 +253,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
               read-only API.
             </p>
           </div>
+          <PoolMappings readMappings={readPoolMappings} readProfiles={readProfiles} />
         </section>
         <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} />
         <Profiles readProfiles={readProfiles} />
@@ -333,6 +335,10 @@ export function App() {
         readEntityInventory={readEntityInventory}
         readCapacityStates={async () => {
           try { return await session.current.capacityStatesSnapshot(); }
+          catch(error) { if(error instanceof SessionEnded && error.message) {disconnect();setError(error.message);} throw error; }
+        }}
+        readPoolMappings={async () => {
+          try { return await session.current.poolMappingsSnapshot(); }
           catch(error) { if(error instanceof SessionEnded && error.message) {disconnect();setError(error.message);} throw error; }
         }}
         readBrokerPolicy={async () => {
