@@ -206,6 +206,25 @@ func TestBrokerProfileMigrationFromRealSchema19ClosesReadiness(t *testing.T) {
 	}
 }
 
+func TestBrokerProfileReviewedSizeCompareIsTransactional(t *testing.T) {
+	f, r, o, p := poolProfileFixture(t)
+	r.ExpectedResources = Resources{CPU: 1000, RAM: 1024, Disk: 4096, Runners: 1}
+	if err := f.store.ProfileUpsert(context.Background(), r.SizeProfile, 2000, 2048, 8192); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p); err == nil {
+		t.Fatal("size changed since review but registration succeeded")
+	}
+	current, err := f.store.CurrentBrokerPoolProfiles(context.Background())
+	if err != nil || len(current) != 0 {
+		t.Fatal("rejected review mutated mapping", err)
+	}
+	r.ExpectedResources = Resources{CPU: 2000, RAM: 2048, Disk: 8192, Runners: 1}
+	if _, err := f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBrokerProfileProtectedTemplateWithoutFabricatedJobPayload(t *testing.T) {
 	files := map[string]string{"bin/Runner.Listener": strings.Repeat("1", 64), "bin/Runner.Listener.dll": strings.Repeat("3", 64)}
 	raw, _ := json.Marshal(files)

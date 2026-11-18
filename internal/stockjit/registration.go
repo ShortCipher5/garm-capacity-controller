@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +30,9 @@ var ErrObservation = errors.New("stock JIT registration identity unavailable or 
 // proxies with a path prefix are deliberately unsupported in this first adapter.
 type Policy struct{ MetadataURL, ControllerID, PoolID, GitHubURL string }
 type Client struct {
+	managed         *managedsource.Client
+	managedIdentity string
+
 	policy Policy
 	http   *http.Client
 }
@@ -92,13 +96,23 @@ func New(policy Policy, trust *tls.Config) (*Client, error) {
 	transport := &http.Transport{Proxy: nil, TLSClientConfig: secure, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second, DisableCompression: true, MaxResponseHeaderBytes: 16384}
 	return &Client{policy: policy, http: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrObservation }}}, nil
 }
-func (c *Client) Close() { c.http.CloseIdleConnections() }
+func (c *Client) Close() {
+	if c == nil {
+		return
+	}
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+	if c.managed != nil {
+		c.managed.CloseIdleConnections()
+	}
+}
 
 // Observe uses only GET credentials/runner from the configured GARM endpoint.
 // It does not fetch .credentials, registration tokens or RSA secrets. Incoming
 // metadata and repository URLs must match deployment policy before any request.
 func (c *Client) Observe(ctx context.Context, controller string, b common.BootstrapInstance) (Observation, error) {
-	if controller != c.policy.ControllerID || b.PoolID != c.policy.PoolID || !b.JitConfigEnabled || b.MetadataURL != c.policy.MetadataURL || b.RepoURL != c.policy.GitHubURL || !label(b.Name) || len(b.Name) > 128 || len(b.InstanceToken) < 1 || len(b.InstanceToken) > 16384 || strings.IndexFunc(b.InstanceToken, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+	if c == nil || c.managed != nil || controller != c.policy.ControllerID || b.PoolID != c.policy.PoolID || !b.JitConfigEnabled || b.MetadataURL != c.policy.MetadataURL || b.RepoURL != c.policy.GitHubURL || !label(b.Name) || len(b.Name) > 128 || len(b.InstanceToken) < 1 || len(b.InstanceToken) > 16384 || strings.IndexFunc(b.InstanceToken, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
 		return Observation{}, ErrPolicy
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.policy.MetadataURL+"/credentials/runner", nil)

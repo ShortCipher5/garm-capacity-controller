@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -196,10 +197,8 @@ func (s *Session) exchange(ctx context.Context, method, path, token string, body
 	if _, e = s.check(ctx); e != nil {
 		return nil, ErrBoundary
 	}
-	if response.StatusCode != 200 {
-		s.revoked = true
-		s.token = ""
-		return nil, ErrBoundary
+	if e := s.checkResponseStatus(method, path, response.StatusCode); e != nil {
+		return nil, e
 	}
 	return raw, nil
 }
@@ -336,7 +335,9 @@ func (s *Session) ReadCollection(ctx context.Context, path string) ([]byte, erro
 	switch path {
 	case "/api/v1/instances", "/api/v1/pools", "/api/v1/jobs":
 	default:
-		return nil, ErrBoundary
+		if !strings.HasPrefix(path, "/api/v1/pools/") || !stockUUID(strings.TrimPrefix(path, "/api/v1/pools/")) {
+			return nil, ErrBoundary
+		}
 	}
 	return s.exchange(ctx, http.MethodGet, path, s.token, nil)
 }

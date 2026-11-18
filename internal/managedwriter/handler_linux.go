@@ -19,10 +19,12 @@ import (
 )
 
 type Handler struct {
-	providers map[string]bool
-	session   *managedgarm.Session
-	manager   *garmmanagement.Manager
-	leaf      [32]byte
+	providers    map[string]bool
+	repositories map[string]bool
+	pools        map[string]bool
+	session      *managedgarm.Session
+	manager      *garmmanagement.Manager
+	leaf         [32]byte
 }
 
 func New(session *managedgarm.Session, journal *garmmanagement.Journal, clientLeaf string, providers, pools, repositories []string) (*Handler, error) {
@@ -39,9 +41,15 @@ func New(session *managedgarm.Session, journal *garmmanagement.Journal, clientLe
 		remote.Close()
 		return nil, e
 	}
-	h := &Handler{session: session, manager: manager, providers: map[string]bool{}}
+	h := &Handler{session: session, manager: manager, providers: map[string]bool{}, repositories: map[string]bool{}, pools: map[string]bool{}}
 	for _, p := range providers {
 		h.providers[p] = true
+	}
+	for _, id := range repositories {
+		h.repositories[id] = true
+	}
+	for _, id := range pools {
+		h.pools[id] = true
 	}
 	copy(h.leaf[:], raw)
 	return h, nil
@@ -63,8 +71,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(403)
 		return
 	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/managed/metadata/") {
+		h.serveMetadata(w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/v1/instances" {
 		h.serveInventory(w, r)
+		return
+	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/api/v1/pools" || r.URL.Path == "/api/v1/jobs" || strings.HasPrefix(r.URL.Path, "/api/v1/pools/")) {
+		h.serveDemand(w, r)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/managed/status" {

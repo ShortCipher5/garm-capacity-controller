@@ -15,7 +15,7 @@ test("profile estimates render fit counts per enabled host, including honest zer
     assert.match(empty, /No enabled hosts — estimates cover enabled hosts only/);
     const view = renderToStaticMarkup(React.createElement(Profiles, { readProfiles: async () => ({ profiles: [] }) }));
     assert.match(view, /Runner-size profiles/);
-    assert.match(view, /Gateway pool policy configuration is not exposed by this admin API/);
+    assert.match(view, /Immutable pool mappings are shown in Pools/);
     assert.match(view, /Refresh profiles/);
   } finally {
     await server.close();
