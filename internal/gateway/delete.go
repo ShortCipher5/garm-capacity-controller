@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 )
 
 // DeletionOutcome is the durable disposition of one verified retirement
@@ -15,16 +14,14 @@ import (
 type DeletionOutcome string
 
 const (
-	// DeletionReleased: absence was confirmed by two matching project-scoped
-	// reads and the ledger released the charge in one transaction.
+	// DeletionReleased is retained for wire compatibility with historical clients.
+	// No current physical retirement path produces it.
 	DeletionReleased DeletionOutcome = "released"
-	// DeletionAlreadyReleased: an earlier verified call already retired this
-	// exact identity. The provider maps this to provider-common NotFound so
-	// stock GARM treats the retry as idempotent.
+	// DeletionAlreadyReleased is returned only for exact never-dispatched
+	// cancellation tombstones. It maps to provider-common NotFound.
 	DeletionAlreadyReleased DeletionOutcome = "already_released"
-	// DeletionStillCharged: the request was verified and the durable 'deleting'
-	// mark exists, but delete transport, wait or confirmed-absence failed. The
-	// charge stays; re-dispatch is idempotent and re-runs the whole flow.
+	// DeletionStillCharged is retained for historical wire compatibility.
+	// Blocked physical retirement returns ErrUnavailable without a receipt.
 	DeletionStillCharged DeletionOutcome = "release_failed_still_charged"
 )
 
@@ -36,33 +33,11 @@ type DeletionReceipt struct {
 	ReleasedAt time.Time
 }
 
-// deleteEvidenceBackend is the optional verified-observation capability the
-// credential-owning gateway supplies. Only an authenticated transport can
-// implement it; a provider request, browser JSON or operator boolean cannot
-// manufacture either observation.
-type deleteEvidenceBackend interface {
-	ObserveInstanceIdentity(context.Context, incusapi.IdentityExpectation) (incusapi.VerifiedInstanceIdentity, error)
-	ObserveProjectAbsence(context.Context, incusapi.VerifiedInstanceIdentity) (incusapi.ProjectAbsenceObservation, error)
-}
-
-// Delete retires exactly one ledger-verified, physically linked, incarnation-
-// bound runner, and releases its charge only after confirmed absence. The
-// request identity is verified against the ledger like Create (stored
-// reservation request, linked inventory row, immutable host binding, original
-// create evidence); unknown, unlinked, unevidenced or incarnation-drifted
-// runners are refused with a typed error and never reach the backend.
-//
-// Ordering is the safety contract: the live incarnation is observed and bound
-// to the original-create evidence, the reservation is durably marked
-// 'deleting', and only then is exactly one DELETE issued and waited to a
-// terminal state. Release happens only when two matching project-scoped reads
-// afterwards prove the observed incarnation gone; a successful DELETE, a 404
-// or a single read never releases. Any failure after the mark leaves the
-// reservation 'deleting' and fully charged: the operator resolves it by
-// re-dispatch (idempotent mark, whole flow re-runs). A re-dispatch cannot
-// rebind a guest that is already gone (the live identity read fails closed),
-// so a crash between a successful delete and the release requires operator
-// evidence surgery; capacity is never reclaimed on restart alone.
+// Delete recognizes exact never-dispatched cancellation only. Physical retirement
+// is blocked: project-scoped absence reads do not establish job completion,
+// exclusive incarnation ownership, or a durable old-writer/post-delete fence.
+// No startup flag or provider request may turn that observation into authority.
+// Existing release tombstones are historical records, not safe deletion proof.
 func (f *Facade) Delete(ctx context.Context, controller, pool, name string) (DeletionReceipt, error) {
 	if controller == "" || controller != f.controller || name == "" || strings.ContainsRune(name, 0) {
 		return DeletionReceipt{}, ErrPolicy
@@ -77,12 +52,6 @@ func (f *Facade) Delete(ctx context.Context, controller, pool, name string) (Del
 	req, err := f.accountingRequest(ctx, state, name, pool, "")
 	if err != nil {
 		return DeletionReceipt{}, ErrPolicy
-	}
-	// A released identity answers from the immutable tombstone before any
-	// ledger-state inspection: the retained reservation row is history only.
-	// This path never touches the backend.
-	if release, err := f.store.LookupRelease(ctx, req.Key); err == nil && release.Request == req {
-		return DeletionReceipt{Outcome: DeletionAlreadyReleased, Request: req, ReleasedAt: release.ReleasedAt}, nil
 	}
 	reservation, exists := state.Reservations[req.Key]
 	if !exists {
@@ -112,58 +81,7 @@ func (f *Facade) Delete(ctx context.Context, controller, pool, name string) (Del
 		// this slice refuses to delete what the ledger cannot place.
 		return DeletionReceipt{}, ErrNotFound
 	}
-	if _, err := f.boundBackend(ctx, req.Host); err != nil {
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	backend, ok := f.hosts[req.Host]
-	if !ok {
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	source, ok := backend.(deleteEvidenceBackend)
-	if !ok {
-		// Without verified-observation capability absence can never be
-		// confirmed, so no delete is issued at all.
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	// The original-create evidence binds the exact incarnation (UUID,
-	// generation, created-at) this retirement must prove absent.
-	evidence, err := f.store.LookupCreateEvidence(ctx, req.Key)
-	if err != nil {
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	identity, err := source.ObserveInstanceIdentity(ctx, incusapi.IdentityExpectation{Name: name, ControllerID: f.controller, PoolID: pool, ReservationKey: req.Key, CPUMillis: req.Resources.CPU, RAMMiB: req.Resources.RAM})
-	if err != nil {
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	if identity.Observation().SubjectFingerprint != evidence.Observation.Identity.SubjectFingerprint {
-		// The live incarnation is not the evidenced one: external delete and
-		// recreate, restore, or rename interference. Refuse; the charge stays.
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	// Durable visibility mark BEFORE the destructive call; replay is a no-op.
-	if _, err := f.store.MarkDeleting(ctx, req); err != nil {
-		return DeletionReceipt{}, ErrUnavailable
-	}
-	stillCharged := DeletionReceipt{Outcome: DeletionStillCharged, Request: req}
-	deletion, err := backend.Delete(ctx, name)
-	if err != nil {
-		return stillCharged, nil
-	}
-	if err := backend.WaitDeletion(ctx, deletion); err != nil {
-		return stillCharged, nil
-	}
-	// Confirmed absence: two matching project-scoped passes that reject any
-	// row matching the observed incarnation. A successful DELETE or a single
-	// read is never enough.
-	absence, err := source.ObserveProjectAbsence(ctx, identity)
-	if err != nil || !absence.Valid() {
-		return stillCharged, nil
-	}
-	release, err := f.store.ReleaseConfirmed(ctx, req, admission.ReleaseEvidence{Absence: absence})
-	if err != nil {
-		// The charge definitely remains; the tombstone check makes an exact
-		// re-dispatch replay safely instead of releasing twice.
-		return stillCharged, nil
-	}
-	return DeletionReceipt{Outcome: DeletionReleased, Request: req, ReleasedAt: release.ReleasedAt}, nil
+	// Do not even mark deleting or call the backend. A name-based DELETE can
+	// race job assignment or incarnation replacement before absence is read.
+	return DeletionReceipt{}, ErrUnavailable
 }

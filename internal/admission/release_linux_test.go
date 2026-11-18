@@ -69,117 +69,48 @@ func releaseIdentity(t *testing.T, fake *testsupport.FakeIncus, req Request) inc
 	return identity
 }
 
-func TestReleaseConfirmedAbsenceFreesChargeAndTombstonesIdentity(t *testing.T) {
+func TestProjectAbsenceCannotAuthorizeReleaseEvenAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	store, req, fake := releaseTestFixture(t)
 	identity := releaseIdentity(t, fake, req)
 	fake.SetGuestVisible(false)
 	absence, err := fake.Client.ObserveProjectAbsence(ctx, identity)
-	if err != nil || !absence.Valid() {
-		t.Fatalf("absence %v %v", absence.Valid(), err)
-	}
-	before := sqliteSnapshot(t, store)
-	if before.Allocated.Global.Runners != 1 || len(before.Inventory) != 1 {
-		t.Fatalf("fixture not charged: %+v", before.Allocated)
+	if err != nil || !absence.Valid() || len(absence.Blockers()) == 0 {
+		t.Fatalf("fixture observation %v %v", absence.Valid(), err)
 	}
 	if _, err := store.MarkDeleting(ctx, req); err != nil {
 		t.Fatal(err)
 	}
-	release, err := store.ReleaseConfirmed(ctx, req, ReleaseEvidence{Absence: absence})
-	if err != nil || release.ReleasedAt.IsZero() || !bindingFingerprint(release.AbsenceDigest) {
-		t.Fatalf("release %+v %v", release, err)
-	}
-	after := sqliteSnapshot(t, store)
-	if after.Allocated.Global.Runners != 0 || after.Allocated.Global.CPU != 0 || len(after.Inventory) != 0 {
-		t.Fatalf("release did not free charge: %+v", after.Allocated)
-	}
-	if _, ok := after.Reservations[req.Key]; !ok {
-		t.Fatal("reservation history lost")
-	}
-	for _, replay := range []func() error{
-		func() error {
-			_, err := store.ReleaseConfirmed(ctx, req, ReleaseEvidence{Absence: absence})
-			return err
-		},
-		func() error { _, err := store.MarkDeleting(ctx, req); return err },
-		func() error { _, err := store.Admit(ctx, req); return err },
-	} {
-		if !errors.Is(replay(), ErrDenied) {
-			t.Fatal("released identity was not refused")
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := store.ReleaseConfirmed(ctx, req, ReleaseEvidence{Absence: absence}); !errors.Is(err, ErrReleaseEvidence) {
+			t.Fatalf("unqualified observation released: %v", err)
+		}
+		if _, err := store.ReleaseConfirmed(ctx, req, ReleaseEvidence{}); !errors.Is(err, ErrReleaseEvidence) {
+			t.Fatalf("empty observation released: %v", err)
 		}
 	}
-	got, err := store.LookupRelease(ctx, req.Key)
-	if err != nil || got.Request != req || !got.ReleasedAt.Equal(release.ReleasedAt) || got.AbsenceDigest != release.AbsenceDigest {
-		t.Fatalf("tombstone %+v %v", got, err)
-	}
-	var audits int
-	if err := store.db.QueryRow("SELECT COUNT(*) FROM audit WHERE kind='released_confirmed_absence'").Scan(&audits); err != nil || audits != 1 {
-		t.Fatalf("release audit %d %v", audits, err)
-	}
-	var record []byte
-	if err := store.db.QueryRow("SELECT record FROM releases WHERE request_key=?", req.Key).Scan(&record); err != nil {
-		t.Fatal(err)
-	}
-	for _, secret := range []string{"fixture-userdata", "user.user-data", "PRIVATE KEY", "https://"} {
-		if strings.Contains(string(record), secret) {
-			t.Fatal("release record leaked a secret")
-		}
-	}
-}
-
-func TestReleaseConfirmedFailsClosedWithoutDeletingMarkOrEvidence(t *testing.T) {
-	ctx := context.Background()
-	store, req, fake := releaseTestFixture(t)
-	if _, err := store.ReleaseConfirmed(ctx, req, ReleaseEvidence{}); !errors.Is(err, ErrReleaseEvidence) {
-		t.Fatalf("zero evidence accepted: %v", err)
-	}
-	identity := releaseIdentity(t, fake, req)
-	fake.SetGuestVisible(false)
-	absence, err := fake.Client.ObserveProjectAbsence(ctx, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence := ReleaseEvidence{Absence: absence}
-	if _, err := store.ReleaseConfirmed(ctx, req, evidence); !errors.Is(err, ErrDenied) {
-		t.Fatalf("release without deleting mark: %v", err)
-	}
-	if marked, err := store.MarkDeleting(ctx, req); err != nil || marked.State != "deleting" {
-		t.Fatalf("mark %+v %v", marked, err)
-	}
-	if again, err := store.MarkDeleting(ctx, req); err != nil || again.State != "deleting" {
-		t.Fatalf("mark replay %+v %v", again, err)
-	}
-	var audits int
-	if err := store.db.QueryRow("SELECT COUNT(*) FROM audit WHERE kind='deleting_marked'").Scan(&audits); err != nil || audits != 1 {
-		t.Fatalf("mark replay audited %d %v", audits, err)
-	}
-	other := request(evidenceDigest([]byte("controller-1\x00app\x00runner-2")))
-	if _, err := store.ReleaseConfirmed(ctx, other, evidence); !errors.Is(err, ErrReleaseEvidence) {
-		t.Fatalf("foreign-bound evidence accepted: %v", err)
-	}
-	if _, err := store.ReleaseConfirmed(ctx, req, ReleaseEvidence{}); !errors.Is(err, ErrReleaseEvidence) {
-		t.Fatalf("invalid evidence accepted after mark: %v", err)
-	}
-	fence, err := store.BeginReconciliation(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ReleaseConfirmed(ctx, req, evidence); !errors.Is(err, ErrReconciliation) {
-		t.Fatalf("release while barrier open: %v", err)
-	}
-	state, err := store.Snapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CompleteReconciliation(ctx, fence, InventorySnapshot{Hosts: observations(state.Config, time.Now())}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ReleaseConfirmed(ctx, req, evidence); err != nil {
-		t.Fatal(err)
-	}
 	after := sqliteSnapshot(t, store)
-	if after.Allocated.Global.Runners != 0 {
-		t.Fatalf("charge not freed: %+v", after.Allocated)
+	if after.Allocated.Global.Runners != 1 || len(after.Inventory) != 1 || after.Reservations[req.Key].State != "deleting" {
+		t.Fatalf("blocked release changed accounting: %+v", after)
+	}
+	if _, err := store.LookupRelease(ctx, req.Key); err == nil {
+		t.Fatal("unqualified release persisted")
+	}
+	// Closing/reopening is not authority to free an uncertain deletion.
+	path := store.path
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLite(path, after.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.ReleaseConfirmed(ctx, req, ReleaseEvidence{Absence: absence}); !errors.Is(err, ErrReleaseEvidence) {
+		t.Fatalf("restart authorized release: %v", err)
+	}
+	if got := sqliteSnapshot(t, reopened); got.Allocated.Global.Runners != 1 {
+		t.Fatal("restart lost charge")
 	}
 }
 
