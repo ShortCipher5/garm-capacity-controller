@@ -69,8 +69,10 @@ type Options struct {
 }
 type Assignment struct {
 	Pool, Host string
-	Warm       bool
-	Resources  Resources
+	// JobID is populated only by BuildForJobs and is advisory correlation, not a runner binding.
+	JobID     string
+	Warm      bool
+	Resources Resources
 }
 type Plan struct {
 	Revision    string
@@ -134,6 +136,10 @@ func share(used, total Resources, w int64) *big.Rat {
 // and is deliberately stateless. Durable grants, remote-write reconciliation,
 // starvation protection for large jobs and provider admission are separate layers.
 func Build(s Snapshot, opt Options) (Plan, error) {
+	return build(s, opt, nil)
+}
+
+func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 	if !s.Complete || s.Revision == "" || opt.Now.IsZero() || s.ObservedAt.IsZero() || s.ObservedAt.After(opt.Now) || opt.MaxAge <= 0 || opt.Now.Sub(s.ObservedAt) > opt.MaxAge || opt.MaxAssignments < 1 || opt.MaxAssignments > 10000 || !valid(s.Global) || len(s.Pools) > 1000 || len(s.Hosts) > 1000 || len(s.Charges) > 100000 {
 		return Plan{}, ErrSnapshot
 	}
@@ -256,8 +262,13 @@ func Build(s Snapshot, opt Options) (Plan, error) {
 			hosts[host], _ = add(hosts[host], p.Size)
 			repos[p.Repository], _ = add(repos[p.Repository], p.Size)
 			pools[selected]++
-			demand[selected]--
-			out.Assignments = append(out.Assignments, Assignment{Pool: selected, Host: host, Warm: phase == 1, Resources: p.Size})
+			jobID := ""
+			if phase == 0 && jobs != nil {
+				jobID = jobs.consume(selected, queued, s.Pools)
+			} else {
+				demand[selected]--
+			}
+			out.Assignments = append(out.Assignments, Assignment{Pool: selected, Host: host, JobID: jobID, Warm: phase == 1, Resources: p.Size})
 		}
 	}
 	for id, n := range queued {
