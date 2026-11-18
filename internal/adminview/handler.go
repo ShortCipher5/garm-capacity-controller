@@ -80,6 +80,7 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	allocatorStatus AllocatorStatusSource
 	rotation        *firstboot.ManagedRotationService
 	rotationHash    [32]byte
 	firstboot       *firstboot.Service
@@ -149,6 +150,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-h.inFlight }()
 	default:
 		fail(http.StatusServiceUnavailable)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/allocator-status" {
+		h.serveAllocatorStatus(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/capacity-states" {
