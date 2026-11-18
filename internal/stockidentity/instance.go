@@ -3,15 +3,15 @@ package stockidentity
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 )
 
 // InstanceObservation links a pending stock instance to its observed pool and
@@ -55,7 +55,6 @@ func ObserveInstance(ctx context.Context, c Configuration, name string) (Instanc
 		return fail()
 	}
 	u.Path = "/api/v1"
-	base := u.String()
 	u.Path += "/instances/" + name
 	trust := c.TLS.Clone()
 	trust.RootCAs = c.TLS.RootCAs.Clone()
@@ -66,6 +65,16 @@ func ObserveInstance(ctx context.Context, c Configuration, name string) (Instanc
 	transport := &http.Transport{TLSClientConfig: trust, Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 5 * time.Second, TLSHandshakeTimeout: 5 * time.Second, MaxResponseHeaderBytes: 16384}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrObservation }}
+	var managed *managedsource.Client
+	if c.ManagedServerKeyPin != "" {
+		managed, e = managedsource.New(c.Endpoint, c.ManagedServerKeyPin, c.ManagedControllerID, c.TLS)
+		if e != nil {
+			return fail()
+		}
+		defer managed.CloseIdleConnections()
+		client.Transport = managed
+		u.Path = "/api/v1/instances"
+	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return fail()
@@ -80,35 +89,41 @@ func ObserveInstance(ctx context.Context, c Configuration, name string) (Instanc
 	if res.StatusCode != 200 {
 		return fail()
 	}
-	raw, e := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
-	if e != nil || len(raw) > 1<<20 {
+	raw, e := io.ReadAll(io.LimitReader(res.Body, (4<<20)+1))
+	if e != nil || len(raw) > 4<<20 {
 		return fail()
 	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	token, e := d.Token()
-	if e != nil || token != json.Delim('{') {
-		return fail()
+	if managed != nil {
+		if managed.Identity() == "" || managed.Identity() != pool.SourceIdentity() {
+			return fail()
+		}
+		var rows []json.RawMessage
+		if len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '[' || json.Unmarshal(raw, &rows) != nil || len(rows) > 10000 {
+			return fail()
+		}
+		var selected json.RawMessage
+		seenNames := map[string]bool{}
+		for _, row := range rows {
+			fields, err := instanceFields(row)
+			if err != nil {
+				return fail()
+			}
+			n, err := text(fields, "name", true)
+			if err != nil || seenNames[n] {
+				return fail()
+			}
+			seenNames[n] = true
+			if n == name {
+				selected = row
+			}
+		}
+		if selected == nil {
+			return fail()
+		}
+		raw = selected
 	}
-	fields := map[string]json.RawMessage{}
-	seen := map[string]bool{}
-	for d.More() {
-		token, e = d.Token()
-		k, ok := token.(string)
-		if e != nil || !ok {
-			return fail()
-		}
-		if seen[strings.ToLower(k)] {
-			return fail()
-		}
-		seen[strings.ToLower(k)] = true
-		var v json.RawMessage
-		if d.Decode(&v) != nil {
-			return fail()
-		}
-		fields[k] = v
-	}
-	token, e = d.Token()
-	if e != nil || token != json.Delim('}') || d.Decode(new(any)) != io.EOF {
+	fields, e := instanceFields(raw)
+	if e != nil {
 		return fail()
 	}
 	var v InstanceFacts
@@ -141,6 +156,36 @@ func ObserveInstance(ctx context.Context, c Configuration, name string) (Instanc
 		}
 	}
 	v.Repository = pool.Facts().Repository
-	hash := sha256.Sum256([]byte("garm-v0.2.1-management\x00" + base))
-	return InstanceObservation{facts: v, source: hex.EncodeToString(hash[:]), at: time.Now().UTC(), valid: true}, nil
+	return InstanceObservation{facts: v, source: pool.SourceIdentity(), at: time.Now().UTC(), valid: true}, nil
+}
+
+func instanceFields(raw []byte) (map[string]json.RawMessage, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, e := d.Token()
+	if e != nil || token != json.Delim('{') {
+		return nil, ErrObservation
+	}
+	fields := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for d.More() {
+		token, e = d.Token()
+		k, ok := token.(string)
+		if e != nil || !ok {
+			return nil, ErrObservation
+		}
+		if seen[strings.ToLower(k)] {
+			return nil, ErrObservation
+		}
+		seen[strings.ToLower(k)] = true
+		var v json.RawMessage
+		if d.Decode(&v) != nil {
+			return nil, ErrObservation
+		}
+		fields[k] = v
+	}
+	token, e = d.Token()
+	if e != nil || token != json.Delim('}') || d.Decode(new(any)) != io.EOF {
+		return nil, ErrObservation
+	}
+	return fields, nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"io"
 	"net/http"
 	"net/url"
@@ -47,7 +48,7 @@ func (c *Client) fetchProtected(ctx context.Context, controller string, b common
 	if c == nil || !c.accepts(controller, b) || protectedboot.ValidateDescriptor(image) != nil {
 		return ProtectedBootstrap{}, ErrPolicy
 	}
-	runner, e := c.readCredential(ctx, b.InstanceToken, "runner")
+	runner, e := c.readCredential(ctx, b.Name, b.InstanceToken, "runner")
 	if e != nil {
 		return ProtectedBootstrap{}, e
 	}
@@ -57,7 +58,7 @@ func (c *Client) fetchProtected(ctx context.Context, controller string, b common
 	}
 	files := map[string]string{".runner": base64.StdEncoding.EncodeToString(runner)}
 	for _, name := range []string{"credentials", "credentials_rsaparams"} {
-		raw, e := c.readCredential(ctx, b.InstanceToken, name)
+		raw, e := c.readCredential(ctx, b.Name, b.InstanceToken, name)
 		if e != nil {
 			return ProtectedBootstrap{}, e
 		}
@@ -65,7 +66,7 @@ func (c *Client) fetchProtected(ctx context.Context, controller string, b common
 	}
 	// Bracket the multi-file read with the exact runner settings. This detects
 	// registration changes; it does not claim an upstream transactional snapshot.
-	after, e := c.readCredential(ctx, b.InstanceToken, "runner")
+	after, e := c.readCredential(ctx, b.Name, b.InstanceToken, "runner")
 	if e != nil || !bytes.Equal(runner, after) {
 		return ProtectedBootstrap{}, ErrObservation
 	}
@@ -86,9 +87,16 @@ func (c *Client) fetchProtected(ctx context.Context, controller string, b common
 func (c *Client) accepts(controller string, b common.BootstrapInstance) bool {
 	return c != nil && controller == c.policy.ControllerID && b.PoolID == c.policy.PoolID && b.JitConfigEnabled && b.MetadataURL == c.policy.MetadataURL && b.RepoURL == c.policy.GitHubURL && label(b.Name) && len(b.Name) <= 128 && len(b.InstanceToken) > 0 && len(b.InstanceToken) <= 16384 && strings.IndexFunc(b.InstanceToken, func(r rune) bool { return r < 33 || r > 126 }) < 0
 }
-func (c *Client) readCredential(ctx context.Context, token, name string) ([]byte, error) {
+func (c *Client) readCredential(ctx context.Context, runnerName, token, name string) ([]byte, error) {
 	if name != "runner" && name != "credentials" && name != "credentials_rsaparams" {
 		return nil, ErrPolicy
+	}
+	if c.managed != nil {
+		out, e := c.managed.ReadCredential(ctx, c.policy.PoolID, runnerName, name, token)
+		if e != nil || c.managed.Identity() != c.managedIdentity {
+			return nil, ErrObservation
+		}
+		return out, nil
 	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, c.policy.MetadataURL+"/credentials/"+name, nil)
 	if e != nil {
@@ -117,6 +125,9 @@ func (c *Client) readCredential(ctx context.Context, token, name string) ([]byte
 func (c *Client) ConfiguredSourceIdentity() string {
 	if c == nil {
 		return ""
+	}
+	if c.managed != nil {
+		return c.managedIdentity
 	}
 	u, e := url.Parse(c.policy.MetadataURL)
 	if e != nil {
@@ -152,3 +163,28 @@ func (c *Client) FetchProtected(ctx context.Context, controller string, b common
 	return result, nil
 }
 func (b ProtectedBootstrap) Instance() stockidentity.InstanceObservation { return b.instance }
+
+// NewManaged binds metadata delivery to a real scoped supervisor ownership read.
+// MetadataURL still binds the original stock bootstrap contract; no request is
+// sent there by this client. Credentials travel only to the pinned supervisor.
+func NewManaged(ctx context.Context, policy Policy, source stockidentity.Configuration) (*Client, error) {
+	if source.ManagedServerKeyPin == "" || source.ManagedControllerID != policy.ControllerID || source.Pool != policy.PoolID || source.Token != "" {
+		return nil, ErrPolicy
+	}
+	observed, e := stockidentity.Observe(ctx, source)
+	if e != nil || observed.ControllerID() != policy.ControllerID || observed.SourceIdentity() == "" {
+		return nil, ErrObservation
+	}
+	c, e := New(policy, source.TLS)
+	if e != nil {
+		return nil, e
+	}
+	c.http.CloseIdleConnections()
+	c.http = nil
+	c.managed, e = managedsource.New(source.Endpoint, source.ManagedServerKeyPin, source.ManagedControllerID, source.TLS)
+	if e != nil {
+		return nil, ErrPolicy
+	}
+	c.managedIdentity = observed.SourceIdentity()
+	return c, nil
+}
