@@ -45,6 +45,8 @@ type Item struct {
 	Conflict          bool
 	MissingFromReader bool
 	Source            string
+	// PriorSource records provenance retained from an earlier poll, not current stock evidence.
+	PriorSource string
 }
 type Result struct {
 	Items                 []Item

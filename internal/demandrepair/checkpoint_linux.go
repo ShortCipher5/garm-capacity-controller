@@ -43,16 +43,26 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 		return Result{}, ErrObservation
 	}
 	sum := sha256.Sum256(raw)
-	return poll(ctx, hex.EncodeToString(sum[:]), options, func(ctx context.Context, baseline []Baseline, from, to time.Time) (Result, error) {
+	return poll(ctx, hex.EncodeToString(sum[:]), options, func(ctx context.Context, history []Item, from, to time.Time) (Result, error) {
+		baseline := []Baseline{}
 		seen := map[string]Job{}
-		for _, b := range baseline {
-			seen[key(b.RepositoryID, b.Job.ID)] = b.Job
+		past := map[string]Item{}
+		current := map[string]bool{}
+		for _, item := range history {
+			k := key(item.RepositoryID, item.Job.ID)
+			past[k] = item
+			seen[k] = item.Job
+			baseline = append(baseline, Baseline{RepositoryID: item.RepositoryID, Job: item.Job})
 		}
 		for _, b := range stock {
 			if !validJob(b.Job) || b.Job.Status != "queued" {
 				return Result{}, ErrObservation
 			}
 			k := key(b.RepositoryID, b.Job.ID)
+			if current[k] {
+				return Result{}, ErrObservation
+			}
+			current[k] = true
 			if old, ok := seen[k]; ok {
 				if !equalLabels(canonical(old).Labels, canonical(b.Job).Labels) {
 					return Result{}, ErrObservation
@@ -62,7 +72,29 @@ func PollGitHub(ctx context.Context, c *GitHubClient, repos []Repository, stock 
 			seen[k] = b.Job
 			baseline = append(baseline, b)
 		}
-		return ObserveGitHub(ctx, c, repos, baseline, from, to)
+		result, err := ObserveGitHub(ctx, c, repos, baseline, from, to)
+		if err != nil {
+			return Result{}, err
+		}
+		for i := range result.Items {
+			item := &result.Items[i]
+			k := key(item.RepositoryID, item.Job.ID)
+			previous, retained := past[k]
+			if current[k] || !retained {
+				continue
+			}
+			item.PriorSource = previous.PriorSource
+			if item.PriorSource == "" {
+				item.PriorSource = previous.Source
+			}
+			if item.MissingFromReader {
+				item.Source = "history"
+				item.Conflict = item.Conflict || previous.Conflict
+			} else {
+				item.Source = "reader"
+			}
+		}
+		return result, nil
 	})
 }
 func privateFile(path string, flags int) (*os.File, error) {
@@ -83,7 +115,7 @@ func privateFile(path string, flags int) (*os.File, error) {
 	}
 	return f, nil
 }
-func poll(ctx context.Context, binding string, o PollOptions, observe func(context.Context, []Baseline, time.Time, time.Time) (Result, error)) (Result, error) {
+func poll(ctx context.Context, binding string, o PollOptions, observe func(context.Context, []Item, time.Time, time.Time) (Result, error)) (Result, error) {
 	now := time.Now().UTC()
 	if ctx == nil || ctx.Err() != nil || binding == "" || o.Path == "" || o.InitialFrom.IsZero() || !o.InitialFrom.Before(now) || o.Overlap < time.Second || o.Overlap > 24*time.Hour || o.MinInterval < time.Minute || o.MinInterval > 24*time.Hour {
 		return Result{}, ErrObservation
@@ -111,7 +143,7 @@ func poll(ctx context.Context, binding string, o PollOptions, observe func(conte
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	from := o.InitialFrom
-	baseline := []Baseline{}
+	history := []Item{}
 	if _, e = os.Lstat(path); e == nil {
 		f, e := privateFile(path, syscall.O_RDONLY)
 		if e != nil {
@@ -140,12 +172,12 @@ func poll(ctx context.Context, binding string, o PollOptions, observe func(conte
 				return Result{}, ErrObservation
 			}
 			seen[k] = true
-			baseline = append(baseline, Baseline{RepositoryID: item.RepositoryID, Job: item.Job})
+			history = append(history, item)
 		}
 	} else if !os.IsNotExist(e) {
 		return Result{}, ErrObservation
 	}
-	result, e := observe(ctx, baseline, from, now)
+	result, e := observe(ctx, history, from, now)
 	if e != nil || ctx.Err() != nil || !result.EnumerationComplete {
 		return Result{}, ErrObservation
 	}

@@ -38,3 +38,9 @@ Polling is non-atomic across GitHub/GARM. Status transitions can escape one set 
 queries; overlap and future active scans improve observation, not absolute event
 coverage. There is no daemon, configuration/credential UI or automatic activation.
 The caller must supply fresh scoped stock queue data and schedule retries/backoff.
+
+Current stock input and checkpoint history are distinct provenance. A previously
+reader-only job never becomes stock-confirmed merely because a checkpoint was
+reloaded. `Source=history` identifies a retained item absent from the current reader;
+`PriorSource` carries its earlier origin. Only current stock input may establish
+`stock`/`stock+reader`. Consumers must honor Conflict/MissingFromReader flags.
