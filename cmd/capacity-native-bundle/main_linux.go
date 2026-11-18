@@ -19,6 +19,9 @@ func main() {
 	flag.StringVar(&c.OutputDirectory, "output", "", "fresh bundle directory")
 	flag.StringVar(&c.ID, "id", "", "fresh 64-hex preparation ID")
 	flag.StringVar(&c.Architecture, "architecture", "", "target amd64 or arm64")
+	flag.StringVar(&c.SelectionFile, "selection", "", "protected saved discovery selection (optional paired input)")
+	flag.StringVar(&c.ExpectedBindingFile, "expected-binding", "", "independently approved exact host and target binding")
+	flag.StringVar(&c.ExpectedSelectionDigest, "selection-digest", "", "expected saved selection digest for reviewed assembly")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, nativebundle.ErrBundle)

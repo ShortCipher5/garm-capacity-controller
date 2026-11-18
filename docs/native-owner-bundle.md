@@ -17,3 +17,39 @@ capacity-native-bundle --export /private/export --export-manifest-sha256 <truste
 ```
 
 Docker target `native-bundle-tool` only exports the builder executable. It is not part of the host executable allowlist and is never installed by the preparation helper. Unit tests use real certificate/key parsing and synthetic valid ELF headers to exercise the file protocol; they do not prove host, runtime image, or dynamic-loader qualification.
+
+## Saved authenticated discovery selections
+
+Optional paired `--selection /private/selection.json` and
+`--expected-binding /private/approved-binding.json` inputs consume the saved
+`native-discovery-selection/v1` configuration. Both files must be protected
+0600 regular deployment files. The expected binding is an independently reviewed
+`nativeplanning.Binding`, not something inferred from the selection: preparation
+ID, policy host, inventory target/review/key pin, and full administrator target
+must match exactly. Unknown/duplicate fields, stale/future observations,
+qualification claims, overcommit, invalid partitions, or either missing input
+are rejected before any output is created.
+
+The builder only replaces the capsule's `limits` and `partition` fields from
+the fresh selection. Existing artifact, storage, network and identity inputs
+still need explicit approved configuration. OS inventory does not prove a ZFS
+pool, quota, isolation boundary or available physical capacity. The output report
+adds the selection digest for review; it does not contain secret bytes. A saved
+configuration is not an opaque runtime observation or activation capability.
+
+Building creates a new bundle digest. Load that actual output through the
+preparation deployment loader and review its new plan before SSH preparation.
+This is not an automatic deployment reload, start, enable or activation flow.
+The existing selection-free builder remains available for explicitly supplied
+configuration; supplying either selection flag never silently falls back.
+
+The inventory and administrator endpoints may differ (for example, separately
+pinned listeners or an explicitly configured NAT mapping). Their association is
+an operator-approved configuration, not authenticated proof that the endpoints
+share physical hardware. Equal addresses would not prove that either. The
+builder checks the entire approved pair without inventing an endpoint mapping.
+
+For assembly tied to a reviewed saved choice, also supply
+`--selection-digest <expected SHA256>`. A mismatch is rejected before output
+creation. The assembly caller must compare the returned selection digest again
+before offering registry reload; the digest is not an activation capability.

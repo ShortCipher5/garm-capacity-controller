@@ -25,12 +25,16 @@ import (
 
 var ErrBundle = errors.New("native bundle unavailable; preserve any partial output and inspect private inputs")
 
-type Configuration struct{ ExportDirectory, ExportManifestSHA256, PrivateDirectory, OutputDirectory, ID, Architecture string }
+type Configuration struct {
+	ExportDirectory, ExportManifestSHA256, PrivateDirectory, OutputDirectory, ID, Architecture string
+	SelectionFile, ExpectedBindingFile, ExpectedSelectionDigest                                string
+}
 type Result struct {
 	ID                   string `json:"id"`
 	ManifestDigest       string `json:"manifest_digest"`
 	Architecture         string `json:"architecture"`
 	State                string `json:"state"`
+	SelectionDigest      string `json:"selection_digest,omitempty"`
 	ActivationAuthorized bool   `json:"activation_authorized"`
 }
 
@@ -173,6 +177,10 @@ func Build(ctx context.Context, c Configuration) (Result, error) {
 	if e != nil {
 		return Result{}, e
 	}
+	selectionDigest, e := applySelection(config, c)
+	if e != nil {
+		return Result{}, e
+	}
 	secret := map[string][]byte{}
 	defer func() {
 		for _, b := range secret {
@@ -244,7 +252,7 @@ func Build(ctx context.Context, c Configuration) (Result, error) {
 	if e != nil {
 		return Result{}, ErrBundle
 	}
-	return Result{c.ID, md, c.Architecture, "bundle_created_not_prepared", false}, nil
+	return Result{c.ID, md, c.Architecture, "bundle_created_not_prepared", selectionDigest, false}, nil
 }
 
 // Duplicate (including case-aliased) object keys are rejected before rewriting.
