@@ -196,6 +196,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveGarm(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/runner-mix" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/runner-mix/") {
+		h.serveRunnerMix(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/native-enrollment" {
 		h.serveNativeEnrollment(w, r)
 		return

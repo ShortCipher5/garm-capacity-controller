@@ -1,3 +1,4 @@
+import { RunnerMix } from "./runner-mix.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { fetchProfiles, upsertProfile, deleteProfile, validateProfileInput } from "./profiles-client.js";
 
@@ -17,7 +18,7 @@ export function ProfileEstimates({ estimates }) {
     </ul>
   );
 }
-export function Profiles({ readProfiles }) {
+export function Profiles({ readProfiles, readMix, hosts }) {
   const [view, setView] = useState(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -113,6 +114,7 @@ export function Profiles({ readProfiles }) {
   }
   return (
     <section id="profiles">
+      {readMix && <RunnerMix hosts={hosts} readMix={readMix} />}
       <div className="section-heading">
         <h2>Runner-size profiles <small>{view ? view.profiles.length : "…"}</small></h2>
         <span className="muted">Per-runner sizing used for host fit estimates</span>
