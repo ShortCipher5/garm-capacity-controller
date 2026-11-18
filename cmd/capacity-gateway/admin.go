@@ -19,6 +19,8 @@ import (
 )
 
 type adminConfiguration struct {
+	NativePlanning                     *nativePlanningConfiguration    `json:"native_planning,omitempty"`
+	EnableNativePlanning               bool                            `json:"-"`
 	NativePreparation                  *nativePreparationConfiguration `json:"native_preparation,omitempty"`
 	EnableNativePreparation            bool                            `json:"-"`
 	BrokerProfileRecipesFile           string                          `json:"broker_profile_recipes_file,omitempty"`
@@ -272,6 +274,17 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		}
 		old := cleanup
 		cleanup = func() { closePreparation(); old() }
+	}
+	if config.EnableNativePlanning {
+		token, e := loadNativePlanning(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.ConfigureNativePlanning(config.NativePlanning.Bindings, config.NativePlanning.SelectionDirectory, token); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

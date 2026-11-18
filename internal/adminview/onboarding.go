@@ -29,7 +29,7 @@ func (h *Handler) SetOnboarding(manager *onboarding.Manager, token string) error
 	if allowProbe {
 		decoded, err := hex.DecodeString(token)
 		hash := sha256.Sum256([]byte("Bearer " + token))
-		if err != nil || subtle.ConstantTimeCompare(hash[:], h.nativePreparationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.rotationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.firstbootHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.bootstrapHash[:]) == 1 || len(decoded) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(h.tokenHash[:], hash[:]) == 1 || subtle.ConstantTimeCompare(h.sshHash[:], hash[:]) == 1 || subtle.ConstantTimeCompare(h.sshTargetsHash[:], hash[:]) == 1 {
+		if err != nil || subtle.ConstantTimeCompare(hash[:], h.nativePlanningHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.nativePreparationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.rotationHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.firstbootHash[:]) == 1 || subtle.ConstantTimeCompare(hash[:], h.bootstrapHash[:]) == 1 || len(decoded) != 32 || token != strings.ToLower(token) || subtle.ConstantTimeCompare(h.tokenHash[:], hash[:]) == 1 || subtle.ConstantTimeCompare(h.sshHash[:], hash[:]) == 1 || subtle.ConstantTimeCompare(h.sshTargetsHash[:], hash[:]) == 1 {
 			return ErrConfiguration
 		}
 		h.onboardingHash = hash

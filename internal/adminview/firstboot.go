@@ -20,7 +20,7 @@ func (h *Handler) SetFirstboot(s *firstboot.Service, token string) error {
 	if s == nil || e != nil || len(b) != 32 || token != strings.ToLower(token) {
 		return ErrConfiguration
 	}
-	for _, other := range [][32]byte{h.nativePreparationHash, h.rotationHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash} {
+	for _, other := range [][32]byte{h.nativePlanningHash, h.nativePreparationHash, h.rotationHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash} {
 		if subtle.ConstantTimeCompare(hash[:], other[:]) == 1 {
 			return ErrConfiguration
 		}
