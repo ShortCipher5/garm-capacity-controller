@@ -44,15 +44,27 @@ type Birth struct {
 // Root and the installed Incus binary/dependencies are trusted. Unprivileged
 // users and guests must never be given its socket, directory or HTTP transport.
 type Domain struct {
-	done      chan struct{}
-	pidfd     int
-	pidfdMu   sync.Mutex
-	birth     Birth
-	directory string
-	pid       int
-	startTime string
-	dead      atomic.Bool
-	transport *http.Transport
+	done            chan struct{}
+	pidfd           int
+	pidfdMu         sync.Mutex
+	birth           Birth
+	directory       string
+	pid             int
+	startTime       string
+	dead            atomic.Bool
+	clientClaimed   atomic.Bool
+	cgroupNamespace uint64
+	transport       *http.Transport
+}
+
+// ClaimClient permanently binds this live domain object to one native adapter.
+// It is only an in-process lifecycle guard, never proof of host exclusivity.
+// It cannot be reset and there is no constructor adopting a surviving daemon.
+func (d *Domain) ClaimClient() error {
+	if d == nil || d.dead.Load() || !d.clientClaimed.CompareAndSwap(false, true) {
+		return ErrDomain
+	}
+	return nil
 }
 
 // StartFresh creates a new domain (never adopts a directory, socket or daemon),
@@ -93,9 +105,16 @@ func StartFresh(ctx context.Context, directory, executable, launcher string) (*D
 		return nil, err
 	}
 	defer helper.Close()
+	namespace, err := namespaceInode("/proc/self/ns/cgroup")
+	if err != nil {
+		return nil, ErrDomain
+	}
 	birth, err := consume(directory, binaryHash, helperHash)
 	if err != nil {
 		return nil, err
+	}
+	if os.Mkdir(filepath.Join(directory, "tmp"), 0700) != nil {
+		return nil, ErrUnknown
 	}
 	// The open executable descriptor prevents pathname replacement between hash
 	// and exec. Root changing the underlying inode is outside the threat model.
@@ -104,7 +123,7 @@ func StartFresh(ctx context.Context, directory, executable, launcher string) (*D
 	pidfd := -1
 	cmd.SysProcAttr = &syscall.SysProcAttr{PidFD: &pidfd, Setsid: true}
 	cmd.Dir = directory
-	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "INCUS_DIR=" + filepath.Join(directory, "incus"), "INCUS_EXEC_PATH=/proc/self/exe"}
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "TMPDIR=" + filepath.Join(directory, "tmp"), "INCUS_DIR=" + filepath.Join(directory, "incus"), "INCUS_EXEC_PATH=/proc/self/exe"}
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -114,7 +133,7 @@ func StartFresh(ctx context.Context, directory, executable, launcher string) (*D
 	if err = cmd.Start(); err != nil {
 		return nil, ErrUnknown
 	}
-	d := &Domain{birth: birth, directory: directory, pid: cmd.Process.Pid, pidfd: pidfd, done: make(chan struct{})}
+	d := &Domain{cgroupNamespace: namespace, birth: birth, directory: directory, pid: cmd.Process.Pid, pidfd: pidfd, done: make(chan struct{})}
 	if pidfd < 0 {
 		go func() { _ = cmd.Wait() }()
 		return nil, ErrUnknown
@@ -274,6 +293,11 @@ func (d *Domain) dial(ctx context.Context, network, address string) (net.Conn, e
 		conn.Close()
 		return nil, ErrUnknown
 	}
+	observedNamespace, e := namespaceInode(fmt.Sprintf("/proc/%d/ns/cgroup", d.pid))
+	if e != nil || observedNamespace != d.cgroupNamespace {
+		conn.Close()
+		return nil, ErrUnknown
+	}
 	start, err = processStart(d.pid)
 	if err != nil || start != d.startTime {
 		conn.Close()
@@ -358,4 +382,31 @@ func (d *Domain) Wait(ctx context.Context) error {
 	case <-d.done:
 		return ErrUnknown
 	}
+}
+
+func namespaceInode(path string) (uint64, error) {
+	st, e := os.Stat(path)
+	if e != nil {
+		return 0, ErrUnknown
+	}
+	s, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || s.Ino == 0 {
+		return 0, ErrUnknown
+	}
+	return s.Ino, nil
+}
+
+// Directory and CgroupNamespace expose immutable birth context for independent
+// actual kernel/filesystem checks; neither value alone grants execution rights.
+func (d *Domain) Directory() string {
+	if d == nil {
+		return ""
+	}
+	return d.directory
+}
+func (d *Domain) CgroupNamespace() uint64 {
+	if d == nil {
+		return 0
+	}
+	return d.cgroupNamespace
 }
