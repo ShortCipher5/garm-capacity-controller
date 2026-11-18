@@ -39,6 +39,7 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	NativeClaims         *nativeClaimConfiguration                `json:"native_claims,omitempty"`
 	JobObserver          *jobObserverConfiguration                `json:"job_observer,omitempty"`
 	EnableJobObserver    bool                                     `json:"-"`
 	NativeStock          map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
@@ -69,6 +70,9 @@ func (redactedConnectionLog) Write(message []byte) (int, error) {
 }
 
 func serve(ctx context.Context, config configuration, provision, monitoring bool) error {
+	if config.NativeClaims != nil {
+		return errNativeClaimsRuntime
+	} // Refuse before any listener or key read.
 	// Initial listener is deliberately local-only even though it also requires
 	// verified mTLS and a leaf allowlist. Use a private reverse tunnel if needed;
 	// never terminate client verification in an unauthenticated proxy.
@@ -104,6 +108,10 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
+	claims, err := buildNativeClaims(ctx, config, store)
+	if err != nil {
+		return err
+	}
 	observer, closeObserver, err := buildJobObserver(config, store)
 	if err != nil {
 		return err
@@ -276,6 +284,11 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		close(observerDone)
 	}
 	defer func() { cancel(); <-loopDone; <-monitorDone; <-observerDone }()
+	var claimsDone chan error
+	if claims != nil {
+		claimsDone = make(chan error, 1)
+		go func() { e := claims.Run(runctx); claimsDone <- e; cancel() }()
+	}
 	var adminDone chan error
 	if adminServer != nil {
 		adminDone = make(chan error, 1)
@@ -307,6 +320,12 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	err = server.ServeTLS(listener, "", "")
 	cancel()
 	<-shutdownDone
+	if claimsDone != nil {
+		claimErr := <-claimsDone
+		if !errors.Is(claimErr, context.Canceled) {
+			return claimErr
+		}
+	}
 	if adminDone != nil {
 		adminErr := <-adminDone
 		if !errors.Is(adminErr, http.ErrServerClosed) {
