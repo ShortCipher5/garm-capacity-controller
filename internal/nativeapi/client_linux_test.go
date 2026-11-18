@@ -30,7 +30,7 @@ func rootFixture(t *testing.T) []byte {
 		t.Fatal(e)
 	}
 	hash := sha256.Sum256(der)
-	raw, e := json.Marshal(map[string]any{"type": "sync", "status_code": 200, "metadata": map[string]any{"auth": "trusted", "api_version": "1.0", "api_status": "stable", "api_extensions": []string{"instance_create_start"}, "environment": map[string]any{"server_clustered": false, "server_name": "fixture", "server_version": NativeVersion, "certificate": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), "certificate_fingerprint": fmt.Sprintf("%x", hash)}}})
+	raw, e := json.Marshal(map[string]any{"type": "sync", "status_code": 200, "metadata": map[string]any{"auth": "trusted", "api_version": "1.0", "api_status": "stable", "api_extensions": []string{"instance_create_start"}, "environment": map[string]any{"server_clustered": false, "server_name": "fixture", "server_version": NativeVersion, "driver": "lxc", "driver_version": "7.0.1", "certificate": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), "certificate_fingerprint": fmt.Sprintf("%x", hash)}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -54,7 +54,7 @@ func TestPrivateRootIdentityIsDomainScopedAndStrict(t *testing.T) {
 	if other.Origin() == identity.Origin() || other.Scope() == identity.Scope() {
 		t.Fatal("domain aliases collide")
 	}
-	for _, pair := range [][2]string{{`"server_clustered":false`, `"server_clustered":true`}, {`"auth":"trusted"`, `"auth":"untrusted"`}, {`"server_version":"6.0.4"`, `"server_version":"6.0.5"`}, {`"status_code":200`, `"status_code":200,"status_code":200`}, {`"server_name":"fixture"`, `"server_name":"fixture","server_name":"other"`}, {`"instance_create_start"`, `"missing"`}} {
+	for _, pair := range [][2]string{{`"driver":"lxc"`, `"driver":"lxc | qemu"`}, {`"driver_version":"7.0.1"`, `"driver_version":"6.0.4"`}, {`"server_clustered":false`, `"server_clustered":true`}, {`"auth":"trusted"`, `"auth":"untrusted"`}, {`"server_version":"6.0.4"`, `"server_version":"6.0.5"`}, {`"status_code":200`, `"status_code":200,"status_code":200`}, {`"server_name":"fixture"`, `"server_name":"fixture","server_name":"other"`}, {`"instance_create_start"`, `"missing"`}} {
 		changed := strings.Replace(string(raw), pair[0], pair[1], 1)
 		if changed == string(raw) {
 			t.Fatal("broken fixture", pair)
