@@ -160,6 +160,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.OverheadRefresh != nil {
+		if !a.EnableExperimentalManagement || a.OverheadRefresh.JournalDirectory == "" {
+			return fail()
+		}
+		if _, e := loadOverheadRecipes(a.OverheadRefresh.RecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if a.BrokerProfileRecipesFile != "" {
 		if !a.EnableExperimentalManagement {
 			return fail()
@@ -250,8 +258,18 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if a.EnableExperimentalGarmManagement && (!a.EnableExperimentalManagement || a.GarmManagement == nil) {
 		return fail()
 	}
-	if a.GarmManagement != nil {
+	if a.GarmManagement != nil && a.GarmManagement.ManagedSupervisor {
+		client, e := managedSettingsClient(a)
+		if e != nil {
+			return fail()
+		}
+		client.Close()
+	}
+	if a.GarmManagement != nil && !a.GarmManagement.ManagedSupervisor {
 		m := a.GarmManagement
+		if m.ProxyServerKeyPin != "" || m.ControllerID != "" {
+			return fail()
+		}
 		if a.EnableExperimentalGarmManagement && (!m.ExclusiveSettingsWriter || !m.QualifiedAdmissionRouting) {
 			return fail()
 		}

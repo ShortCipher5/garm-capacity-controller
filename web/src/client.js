@@ -1,3 +1,4 @@
+import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
 import {validateAllocatorPlan} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
@@ -88,6 +89,10 @@ export function validateOverview(value) {
   return value;
 }
 export class ReadSession {
+ #enrollmentRequest;
+ #enrollmentGeneration=0;
+ #collectionRequest;
+ #collectionGeneration=0;
   #planRequest;
  #planGeneration=0;
   #allocatorRequest;
@@ -116,6 +121,8 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+ this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
+ this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
  this.#planGeneration++;this.#planRequest?.abort();this.#planRequest=undefined;
     this.#allocatorGeneration++; this.#allocatorRequest?.abort(); this.#allocatorRequest=undefined;
     this.#entityGeneration++;
@@ -208,6 +215,38 @@ export class ReadSession {
       if(!response.ok)throw new Error('Allocation plan unavailable.');
       const result=validateAllocatorPlan(await response.json());
       if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async nativeEnrollmentSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#enrollmentRequest?.abort(); const generation=++this.#enrollmentGeneration;
+    const controller=new AbortController();this.#enrollmentRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/native-enrollment',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#enrollmentGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Native enrollment status unavailable.');
+      const result=validateEnrollmentView(await response.json());
+      if(generation!==this.#enrollmentGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async overheadRefreshSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#collectionRequest?.abort(); const generation=++this.#collectionGeneration;
+    const controller=new AbortController();this.#collectionRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/overhead-refresh',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#collectionGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Collection status unavailable.');
+      const result=validateCollectionView(await response.json());
+      if(generation!==this.#collectionGeneration||controller.signal.aborted)throw new SessionEnded();
       return result;
     } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
   }
