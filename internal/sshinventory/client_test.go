@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/hostinventory"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -32,7 +33,7 @@ func signer(t *testing.T) ssh.Signer {
 	}
 	return s
 }
-func server(t *testing.T, output string) (Config, KeyResolver, *atomic.Int32) {
+func server(t *testing.T, output string, forced ...bool) (Config, KeyResolver, *atomic.Int32) {
 	t.Helper()
 	host, user := signer(t), signer(t)
 	auths := &atomic.Int32{}
@@ -81,14 +82,21 @@ func server(t *testing.T, output string) (Config, KeyResolver, *atomic.Int32) {
 					return
 				}
 				req.Reply(true, nil)
-				script, e := io.ReadAll(io.LimitReader(stream, 8192))
+				script, e := io.ReadAll(io.LimitReader(stream, 8193))
 				if e != nil {
 					return
 				}
-				if string(script) != probeScript {
+				if len(forced) == 0 && string(script) != probeScript {
 					t.Error("unreviewed command script")
 				}
-				io.WriteString(stream, output)
+				if len(forced) > 0 {
+					if len(script) > 8192 {
+						t.Error("oversized input")
+					}
+					hostinventory.Write(stream, hostinventory.Collect())
+				} else {
+					io.WriteString(stream, output)
+				}
 				stream.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 				stream.Close()
 				return
@@ -228,5 +236,22 @@ func TestParserRejectsInconsistentOrAmbiguousDimensions(t *testing.T) {
 	result, e := parse([]byte(input))
 	if e != nil || result.AvailableRAMMiB == nil || *result.AvailableRAMMiB != 0 {
 		t.Fatal("known zero became unknown")
+	}
+}
+
+func TestForcedCommandProbe(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		config, resolve, _ := server(t, "", true)
+		client, e := New(config, resolve)
+		if e != nil {
+			t.Fatal(e)
+		}
+		result, e := client.Probe(context.Background())
+		if e != nil {
+			t.Fatal(e)
+		}
+		if result.Source != "authenticated_linux_os_view" || result.PhysicalCapacityQualified {
+			t.Fatal(result)
+		}
 	}
 }
