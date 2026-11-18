@@ -39,8 +39,13 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	NativeRetirement              *nativeRetirementConfiguration           `json:"native_retirement,omitempty"`
+	EnableNativeRetirement        bool                                     `json:"-"`
+	NativeClaims                  *nativeClaimConfiguration                `json:"native_claims,omitempty"`
+	JobObserver                   *jobObserverConfiguration                `json:"job_observer,omitempty"`
+	EnableJobObserver             bool                                     `json:"-"`
 	NativeStock                   map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
-	ProviderInspectionFingerprint string                                   `json:"provider_inspection_fingerprint,omitempty"`
+	AllocatorLoop                 *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	StockProviderScopes           []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
 	EnableStockProvider           bool                                     `json:"-"`
 	PreparationPools              map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
@@ -57,7 +62,7 @@ type configuration struct {
 	Garm                          garmConfiguration                        `json:"garm"`
 	ServerTLS                     securefiles.TLSFiles                     `json:"server_tls"`
 	ProviderFingerprints          []string                                 `json:"provider_fingerprints"`
-	AllocatorLoop                 *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
+	ProviderInspectionFingerprint string                                   `json:"provider_inspection_fingerprint,omitempty"`
 }
 
 type redactedConnectionLog struct{}
@@ -68,6 +73,9 @@ func (redactedConnectionLog) Write(message []byte) (int, error) {
 }
 
 func serve(ctx context.Context, config configuration, provision, monitoring bool) error {
+	if config.NativeClaims != nil || config.NativeRetirement != nil {
+		return errNativeClaimsRuntime
+	} // Refuse before any listener or key read.
 	// Initial listener is deliberately local-only even though it also requires
 	// verified mTLS and a leaf allowlist. Use a private reverse tunnel if needed;
 	// never terminate client verification in an unauthenticated proxy.
@@ -103,6 +111,25 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
+	claims, err := buildNativeClaims(ctx, config, store)
+	if err != nil {
+		return err
+	}
+	retirement, err := buildNativeRetirement(ctx, config, store)
+	if err != nil {
+		return err
+	}
+	if config.Admin != nil {
+		config.Admin.nativeRetirementRuntime = retirement
+	}
+	observer, closeObserver, err := buildJobObserver(config, store)
+	if err != nil {
+		return err
+	}
+	defer closeObserver()
+	if config.Admin != nil {
+		config.Admin.jobObserverRuntime = observer
+	}
 	allocator, closeAllocator, err := startConfiguredAllocatorLoop(ctx, config, store)
 	if err != nil {
 		return err
@@ -272,7 +299,24 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	} else {
 		close(monitorDone)
 	}
-	defer func() { cancel(); <-loopDone; <-monitorDone }()
+	retirementDone := make(chan struct{})
+	if retirement != nil {
+		go func() { defer close(retirementDone); _ = retirement.Run(runctx) }()
+	} else {
+		close(retirementDone)
+	}
+	observerDone := make(chan struct{})
+	if observer != nil {
+		go func() { defer close(observerDone); _ = observer.Run(runctx) }()
+	} else {
+		close(observerDone)
+	}
+	defer func() { cancel(); <-loopDone; <-monitorDone; <-observerDone; <-retirementDone }()
+	var claimsDone chan error
+	if claims != nil {
+		claimsDone = make(chan error, 1)
+		go func() { e := claims.Run(runctx); claimsDone <- e; cancel() }()
+	}
 	var adminDone chan error
 	if adminServer != nil {
 		adminDone = make(chan error, 1)
@@ -304,6 +348,12 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	err = server.ServeTLS(listener, "", "")
 	cancel()
 	<-shutdownDone
+	if claimsDone != nil {
+		claimErr := <-claimsDone
+		if !errors.Is(claimErr, context.Canceled) {
+			return claimErr
+		}
+	}
 	if adminDone != nil {
 		adminErr := <-adminDone
 		if !errors.Is(adminErr, http.ErrServerClosed) {
@@ -318,6 +368,8 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
+	retirement := flag.Bool("allow-experimental-native-retirement", false, "configure canonical STOP/DELETE orchestration; active runtime still refused, no release")
+	jobObserver := flag.Bool("allow-job-observer", false, "enable positive authenticated job/root journal correlation only; no retirement or release")
 	stockProvider := flag.Bool("allow-experimental-stock-provider", false, "enable distinct post-JIT stock-provider admission; no original-preparation guarantee or physical release")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
@@ -422,6 +474,8 @@ func main() {
 		config.Admin.EnableFirstboot = true
 	}
 	config.EnableStockProvider = *stockProvider
+	config.EnableJobObserver = *jobObserver
+	config.EnableNativeRetirement = *retirement
 	if *bootstrap {
 		if config.Admin == nil {
 			fmt.Fprintln(os.Stderr, "bootstrap requires separate admin configuration")
