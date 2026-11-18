@@ -92,3 +92,5 @@ test("pending resolution capability is optional for older servers and strictly b
  for(const value of ["true",1,null,{}]) {v.pending.resolution_available=value;assert.throws(()=>validateGarm(v),/unsupported/);}
 });
 test('restricted managed mode rejects malformed capability or unsupported resolution',()=>{const v={...structuredClone(settings),maximum_reduction_only:true};assert.equal(validateGarm(v),v);assert.throws(()=>validateGarm({...v,maximum_reduction_only:'true'}));assert.throws(()=>validateGarm({...v,pending:{request_id:'x',kind:'pool',target:'x',started_at:'2026-01-01T00:00:00Z',resolution_available:true}}));const withRepo=structuredClone(v);withRepo.settings.repositories=[{id:'repo',owner:'o',name:'r',pool_balancing_type:'pack',fingerprint:'f'.repeat(64)}];assert.throws(()=>validateGarm(withRepo));});
+
+test("managed history availability is explicit and typed",()=>{assert.equal(validateGarm({...settings,managed_history_available:false}).managed_history_available,false);assert.throws(()=>validateGarm({...settings,managed_history_available:"true"}));});
