@@ -241,6 +241,14 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if err := runctx.Err(); err != nil {
 		return err
 	}
+	// Start only after all local handlers/listeners are validated and the
+	// initial inventory reconciliation has completed. The service still reads
+	// canonical readiness itself; a failed inventory pass cannot authorize it.
+	closePolicyCaps, err := startPolicyCapReconciler(runctx, config, store, remoteManager)
+	if err != nil {
+		return err
+	}
+	defer closePolicyCaps()
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)

@@ -1,3 +1,4 @@
+import {PolicyCapStatus} from "./policy-cap-status.jsx";
 import { maximumReductionOnly, maximumReduction, reviewedReductionAllowed } from "./garm-reduction.js";
 import { reconcileGarmRead } from "./garm-read-reconciliation.js";
 import { GarmReadChanges } from "./garm-read-reconciliation.jsx";
@@ -122,6 +123,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
     {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings and journal details may be stale; pool and scaleset inventories are unavailable. Editing is blocked until a successful refresh.</p>}
+    <PolicyCapStatus value={snapshot?.policy_cap_reconciler} stale={syncError}/>
     {snapshot && <GarmPoolInventory inventory={snapshot.pool_inventory} />}
     {snapshot && <GarmScaleSetInventory inventory={snapshot.scaleset_inventory} />}
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
