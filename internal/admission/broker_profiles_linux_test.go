@@ -15,7 +15,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/stockidentity"
 )
 
-const brokerProfileDowngradeSQL = `
+const brokerProfileDowngradeSQL = nativeOperationDowngradeSQL + `
 DROP TRIGGER broker_provider_not_owner;
 DROP TABLE broker_pool_profiles;
 DELETE FROM audit WHERE kind IN ('broker_profile_recorded','schema_migrated_v20');
@@ -193,7 +193,7 @@ func TestBrokerProfileMigrationFromRealSchema19ClosesReadiness(t *testing.T) {
 		t.Fatal("migration activated or fabricated mapping", err)
 	}
 	var version int
-	if reopened.db.QueryRow("PRAGMA user_version").Scan(&version) != nil || version != 20 {
+	if reopened.db.QueryRow("PRAGMA user_version").Scan(&version) != nil || version != sqliteCurrentVersion {
 		t.Fatal("migration version")
 	}
 }

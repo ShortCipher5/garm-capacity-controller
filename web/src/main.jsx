@@ -1,4 +1,5 @@
 import { PoolMappings } from "./broker-profiles.jsx";
+import { Lifecycle } from "./lifecycle.jsx";
 import { CapacityStates } from "./capacity-states.jsx";
 import { BrokerPolicy } from "./broker-policy.jsx";
 import { createEntityInventoryReader } from "./entity-inventory-client.js";
@@ -134,6 +135,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
             · Admission barrier {data.admission_ready ? "ready" : "not ready"}
           </span>
         </div>
+        <Lifecycle data={data} />
         <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
         {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}
@@ -284,6 +286,12 @@ export function App() {
     try { return await session.current.entityInventorySnapshot(options); }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
+  // Refresh measured history once per committed overview snapshot, not on busy
+  // transitions. Stable identity also prevents unrelated renders aborting reads.
+  const readUsage = useCallback(async (host, options) => {
+    try { return await session.current.usageHistory(host, options); }
+    catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+  }, [disconnect, data]);
   useEffect(() => {
     window.addEventListener("pagehide", disconnect);
     return () => {
@@ -337,10 +345,7 @@ export function App() {
           try { return await session.current.profilesSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
-        readUsage={async (host, options) => {
-          try { return await session.current.usageHistory(host, options); }
-          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
-        }}
+        readUsage={readUsage}
         readGarm={async () => {
           try { return await session.current.garmSnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
