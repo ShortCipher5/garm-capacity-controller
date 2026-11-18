@@ -123,3 +123,14 @@ validation additionally reconstructs totals and rejects duplicated identities
 or audit sequences. v3 refuses incompatible older payloads rather than treating
 missing overhead as zero. These records remain accounting, not release-safe
 readiness or capacity-increase authority.
+
+Protocol v4 includes canonical schema27 artifact-root records and a separate
+`artifact_overhead` disk subtotal. Global/host allocations retain both capsule
+and artifact charges, while pool allocations contain neither overhead subtotal.
+Shared artifact roots are unique by physical pool/root GUID and immutable
+artifact identity, not per domain. Original enrolling owner provenance remains
+anchored; lower measured/enforced current quota never removes retained debt.
+Snapshot validation reconstructs both subtotals and their combined per-host
+charge, rejects duplicate roots/audit sequences or missing records, and binds
+all fields to the accounting digest. This is read-only accounting, not proof of
+safe retirement or authority to increase pool settings.

@@ -24,7 +24,13 @@ import (
 	"time"
 )
 
-const nativeDomainOverheadDowngradeSQL = `
+const nativeArtifactOverheadDowngradeSQL = `DROP TABLE native_artifact_overheads;DELETE FROM audit WHERE kind='schema_migrated_v27';
+DROP TRIGGER reservation_current_accounting;
+CREATE TRIGGER reservation_current_accounting BEFORE INSERT ON reservations WHEN NEW.accounting_version!=26 BEGIN SELECT RAISE(ABORT,'current domain overhead accounting required'); END;
+DROP TRIGGER dispatch_current_accounting;
+CREATE TRIGGER dispatch_current_accounting BEFORE INSERT ON dispatches WHEN NEW.grant_accounting_version!=26 BEGIN SELECT RAISE(ABORT,'current domain overhead accounting required'); END;
+`
+const nativeDomainOverheadDowngradeSQL = nativeArtifactOverheadDowngradeSQL + `
 DROP TRIGGER reservation_current_accounting;
 CREATE TRIGGER reservation_current_accounting BEFORE INSERT ON reservations WHEN NEW.accounting_version!=18 BEGIN SELECT RAISE(ABORT,'current shared grant accounting required'); END;
 DROP TRIGGER dispatch_current_accounting;

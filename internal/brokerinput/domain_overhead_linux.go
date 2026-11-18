@@ -13,7 +13,7 @@ func overheadBudgets(state admission.BrokerGrantState) (capacitybroker.Resources
 	fail := func() (capacitybroker.Resources, map[string]capacitybroker.Resources, error) {
 		return capacitybroker.Resources{}, nil, capacitybroker.ErrSnapshot
 	}
-	if len(state.DomainOverheads) > 1000 {
+	if len(state.DomainOverheads) > 1000 || len(state.ArtifactOverheads) > 1000 {
 		return fail()
 	}
 	global := capacitybroker.Resources{}
@@ -43,6 +43,35 @@ func overheadBudgets(state admission.BrokerGrantState) (capacitybroker.Resources
 		byHost[entry.Host] = h
 	}
 	if global != resources(state.Allocated.DomainOverhead) {
+		return fail()
+	}
+	artifacts := capacitybroker.Resources{}
+	artifactIDs := map[string]bool{}
+	roots := map[string]bool{}
+	for _, entry := range state.ArtifactOverheads {
+		root := entry.PoolGUID + "\x00" + entry.RootGUID
+		if admission.ValidateNativeArtifactOverhead(entry) != nil || sequences[entry.Sequence] || entry.Sequence > state.Sequence || artifactIDs[entry.ArtifactID] || roots[root] {
+			return fail()
+		}
+		if _, ok := state.Config.Hosts[entry.Host]; !ok {
+			return fail()
+		}
+		sequences[entry.Sequence] = true
+		artifactIDs[entry.ArtifactID] = true
+		roots[root] = true
+		h := byHost[entry.Host]
+		r := resources(entry.Resources)
+		for i, n := range r {
+			if n < 0 || artifacts[i] > math.MaxInt64-n || global[i] > math.MaxInt64-n || h[i] > math.MaxInt64-n {
+				return fail()
+			}
+			artifacts[i] += n
+			global[i] += n
+			h[i] += n
+		}
+		byHost[entry.Host] = h
+	}
+	if artifacts != resources(state.Allocated.ArtifactOverhead) {
 		return fail()
 	}
 	canonical := resources(state.Allocated.Global)

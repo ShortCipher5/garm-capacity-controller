@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeartifacts"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeenforcement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
@@ -66,6 +67,24 @@ func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture
 			}
 			authority <- a
 			w.WriteHeader(204)
+			return
+		}
+		if r.URL.Path == nativeartifacts.Path {
+			evidenceMu.Lock()
+			raw, ok := evidence[r.URL.Path]
+			evidenceMu.Unlock()
+			if !ok {
+				w.WriteHeader(404)
+				return
+			}
+			var d nativeartifacts.Descriptor
+			if json.Unmarshal(raw, &d) != nil {
+				w.WriteHeader(500)
+				return
+			}
+			d.Nonce = r.URL.Query().Get("nonce")
+			d.IssuedAt = time.Now().UTC()
+			json.NewEncoder(w).Encode(d)
 			return
 		}
 		if r.URL.Path == nativeenforcement.Path {

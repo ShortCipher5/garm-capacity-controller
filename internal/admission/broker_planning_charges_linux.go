@@ -40,6 +40,9 @@ func (s *SQLiteStore) ReadBrokerPlanningState(ctx context.Context) (BrokerGrantS
 	if err := addDomainOverheads(&total, state.Config, state.DomainOverheads); err != nil {
 		return BrokerGrantState{}, nil, err
 	}
+	if err := addArtifactOverheads(&total, state.Config, state.ArtifactOverheads); err != nil {
+		return BrokerGrantState{}, nil, err
+	}
 	for h := range state.Allocated.Hosts {
 		if _, ok := total.Hosts[h]; !ok {
 			total.Hosts[h] = Resources{}

@@ -11,13 +11,15 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeartifacts"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeenforcement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/profilesnapshot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 )
 
 func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
-	for _, dimension := range []string{"cpu", "ram", "disk"} {
+	for _, dimension := range []string{"cpu", "ram", "disk", "artifact"} {
 		t.Run(dimension, func(t *testing.T) {
 			ctx := context.Background()
 			domain := strings.Repeat("a", 64)
@@ -28,7 +30,15 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			}
 			var desc nativeidentity.Descriptor
 			var enforcement nativeenforcement.Descriptor
+			var artifact nativeartifacts.Descriptor
 			native, controllerTLS, ownerTLS := testsupport.NativeTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == nativeartifacts.Path {
+					evidence := artifact
+					evidence.Nonce = r.URL.Query().Get("nonce")
+					evidence.IssuedAt = time.Now()
+					json.NewEncoder(w).Encode(evidence)
+					return
+				}
 				if r.URL.Path == nativeenforcement.Path {
 					evidence := enforcement
 					evidence.Nonce = r.URL.Query().Get("nonce")
@@ -112,6 +122,8 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 				limits.CPUMilli = uint64(state.Config.Global.CPU)
 			case "ram":
 				limits.MemoryBytes = uint64(state.Config.Global.RAM) << 20
+			case "artifact":
+				limits.DiskBytes = 1000 << 20
 			case "disk":
 				limits.DiskBytes = uint64(state.Config.Global.Disk) << 20
 			}
@@ -128,6 +140,16 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if dimension == "artifact" {
+				artifact = nativeartifacts.Descriptor{Version: nativeartifacts.Version, Owner: desc, ArtifactID: strings.Repeat("9", 64), PoolGUID: "101", PoolLoadGUID: "102", RootGUID: "103", Dataset: "pool/control-" + strings.Repeat("9", 64), QuotaBytes: 3000 << 20}
+				proof, e := nativeartifacts.Observe(ctx, nativeartifacts.Configuration{Endpoint: native.URL, TLS: controllerTLS, Expected: desc})
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e = store.RecordNativeArtifactOverhead(ctx, enrolled.Sequence, proof); e != nil {
+					t.Fatal(e)
+				}
+			}
 			snap, saved, err = Ledger(ctx, store, profiles, opt)
 			if err != nil {
 				t.Fatal(err)
@@ -136,8 +158,41 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			if err != nil || len(after.Assignments) != 0 || len(snap.Charges) != 0 || len(saved.DomainOverheads) != 1 || saved.Allocated.DomainOverhead != recorded.Resources {
 				t.Fatal("actual ledger overhead did not constrain planner", after, saved.Allocated, err)
 			}
+			if dimension == "artifact" && (len(saved.ArtifactOverheads) != 1 || saved.Allocated.ArtifactOverhead.Disk != 3000) {
+				t.Fatal("artifact subtotal omitted", saved.Allocated)
+			}
 			if snap.Pools[pool].Budget[0] != state.Config.Pools[pool].Budget.CPU || snap.Global[3] != state.Config.Global.Runners {
 				t.Fatal("overhead became pool/runner charge")
+			}
+			// A separately authenticated host artifact root is populated through
+			// the actual canonical transaction, then projected from one read.
+			id := strings.Repeat("7", 64)
+			quota := int64((1 << 20) + 1)
+			if dimension == "artifact" {
+				id = strings.Repeat("9", 64)
+				quota = 3000 << 20
+			}
+			artifact = nativeartifacts.Descriptor{Version: nativeartifacts.Version, Owner: desc, ArtifactID: id, PoolGUID: "101", PoolLoadGUID: "102", RootGUID: "103", Dataset: "pool/control-" + id, QuotaBytes: quota}
+			art, err := nativeartifacts.Observe(ctx, nativeartifacts.Configuration{Endpoint: native.URL, TLS: controllerTLS, Expected: desc})
+			if err != nil {
+				t.Fatal(err)
+			}
+			retained, err := store.RecordNativeArtifactOverhead(ctx, enrolled.Sequence, art)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.ReadBrokerGrantState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projected, err := profilesnapshot.New("controller", strings.Repeat("8", 64), strings.Repeat("9", 64), current, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(projected)
+			decoded, err := profilesnapshot.Decode(raw, projected.Controller, projected.Nonce, time.Now())
+			if err != nil || decoded.Accounting.Allocated.ArtifactOverhead != retained.Resources || len(decoded.Accounting.ArtifactOverheads) != 1 || decoded.Accounting.ArtifactOverheads[0].Sequence != retained.Sequence || decoded.Accounting.Allocated.DomainOverhead != recorded.Resources {
+				t.Fatal("actual artifact snapshot", err)
 			}
 
 		})
