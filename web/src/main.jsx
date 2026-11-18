@@ -68,7 +68,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan, readRetirementStatus }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -137,7 +137,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </span>
         </div>
         <AllocatorStatus read={readAllocatorStatus} />
-        <Lifecycle data={data} />
+        <Lifecycle data={data} readRetirementStatus={readRetirementStatus} />
         <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
         {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}
@@ -290,6 +290,7 @@ export function App() {
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
   const readAllocatorStatus=useCallback(async(options)=>{try{return await session.current.allocatorStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
+  const readRetirementStatus=useCallback(async(options)=>{try{return await session.current.nativeRetirementStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   // Refresh measured history once per committed overview snapshot, not on busy
   // transitions. Stable identity also prevents unrelated renders aborting reads.
   const readUsage = useCallback(async (host, options) => {
@@ -326,6 +327,7 @@ export function App() {
       <Dashboard
         data={data}
         readAllocatorStatus={readAllocatorStatus}
+        readRetirementStatus={readRetirementStatus}
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
