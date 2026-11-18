@@ -28,7 +28,7 @@ RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-ledger ./c
 # No Incus, LXC, ZFS, nspawn, credentials or runtime image is synthesized here.
 FROM go-build AS native-owner-build
 RUN mkdir -p /native-out && for name in \
-    capacity-native-domain capacity-capsule-launch capacity-native-stage \
+    capacity-native-domain capacity-native-prepare capacity-capsule-launch capacity-native-stage \
     capacity-native-image capacity-native-zfs-exec capacity-native-egress \
     capacity-native-preflight capacity-native-memory-plan \
     capacity-quota-read capacity-protected-boot capacity-runner-init \
