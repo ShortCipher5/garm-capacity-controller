@@ -20,7 +20,7 @@ Registration checks the actual observed controller against the requested provide
 authority. CLI `register-pool-profile` supports `managed_server_key_pin`,
 `managed_controller_id`, `client_certificate_file`, `client_key_file` alongside
 `ca_file`; `token_file` is forbidden in this mode. Direct stock-token mode is
-unchanged. Private console recipe wiring is not yet included in this change.
+unchanged. Private console recipes accept the same managed transport fields. Browser users still select only a server-owned recipe and saved size. Recipe review revisions bind the endpoint, proxy key pin, controller ID, CA and public client certificate identity; a restart with changed trust requires a fresh review. No private key is hashed or exposed.
 
 These reads remain non-atomic; repeated pool snapshots detect some drift but do
 not prove webhook completeness. TLS supervisor provenance is not native capacity

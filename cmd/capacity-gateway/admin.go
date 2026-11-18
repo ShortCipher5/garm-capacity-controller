@@ -21,6 +21,7 @@ import (
 
 type adminConfiguration struct {
 	jobObserverRuntime                 *jobobserver.Service
+	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
@@ -97,6 +98,17 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		if err := handler.EnableManagement(managementToken); err != nil {
 			cleanup()
 			return nil, noop, err
+		}
+	}
+	if config.BrokerProfileRecipesFile != "" {
+		recipes, e := loadBrokerProfileRecipes(config.BrokerProfileRecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetBrokerProfileRecipes(recipes); e != nil {
+			cleanup()
+			return nil, noop, e
 		}
 	}
 	if config.GarmManagement != nil {

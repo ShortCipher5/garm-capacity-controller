@@ -160,6 +160,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.BrokerProfileRecipesFile != "" {
+		if !a.EnableExperimentalManagement {
+			return fail()
+		}
+		if _, e := loadBrokerProfileRecipes(a.BrokerProfileRecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if !loopback(a.Listen) {
 		return fail()
 	}
