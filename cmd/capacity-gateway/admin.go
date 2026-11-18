@@ -19,6 +19,7 @@ import (
 )
 
 type adminConfiguration struct {
+	NativeEnrollmentRecipesFile        string `json:"native_enrollment_recipes_file,omitempty"`
 	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
@@ -95,6 +96,17 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		if err := handler.EnableManagement(managementToken); err != nil {
 			cleanup()
 			return nil, noop, err
+		}
+	}
+	if config.NativeEnrollmentRecipesFile != "" {
+		recipes, e := loadNativeEnrollmentRecipes(config.NativeEnrollmentRecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativeEnrollmentRecipes(recipes); e != nil {
+			cleanup()
+			return nil, noop, e
 		}
 	}
 	if config.BrokerProfileRecipesFile != "" {
