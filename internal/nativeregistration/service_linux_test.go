@@ -60,7 +60,7 @@ func elfFixture() []byte {
 }
 func fixture(t *testing.T) (nativebundle.Configuration, map[string]any) {
 	t.Helper()
-	e, p, parent := t.TempDir(), t.TempDir(), t.TempDir()
+	e, p, parent := protectedTestDirectory(t), protectedTestDirectory(t), protectedTestDirectory(t)
 	c := nativebundle.Configuration{ExportDirectory: e, PrivateDirectory: p, OutputDirectory: filepath.Join(parent, "bundle"), ID: strings.Repeat("c", 64), Architecture: "amd64"}
 	sums := ""
 	for _, n := range nativeprepare.ExecutableNames() {
@@ -133,7 +133,7 @@ func registrationFixture(t *testing.T) (nativebundle.RegistrationCatalog, native
 	cfg["storage_budgets"] = nativezfs.CategoryBudgets{Runtime: 1 << 20, Categories: cats}
 	cfg["network"] = nativeegress.Specification{Mode: nativeegress.PublicInternet, TransitCIDR: "10.240.0.0/30", RunnerCIDR: "10.241.0.0/24", DNS: []string{"1.1.1.1"}, ControlPlaneCIDRs: []string{"8.8.8.8/32"}}
 	writeConfig(t, base, cfg)
-	identityDir := t.TempDir()
+	identityDir := protectedTestDirectory(t)
 	for _, n := range []string{"owner-server.crt", "owner-server.key", "owner-client.crt", "owner-client.key", "controller-ca.crt"} {
 		b, e := os.ReadFile(filepath.Join(base.PrivateDirectory, n))
 		if e != nil {
@@ -147,7 +147,7 @@ func registrationFixture(t *testing.T) (nativebundle.RegistrationCatalog, native
 	base.OutputDirectory = ""
 	base.SelectionFile = ""
 	base.ExpectedBindingFile = ""
-	c := nativebundle.RegistrationCatalog{Templates: map[string]nativebundle.RegistrationTemplate{"standard": {Configuration: base, ArtifactReference: "image1", StorageReference: "disk1", NetworkReference: "egress1"}}, Identities: map[string]nativebundle.RegistrationIdentity{"owner1": {Directory: identityDir, Template: "standard", Administrator: "ssh", HostPrefix: "host-"}}, Administrators: map[string]nativebundle.RegistrationAdministrator{"ssh": {Networks: []string{"192.0.2.0/24"}, Users: []string{"root"}, Ports: []uint16{22}, AdminKeyFingerprint: selection.Binding.NativeTarget.AdminKeyFingerprint}}, PrivateParent: t.TempDir(), OutputParent: t.TempDir(), JournalParent: t.TempDir()}
+	c := nativebundle.RegistrationCatalog{Templates: map[string]nativebundle.RegistrationTemplate{"standard": {Configuration: base, ArtifactReference: "image1", StorageReference: "disk1", NetworkReference: "egress1"}}, Identities: map[string]nativebundle.RegistrationIdentity{"owner1": {Directory: identityDir, Template: "standard", Administrator: "ssh", HostPrefix: "host-"}}, Administrators: map[string]nativebundle.RegistrationAdministrator{"ssh": {Networks: []string{"192.0.2.0/24"}, Users: []string{"root"}, Ports: []uint16{22}, AdminKeyFingerprint: selection.Binding.NativeTarget.AdminKeyFingerprint}}, PrivateParent: protectedTestDirectory(t), OutputParent: protectedTestDirectory(t), JournalParent: protectedTestDirectory(t)}
 	r := nativebundle.RegistrationRequest{Template: "standard", Identity: "owner1", Administrator: "ssh", ArtifactReference: "image1", StorageReference: "disk1", NetworkReference: "egress1", PreparationID: selection.Binding.PreparationID, Host: "host-new", NativeTarget: selection.Binding.NativeTarget, InventoryTarget: selection.Binding.InventoryTarget}
 	for _, p := range []string{base.PrivateDirectory, identityDir, c.PrivateParent, c.OutputParent, c.JournalParent} {
 		if os.Chmod(p, 0700) != nil {
@@ -179,7 +179,7 @@ func registryFixture(t *testing.T) (*Service, Request, nativebundle.Registration
 	}
 	target := inventory.Targets()[0]
 	r := Request{Revision: compiler.Revision(), Template: req.Template, Identity: req.Identity, Administrator: req.Administrator, ArtifactReference: req.ArtifactReference, StorageReference: req.StorageReference, NetworkReference: req.NetworkReference, PreparationID: req.PreparationID, Host: req.Host, InventoryTargetID: target.ID, InventoryTargetDigest: nativeplanning.Digest(target), NativeTarget: req.NativeTarget}
-	dir := t.TempDir()
+	dir := protectedTestDirectory(t)
 	os.Chmod(dir, 0700)
 	svc, e := NewService(compiler, inventory, dir)
 	if e != nil {
@@ -325,7 +325,7 @@ func TestRegistrationBoundMatchesInstallableSlotsAndCatalogIsFrozen(t *testing.T
 	key, _ := ssh.NewPublicKey(pub)
 	for i := 0; i < 9; i++ {
 		name := fmt.Sprintf("owner%d", i)
-		dir := t.TempDir()
+		dir := protectedTestDirectory(t)
 		os.Chmod(dir, 0700)
 		sc, sk := cert(t, int64(i*2+10))
 		cc, ck := cert(t, int64(i*2+11))
@@ -389,4 +389,19 @@ func TestRegistrationBoundMatchesInstallableSlotsAndCatalogIsFrozen(t *testing.T
 	if _, _, e = reopened.Restore(t.Context()); e == nil {
 		t.Fatal("catalog history silently rebound")
 	}
+}
+
+// Registry state and materialized planning paths require protected ancestors.
+func protectedTestDirectory(t *testing.T) string {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := os.MkdirTemp(cwd, ".registration-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(p) })
+	return p
 }

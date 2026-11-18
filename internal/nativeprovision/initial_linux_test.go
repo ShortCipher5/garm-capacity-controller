@@ -12,7 +12,7 @@ import (
 )
 
 func TestInitialRealPlanPinsFirstBundleAndReplacementChain(t *testing.T) {
-	s := attemptFixture(t)
+	s := initialPlanFixture(t)
 	registration, selection := strings.Repeat("c", 64), strings.Repeat("d", 64)
 	initial, e := s.RegisterInitialPlan(t.Context(), registration, selection)
 	if e != nil {
@@ -46,7 +46,7 @@ func TestInitialRealPlanPinsFirstBundleAndReplacementChain(t *testing.T) {
 func TestInitialPlanRejectsConsumedAndCorruptHistory(t *testing.T) {
 	for _, mode := range []string{"intent", "attempt", "corrupt", "chain", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
-			s := attemptFixture(t)
+			s := initialPlanFixture(t)
 			ctx := t.Context()
 			switch mode {
 			case "intent":
@@ -69,4 +69,20 @@ func TestInitialPlanRejectsConsumedAndCorruptHistory(t *testing.T) {
 			}
 		})
 	}
+}
+
+func initialPlanFixture(t *testing.T) *Service {
+	t.Helper()
+	s := attemptFixture(t)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := os.MkdirTemp(cwd, ".initial-plan-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close(); os.RemoveAll(p) })
+	s.dir = p
+	return s
 }
