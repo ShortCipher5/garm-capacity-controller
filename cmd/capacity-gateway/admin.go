@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"log"
 	"net"
@@ -22,6 +23,7 @@ import (
 )
 
 type adminConfiguration struct {
+	demandObserverRuntime       *demandobserver.Service
 	nativeRetirementRuntime     *nativecontroller.RetirementService
 	jobObserverRuntime          *jobobserver.Service
 	NativeRegistration          *nativeRegistrationConfiguration `json:"native_registration,omitempty"`
@@ -95,6 +97,7 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		return nil, noop, err
 	}
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
+	handler.SetDemandObserver(config.demandObserverRuntime)
 	handler.SetJobObserver(config.jobObserverRuntime)
 	handler.SetNativeRetirement(config.nativeRetirementRuntime)
 	needsCredential := config.EnableExperimentalManagement || config.EnableExperimentalOnboardingProbes

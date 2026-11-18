@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 	"log"
 	"net"
 	"net/http"
@@ -39,6 +40,7 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	DemandObserverConfigFile      string                                   `json:"demand_observer_config_file,omitempty"`
 	NativeRetirement              *nativeRetirementConfiguration           `json:"native_retirement,omitempty"`
 	EnableNativeRetirement        bool                                     `json:"-"`
 	NativeClaims                  *nativeClaimConfiguration                `json:"native_claims,omitempty"`
@@ -139,6 +141,21 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		config.Admin.allocatorRuntime = allocator
 	}
 
+	var demand *demandobserver.Service
+	if config.DemandObserverConfigFile != "" {
+		if config.Admin == nil {
+			return demandobserver.ErrObserver
+		}
+		dc, e := demandobserver.Load(config.DemandObserverConfigFile)
+		if e != nil {
+			return e
+		}
+		demand, e = demandobserver.NewService(dc)
+		if e != nil {
+			return e
+		}
+		config.Admin.demandObserverRuntime = demand
+	}
 	backends := map[string]gateway.Backend{}
 	monitors := map[string]hostmetrics.Source{}
 	for id, host := range config.Hosts {
@@ -311,7 +328,20 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	} else {
 		close(observerDone)
 	}
-	defer func() { cancel(); <-loopDone; <-monitorDone; <-observerDone; <-retirementDone }()
+	demandDone := make(chan struct{})
+	if demand != nil {
+		go func() { defer close(demandDone); _ = demand.Run(runctx) }()
+	} else {
+		close(demandDone)
+	}
+	defer func() {
+		cancel()
+		<-loopDone
+		<-monitorDone
+		<-observerDone
+		<-retirementDone
+		<-demandDone
+	}()
 	var claimsDone chan error
 	if claims != nil {
 		claimsDone = make(chan error, 1)

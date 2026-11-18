@@ -1,3 +1,4 @@
+import {DemandObserverStatus} from "./demand-observer-status.jsx";
 import {MixPrefillProvider} from "./mix-prefill-context.jsx";
 import { PoolMappings } from "./broker-profiles.jsx";
 import { AllocatorStatus } from "./allocator-status.jsx";
@@ -69,7 +70,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readMix, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readMix, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readDemandObserverStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -259,6 +260,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         </section>
         <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} readOverheadRefresh={readOverheadRefresh} readNativeEnrollment={readNativeEnrollment} />
         <Profiles readProfiles={readProfiles} readMix={readMix} hosts={data.hosts} />
+        <DemandObserverStatus read={readDemandObserverStatus} />
         <BrokerPolicy readPolicy={readBrokerPolicy} readPlan={readAllocatorPlan} />
         <div className="bottom-grid">
           <CapacityStates read={readCapacityStates} />
@@ -290,6 +292,7 @@ export function App() {
     try { return await session.current.entityInventorySnapshot(options); }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
+  const readDemandObserverStatus=useCallback(async(options)=>{try{return await session.current.demandObserverStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   const readAllocatorStatus=useCallback(async(options)=>{try{return await session.current.allocatorStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   // Refresh measured history once per committed overview snapshot, not on busy
   // transitions. Stable identity also prevents unrelated renders aborting reads.
@@ -327,6 +330,7 @@ export function App() {
       <Dashboard
         data={data}
         readAllocatorStatus={readAllocatorStatus}
+        readDemandObserverStatus={readDemandObserverStatus}
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
