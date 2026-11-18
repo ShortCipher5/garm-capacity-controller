@@ -22,6 +22,7 @@ RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-gateway ./
 RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-provider ./cmd/capacity-provider
 # Local recovery tooling is packaged separately, never started with the gateway.
 RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-ledger ./cmd/capacity-ledger
+RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-native-bundle ./cmd/capacity-native-bundle
 
 # Owner and helper artifacts are exported, never executed in the build or by an
 # image ENTRYPOINT. CGO stays enabled for the shared canonical SQLite dependency.
@@ -42,6 +43,10 @@ RUN mkdir -p /native-out && for name in \
 # runnable service image. The startup guard remains compiled into the owner.
 FROM scratch AS native-owner-artifacts
 COPY --from=native-owner-build /native-out/ /
+
+# Offline bundle builder export; never runs artifacts or contacts a host.
+FROM scratch AS native-bundle-tool
+COPY --from=go-build /out/capacity-native-bundle /capacity-native-bundle
 
 # Export only this binary to a reviewed Garm image. This is not a runnable image.
 FROM scratch AS provider-artifact
