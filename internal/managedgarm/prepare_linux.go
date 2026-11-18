@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,7 +120,7 @@ func Prepare(p Preparation) error {
 			return ErrBoundary
 		}
 	}
-	stock := fmt.Sprintf("[default]\nenable_webhook_management = true\nenable_log_streamer = false\ndebug_server = false\n[logging]\nenable_log_streamer = false\nlog_format = \"json\"\nlog_level = \"info\"\n[metrics]\nenable = false\n[jwt_auth]\nsecret = %q\ntime_to_live = \"24h\"\n[apiserver]\nbind = \"127.0.0.1\"\nport = 9998\nuse_tls = true\n[apiserver.tls]\ncertificate = \"/etc/garm/api-cert.pem\"\nkey = \"/etc/garm/api-key.pem\"\n[apiserver.webui]\nenable = false\n[database]\nbackend = \"sqlite3\"\npassphrase = %q\n[database.sqlite3]\ndb_file = \"/var/lib/garm/garm.db\"\nbusy_timeout_seconds = 5\n", jwt, dbkey)
+	stock := managedStockConfiguration(jwt, dbkey)
 	if exclusiveFile(filepath.Join(p.Directory, "garm-config", "garm.toml"), []byte(stock), 65530) != nil {
 		return ErrBoundary
 	}

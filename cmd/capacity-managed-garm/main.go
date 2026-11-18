@@ -37,6 +37,22 @@ func run(args []string) error {
 			return managedgarm.ErrBoundary
 		}
 		return managedgarm.Bootstrap(context.Background(), p)
+	case "inspect-provider":
+		var p struct {
+			Boundary    managedgarm.Specification
+			Profiles    managedgarm.ProviderProfileConfiguration
+			Executables managedgarm.ProviderPathPins
+		}
+		if d.Decode(&p) != nil || d.Decode(new(any)) != io.EOF {
+			return managedgarm.ErrBoundary
+		}
+		session, err := managedgarm.OpenSession(context.Background(), p.Boundary)
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		_, err = managedgarm.NewProviderPathObserver(context.Background(), session, p.Profiles, p.Executables)
+		return err
 	case "inspect":
 		var p managedgarm.Specification
 		if d.Decode(&p) != nil || d.Decode(new(any)) != io.EOF {
