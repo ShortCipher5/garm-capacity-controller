@@ -147,3 +147,17 @@ func TestBrokerRecipeRevisionRejectsRestartRetarget(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestBrokerRecipeReviewBindsManagedDestination(t *testing.T) {
+	r := recipeFixture(t)
+	original := brokerRecipeRevision(r)
+	r.Transport.ManagedServerKeyPin = strings.Repeat("a", 64)
+	if brokerRecipeRevision(r) == original {
+		t.Fatal("managed key pin omitted from review")
+	}
+	pinned := brokerRecipeRevision(r)
+	r.Transport.ManagedControllerID = "11111111-1111-1111-1111-111111111111"
+	if brokerRecipeRevision(r) == pinned {
+		t.Fatal("controller identity omitted from review")
+	}
+}
