@@ -410,6 +410,7 @@ func main() {
 	nativeRegistration := flag.Bool("allow-native-target-registration", false, "allow scoped new-target configuration, discovery, bundle assembly and separately approved disabled preparation; never activation")
 	nativeAssembly := flag.Bool("allow-native-bundle-assembly", false, "allow explicit fixed-recipe local assembly and reviewed preparation registry reload; no SSH or activation")
 	nativePlanning := flag.Bool("allow-native-discovery-planning", false, "allow separately approved SSH discovery and saved native resource configuration; no activation")
+	nativeAssets := flag.Bool("allow-native-asset-staging", false, "allow separately approved runtime asset transfer for exact existing native preparation targets; never activation")
 	nativePreparation := flag.Bool("allow-native-owner-preparation", false, "allow separately approved private configuration transfer and disabled owner preparation; never activation")
 	firstboot := flag.Bool("allow-isolated-inventory-firstboot", false, "allow separately approved full-admin first-time isolated listener installation; changes host account, service and owned firewall")
 	bootstrap := flag.Bool("allow-prepared-host-bootstrap", false, "allow separately authorized installation on deployment-approved prepared hosts; no account creation or sshd changes")
@@ -495,6 +496,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableNativePreparation = true
+	}
+	if *nativeAssets {
+		if config.Admin == nil || (!*nativePreparation && !*nativeRegistration) {
+			fmt.Fprintln(os.Stderr, "native asset staging requires existing native preparation or registration configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativeAssets = true
 	}
 	if *firstboot {
 		if config.Admin == nil {

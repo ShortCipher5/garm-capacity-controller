@@ -89,6 +89,8 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	nativeAssets                map[string]NativeAssetsTarget
+	nativeAssetsHash            [32]byte
 	nativeRetirement            *nativecontroller.RetirementService
 	demandObserver              *demandobserver.Service
 	jobObserver                 JobObserverStatusSource
@@ -219,6 +221,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/native-assembly" {
 		h.serveNativeAssembly(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-assets" {
+		h.serveNativeAssets(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/native-preparation" {

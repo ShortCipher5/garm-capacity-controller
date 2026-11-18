@@ -242,6 +242,13 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
+	if a.EnableNativeAssets {
+		_, _, closeAssets, e := loadNativeAssets(a)
+		closeAssets()
+		if e != nil {
+			return fail()
+		}
+	}
 	if a.EnableNativePreparation {
 		_, token, closePreparation, e := loadNativePreparation(a)
 		closePreparation()

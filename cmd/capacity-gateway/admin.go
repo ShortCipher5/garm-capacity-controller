@@ -23,6 +23,8 @@ import (
 )
 
 type adminConfiguration struct {
+	NativeAssets                *nativeAssetsConfiguration `json:"native_assets,omitempty"`
+	EnableNativeAssets          bool                       `json:"-"`
 	demandObserverRuntime       *demandobserver.Service
 	nativeRetirementRuntime     *nativecontroller.RetirementService
 	jobObserverRuntime          *jobobserver.Service
@@ -360,6 +362,20 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		}
 		old := cleanup
 		cleanup = func() { handler.CloseNativePreparation(); old() }
+	}
+	if config.EnableNativeAssets {
+		targets, token, closeAssets, e := loadNativeAssets(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativeAssets(targets, token); e != nil {
+			closeAssets()
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { closeAssets(); old() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil
