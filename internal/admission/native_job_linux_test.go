@@ -24,7 +24,8 @@ import (
 	"time"
 )
 
-const nativeFenceDowngradeSQL = `DROP TABLE native_root_fences; DELETE FROM audit WHERE kind='schema_migrated_v24';`
+const nativeRetirementDowngradeSQL = `DROP TRIGGER native_operation_not_retirement;DROP TABLE native_retirement_receipts;DROP TABLE native_retirement_claims;DROP TABLE native_retirement_intents;DELETE FROM audit WHERE kind='schema_migrated_v25';`
+const nativeFenceDowngradeSQL = nativeRetirementDowngradeSQL + `DROP TABLE native_root_fences; DELETE FROM audit WHERE kind='schema_migrated_v24';`
 const nativeJobDowngradeSQL = nativeFenceDowngradeSQL + `
 DROP TABLE native_job_observations;
 DROP TABLE native_runner_bindings;
@@ -361,6 +362,7 @@ func TestNativeJobAuthenticBindingTerminalReplayAndChargeRetention(t *testing.T)
 	if e = s.checkNativeRootFences(ctx); e != nil {
 		t.Fatal(e)
 	}
+	exerciseNativeRetirement(t, f, permit, jo, policy)
 	journal.ResourceID = "22222222-2222-4222-8222-222222222222"
 	f.setEvidence("/v1/native/executions/"+permit+"/journal", journal)
 	jo, e = nativeidentity.ObserveProtectedJournal(ctx, f.evidenceConfig, permit)
@@ -383,6 +385,12 @@ func TestNativeJobAuthenticBindingTerminalReplayAndChargeRetention(t *testing.T)
 		t.Fatal(e)
 	}
 	defer reopened.Close()
+	if _, _, e = reopened.LookupNativeRetirement(ctx, permit); e != nil {
+		t.Fatal("retirement lost on reopen", e)
+	}
+	if e = reopened.checkNativeRetirements(ctx); e != nil {
+		t.Fatal(e)
+	}
 	if _, e = reopened.LookupNativeRootFence(ctx, permit); e != nil {
 		t.Fatal("fence lost on reopen", e)
 	}
