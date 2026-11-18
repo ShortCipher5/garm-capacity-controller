@@ -1,14 +1,16 @@
+import {BrokerStatus} from "./broker-status.jsx";
 import React, { useEffect, useRef, useState } from 'react';
 import { saveBrokerPolicy, validateBrokerSaveInput } from './broker-policy-client.js';
 export function BrokerPolicy({ readPolicy }) {
+  const [comparisonStale,setComparisonStale]=useState(false);
   const [view,setView]=useState(null), [message,setMessage]=useState(''), [busy,setBusy]=useState(false), [blocked,setBlocked]=useState(true);
   const active=useRef(null), alive=useRef(true), token=useRef(null);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;active.current?.abort();if(token.current)token.current.value='';};},[]);
   async function load(){
     if(active.current || !readPolicy)return;
-    const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);setMessage('');
-    try { const next=await readPolicy();if(alive.current&&!controller.signal.aborted){setView(next);setBlocked(false);} }
-    catch(e){if(alive.current)setMessage(e.message);}
+    const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);setComparisonStale(true);setMessage('');
+    try { const next=await readPolicy();if(alive.current&&!controller.signal.aborted){setView(next);setComparisonStale(false);setBlocked(false);} }
+    catch(e){if(alive.current){setMessage(e.message);setComparisonStale(true);}}
     finally{active.current=null;if(alive.current)setBusy(false);}
   }
   useEffect(()=>{void load();},[]);
@@ -21,17 +23,18 @@ export function BrokerPolicy({ readPolicy }) {
     // Proven pre-dispatch failures must not discard or lock an editable draft.
     try { validateBrokerSaveInput(credential, view.policy); }
     catch (error) { setMessage(error.message); if (token.current) token.current.value = ''; return; }
-    const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);
+    const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);setComparisonStale(true);
     const timer=setTimeout(()=>controller.abort(),15000);
     try{await saveBrokerPolicy(credential,view.policy,{signal:controller.signal});if(alive.current)setMessage('Advisory policy saved. No GARM settings, grants or runners changed. Reload before further edits.');}
-    catch(e){if(alive.current)setMessage(e.message);}
+    catch(e){if(alive.current){setMessage(e.message);setComparisonStale(true);}}
     finally{clearTimeout(timer);active.current=null;if(token.current)token.current.value='';if(alive.current)setBusy(false);}
   }
   return <section id="broker-policy"><h2>Repository capacity policy</h2><div className="card">
-    <p>Advisory configuration only. Not connected to allocation or GARM writes. Saving does not enroll pools, reserve capacity, drain runners or change existing charges.</p>
+    <p>Saved allocation inputs, not an activation switch. The grant planner consumes saved policy only when its separate runtime prerequisites permit. Saving alone does not enroll pools, reserve capacity, drain runners or change existing charges.</p>
     <p>Equal fairness uses weight 1. Caps are ceilings, not guarantees; zero means no new capacity. Warm idle is a soft spare-runner target per pool. Pool ownership is not yet verified here.</p>
     <button type="button" disabled={busy||!readPolicy} onClick={load}>Reload policy (discard edits)</button>
     {message&&<p role="status">{message}</p>}
+    {view&&<BrokerStatus status={view.status} stale={comparisonStale} />}
     {view&&<form onSubmit={save}><p>Revision {view.policy.revision}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
       {view.policy.repositories.map((r,i)=><div className="card" key={i}>
         <label>GARM repository UUID<input required value={r.id} onChange={e=>repo(i,'id',e.target.value)}/></label>
