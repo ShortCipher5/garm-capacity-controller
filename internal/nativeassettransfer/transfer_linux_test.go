@@ -321,14 +321,15 @@ func TestLostAcknowledgmentRestartRecoversByReadOnlyInspect(t *testing.T) {
 func TestContextCancellationRetainsIntent(t *testing.T) {
 	b, target, key, journal := fixture(t)
 	var calls atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
 		calls.Add(1)
+		cancel()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 	p, _ := b.Plan(target)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
 	if _, e := b.runDial(ctx, p, Digest(p), key, journal, false, dial); e == nil {
 		t.Fatal("canceled accepted")
 	}
