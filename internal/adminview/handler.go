@@ -80,32 +80,33 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
-	brokerProfiles  map[string]BrokerProfileRecipe
-	allocatorStatus AllocatorStatusSource
-	rotation        *firstboot.ManagedRotationService
-	rotationHash    [32]byte
-	firstboot       *firstboot.Service
-	firstbootHash   [32]byte
-	bootstrap       *hostbootstrap.Service
-	bootstrapHash   [32]byte
-	sshTargets      *sshinventory.Registry
-	sshTargetsHash  [32]byte
-	sshInventory    *sshinventory.Service
-	sshHash         [32]byte
-	onboarding      *onboarding.Manager
-	onboardingProbe bool
-	onboardingHash  [32]byte
-	store           *admission.SQLiteStore
-	tokenHash       [32]byte
-	writeHash       [32]byte
-	management      bool
-	garm            GarmManager
-	garmWrites      bool
-	remoteFlight    chan struct{}
-	assets          *os.Root
-	provision       bool
-	inFlight        chan struct{}
-	Audit           func(string)
+	nativeEnrollments map[string]frozenNativeRecipe
+	brokerProfiles    map[string]BrokerProfileRecipe
+	allocatorStatus   AllocatorStatusSource
+	rotation          *firstboot.ManagedRotationService
+	rotationHash      [32]byte
+	firstboot         *firstboot.Service
+	firstbootHash     [32]byte
+	bootstrap         *hostbootstrap.Service
+	bootstrapHash     [32]byte
+	sshTargets        *sshinventory.Registry
+	sshTargetsHash    [32]byte
+	sshInventory      *sshinventory.Service
+	sshHash           [32]byte
+	onboarding        *onboarding.Manager
+	onboardingProbe   bool
+	onboardingHash    [32]byte
+	store             *admission.SQLiteStore
+	tokenHash         [32]byte
+	writeHash         [32]byte
+	management        bool
+	garm              GarmManager
+	garmWrites        bool
+	remoteFlight      chan struct{}
+	assets            *os.Root
+	provision         bool
+	inFlight          chan struct{}
+	Audit             func(string)
 }
 
 // Token is 32 random bytes encoded as 64 lowercase hexadecimal characters and
@@ -191,6 +192,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/garm" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/garm/") {
 		h.serveGarm(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-enrollment" {
+		h.serveNativeEnrollment(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/broker-profiles" {
