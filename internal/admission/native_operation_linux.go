@@ -431,6 +431,9 @@ func (s *SQLiteStore) ClaimNativeStart(ctx context.Context, owner NativeOwnerAut
 		if !nativeEvidenceFresh(tx, quota.ObservedAt, s.now()) {
 			return ErrNativeOperation
 		}
+		if e = requireNativeBootstrap(tx, permitID, s.now()); e != nil {
+			return e
+		}
 		out, e = insertNativeOperationIntent(tx, permitID, envelopeDigest, parentClaimID, NativeStart, nativeidentity.NativeStartDigest(), s.now().UTC())
 		return e
 	})

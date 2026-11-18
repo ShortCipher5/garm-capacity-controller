@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const nativeOperationDowngradeSQL = `
+const nativeOperationDowngradeSQL = nativeBootstrapDowngradeSQL + `
 DROP TRIGGER native_steps_outcome;
 DROP TABLE native_operation_quotas;
 DROP TABLE native_operation_receipts;
@@ -82,12 +82,12 @@ const nativeStartOp = "22222222-2222-4222-8222-222222222222"
 const nativeResource = "33333333-3333-4333-8333-333333333333"
 
 func TestNativeSuboperationsRequireCreateQuotaStartAndNeverReturnSecondClaim(t *testing.T) {
-	f := nativeExecutionFixture(t)
+	f, protectedPolicy, protectedData := protectedNativeFixture(t, "step-sequence")
 	s := f.store
 	ctx := context.Background()
 	p, b := nativeStepPlan(t, f, "step-sequence")
 	_, e := s.ExecuteStockProviderDispatch(ctx, p, b, stockAuthority(), stockDigest(), func(ctx context.Context, d DispatchPermit) (DispatchReceipt, error) {
-		envelope, digest := nativeEnvelope(t, f, d)
+		envelope, digest := protectedEnvelope(t, f, d, protectedPolicy, protectedData)
 		parent, e := s.ConsumeNativeExecution(ctx, f.owner, d.ID(), digest)
 		if e != nil {
 			t.Fatal(e)
@@ -132,6 +132,7 @@ func TestNativeSuboperationsRequireCreateQuotaStartAndNeverReturnSecondClaim(t *
 		if e := s.RecordDispatchOutcome(ctx, d, DispatchReceipt{State: "confirmed", OperationID: nativeCreateOp, ResourceID: nativeResource}); e == nil {
 			t.Fatal("stopped create was mistaken for started runner")
 		}
+		bootstrapProof(t, f, envelope, protectedPolicy, protectedData)
 		start, e := s.ClaimNativeStart(ctx, f.owner, d.ID(), digest, parent.ClaimID)
 		if e != nil {
 			t.Fatal(e)
