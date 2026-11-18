@@ -431,7 +431,7 @@ func (s *SQLiteStore) RetireUnusedBrokerGrant(ctx context.Context, id string, ex
 	})
 }
 
-func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, now time.Time) (BrokerGrant, error) {
+func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, now time.Time, config Config, allocated Allocations) (BrokerGrant, error) {
 	all, e := sqliteBrokerGrants(tx)
 	if e != nil {
 		return BrokerGrant{}, e
@@ -440,9 +440,22 @@ func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, 
 		if g.State != "unused" || !g.Spec.ExpiresAt.After(now) || !grantProfileMatches(g.Spec, r, a) {
 			continue
 		}
+		host, hostOK := config.Hosts[g.Spec.Host]
+		pool, poolOK := config.Pools[r.Pool]
+		// Redemption replaces an equal charge; it cannot evade reduced budgets.
+		if !hostOK || !poolOK || host.Mode != "enabled" || !host.Healthy || !contains(pool.Hosts, g.Spec.Host) || !fits(allocated.Global, Resources{}, config.Global) || !fits(allocated.Pools[r.Pool], Resources{}, pool.Budget) || !fits(allocated.Hosts[g.Spec.Host], Resources{}, host.Budget) {
+			continue
+		}
 		var sequence int64
-		if tx.QueryRow("SELECT bound_sequence FROM host_bindings WHERE host=?", g.Spec.Host).Scan(&sequence) != nil || sequence != g.Spec.HostBindingSequence {
-			return BrokerGrant{}, ErrBrokerGrant
+		err := tx.QueryRow("SELECT bound_sequence FROM host_bindings WHERE host=?", g.Spec.Host).Scan(&sequence)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return BrokerGrant{}, err
+		}
+		if sequence != g.Spec.HostBindingSequence {
+			continue
 		}
 		return g, nil
 	}

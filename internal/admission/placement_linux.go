@@ -192,7 +192,7 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 
 		var stockGrant *BrokerGrant
 		if stock != nil {
-			selectedGrant, err := selectStockGrant(tx, request, stock.Authority, now)
+			selectedGrant, err := selectStockGrant(tx, request, stock.Authority, now, config, allocated)
 			if err != nil {
 				return deny("placement_denied_broker_grant", err)
 			}
