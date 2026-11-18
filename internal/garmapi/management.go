@@ -52,6 +52,7 @@ type ManagementConfig struct {
 }
 
 type ManagementClient struct {
+	managedIdentity      string
 	client               *Client
 	base                 string
 	pools                map[string]bool
