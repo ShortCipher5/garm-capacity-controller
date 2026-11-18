@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
@@ -152,5 +154,79 @@ func TestOnboardingConfiguredServerPinAllowsOnlyReviewedKey(t *testing.T) {
 	if _, close, err := newOnboardingControl(config, managementStore(t)); err == nil {
 		close()
 		t.Fatal("runtime accepted malformed pin")
+	}
+}
+
+func TestDynamicConfiguredConnectionWorksOnlyAfterReview(t *testing.T) {
+	fixture := testsupport.Identity(t, "disposable-dynamic-daemon")
+	raw, err := os.ReadFile(fixture.Configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transport struct {
+		Endpoint string               `json:"endpoint"`
+		TLS      securefiles.TLSFiles `json:"tls"`
+	}
+	if json.Unmarshal(raw, &transport) != nil {
+		t.Fatal("fixture config")
+	}
+	identity, err := fixture.Client.PhysicalIdentity(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &adminConfiguration{IncusOnboarding: &onboardingConfiguration{Targets: map[string]onboardingProfileConfiguration{"approved-target": {Endpoint: transport.Endpoint, Project: "runners", TLS: transport.TLS}}}, EnableExperimentalOnboardingProbes: true}
+	store := managementStore(t)
+	manager, close, err := newOnboardingControl(config, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close()
+	service := manager.Connections()
+	c, err := service.Put(context.Background(), admission.Connection{ID: "dynamic", CredentialRef: "approved-target", Endpoint: transport.Endpoint, Project: "runners", ServerKeySHA256: identity.ServerKeyFingerprint()}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := onboarding.Request{RequestID: "11111111-1111-4111-8111-111111111111", ProfileID: "dynamic", Reason: "reviewed fixture"}
+	if _, err = manager.Discover(context.Background(), req); err != onboarding.ErrDenied {
+		t.Fatal("draft reached transport")
+	}
+	c, err = service.Transition(context.Background(), c.ID, c.Revision, "approved", c.ServerKeySHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Discover(context.Background(), req)
+	if err != nil || !result.Identity.ObservationAvailable || result.ConnectionRevision != c.Revision {
+		t.Fatal("dynamic discovery unavailable", result, err)
+	}
+	if _, err = service.Transition(context.Background(), c.ID, c.Revision, "revoked", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.Discover(context.Background(), req); err != onboarding.ErrDenied {
+		t.Fatal("revoked connection reached transport")
+	}
+}
+
+func TestRemovingAllDynamicTargetsInvalidatesExistingReviews(t *testing.T) {
+	store := managementStore(t)
+	ctx := context.Background()
+	c, err := store.PutConnection(ctx, admission.Connection{ID: "removed", CredentialRef: "alias", Endpoint: "https://192.0.2.10:8443", Project: "runners", ServerKeySHA256: strings.Repeat("a", 64)}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = store.TransitionConnection(ctx, c.ID, c.Revision, "approved", c.ServerKeySHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := store.RecordConnectionDiscoveryReview(ctx, "11111111-1111-4111-8111-111111111111", c.ID, time.Now().UTC(), []byte(`{}`), nil, c.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, close, err := newOnboardingControl(nil, store); err != nil {
+		t.Fatal(err)
+	} else {
+		close()
+	}
+	if err = store.EnrollHostFromReview(ctx, "must-not-enroll", admission.Resources{CPU: 1, RAM: 1}, "disabled", review); err != admission.ErrConflict {
+		t.Fatal("removed runtime policy left review current", err)
 	}
 }

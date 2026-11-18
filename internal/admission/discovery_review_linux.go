@@ -30,6 +30,12 @@ type DiscoveryReview struct {
 // reviews. A new discovery supersedes earlier reviews for that profile, even if
 // incomplete. Only trusted server discovery callers may supply this record.
 func (s *SQLiteStore) RecordDiscoveryReview(ctx context.Context, id, profile string, observedAt time.Time, snapshot []byte, detected *Resources) (DiscoveryReview, error) {
+	return s.RecordConnectionDiscoveryReview(ctx, id, profile, observedAt, snapshot, detected, 0)
+}
+
+// RecordConnectionDiscoveryReview rejects observations that completed after a
+// connection revision/revocation. The check and review persistence are atomic.
+func (s *SQLiteStore) RecordConnectionDiscoveryReview(ctx context.Context, id, profile string, observedAt time.Time, snapshot []byte, detected *Resources, connectionRevision int64) (DiscoveryReview, error) {
 	review := DiscoveryReview{ID: id, Profile: profile}
 	if !ValidOnboardingRequestID(id) || !ValidOnboardingProfileID(profile) || observedAt.IsZero() || len(snapshot) == 0 || len(snapshot) > 2<<20 || !json.Valid(snapshot) {
 		return review, ErrDenied
@@ -44,6 +50,17 @@ func (s *SQLiteStore) RecordDiscoveryReview(ctx context.Context, id, profile str
 		totals, _ = json.Marshal(detected)
 	}
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
+		var connection Connection
+		connectionErr := readConnection(tx, profile, &connection)
+		if connectionRevision > 0 {
+			if connectionErr != nil || connection.State != "approved" || connection.Revision != connectionRevision {
+				return ErrConflict
+			}
+		} else if connectionErr == nil {
+			return ErrConflict
+		} else if connectionErr != ErrDenied {
+			return connectionErr
+		}
 		config, _, _, _, err := sqliteMetadata(tx)
 		if err != nil {
 			return err

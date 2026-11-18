@@ -1,3 +1,4 @@
+import { ConnectionManager } from "./connections.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
 import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS } from "./host-budget.js";
@@ -273,9 +274,10 @@ export function Servers({ data, readOnboarding, readUsage, refresh }) {
         <h2>Servers <small>{data.hosts.length}</small></h2>
         <span className="muted">Detected physical totals, measured utilization and explicit enrollment</span>
       </div>
+      {data.management_enabled && <ConnectionManager onChanged={()=>{setResults({});setEnrolling("");setProfiles(null)}} />}
       <div className="card management" id="server-discovery">
         <h2>Server discovery</h2>
-        <p>Read-only discovery runs against allowlisted onboarding profiles. It suggests a budget but never applies one: enrollment below is the only write, and it stays disabled or draining.</p>
+        <p>Read-only discovery runs against allowlisted onboarding profiles. It suggests a budget but never applies one: discovery never applies configuration. Explicit enrollment stays disabled or draining.</p>
         <p className="drain-warning">No discovery observation is physical-hardware, whole-project, parent-quota or capacity qualification.</p>
         {!profiles ? (
           <button className="quiet" type="button" disabled={busy} onClick={loadProfiles}>{busy ? "Working…" : "Load discovery profiles"}</button>

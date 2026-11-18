@@ -33,7 +33,7 @@ type SQLiteStore struct {
 	runtimeFile os.FileInfo
 }
 
-const sqliteCurrentVersion = 13
+const sqliteCurrentVersion = 14
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -294,6 +294,15 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 14 {
+			if _, err := tx.Exec(sqliteConnectionsSchema); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v14", "", s.now()); err != nil {
+				return err
+			}
+		}
+
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})

@@ -48,6 +48,10 @@ func (h *Handler) serveOnboarding(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusNotFound, "onboarding preflight unavailable")
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/onboarding/connections" {
+		h.serveConnections(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/onboarding" {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -60,6 +64,14 @@ func (h *Handler) serveOnboarding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view := h.onboarding.Discovery()
+		if service := h.onboarding.Connections(); service != nil {
+			profiles, err := service.ApprovedProfiles(r.Context())
+			if err != nil {
+				fail(http.StatusServiceUnavailable, "connection profiles unavailable")
+				return
+			}
+			view.Profiles = append(view.Profiles, profiles...)
+		}
 		view.ProbeEnabled = h.onboardingProbe && h.onboarding.ProbeEnabled()
 		_ = json.NewEncoder(w).Encode(view)
 		return
@@ -207,7 +219,7 @@ func (h *Handler) serveOnboardingProfileDiscovery(w http.ResponseWriter, r *http
 			fail(http.StatusServiceUnavailable, "discovery review unavailable")
 			return
 		}
-		review, recordErr := h.store.RecordDiscoveryReview(r.Context(), requestID, parts[0], result.ObservedAt, snapshot, detected)
+		review, recordErr := h.store.RecordConnectionDiscoveryReview(r.Context(), requestID, parts[0], result.ObservedAt, snapshot, detected, result.ConnectionRevision)
 		if recordErr != nil {
 			fail(http.StatusServiceUnavailable, "discovery review unavailable; no enrollment performed")
 			return

@@ -236,8 +236,22 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return fail()
 	}
 	if a.IncusOnboarding != nil {
-		if len(a.IncusOnboarding.Profiles) == 0 || len(a.IncusOnboarding.Profiles) > 32 {
+		if (len(a.IncusOnboarding.Profiles) == 0 && len(a.IncusOnboarding.Targets) == 0) || len(a.IncusOnboarding.Profiles) > 32 || len(a.IncusOnboarding.Targets) > 32 {
 			return fail()
+		}
+		for id, p := range a.IncusOnboarding.Targets {
+			if !admission.ValidOnboardingProfileID(id) || !admission.ValidConnectionEndpoint(p.Endpoint) {
+				return fail()
+			}
+			trust, e := onboardingTLS(p)
+			if e != nil {
+				return fail()
+			}
+			ic, e := incusapi.New(p.Endpoint, p.Project, trust)
+			if e != nil {
+				return fail()
+			}
+			ic.Close()
 		}
 		for id, p := range a.IncusOnboarding.Profiles {
 			if !admission.ValidOnboardingProfileID(id) {
