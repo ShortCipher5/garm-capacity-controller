@@ -17,6 +17,16 @@ export function validateNativeAssemblyReport(value, target, selectionDigest) {
   };
 }
 
+export function validateNativeRecoveryStatus(value,target,selectionDigest) {
+  if(!hash(target?.binding?.preparation_id)||typeof target?.target_id!=='string'||!value||value?.target_id!==target?.target_id||value?.preparation_id!==target?.binding?.preparation_id||value?.selection_digest!==selectionDigest||!hash(selectionDigest)||value?.activation_authorized!==false||typeof value?.partial_output_present!=='boolean'||!['never_attempted','assembly_unknown','completed_bundle'].includes(value?.state))throw Error('Local recovery response does not match the selected configuration. Status remains unavailable; no retry is authorized.');
+  if(value.state==='completed_bundle'){
+    if(value.partial_output_present)throw Error('Inconsistent completed bundle status. Load local recovery status again.');
+    return {target_id:value.target_id,preparation_id:value.preparation_id,selection_digest:value.selection_digest,state:value.state,partial_output_present:false,activation_authorized:false,assembly:validateNativeAssemblyReport(value.assembly,target,selectionDigest)};
+  }
+  if(value.assembly!==undefined||(value.state==='never_attempted'&&value.partial_output_present))throw Error('Inconsistent local recovery status. Do not infer that no attempt occurred.');
+  return {target_id:value.target_id,preparation_id:value.preparation_id,selection_digest:value.selection_digest,state:value.state,partial_output_present:value.partial_output_present,activation_authorized:false};
+}
+
 import {validatePreparationView} from './native-preparation-client.js';
 async function expectedHostFingerprint(target) {
   try {
@@ -38,7 +48,7 @@ export async function nativeAssemblyRequest(token,action,target,selection,curren
   const selectionDigest=selection.selection_digest;
   let body=null;
   if(action){
-    if(!['build','inspect','reload'].includes(action))throw Error('Unsupported assembly action.');
+    if(!['build','inspect','reload','status'].includes(action))throw Error('Unsupported assembly action.');
     body={action,target_id:target.target_id,selection_digest:selectionDigest};
     if(action==='build'){
       if(!current||current.state.status!=='not_started'||!Number.isFinite(Date.parse(selection.selection.expires_at))||Date.parse(selection.selection.expires_at)<=Date.now()||!Number.isFinite(Date.parse(selection.selection.saved_at))||Date.parse(selection.selection.saved_at)>Date.now())throw Error('A fresh saved selection and unconsumed registered preparation are required.');
@@ -59,6 +69,7 @@ export async function nativeAssemblyRequest(token,action,target,selection,curren
   let value;try{value=await response.json();}catch{throw Error('Assembly response unreadable. Outcome may be uncertain; inspect the exact assembly and load the current registry rather than repeating a write.');}
   if(!action){const found=validatePreparationView(value).targets.find(v=>v.target_id===target.target_id);if(!found)throw Error('This target has no configured assembly recipe.');return matchPreparation(found,target);}
   if(value.target_id!==target.target_id)throw Error('Assembly response target mismatched; outcome uncertain.');
+  if(action==='status')return validateNativeRecoveryStatus(value.recovery,target,selectionDigest);
   const report=validateNativeAssemblyReport(value.assembly,target,selectionDigest);
   if(action!=='reload')return report;
   const view=await matchPreparation(validatePreparationView({targets:[value.preparation]}).targets[0],target);

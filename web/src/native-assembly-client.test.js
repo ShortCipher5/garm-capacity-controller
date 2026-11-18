@@ -36,3 +36,16 @@ test('uncertain build or registry reload never retries and inspection is explici
  for(const action of ['build','reload']){let count=0;await assert.rejects(nativeAssemblyRequest(token,action,paired,saved,current,report,{fetcher:async()=>{count++;throw Error('lost response');}}),/uncertain/);assert.equal(count,1);}
  await nativeAssemblyRequest(token,'inspect',paired,saved,null,null,{fetcher:async(_,o)=>{assert.deepEqual(JSON.parse(o.body),{action:'inspect',target_id:'server',selection_digest:selection});return{status:200,json:async()=>({target_id:'server',assembly:report})};}});
 });
+
+import {validateNativeRecoveryStatus} from './native-assembly-client.js';
+const recovery={target_id:'server',preparation_id:hash,selection_digest:selection,state:'never_attempted',partial_output_present:false,activation_authorized:false};
+test('recovery statuses distinguish actual no-attempt from unknown and verified completion',()=>{
+ assert.deepEqual(validateNativeRecoveryStatus(recovery,target,selection),recovery);
+ assert.equal(validateNativeRecoveryStatus({...recovery,state:'assembly_unknown',partial_output_present:true},target,selection).state,'assembly_unknown');
+ assert.deepEqual(validateNativeRecoveryStatus({...recovery,state:'completed_bundle',assembly:report,internal_path:'/not-exposed'},target,selection),{...recovery,state:'completed_bundle',assembly:report});
+ for(const patch of [{state:'running'},{target_id:'other'},{selection_digest:hash},{activation_authorized:true},{partial_output_present:true},{assembly:report},{state:'completed_bundle'},{state:'completed_bundle',assembly:report,partial_output_present:true}])assert.throws(()=>validateNativeRecoveryStatus({...recovery,...patch},target,selection));
+});
+test('status reads send only fixed IDs and unavailable never becomes never attempted',async()=>{
+ let calls=0;const got=await nativeAssemblyRequest(token,'status',paired,saved,null,null,{fetcher:async(_,o)=>{calls++;assert.deepEqual(JSON.parse(o.body),{action:'status',target_id:'server',selection_digest:selection});return{status:200,json:async()=>({target_id:'server',recovery})};}});assert.equal(got.state,'never_attempted');
+ await assert.rejects(nativeAssemblyRequest(token,'status',paired,saved,null,null,{fetcher:async()=>{calls++;return{status:503,json:async()=>({})};}}),/unavailable/);assert.equal(calls,2);
+});
