@@ -21,6 +21,10 @@ func main() {
 	}
 	var c nativeimage.Configuration
 	var manifest string
+	var inspectDirectory, expectedManifest, expectedImage string
+	flag.StringVar(&inspectDirectory, "inspect-completed", "", "Read-only local completed image directory; never mount or execute")
+	flag.StringVar(&expectedManifest, "expected-manifest-sha256", "", "Independently approved manifest digest for inspection")
+	flag.StringVar(&expectedImage, "expected-image-sha256", "", "Independently approved image digest for inspection")
 	flag.StringVar(&manifest, "manifest", "", "Exact runtime inventory JSON")
 	flag.StringVar(&c.Source, "source", "", "Root-owned supplied runtime filesystem")
 	flag.StringVar(&c.Destination, "destination", "", "New exclusive output directory")
@@ -30,6 +34,21 @@ func main() {
 	flag.StringVar(&c.HelperSHA256, "helper-sha256", "", "Image helper SHA256")
 	flag.Parse()
 	if flag.NArg() != 0 {
+		os.Exit(2)
+	}
+	if inspectDirectory != "" {
+		if manifest != "" || c != (nativeimage.Configuration{}) {
+			os.Exit(2)
+		}
+		result, e := nativeimage.InspectCompleted(context.Background(), inspectDirectory, expectedManifest, expectedImage)
+		if e != nil {
+			fmt.Fprintln(os.Stderr, nativeimage.ErrImage)
+			os.Exit(1)
+		}
+		json.NewEncoder(os.Stdout).Encode(result)
+		return
+	}
+	if expectedManifest != "" || expectedImage != "" {
 		os.Exit(2)
 	}
 	f, e := os.Open(manifest)

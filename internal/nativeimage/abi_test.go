@@ -66,3 +66,108 @@ func TestReadRealELFVersionTable(t *testing.T) {
 		t.Fatal("plaintext")
 	}
 }
+
+func TestVersionLabelWithoutRequiredSymbolRejected(t *testing.T) {
+	m := fixture()
+	m.Files["usr/lib/libc.so.6"] = File{strings.Repeat("c", 64), 0444}
+	consumer := elfVersions{needed: map[string][]string{"libc.so.6": {"GLIBC_2.43"}}, imports: map[string][]versionedSymbol{"libc.so.6": {{"required_call", "GLIBC_2.43", elf.STT_FUNC}}}}
+	provider := elfVersions{defined: map[string]bool{"GLIBC_2.43": true}, exports: map[string]map[string]elf.SymType{"GLIBC_2.43": {"another_call": elf.STT_FUNC}}}
+	actual := map[string]elfVersions{"usr/lib/liblxc.so.1": consumer, "usr/lib/libc.so.6": provider}
+	if versionsSatisfied(m, actual) {
+		t.Fatal("version label accepted without imported symbol")
+	}
+	provider.exports["GLIBC_2.43"]["required_call"] = elf.STT_OBJECT
+	if versionsSatisfied(m, actual) {
+		t.Fatal("data object accepted for function")
+	}
+	provider.exports["GLIBC_2.43"]["required_call"] = elf.STT_GNU_IFUNC
+	if !versionsSatisfied(m, actual) {
+		t.Fatal("GNU indirect function rejected")
+	}
+	delete(provider.exports["GLIBC_2.43"], "required_call")
+	provider.exports["GLIBC_2.42"] = map[string]elf.SymType{"required_call": elf.STT_FUNC}
+	if versionsSatisfied(m, actual) {
+		t.Fatal("wrong symbol version accepted")
+	}
+}
+func TestRealELFVersionedImportExtraction(t *testing.T) {
+	raw := versionELFFixture()
+	order := binary.LittleEndian
+	// The second dynamic symbol is at the declared DYNSYM offset + one null entry.
+	symOffset := order.Uint64(raw[64+2*64+24:]) + 24
+	stringsOffset := order.Uint64(raw[64+1*64+24:])
+	name := bytes.Index(raw[stringsOffset:], []byte("foo\x00"))
+	order.PutUint32(raw[symOffset:], uint32(name))
+	raw[symOffset+4] = byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC)
+	v, e := readVersions(bytes.NewReader(raw))
+	if e != nil {
+		t.Fatal(e)
+	}
+	got := v.imports["libc.so.6"]
+	if len(got) != 1 || got[0].name != "foo" || got[0].version != "GLIBC_2.43" || got[0].kind != elf.STT_FUNC {
+		t.Fatalf("%+v", got)
+	}
+	raw[symOffset+4] = byte(elf.STB_WEAK)<<4 | byte(elf.STT_FUNC)
+	v, e = readVersions(bytes.NewReader(raw))
+	if e != nil || len(v.imports) != 0 {
+		t.Fatal("weak optional import became mandatory", e, v)
+	}
+}
+
+func TestRealELFVersionedExportVisibility(t *testing.T) {
+	raw := versionELFFixture()
+	o := binary.LittleEndian
+	sym := o.Uint64(raw[64+2*64+24:]) + 24
+	str := o.Uint64(raw[64+1*64+24:])
+	o.PutUint32(raw[sym:], uint32(bytes.Index(raw[str:], []byte("foo\x00"))))
+	raw[sym+4] = byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC)
+	o.PutUint16(raw[sym+6:], 1)
+	section := 64 + 4*64
+	off := o.Uint64(raw[section+24:])
+	o.PutUint32(raw[section+4:], uint32(elf.SHT_GNU_VERDEF))
+	clear(raw[off:])
+	o.PutUint16(raw[off:], 1)
+	o.PutUint16(raw[off+4:], 2)
+	o.PutUint16(raw[off+6:], 1)
+	o.PutUint32(raw[off+12:], 20)
+	o.PutUint32(raw[off+20:], 11)
+	v, e := readVersions(bytes.NewReader(raw))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if k, ok := v.exports["GLIBC_2.43"]["foo"]; !ok || k != elf.STT_FUNC {
+		t.Fatal(v)
+	}
+	raw[sym+5] = byte(elf.STV_HIDDEN)
+	v, e = readVersions(bytes.NewReader(raw))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, ok := v.exports["GLIBC_2.43"]["foo"]; ok {
+		t.Fatal("hidden export accepted")
+	}
+}
+
+func TestMalformedGNUIndicesCannotHideRequiredImport(t *testing.T) {
+	for _, mode := range []string{"unknown-index", "truncated-table", "odd-table", "missing-table", "missing-dynsym"} {
+		raw := versionELFFixture()
+		o := binary.LittleEndian
+		section := 64 + 3*64
+		off := o.Uint64(raw[section+24:])
+		switch mode {
+		case "unknown-index":
+			o.PutUint16(raw[off+2:], 99)
+		case "truncated-table":
+			o.PutUint64(raw[section+32:], 2)
+		case "odd-table":
+			o.PutUint64(raw[section+32:], 3)
+		case "missing-table":
+			o.PutUint32(raw[section+4:], uint32(elf.SHT_PROGBITS))
+		case "missing-dynsym":
+			o.PutUint32(raw[64+2*64+4:], uint32(elf.SHT_PROGBITS))
+		}
+		if _, e := readVersions(bytes.NewReader(raw)); e == nil {
+			t.Fatal("malformed GNU metadata accepted", mode)
+		}
+	}
+}

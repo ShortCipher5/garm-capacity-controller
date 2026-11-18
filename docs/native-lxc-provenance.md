@@ -75,3 +75,18 @@ hash-verified ELF against version definitions in every inventoried loader
 candidate for the named dependency. Missing GLIBC_2.43 or an ambiguous older
 libc candidate is refused before image construction. This is declared-version
 closure, not a substitute for actual symbol binding, execution or ABI tests.
+
+## Declared versioned symbol contract
+
+Image inventory now checks each mandatory GLOBAL versioned dynamic import
+against every possible inventoried candidate of its declared provider library.
+A matching GNU version label alone no longer passes if the actual symbol is
+missing, hidden, wrong-version or incompatible in ELF symbol type. GNU indirect
+functions can satisfy function imports; optional weak imports are not mandatory.
+The parser reads the same hash-verified descriptors as the inventory.
+
+This is not a full dynamic linker or ABI guarantee: unversioned lookup, symbol
+interposition, runtime-loaded plugins, calling conventions and actual Incus/LXC
+behavior still require a qualified runtime image. No production gate is opened.
+Synthetic actual ELF tables cover import extraction and export visibility; no
+artifact is executed by this validation.

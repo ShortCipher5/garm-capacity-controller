@@ -6,11 +6,19 @@ import (
 )
 
 // elfVersions is sampled from the same hash-verified ELF descriptor as the
-// ordinary inventory. This verifies declared GNU version requirements only,
-// not loader execution, symbol semantics or complete application ABI behavior.
+// ordinary inventory. This verifies declared GNU versions and mandatory
+// versioned symbol names/types, not unversioned lookup/interposition, loader
+// execution, symbol semantics or complete application ABI behavior.
 type elfVersions struct {
 	defined map[string]bool
 	needed  map[string][]string
+	imports map[string][]versionedSymbol
+	exports map[string]map[string]elf.SymType
+}
+
+type versionedSymbol struct {
+	name, version string
+	kind          elf.SymType
 }
 
 func readVersions(r io.ReaderAt) (elfVersions, error) {
@@ -19,7 +27,10 @@ func readVersions(r io.ReaderAt) (elfVersions, error) {
 		return elfVersions{}, ErrImage
 	}
 	defer f.Close()
-	out := elfVersions{defined: map[string]bool{}, needed: map[string][]string{}}
+	if f.SectionByType(elf.SHT_DYNSYM) == nil && (f.SectionByType(elf.SHT_GNU_VERNEED) != nil || f.SectionByType(elf.SHT_GNU_VERDEF) != nil || f.SectionByType(elf.SHT_GNU_VERSYM) != nil) {
+		return elfVersions{}, ErrImage
+	}
+	out := elfVersions{defined: map[string]bool{}, needed: map[string][]string{}, imports: map[string][]versionedSymbol{}, exports: map[string]map[string]elf.SymType{}}
 	if f.SectionByType(elf.SHT_GNU_VERDEF) != nil {
 		defs, e := f.DynamicVersions()
 		if e != nil || len(defs) == 0 {
@@ -47,6 +58,63 @@ func readVersions(r io.ReaderAt) (elfVersions, error) {
 				}
 				out.needed[n.Name] = append(out.needed[n.Name], v.Dep)
 			}
+		}
+	}
+	if f.SectionByType(elf.SHT_DYNSYM) != nil {
+		symbols, err := f.DynamicSymbols()
+		if err != nil {
+			return elfVersions{}, ErrImage
+		}
+		var indices []byte
+		if table := f.SectionByType(elf.SHT_GNU_VERSYM); table != nil {
+			indices, err = table.Data()
+			// One entry per dynamic symbol, including the skipped null entry.
+			if err != nil || table.Entsize != 2 || len(indices)/2 != len(symbols)+1 || len(indices)%2 != 0 {
+				return elfVersions{}, ErrImage
+			}
+		} else if len(out.needed) != 0 {
+			return elfVersions{}, ErrImage
+		}
+		for i, sym := range symbols {
+			if indices != nil {
+				index := f.ByteOrder.Uint16(indices[2*(i+1):]) & 0x7fff
+				// debug/elf deliberately returns an empty version for an
+				// unresolved index. Do not treat malformed version metadata
+				// as an unversioned import and silently skip its contract.
+				if index > 1 && (!sym.HasVersion || sym.Version == "") {
+					return elfVersions{}, ErrImage
+				}
+			}
+			if sym.Name == "" {
+				continue
+			}
+			bind, kind := elf.ST_BIND(sym.Info), elf.ST_TYPE(sym.Info)
+			if sym.Section == elf.SHN_UNDEF {
+				// Optional weak imports may legitimately remain unresolved.
+				// Unversioned lookup/interposition needs a complete loader model.
+				if bind == elf.STB_GLOBAL && sym.Version != "" {
+					if sym.Library == "" || out.needed[sym.Library] == nil {
+						return elfVersions{}, ErrImage
+					}
+					out.imports[sym.Library] = append(out.imports[sym.Library], versionedSymbol{sym.Name, sym.Version, kind})
+				}
+				continue
+			}
+			// GNU ELF binding 10 is STB_GNU_UNIQUE (not named by debug/elf).
+			visibility := elf.ST_VISIBILITY(sym.Other)
+			if sym.Version == "" || (bind != elf.STB_GLOBAL && bind != elf.STB_WEAK && bind != elf.SymBind(10)) || (visibility != elf.STV_DEFAULT && visibility != elf.STV_PROTECTED) {
+				continue
+			}
+			if !out.defined[sym.Version] {
+				return elfVersions{}, ErrImage
+			}
+			if out.exports[sym.Version] == nil {
+				out.exports[sym.Version] = map[string]elf.SymType{}
+			}
+			if prior, exists := out.exports[sym.Version][sym.Name]; exists && prior != kind {
+				return elfVersions{}, ErrImage
+			}
+			out.exports[sym.Version][sym.Name] = kind
 		}
 	}
 	return out, nil
@@ -84,8 +152,20 @@ func versionsSatisfied(m Manifest, actual map[string]elfVersions) bool {
 						return false
 					}
 				}
+				for _, need := range v.imports[lib] {
+					kind, ok := provider.exports[need.version][need.name]
+					if !ok || !symbolTypeMatches(need.kind, kind) {
+						return false
+					}
+				}
 			}
 		}
 	}
 	return true
+}
+
+// GNU indirect functions satisfy function imports; other incompatible types
+// (notably TLS versus ordinary objects) do not. This is not a calling ABI proof.
+func symbolTypeMatches(want, have elf.SymType) bool {
+	return want == elf.STT_NOTYPE || want == have || want == elf.STT_FUNC && have == elf.STT_GNU_IFUNC
 }
