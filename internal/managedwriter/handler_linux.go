@@ -106,6 +106,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(v)
 		return
 	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/managed/pools/") && strings.HasSuffix(r.URL.Path, "/reduce-maximum") {
+		h.serveMaximumReduction(w, r)
+		return
+	}
 	const prefix = "/v1/managed/pools/"
 	const suffix = "/pause"
 	if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, suffix) {
