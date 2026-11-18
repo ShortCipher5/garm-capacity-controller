@@ -64,3 +64,23 @@ through the trusted administrator session. For revocation, remove the specific
 public-key entry remotely and separately revoke the controller's local target.
 Local target revocation alone does not remove the server-side key. Already open
 SSH sessions may finish; these are bounded read-only probes, not runner operations.
+
+## Rotate the controller's saved target permission
+
+The existing Add an SSH server configuration panel now supports **Replace saved
+ target**. Load scopes and targets, select the old target, enter a new unused
+ target ID and the replacement tuple, review its fingerprint independently, then
+ explicitly approve replacement. The new credential alias must already exist in
+ deployment-approved scopes. Private keys are never uploaded through this flow.
+
+Replacement commits the new permission, permanent old-ID tombstone, and audit
+ record in one database transaction. A failed audit rolls back the whole change.
+ An exact request retry is idempotent while the replacement remains active.
+ Old reviews and old IDs cannot reauthorize subsequent probes. Already in-flight
+ probes may finish within their timeout. Reload targets after a lost response.
+
+This rotates **local inventory permission**, not SSH keys on the server. Install
+ and verify the replacement public key through a trusted administrator first;
+ remove the old remote public key separately after successful separately
+ authorized inventory. No host is contacted by review or replacement. No physical
+ enrollment, runner configuration, allocation, or capacity release occurs.

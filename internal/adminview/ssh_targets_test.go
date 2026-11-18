@@ -125,3 +125,55 @@ func TestSSHTargetHTTPRequiresSeparateAuthorityAndExactReviewedIdentity(t *testi
 	}
 
 }
+
+func TestSSHTargetReplacementRequiresReviewedBothIdentities(t *testing.T) {
+	h, store, _ := fixture(t)
+	ctx := context.Background()
+	if e := store.InitializeSSHTargets(ctx); e != nil {
+		t.Fatal(e)
+	}
+	_, private, _ := ed25519.GenerateKey(rand.Reader)
+	key, _ := ssh.NewSignerFromKey(private)
+	c := sshinventory.Config{Address: "192.0.2.20", Port: 22, User: "inventory", CredentialRef: "key", HostKey: string(ssh.MarshalAuthorizedKey(key.PublicKey()))}
+	calls := 0
+	resolve := func(context.Context, string) (ssh.Signer, error) { calls++; return nil, sshinventory.ErrInventory }
+	registry, e := sshinventory.NewRegistry(map[string]sshinventory.Scope{"key": {Networks: []string{"192.0.2.0/24"}, Users: []string{"inventory"}, Ports: []uint16{22}}}, store, resolve, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	token := strings.Repeat("d", 64)
+	if e = h.SetSSHTargetManagement(registry, token); e != nil {
+		t.Fatal(e)
+	}
+	request := "11111111-1111-4111-8111-111111111111"
+	oldDigest := sshinventory.ReviewDigest("old", c)
+	if _, e = registry.Save(ctx, request, "old", c, oldDigest); e != nil {
+		t.Fatal(e)
+	}
+	body := map[string]any{"action": "replace", "old_target_id": "old", "old_review_digest": oldDigest, "target_id": "new", "config": c, "review_digest": sshinventory.ReviewDigest("new", c), "request_id": request, "verified_host_key": true}
+	send := func() int {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest("POST", "https://127.0.0.1/admin/api/v1/ssh-targets", strings.NewReader(string(raw)))
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if send() != 400 {
+		t.Fatal("unconfirmed replacement")
+	}
+	body["confirm_replace"] = true
+	body["old_review_digest"] = strings.Repeat("a", 64)
+	if send() != 409 {
+		t.Fatal("stale old tuple")
+	}
+	body["old_review_digest"] = oldDigest
+	if send() != 200 || send() != 200 || calls != 0 {
+		t.Fatal("replacement failed or contacted host")
+	}
+	list, e := store.ListSSHTargets(ctx)
+	if e != nil || len(list) != 1 || list["new"] != c {
+		t.Fatal(list, e)
+	}
+}
