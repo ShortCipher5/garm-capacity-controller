@@ -33,7 +33,7 @@ import (
 // producer and native coordinator are real implementations. The native owner
 // boundary is explicitly a test TLS server: no Incus, ZFS, PID1 or live runner.
 func TestOfflineManagedDemandThroughNativeCreationAndRestart(t *testing.T) {
-	for _, mode := range []string{"retire-stop-cancel-restart", "retire-success", "retire-stop-ack-lost", "retire-delete-ack-lost", "retire-stop-unknown", "retire-delete-unknown", "success", "grant-result-lost", "journal-ack-lost", "create-ack-lost", "bootstrap-ack-lost", "start-ack-lost"} {
+	for _, mode := range []string{"retire-evidence-mismatch", "retire-stop-cancel-restart", "retire-success", "retire-stop-ack-lost", "retire-delete-ack-lost", "retire-stop-unknown", "retire-delete-unknown", "success", "grant-result-lost", "journal-ack-lost", "create-ack-lost", "bootstrap-ack-lost", "start-ack-lost"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			const controller = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

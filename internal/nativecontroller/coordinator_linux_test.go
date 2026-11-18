@@ -39,12 +39,14 @@ type ownerFixture struct {
 	create, start           admission.NativeOperationClaim
 	bootstrap               admission.NativeBootstrapClaim
 	bootstrapCalls          int
+	totalCalls              int
 	createCalls, startCalls int
 }
 
 func (o *ownerFixture) serve(w http.ResponseWriter, r *http.Request) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.totalCalls++
 	if r.URL.Path == nativeidentity.Path {
 		json.NewEncoder(w).Encode(o.descriptor)
 		return
