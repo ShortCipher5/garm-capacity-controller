@@ -234,6 +234,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveNativeAssets(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/native-preparation/diagnostic" {
+		h.serveNativePreparationDiagnostic(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/native-preparation" {
 		h.serveNativePreparation(w, r)
 		return
