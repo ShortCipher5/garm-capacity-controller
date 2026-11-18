@@ -77,3 +77,33 @@ is an explicit separate topology, not transparent adoption of an arbitrary GARM
 server. Direct changes through the GARM UI are incompatible with an enforced
 single management writer; detected changes revoke inspection rather than being
 silently overwritten. No two-way synchronization is introduced by this slice.
+
+## Coherent accounting extension (protocol v2)
+
+The same authenticated snapshot now includes the saved broker policy/revision,
+reconciliation epoch, ledger readiness, global/host/pool budgets, canonical total
+allocations, unused-grant resource subtotals and per-pool unused/consumed-unreleased
+grant counts. All come from the existing single `ReadBrokerGrantState` transaction
+and carry its audit sequence. No second ledger query or caller maxima are used.
+
+Canonical allocated totals already include unused grants, unreleased physical
+reservations, unknown outcomes and inventory charges. The unused subtotal must
+not be added again. Expiry timestamps alone do not subtract unused charges;
+consumed grants are counted through their unreleased reservations. Counts are
+not idle-runner counts, eligibility, physical completion or permission to create.
+Over-budget retained allocations remain visible rather than being clamped.
+
+Dynamic accounting has a separate digest from immutable profile identity, so a
+normal grant consumption does not falsely revoke an unchanged profile mapping.
+Both digests, sequence, nonce and freshness are checked under the authenticated
+transport. Version 1 responses are refused by version 2 readers rather than
+being interpreted as zero budgets. The extension does not enable a writer or
+remove runtime authority guards.
+
+The v2 profile digest also binds the exact immutable native-domain enrollment
+records referenced by the saved profiles, including the two distinct owner
+certificate leaf fingerprints. These records are read in the same ledger
+transaction as the profiles and accounting. Missing, extra or mismatched domain
+records are refused. This is enrollment history, not a fresh native enforcement
+observation: stale host bindings remain visible rather than being promoted into
+current authority.
