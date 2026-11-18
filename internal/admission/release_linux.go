@@ -53,8 +53,8 @@ type Release struct {
 	ReleasedAt    time.Time `json:"released_at"`
 }
 
-// ReleaseEvidence bundles the authenticated confirmed-absence observation that
-// authorizes exactly one capacity release, together with the durable 'deleting'
+// ReleaseEvidence retains project-scoped observations for compatibility; these
+// do not authorize capacity release. Even with a durable 'deleting'
 // mark recorded before the destructive call. The observation can only be minted
 // by credential-verified transport reads; operator JSON or zero values never
 // validate, and the two matching project-scoped passes never become an atomic
@@ -99,7 +99,7 @@ func sqliteReleasedKeys(tx *sql.Tx) (map[string]bool, error) {
 }
 
 func validReleaseEvidence(e ReleaseEvidence, req Request) bool {
-	if !e.Absence.Valid() {
+	if !e.Absence.Valid() || len(e.Absence.Blockers()) != 0 {
 		return false
 	}
 	record := e.Absence.Record()
@@ -181,7 +181,10 @@ func (s *SQLiteStore) MarkDeleting(ctx context.Context, req Request) (Reservatio
 	return result, nil
 }
 
-// ReleaseConfirmed frees exactly one charge after confirmed absence. ONE BEGIN
+// ReleaseConfirmed currently rejects all project-only observations because their
+// safety blockers remain unresolved. The dormant transaction below must not be
+// enabled without a separately reviewed qualified authority protocol.
+// Historical implementation: frees exactly one charge after confirmed absence. ONE BEGIN
 // IMMEDIATE transaction verifies the reservation still exists with the exact
 // identity in state 'deleting' (the mark recorded before the destructive
 // call), verifies the authenticated two-pass absence evidence and its

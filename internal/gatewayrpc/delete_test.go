@@ -75,24 +75,17 @@ func runningDeleteFixture(t *testing.T, provision bool) (*Client, *testsupport.F
 	return client, fake
 }
 
-func TestAuthenticatedDeleteReleasesAndReplayIsIdempotentOverWire(t *testing.T) {
+func TestAuthenticatedDeleteCannotBypassRetirementBlock(t *testing.T) {
 	ctx := context.Background()
 	client, fake := runningDeleteFixture(t, true)
 	request := DeletionRequest{Controller: "controller-a", Name: "runner-1", PoolID: "pool-a"}
-	response, err := client.Delete(ctx, request)
-	if err != nil || response.Outcome != OutcomeReleased || response.Resources == nil || response.Resources.CPU != 1000 || response.Resources.RAM != 1024 || response.Resources.Runners != 1 {
-		t.Fatalf("delete %+v %v", response, err)
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := client.Delete(ctx, request); err == nil {
+			t.Fatal("provisioning opt-in bypassed retirement block")
+		}
 	}
-	replay, err := client.Delete(ctx, request)
-	if err != nil || replay.Outcome != OutcomeAlreadyReleased || replay.Resources != nil {
-		t.Fatalf("replay %+v %v", replay, err)
-	}
-	if fake.Deletes.Load() != 1 {
-		t.Fatalf("replay repeated backend delete %d", fake.Deletes.Load())
-	}
-	unknown := DeletionRequest{Controller: "controller-a", Name: "missing", PoolID: "pool-a"}
-	if _, err := client.Delete(ctx, unknown); err == nil {
-		t.Fatal("unknown runner deleted over wire")
+	if fake.Deletes.Load() != 0 || fake.DeletePolls.Load() != 0 {
+		t.Fatal("blocked request reached delete backend")
 	}
 }
 
