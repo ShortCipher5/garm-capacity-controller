@@ -149,7 +149,7 @@ func TestManagementAllowlistedPoolUpdateAndReadback(t *testing.T) {
 	}
 }
 func TestManagementRejectsStaleAndUnsafeEditsWithoutWrite(t *testing.T) {
-	for name, update := range map[string]PoolUpdate{"empty": {}, "max-zero": {MaxRunners: value(uint64(0))}, "max-below-min": {MaxRunners: value(uint64(1)), MinIdleRunners: value(uint64(2))}, "idle-decrease": {MinIdleRunners: value(uint64(0))}, "empty-tags": {Tags: value([]string{})}, "duplicate-tags": {Tags: value([]string{"linux", "linux"})}, "newline-tags": {Tags: value([]string{"bad\nlabel"})}, "oversized-tags": {Tags: value([]string{strings.Repeat("a", 257)})}, "priority-limit": {Priority: value(uint64(1000001))}} {
+	for name, update := range map[string]PoolUpdate{"empty": {}, "max-zero-below-existing-min": {MaxRunners: value(uint64(0))}, "zero-with-idle-decrease": {MaxRunners: value(uint64(0)), MinIdleRunners: value(uint64(0))}, "max-below-min": {MaxRunners: value(uint64(1)), MinIdleRunners: value(uint64(2))}, "idle-decrease": {MinIdleRunners: value(uint64(0))}, "empty-tags": {Tags: value([]string{})}, "duplicate-tags": {Tags: value([]string{"linux", "linux"})}, "newline-tags": {Tags: value([]string{"bad\nlabel"})}, "oversized-tags": {Tags: value([]string{strings.Repeat("a", 257)})}, "priority-limit": {Priority: value(uint64(1000001))}} {
 		t.Run(name, func(t *testing.T) {
 			c, f := managementServer(t, true)
 			before, err := c.Pool(context.Background(), managedPoolID)
@@ -288,5 +288,26 @@ func TestManagementReadBoundsRejectOversizedSettings(t *testing.T) {
 				t.Fatal("unbounded setting accepted")
 			}
 		})
+	}
+}
+
+func TestManagementZeroMaximumPreservesEnabledAndExistingInstances(t *testing.T) {
+	c, f := managementServer(t, true)
+	f.mu.Lock()
+	f.pool["min_idle_runners"] = uint64(0)
+	f.mu.Unlock()
+	before, e := c.Pool(context.Background(), managedPoolID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	got, e := c.UpdatePool(context.Background(), managedPoolID, before.Fingerprint, PoolUpdate{MaxRunners: value(uint64(0))})
+	if e != nil || got.MaxRunners != 0 || got.MinIdleRunners != 0 || !got.Enabled {
+		t.Fatalf("%+v %v", got, e)
+	}
+	if string(f.body["max_runners"]) != "0" || len(f.body) != 1 || f.writes != 1 || len(f.pool["instances"].([]any)) != 1 {
+		t.Fatal("zero omitted or existing runner/enabled state changed")
+	}
+	if _, e = c.UpdatePool(context.Background(), managedPoolID, before.Fingerprint, PoolUpdate{MaxRunners: value(uint64(0))}); !errors.Is(e, ErrManagementConflict) || f.writes != 1 {
+		t.Fatal("stale zero-max write dispatched")
 	}
 }
