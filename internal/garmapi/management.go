@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"io"
 	"net/http"
 	"net/url"
@@ -53,6 +54,7 @@ type ManagementConfig struct {
 
 type ManagementClient struct {
 	managedIdentity      string
+	managedSource        *managedsource.Client
 	client               *Client
 	base                 string
 	pools                map[string]bool

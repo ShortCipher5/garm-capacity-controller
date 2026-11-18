@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"io"
 	"net"
 	"net/http"
@@ -22,12 +23,14 @@ var ErrObservation = errors.New("scoped stock ownership unavailable")
 
 type Facts struct{ Pool, Repository, Provider, Flavor, Image, OSType, OSArch string }
 type Observation struct {
-	facts  Facts
-	source string
-	at     time.Time
-	valid  bool
+	controller string
+	facts      Facts
+	source     string
+	at         time.Time
+	valid      bool
 }
 
+func (o Observation) ControllerID() string   { return o.controller }
 func (o Observation) Valid() bool            { return o.valid && !o.at.IsZero() }
 func (o Observation) Facts() Facts           { return o.facts }
 func (o Observation) SourceIdentity() string { return o.source }
@@ -39,8 +42,9 @@ func (f Facts) Fingerprint() string {
 }
 
 type Configuration struct {
-	Endpoint, Token, Provider, Pool string
-	TLS                             *tls.Config
+	Endpoint, Token, Provider, Pool          string
+	ManagedServerKeyPin, ManagedControllerID string
+	TLS                                      *tls.Config
 }
 
 func uuid(s string) bool {
@@ -119,11 +123,26 @@ func ParseFacts(raw []byte) (Facts, error) {
 	return f, nil
 }
 
-// ValidateConfiguration checks transport syntax without network access or minting provenance.
+// ValidateConfiguration checks syntax without minting provenance or contacting a server.
 func ValidateConfiguration(c Configuration) error {
-	if !uuid(c.Pool) || c.Provider == "" || c.Token == "" || strings.ContainsAny(c.Token, "\r\n\x00") || c.TLS == nil || c.TLS.InsecureSkipVerify || c.TLS.RootCAs == nil || c.TLS.VerifyConnection != nil || c.TLS.VerifyPeerCertificate != nil {
+	if !uuid(c.Pool) || c.Provider == "" || c.TLS == nil || c.TLS.InsecureSkipVerify || c.TLS.RootCAs == nil || c.TLS.VerifyConnection != nil || c.TLS.VerifyPeerCertificate != nil {
 		return ErrObservation
 	}
+	if c.ManagedServerKeyPin != "" {
+		if c.Token != "" {
+			return ErrObservation
+		}
+		source, e := managedsource.New(c.Endpoint, c.ManagedServerKeyPin, c.ManagedControllerID, c.TLS)
+		if e != nil {
+			return ErrObservation
+		}
+		source.CloseIdleConnections()
+		return nil
+	}
+	if c.ManagedControllerID != "" || c.Token == "" || strings.ContainsAny(c.Token, "\r\n\x00") {
+		return ErrObservation
+	}
+
 	u, e := url.Parse(c.Endpoint)
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return ErrObservation
@@ -154,6 +173,21 @@ func Observe(ctx context.Context, c Configuration) (Observation, error) {
 	tr := &http.Transport{TLSClientConfig: trust, Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, ResponseHeaderTimeout: 10 * time.Second}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	var managed *managedsource.Client
+	var e error
+	if c.ManagedServerKeyPin != "" {
+		if c.Token != "" {
+			return fail()
+		}
+		managed, e = managedsource.New(c.Endpoint, c.ManagedServerKeyPin, c.ManagedControllerID, c.TLS)
+		if e != nil {
+			return fail()
+		}
+		defer managed.CloseIdleConnections()
+		client.Transport = managed
+	} else if c.ManagedControllerID != "" {
+		return fail()
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, base+"/pools/"+c.Pool, nil)
@@ -178,6 +212,12 @@ func Observe(ctx context.Context, c Configuration) (Observation, error) {
 	f, e := ParseFacts(raw)
 	if e != nil || f.Pool != c.Pool || f.Provider != c.Provider {
 		return fail()
+	}
+	if managed != nil {
+		if managed.Identity() == "" {
+			return fail()
+		}
+		return Observation{facts: f, source: managed.Identity(), controller: managed.ControllerID(), at: at, valid: true}, nil
 	}
 	h := sha256.Sum256([]byte("garm-v0.2.1-management\x00" + base))
 	return Observation{facts: f, source: hex.EncodeToString(h[:]), at: at, valid: true}, nil
