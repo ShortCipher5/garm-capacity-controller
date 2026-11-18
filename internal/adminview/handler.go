@@ -61,6 +61,7 @@ type Event struct {
 	At         time.Time `json:"at"`
 }
 type Overview struct {
+	NonPoolOverhead              OverheadTotals `json:"non_pool_overhead"`
 	OnboardingPreflightAvailable bool           `json:"onboarding_preflight_available"`
 	ExecutionPlanCount           int64          `json:"immutable_execution_plans"`
 	UnplannedReservationCount    int64          `json:"legacy_unplanned_reservations"`
@@ -312,7 +313,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func overview(state admission.SQLiteSnapshot, provision bool, now time.Time) (Overview, error) {
-	result := Overview{ExecutionPlanCount: state.ExecutionPlanCount, UnplannedReservationCount: state.UnplannedReservationCount, LegacySourcePreparationCount: state.LegacySourcePreparationCount, PolicyRevision: admission.PolicyRevision(state.Config), Mode: "experimental-ledger", Provisioning: provision, Ready: state.Ready, Epoch: state.Epoch, At: now, Global: Allocation{state.Config.Global, state.Allocated.Global}, Hosts: []Host{}, Pools: []Pool{}, States: map[string]int{}, Events: []Event{}}
+	overhead, err := overheadTotals(state.Allocated)
+	if err != nil {
+		return Overview{}, err
+	}
+	result := Overview{NonPoolOverhead: overhead, ExecutionPlanCount: state.ExecutionPlanCount, UnplannedReservationCount: state.UnplannedReservationCount, LegacySourcePreparationCount: state.LegacySourcePreparationCount, PolicyRevision: admission.PolicyRevision(state.Config), Mode: "experimental-ledger", Provisioning: provision, Ready: state.Ready, Epoch: state.Epoch, At: now, Global: Allocation{state.Config.Global, state.Allocated.Global}, Hosts: []Host{}, Pools: []Pool{}, States: map[string]int{}, Events: []Event{}}
 	for id, host := range state.Config.Hosts {
 		drain, err := retirement.Assess(state, id, now)
 		if err != nil {

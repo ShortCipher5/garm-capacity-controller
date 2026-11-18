@@ -1,3 +1,4 @@
+import {validateOverhead} from "./overhead.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
 import { validateCapacityStates } from "./capacity-states.js";
@@ -84,6 +85,7 @@ export function validateOverview(value) {
       "The server returned an unsupported overview. Disconnected.",
     );
   }
+  if(value.non_pool_overhead!==undefined)validateOverhead(value.non_pool_overhead,value.global.allocated);
   return value;
 }
 export class ReadSession {
