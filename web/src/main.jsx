@@ -1,3 +1,4 @@
+import { CapacityStates } from "./capacity-states.jsx";
 import { BrokerPolicy } from "./broker-policy.jsx";
 import { createEntityInventoryReader } from "./entity-inventory-client.js";
 import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
@@ -54,7 +55,7 @@ function CapacityWarnings({ data }) {
   const stale = data.hosts.filter((host) => !host.observation_fresh);
   const unhealthy = data.hosts.filter((host) => !host.last_observed_healthy);
   if (!full.length && !stale.length && !unhealthy.length)
-    return <p className="muted" role="status">Capacity warnings: none in this snapshot. Accounted resource states below stay charged until reconciliation proves absence.</p>;
+    return <p className="muted" role="status">Capacity warnings: none in this snapshot. Unknown or failed resources remain charged until authoritative reconciliation proves absence.</p>;
   return (
     <div className="notice" role="status">
       <strong>Capacity warnings in this snapshot</strong>
@@ -64,7 +65,7 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
@@ -252,29 +253,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         <Profiles readProfiles={readProfiles} />
         <BrokerPolicy readPolicy={readBrokerPolicy} />
         <div className="bottom-grid">
-          <section>
-            <div className="section-heading">
-              <h2>Accounted resource states</h2>
-            </div>
-            <div className="card states">
-              {Object.entries(data.states).length ? (
-                Object.entries(data.states)
-                  .sort(([a], [b]) => a.localeCompare(b))
-                  .map(([state, count]) => (
-                    <div key={state}>
-                      <span>{state}</span>
-                      <strong>{fmt(count)}</strong>
-                    </div>
-                  ))
-              ) : (
-                <p className="empty">No accounted resources.</p>
-              )}
-              <p className="table-note">
-                Unknown and failed resources remain charged. These counts are
-                not live job telemetry.
-              </p>
-            </div>
-          </section>
+          <CapacityStates read={readCapacityStates} />
           <AuditEvents events={data.events} />
         </div>
         <footer>
@@ -340,6 +319,10 @@ export function App() {
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
         readEntityInventory={readEntityInventory}
+        readCapacityStates={async () => {
+          try { return await session.current.capacityStatesSnapshot(); }
+          catch(error) { if(error instanceof SessionEnded && error.message) {disconnect();setError(error.message);} throw error; }
+        }}
         readBrokerPolicy={async () => {
           try { return await session.current.brokerPolicySnapshot(); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }

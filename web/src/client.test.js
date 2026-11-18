@@ -210,3 +210,20 @@ test("overview does not advertise claims allowed against known admission gates",
     assert.doesNotThrow(() => validateOverview({ ...ready, ...changed, hosts: [{ ...host, new_claims_paused: true }] }));
   }
 });
+
+test("charged capacity read is authenticated and disconnect discards a late result", async () => {
+  let resolve, signal;
+  const session = new ReadSession(async (url, options) => {
+    if (url !== "/admin/api/v1/capacity-states") return {ok:true,status:200,json:async()=>view};
+    assert.equal(options.headers.Authorization, `Bearer ${token}`);
+    assert.equal(options.cache,"no-store");
+    signal=options.signal;
+    return new Promise(r=>{resolve=r;});
+  });
+  await session.connect(token);
+  const pending=session.capacityStatesSnapshot();
+  session.disconnect();
+  assert.equal(signal.aborted,true);
+  resolve({ok:true,status:200,json:async()=>({})});
+  await assert.rejects(pending, SessionEnded);
+});
