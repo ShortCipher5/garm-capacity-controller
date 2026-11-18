@@ -16,7 +16,7 @@ import (
 var ErrPolicy = errors.New("native policy refused")
 var ErrNative = errors.New("native operation outcome unknown; retain charge")
 
-const PolicyVersion = "garm-native-policy/v1"
+const PolicyVersion = "garm-native-policy/v2"
 const NativeVersion = "6.0.4"
 
 type PolicySpec struct {
