@@ -43,6 +43,7 @@ type Item struct {
 	RepositoryID      string
 	Job               Job
 	Conflict          bool
+	LabelsConflict    bool
 	MissingFromReader bool
 	Source            string
 	// ReaderStatus is the status positively observed in this read only. It is
@@ -145,7 +146,8 @@ func Observe(ctx context.Context, r Reader, repos []Repository, baseline []Basel
 				if existing, ok := merged[k]; ok {
 					existing.MissingFromReader = false
 					existing.ReaderStatus = j.Status
-					existing.Conflict = j.Status != "queued" || !equalLabels(existing.Job.Labels, j.Labels)
+					existing.LabelsConflict = !equalLabels(existing.Job.Labels, j.Labels)
+					existing.Conflict = j.Status != "queued" || existing.LabelsConflict
 					existing.Source = "stock+reader"
 					merged[k] = existing
 				} else if j.Status == "queued" {

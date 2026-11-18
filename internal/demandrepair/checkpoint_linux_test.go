@@ -15,7 +15,7 @@ func TestPollCheckpointPreservesHistoryAndFailure(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0700)
 	o := PollOptions{Path: filepath.Join(dir, "state.json"), InitialFrom: time.Now().Add(-time.Hour), Overlap: time.Minute, MinInterval: time.Minute}
-	callback := func(context.Context, []Item, time.Time, time.Time) (Result, error) {
+	callback := func(context.Context, []Item, time.Time, time.Time, *string) (Result, error) {
 		return Result{EnumerationComplete: true, Items: []Item{{RepositoryID: repo.GarmID, Job: Job{ID: 1, Status: "queued"}}}}, nil
 	}
 	if _, e := poll(context.Background(), "scope", o, callback); e != nil {
@@ -28,7 +28,7 @@ func TestPollCheckpointPreservesHistoryAndFailure(t *testing.T) {
 	aged, _ := json.Marshal(state)
 	os.WriteFile(o.Path, aged, 0600)
 	called := false
-	if _, e := poll(context.Background(), "scope", o, func(_ context.Context, b []Item, from, to time.Time) (Result, error) {
+	if _, e := poll(context.Background(), "scope", o, func(_ context.Context, b []Item, from, to time.Time, _ *string) (Result, error) {
 		called = true
 		if len(b) != 1 || !from.Equal(state.Through.Add(-time.Minute)) {
 			t.Fatal("lost history/overlap")
@@ -50,7 +50,7 @@ func TestPollRejectsFastRetryAndSymlink(t *testing.T) {
 	os.Chmod(dir, 0700)
 	o := PollOptions{Path: filepath.Join(dir, "state"), InitialFrom: time.Now().Add(-time.Hour), Overlap: time.Minute, MinInterval: time.Minute}
 	calls := 0
-	fn := func(context.Context, []Item, time.Time, time.Time) (Result, error) {
+	fn := func(context.Context, []Item, time.Time, time.Time, *string) (Result, error) {
 		calls++
 		return Result{EnumerationComplete: true, Items: []Item{}}, nil
 	}
@@ -106,12 +106,13 @@ func TestPollReaderOnlyProvenanceSurvivesRestart(t *testing.T) {
 
 func TestPollRetiresOnlyFreshCompletedHistoryWithoutStockClaim(t *testing.T) {
 	for _, tc := range []struct {
-		name, status            string
-		stock, missing, failure bool
-		want                    int
+		name, status                      string
+		stock, missing, failure, mismatch bool
+		want                              int
 	}{
 		{name: "completed history", status: "completed", want: 0},
 		{name: "current stock conflict", status: "completed", stock: true, want: 1},
+		{name: "completed with conflicting labels", status: "completed", mismatch: true, want: 1},
 		{name: "still queued", status: "queued", want: 1},
 		{name: "in progress", status: "in_progress", want: 1},
 		{name: "absent is unknown", status: "completed", missing: true, want: 1},
@@ -138,7 +139,11 @@ func TestPollRetiresOnlyFreshCompletedHistoryWithoutStockClaim(t *testing.T) {
 				if second {
 					status = tc.status
 				}
-				fmt.Fprintf(w, `{"total_count":1,"jobs":[{"id":1,"run_id":7,"status":%q,"labels":["linux"]}]}`, status)
+				labels := "linux"
+				if second && tc.mismatch {
+					labels = "windows"
+				}
+				fmt.Fprintf(w, `{"total_count":1,"jobs":[{"id":1,"run_id":7,"status":%q,"labels":[%q]}]}`, status, labels)
 			})
 			o := PollOptions{Path: filepath.Join(dir, "state"), InitialFrom: time.Now().Add(-time.Hour), Overlap: time.Minute, MinInterval: time.Minute}
 			if _, e := PollGitHub(context.Background(), c, []Repository{repo}, nil, o); e != nil {
@@ -171,6 +176,9 @@ func TestPollRetiresOnlyFreshCompletedHistoryWithoutStockClaim(t *testing.T) {
 			if e = json.Unmarshal(after, &cp); e != nil || len(cp.Result.Items) != tc.want {
 				t.Fatalf("history not persisted: %+v %v", cp, e)
 			}
+			if tc.mismatch && (!got.Items[0].LabelsConflict || !got.Items[0].Conflict) {
+				t.Fatal("lost label conflict")
+			}
 			if tc.stock && (!got.Items[0].Conflict || got.Items[0].ReaderStatus != "completed") {
 				t.Fatal("lost current stock disagreement")
 			}
@@ -178,5 +186,82 @@ func TestPollRetiresOnlyFreshCompletedHistoryWithoutStockClaim(t *testing.T) {
 				t.Fatal("reused stale terminal status")
 			}
 		})
+	}
+}
+
+func TestPollPrunesOldCompletedOnlyAfterExactLookup(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	second := false
+	c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo/actions/runs":
+			if second {
+				fmt.Fprint(w, `{"total_count":0,"workflow_runs":[]}`)
+			} else {
+				fmt.Fprint(w, `{"total_count":1,"workflow_runs":[{"id":7,"repository":{"full_name":"owner/repo"}}]}`)
+			}
+		case "/repos/owner/repo/actions/runs/7/jobs":
+			fmt.Fprint(w, `{"total_count":1,"jobs":[{"id":1,"run_id":7,"status":"queued","labels":["linux"]}]}`)
+		case "/repos/owner/repo/actions/jobs/1":
+			fmt.Fprint(w, `{"id":1,"run_id":7,"status":"completed","labels":["linux"]}`)
+		default:
+			t.Errorf("unexpected route %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	})
+	o := PollOptions{Path: filepath.Join(dir, "state"), InitialFrom: time.Now().Add(-time.Hour), Overlap: time.Minute, MinInterval: time.Minute}
+	if _, e := PollGitHub(context.Background(), c, []Repository{repo}, nil, o); e != nil {
+		t.Fatal(e)
+	}
+	data, _ := os.ReadFile(o.Path)
+	var cp checkpoint
+	if e := json.Unmarshal(data, &cp); e != nil {
+		t.Fatal(e)
+	}
+	cp.Through = time.Now().Add(-2 * time.Minute)
+	data, _ = json.Marshal(cp)
+	os.WriteFile(o.Path, data, 0600)
+	second = true
+	got, e := PollGitHub(context.Background(), c, []Repository{repo}, nil, o)
+	if e != nil || len(got.Items) != 0 {
+		t.Fatalf("got %+v %v", got, e)
+	}
+	data, _ = os.ReadFile(o.Path)
+	if e = json.Unmarshal(data, &cp); e != nil || cp.LookupAfter == "" || len(cp.Result.Items) != 0 {
+		t.Fatalf("cursor or removal not persisted: %+v %v", cp, e)
+	}
+}
+
+func TestLookupCursorSurvivesRestartAndFailedPoll(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	o := PollOptions{Path: filepath.Join(dir, "state"), InitialFrom: time.Now().Add(-time.Hour), Overlap: time.Minute, MinInterval: time.Minute}
+	first := func(_ context.Context, _ []Item, _, _ time.Time, cursor *string) (Result, error) {
+		*cursor = "repo/10"
+		return Result{EnumerationComplete: true, Items: []Item{}}, nil
+	}
+	if _, e := poll(context.Background(), "scope", o, first); e != nil {
+		t.Fatal(e)
+	}
+	data, _ := os.ReadFile(o.Path)
+	var cp checkpoint
+	json.Unmarshal(data, &cp)
+	cp.Through = time.Now().Add(-2 * time.Minute)
+	data, _ = json.Marshal(cp)
+	os.WriteFile(o.Path, data, 0600)
+	fail := func(_ context.Context, _ []Item, _, _ time.Time, cursor *string) (Result, error) {
+		if *cursor != "repo/10" {
+			t.Fatal("cursor not restored")
+		}
+		*cursor = "repo/20"
+		return Result{}, ErrObservation
+	}
+	if _, e := poll(context.Background(), "scope", o, fail); e != ErrObservation {
+		t.Fatal(e)
+	}
+	after, _ := os.ReadFile(o.Path)
+	if string(after) != string(data) {
+		t.Fatal("failed poll advanced cursor")
 	}
 }
