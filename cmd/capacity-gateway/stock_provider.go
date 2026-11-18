@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gatewayrpc"
 	"net/http"
 )
@@ -28,14 +29,29 @@ func validateStockProviderScopes(c configuration) error {
 	}
 	return nil
 }
-func stockProviderHandler(c configuration, base *gatewayrpc.Handler) (http.Handler, error) {
+func stockProviderHandler(c configuration, base *gatewayrpc.Handler, native ...*gateway.NativeStock) (http.Handler, error) {
 	if e := validateStockProviderScopes(c); e != nil {
 		return nil, e
 	}
 	if !c.EnableStockProvider {
+		if len(c.NativeStock) > 0 {
+			return nil, gatewayrpc.ErrConfiguration
+		}
 		return base, nil
 	}
-	stock, e := gatewayrpc.NewStockHandler(base, c.StockProviderScopes)
+	var stock *gatewayrpc.StockHandler
+	var e error
+	if len(c.NativeStock) > 0 {
+		if len(native) != 1 || native[0] == nil {
+			return nil, gatewayrpc.ErrConfiguration
+		}
+		stock, e = gatewayrpc.NewNativeStockHandler(base, native[0], c.StockProviderScopes)
+	} else {
+		if len(native) > 1 || (len(native) == 1 && native[0] != nil) {
+			return nil, gatewayrpc.ErrConfiguration
+		}
+		stock, e = gatewayrpc.NewStockHandler(base, c.StockProviderScopes)
+	}
 	if e != nil {
 		return nil, e
 	}

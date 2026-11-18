@@ -70,7 +70,7 @@ export function Profiles({ readProfiles }) {
         await load();
         // load() clears status lines and bumps the generation guard at start,
         // so the confirmation renders unconditionally afterwards.
-        if (mounted.current) setMessage(`Runner-size profile ${profile.name} saved. Pool policies referencing it use it at next dispatch.`);
+        if (mounted.current) setMessage(`Runner-size profile ${profile.name} saved. Existing immutable pool mappings keep their captured size; register a new mapping revision to adopt this change.`);
       }
     } catch (error) {
       if (mounted.current && current === generation.current) setMessage(error.message);
@@ -100,7 +100,7 @@ export function Profiles({ readProfiles }) {
         await load();
         // load() clears status lines and bumps the generation guard at start,
         // so the confirmation renders unconditionally afterwards.
-        if (mounted.current) setMessage(`Runner-size profile ${removed} deleted. Pool policies referencing it fail closed at next dispatch.`);
+        if (mounted.current) setMessage(`Runner-size profile ${removed} deleted. Existing immutable pool mappings keep their captured size. Legacy name-based policies may fail closed.`);
       }
     } catch (error) {
       if (mounted.current && current === generation.current) setMessage(error.message);
@@ -120,7 +120,7 @@ export function Profiles({ readProfiles }) {
       <div className="card management" id="profile-management">
         <h2>Runner-size profile management</h2>
         <p>Saved sizes estimate how many runners fit each enabled host's remaining budget. Estimates use the same dimension math as pool admission; a zero disk size ignores the disk dimension.</p>
-        <p className="muted">Gateway pool policy configuration is not exposed by this admin API, so pools referencing a profile by name are not listed here. Deleting a profile does not edit pool policies: they fail closed at next dispatch.</p>
+        <p className="muted">Immutable pool mappings are shown in Pools. They capture sizes at registration, so editing or deleting a size does not change their resources. Legacy name-based gateway policies remain separate and may fail closed after deletion.</p>
         <div className="profile-toolbar">
           <button className="quiet" type="button" disabled={busy} onClick={load}>{busy ? "Working…" : "Refresh profiles"}</button>
           <button className="quiet" type="button" disabled={busy} onClick={() => { setEditing({ name: "", cpu_millis: 0, ram_mib: 0, disk_mib: 0 }); setConfirming(""); setMessage(""); }}>New profile</button>

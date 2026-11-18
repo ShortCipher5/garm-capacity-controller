@@ -76,6 +76,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(403)
 		return
 	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/managed/metadata/") {
+		h.serveMetadata(w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/v1/instances" {
 		h.serveInventory(w, r)
 		return

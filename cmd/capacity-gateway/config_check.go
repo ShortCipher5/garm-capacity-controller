@@ -147,6 +147,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if e != nil {
 		return fail()
 	}
+	if validateProviderProfileRole(c, server.Certificates[0]) != nil {
+		return fail()
+	}
 	if _, e = gatewayrpc.ServerTLS(server.Certificates[0], server.RootCAs); e != nil {
 		return fail()
 	}
@@ -157,6 +160,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.BrokerProfileRecipesFile != "" {
+		if !a.EnableExperimentalManagement {
+			return fail()
+		}
+		if _, e := loadBrokerProfileRecipes(a.BrokerProfileRecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if !loopback(a.Listen) {
 		return fail()
 	}
