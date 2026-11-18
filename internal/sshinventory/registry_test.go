@@ -154,3 +154,54 @@ func TestRevocationRejectsPreviouslyReviewedProbeWithoutCredentialUse(t *testing
 		t.Fatal("revoked record remained active")
 	}
 }
+
+type replacementTargets struct {
+	memoryTargets
+	replacements int
+}
+
+func (m *replacementTargets) ReplaceSSHTarget(context.Context, string, string, string, string, Config, string, int) error {
+	m.replacements++
+	return nil
+}
+func TestReplacementRegistryFailsClosedAndChecksScope(t *testing.T) {
+	c, _, _ := server(t, sample)
+	c.Address = "192.0.2.20"
+	c.Port = 22
+	c.CredentialRef = "key"
+	scopes := map[string]Scope{"key": {Networks: []string{"192.0.2.0/24"}, Users: []string{c.User}, Ports: []uint16{22}}}
+	calls := 0
+	resolve := func(context.Context, string) (ssh.Signer, error) { calls++; return nil, ErrInventory }
+	old := &memoryTargets{values: map[string]Config{}}
+	r, e := NewRegistry(scopes, old, resolve, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	request := "11111111-1111-4111-8111-111111111111"
+	digest := ReviewDigest("new", c)
+	oldDigest := ReviewDigest("old", c)
+	if _, e = r.Replace(context.Background(), request, "old", oldDigest, "new", c, digest); e == nil {
+		t.Fatal("legacy store accepted non-atomic replacement")
+	}
+	store := &replacementTargets{}
+	r, e = NewRegistry(scopes, store, resolve, map[string]Config{"reserved": c})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, id := range []string{"reserved", "new", "bad!"} {
+		if _, e = r.Replace(context.Background(), request, id, oldDigest, "new", c, digest); e == nil {
+			t.Fatal("invalid old ID", id)
+		}
+	}
+	changed := c
+	changed.CredentialRef = "unapproved"
+	if _, e = r.Replace(context.Background(), request, "old", oldDigest, "new", changed, ReviewDigest("new", changed)); e == nil {
+		t.Fatal("scope escaped")
+	}
+	if store.replacements != 0 {
+		t.Fatal("invalid request reached store")
+	}
+	if _, e = r.Replace(context.Background(), request, "old", oldDigest, "new", c, digest); e != nil || store.replacements != 1 || calls != 0 {
+		t.Fatal(e, store.replacements, calls)
+	}
+}

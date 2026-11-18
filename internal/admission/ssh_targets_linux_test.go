@@ -184,3 +184,88 @@ func TestSSHTargetRevocationIsDurableAtomicAndCannotReactivate(t *testing.T) {
 		t.Fatal("restart resurrected revoked identity")
 	}
 }
+
+func TestSSHTargetReplacementAtomicReplayAndTombstone(t *testing.T) {
+	ctx := context.Background()
+	s := sqliteFixtureStore(t, fixture(time.Now()), true)
+	if e := s.InitializeSSHTargets(ctx); e != nil {
+		t.Fatal(e)
+	}
+	c := sshinventory.Config{Address: "192.0.2.20", Port: 22, User: "inventory", CredentialRef: "old", HostKey: "placeholder"}
+	request := "11111111-1111-4111-8111-111111111111"
+	oldDigest := sshinventory.ReviewDigest("old", c)
+	if e := s.SaveSSHTarget(ctx, request, "old", c, oldDigest, 1); e != nil {
+		t.Fatal(e)
+	}
+	next := c
+	next.CredentialRef = "next"
+	digest := sshinventory.ReviewDigest("next", next)
+	replace := func() error { return s.ReplaceSSHTarget(ctx, request, "old", oldDigest, "next", next, digest, 1) }
+	if _, e := s.db.Exec(`CREATE TRIGGER fail_replace BEFORE INSERT ON audit WHEN NEW.kind='ssh_target_replaced' BEGIN SELECT RAISE(ABORT,'denied'); END`); e != nil {
+		t.Fatal(e)
+	}
+	if replace() == nil {
+		t.Fatal("audit failure accepted")
+	}
+	list, e := s.ListSSHTargets(ctx)
+	if e != nil || len(list) != 1 || list["old"] != c {
+		t.Fatal("partial replacement", list, e)
+	}
+	if _, e = s.db.Exec(`DROP TRIGGER fail_replace`); e != nil {
+		t.Fatal(e)
+	}
+	if e = replace(); e != nil {
+		t.Fatal(e)
+	}
+	if e = replace(); e != nil {
+		t.Fatal("retry", e)
+	}
+	list, e = s.ListSSHTargets(ctx)
+	if e != nil || len(list) != 1 || list["next"] != next {
+		t.Fatal(list, e)
+	}
+	if s.SaveSSHTarget(ctx, request, "old", c, oldDigest, 32) == nil {
+		t.Fatal("old ID resurrected")
+	}
+	if s.ReplaceSSHTarget(ctx, request, "old", oldDigest, "different", next, sshinventory.ReviewDigest("different", next), 1) == nil {
+		t.Fatal("request reused")
+	}
+	if e = s.RevokeSSHTarget(ctx, request, "next", digest); e != nil {
+		t.Fatal(e)
+	}
+	if replace() == nil {
+		t.Fatal("replayed rotation reactivated revoked destination")
+	}
+}
+
+func TestSSHTargetConcurrentReplacementAndRevocation(t *testing.T) {
+	ctx := context.Background()
+	s := sqliteFixtureStore(t, fixture(time.Now()), true)
+	if e := s.InitializeSSHTargets(ctx); e != nil {
+		t.Fatal(e)
+	}
+	c := sshinventory.Config{Address: "192.0.2.20", Port: 22, User: "inventory", CredentialRef: "key", HostKey: "placeholder"}
+	request := "11111111-1111-4111-8111-111111111111"
+	old := sshinventory.ReviewDigest("old", c)
+	next := sshinventory.ReviewDigest("next", c)
+	if e := s.SaveSSHTarget(ctx, request, "old", c, old, 1); e != nil {
+		t.Fatal(e)
+	}
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	go func() { <-start; done <- s.ReplaceSSHTarget(ctx, request, "old", old, "next", c, next, 1) }()
+	go func() { <-start; done <- s.RevokeSSHTarget(ctx, request, "old", old) }()
+	close(start)
+	<-done
+	<-done
+	list, e := s.ListSSHTargets(ctx)
+	if e != nil || len(list) > 1 {
+		t.Fatal(list, e)
+	}
+	if _, ok := list["old"]; ok {
+		t.Fatal("old target active")
+	}
+	if s.SaveSSHTarget(ctx, request, "old", c, old, 32) == nil {
+		t.Fatal("old target resurrected")
+	}
+}

@@ -140,3 +140,23 @@ func (r *Registry) Revoke(ctx context.Context, request, id, digest string) error
 	}
 	return nil
 }
+
+// ReplacementStore is optional so older stores fail closed rather than perform
+// a non-atomic revoke/save sequence.
+type ReplacementStore interface {
+	ReplaceSSHTarget(context.Context, string, string, string, string, Config, string, int) error
+}
+
+// Replace withdraws the old immutable identity and authorizes a new reviewed
+// tuple atomically. It never resolves credentials or contacts either host.
+func (r *Registry) Replace(ctx context.Context, request, oldID, oldDigest, id string, c Config, digest string) (Target, error) {
+	t, e := r.Review(id, c)
+	store, ok := r.store.(ReplacementStore)
+	if e != nil || !ok || !requestID.MatchString(request) || !targetID.MatchString(oldID) || r.reserved[oldID] || oldID == id || len(oldDigest) != 64 || digest != t.ReviewDigest {
+		return Target{}, ErrReview
+	}
+	if store.ReplaceSSHTarget(ctx, request, oldID, oldDigest, id, c, digest, 32-len(r.reserved)) != nil {
+		return Target{}, ErrReview
+	}
+	return t, nil
+}

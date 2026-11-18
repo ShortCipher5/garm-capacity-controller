@@ -76,13 +76,16 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Action        string              `json:"action"`
-		ID            string              `json:"target_id"`
-		Config        sshinventory.Config `json:"config"`
-		Digest        string              `json:"review_digest"`
-		Request       string              `json:"request_id"`
-		Verified      bool                `json:"verified_host_key"`
-		ConfirmRevoke bool                `json:"confirm_revoke"`
+		Action         string              `json:"action"`
+		ID             string              `json:"target_id"`
+		Config         sshinventory.Config `json:"config"`
+		Digest         string              `json:"review_digest"`
+		Request        string              `json:"request_id"`
+		Verified       bool                `json:"verified_host_key"`
+		OldID          string              `json:"old_target_id"`
+		OldDigest      string              `json:"old_review_digest"`
+		ConfirmReplace bool                `json:"confirm_replace"`
+		ConfirmRevoke  bool                `json:"confirm_revoke"`
 	}
 	d := json.NewDecoder(strings.NewReader(string(body)))
 	d.DisallowUnknownFields()
@@ -108,6 +111,14 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 
 	case "review":
 		target, e = h.sshTargets.Review(request.ID, request.Config)
+	case "replace":
+		if !request.Verified || !request.ConfirmReplace {
+			fail(400, "verified host key and explicit replacement confirmation required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		target, e = h.sshTargets.Replace(ctx, request.Request, request.OldID, request.OldDigest, request.ID, request.Config, request.Digest)
 	case "approve":
 		if !request.Verified {
 			fail(400, "independent host-key verification required")
@@ -117,12 +128,12 @@ func (h *Handler) serveSSHTargets(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		target, e = h.sshTargets.Save(ctx, request.Request, request.ID, request.Config, request.Digest)
 	default:
-		fail(400, "review, approve or revoke required")
+		fail(400, "review, approve, replace or revoke required")
 		return
 	}
 	if e != nil {
 		fail(409, "target is outside approved scope, changed, already used, or its durable audit is unavailable")
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{"target": target, "saved": request.Action == "approve"})
+	json.NewEncoder(w).Encode(map[string]any{"target": target, "saved": request.Action == "approve" || request.Action == "replace"})
 }
