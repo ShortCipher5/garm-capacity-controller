@@ -38,6 +38,8 @@ type garmConfiguration struct {
 	ScaleSets map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	StockProviderScopes  []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
+	EnableStockProvider  bool                                     `json:"-"`
 	PreparationPools     map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
 	SourceFingerprints   []string                                 `json:"source_fingerprints,omitempty"`
 	BootstrapMode        string                                   `json:"bootstrap_mode,omitempty"`
@@ -145,6 +147,10 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	handler.Audit = func(event string) { log.Print(event) }
+	rpcHandler, err := stockProviderHandler(config, handler)
+	if err != nil {
+		return err
+	}
 	serverCredentials, err := securefiles.LoadTLS(config.ServerTLS)
 	if err != nil {
 		return err
@@ -154,7 +160,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	// No secrets, request bodies, URLs, panic values or provider output in logs.
-	server := &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 12 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}
+	server := &http.Server{Addr: config.Listen, Handler: rpcHandler, TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 12 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}
 	if err := validateGarmManagementRouting(config); err != nil {
 		return err
 	}
@@ -290,6 +296,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
+	stockProvider := flag.Bool("allow-experimental-stock-provider", false, "enable distinct post-JIT stock-provider admission; no original-preparation guarantee or physical release")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
@@ -344,6 +351,7 @@ func main() {
 		}
 		config.Admin.EnableSSHTargetManagement = true
 	}
+	config.EnableStockProvider = *stockProvider
 	if *bootstrap {
 		if config.Admin == nil {
 			fmt.Fprintln(os.Stderr, "bootstrap requires separate admin configuration")

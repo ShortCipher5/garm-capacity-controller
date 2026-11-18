@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// CapacityStateView reports charged ledger resources, not physical utilization or grants.
+// CapacityStateView reports charged ledger resources, not physical utilization or execution permission.
 // Released historical reservations are excluded. Reappearing released resources
 // are charged as orphans rather than being hidden by their old reservation.
 type CapacityStateView struct {
@@ -87,7 +87,7 @@ func capacityStates(reservations map[string]Reservation, inventory []InventoryRe
 	return rows, total, nil
 }
 func (s *SQLiteStore) ReadCapacityStates(ctx context.Context) (CapacityStateView, error) {
-	out := CapacityStateView{Source: "charged-ledger", Rows: []CapacityStateRow{}}
+	out := CapacityStateView{Source: "charged-ledger", GrantsAvailable: true, Rows: []CapacityStateRow{}}
 	err := s.readTransaction(ctx, func(tx *sql.Tx) error {
 		config, _, _, _, err := sqliteMetadata(tx)
 		if err != nil {
@@ -105,7 +105,7 @@ func (s *SQLiteStore) ReadCapacityStates(ctx context.Context) (CapacityStateView
 		if err != nil {
 			return err
 		}
-		allocations, err := sqliteAllocations(config, reservations, inventory, released)
+		allocations, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}
@@ -113,6 +113,26 @@ func (s *SQLiteStore) ReadCapacityStates(ctx context.Context) (CapacityStateView
 		if err != nil {
 			return err
 		}
+
+		grants, err := sqliteBrokerGrants(tx)
+		if err != nil {
+			return err
+		}
+		unused := Resources{}
+		for _, g := range grants {
+			if g.State == "unused" {
+				if !accumulate(&unused, g.Spec.Resources) {
+					return ErrBrokerGrant
+				}
+			}
+		}
+		if unused.Runners > 0 {
+			out.Rows = append(out.Rows, CapacityStateRow{State: "granted", Resources: unused})
+			if !accumulate(&out.Total, unused) {
+				return ErrBrokerGrant
+			}
+		}
+		sort.Slice(out.Rows, func(i, j int) bool { return out.Rows[i].State < out.Rows[j].State })
 		if out.Total != allocations.Global {
 			return errors.New("capacity state accounting mismatch")
 		}

@@ -27,7 +27,7 @@ func TestCapacityStatesReadOnly(t *testing.T) {
 	if e := json.Unmarshal(w.Body.Bytes(), &view); e != nil {
 		t.Fatal(e)
 	}
-	if view.Source != "charged-ledger" || view.GrantsAvailable || view.Total != before.Allocated.Global || len(view.Rows) != 1 || view.Rows[0].State != "unknown" {
+	if view.Source != "charged-ledger" || !view.GrantsAvailable || view.Total != before.Allocated.Global || len(view.Rows) != 1 || view.Rows[0].State != "unknown" {
 		t.Fatalf("%+v", view)
 	}
 	after, _ := store.ReadSnapshot(context.Background())

@@ -343,7 +343,7 @@ func TestSQLiteMigratesV9RowsPreservingChargesAndEnablingProfiles(t *testing.T) 
 	if _, err := s.Admit(context.Background(), request("v9-reservation")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`DROP TABLE profiles; DROP TABLE usage_samples;
+	if _, err := s.db.Exec(stockMigrationDowngradeSQL + `DROP TABLE profiles; DROP TABLE usage_samples;
 ALTER TABLE reservations DROP COLUMN disk; ALTER TABLE inventory DROP COLUMN disk; ALTER TABLE cancellations DROP COLUMN disk;
 PRAGMA user_version=9`); err != nil {
 		t.Fatal(err)

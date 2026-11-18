@@ -137,6 +137,10 @@ func (source) Instances(context.Context) ([]gateway.GarmInstance, error) {
 	return []gateway.GarmInstance{}, nil
 }
 func facade(t *testing.T) (*gateway.Facade, *backend) {
+	f, b, _ := facadeStore(t)
+	return f, b
+}
+func facadeStore(t *testing.T) (*gateway.Facade, *backend, *admission.SQLiteStore) {
 	t.Helper()
 	budget := admission.Resources{CPU: 2000, RAM: 4096, Runners: 2}
 	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}
@@ -153,7 +157,7 @@ func facade(t *testing.T) (*gateway.Facade, *backend) {
 	if err = f.Reconcile(context.Background(), source{}); err != nil {
 		t.Fatal(err)
 	}
-	return f, b
+	return f, b, store
 }
 func runningFixture(t *testing.T, provision bool) (*Client, *backend, *Handler, *tls.Config, string) {
 	t.Helper()

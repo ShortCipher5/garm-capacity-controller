@@ -409,7 +409,7 @@ func TestInactivePoolRouteSchema9MigrationClosesOldFenceWithoutImportingExisting
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("DROP TABLE pool_routes;DROP INDEX pool_route_execution_history;DROP TRIGGER inactive_pool_no_new_reservation;DROP TRIGGER inactive_pool_no_new_dispatch;PRAGMA user_version=8"); err != nil {
+	if _, err := s.db.Exec(stockMigrationDowngradeSQL + "DROP TABLE pool_routes;DROP INDEX pool_route_execution_history;DROP TRIGGER inactive_pool_no_new_reservation;DROP TRIGGER inactive_pool_no_new_dispatch;PRAGMA user_version=8"); err != nil {
 		t.Fatal(err)
 	}
 	path := s.path
