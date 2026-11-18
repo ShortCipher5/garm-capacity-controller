@@ -202,6 +202,7 @@ type testFixture struct {
 	owner    *ownerFixture
 	config   Configuration
 	userData string
+	path     string
 }
 
 func setup(t *testing.T, mode string) testFixture {
@@ -224,7 +225,8 @@ func setup(t *testing.T, mode string) testFixture {
 	endpoint := nativeidentity.Configuration{Endpoint: server.URL, TLS: controllerTLS, DomainID: domain, PolicyDigest: policy.Digest(), OwnerServerLeaf: owner.descriptor.OwnerServerLeaf, OwnerClientLeaf: owner.descriptor.OwnerClientLeaf}
 	budget := admission.Resources{CPU: 4000, RAM: 8192, Disk: 16384, Runners: 4}
 	config := admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", Healthy: true, ObservedAt: time.Now()}}, Pools: map[string]admission.Pool{"app": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Hour}
-	s, e := admission.OpenSQLite(filepath.Join(t.TempDir(), "ledger.db"), config)
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	s, e := admission.OpenSQLite(path, config)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -285,7 +287,7 @@ func setup(t *testing.T, mode string) testFixture {
 	if e != nil {
 		t.Fatal(e)
 	}
-	return testFixture{c, s, plan, host, auth, digest, owner, cconfig, string(payload)}
+	return testFixture{c, s, plan, host, auth, digest, owner, cconfig, string(payload), path}
 }
 func TestCoordinatorRunsCanonicalOwnerSequenceOnce(t *testing.T) {
 	f := setup(t, "")
