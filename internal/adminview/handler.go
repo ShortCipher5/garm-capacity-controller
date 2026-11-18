@@ -81,33 +81,33 @@ type Overview struct {
 }
 type Handler struct {
 	nativeEnrollments map[string]frozenNativeRecipe
-	brokerProfiles  map[string]BrokerProfileRecipe
-	allocatorStatus AllocatorStatusSource
-	jobObserver     JobObserverStatusSource
-	rotation        *firstboot.ManagedRotationService
-	rotationHash    [32]byte
-	firstboot       *firstboot.Service
-	firstbootHash   [32]byte
-	bootstrap       *hostbootstrap.Service
-	bootstrapHash   [32]byte
-	sshTargets      *sshinventory.Registry
-	sshTargetsHash  [32]byte
-	sshInventory    *sshinventory.Service
-	sshHash         [32]byte
-	onboarding      *onboarding.Manager
-	onboardingProbe bool
-	onboardingHash  [32]byte
-	store           *admission.SQLiteStore
-	tokenHash       [32]byte
-	writeHash       [32]byte
-	management      bool
-	garm            GarmManager
-	garmWrites      bool
-	remoteFlight    chan struct{}
-	assets          *os.Root
-	provision       bool
-	inFlight        chan struct{}
-	Audit           func(string)
+	brokerProfiles    map[string]BrokerProfileRecipe
+	allocatorStatus   AllocatorStatusSource
+	jobObserver       JobObserverStatusSource
+	rotation          *firstboot.ManagedRotationService
+	rotationHash      [32]byte
+	firstboot         *firstboot.Service
+	firstbootHash     [32]byte
+	bootstrap         *hostbootstrap.Service
+	bootstrapHash     [32]byte
+	sshTargets        *sshinventory.Registry
+	sshTargetsHash    [32]byte
+	sshInventory      *sshinventory.Service
+	sshHash           [32]byte
+	onboarding        *onboarding.Manager
+	onboardingProbe   bool
+	onboardingHash    [32]byte
+	store             *admission.SQLiteStore
+	tokenHash         [32]byte
+	writeHash         [32]byte
+	management        bool
+	garm              GarmManager
+	garmWrites        bool
+	remoteFlight      chan struct{}
+	assets            *os.Root
+	provision         bool
+	inFlight          chan struct{}
+	Audit             func(string)
 }
 
 // Token is 32 random bytes encoded as 64 lowercase hexadecimal characters and

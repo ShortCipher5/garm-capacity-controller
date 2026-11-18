@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontrol"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/protectedboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 )
@@ -42,7 +44,7 @@ func TestNativeClaimRuntimeRefusesBeforeKeysOrListener(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer store.Close()
-	c := configuration{NativeClaims: &nativeClaimConfiguration{Listen: "127.0.0.1:0", TLS: securefiles.TLSFiles{CA: "/missing", Certificate: "/missing", Key: "/missing"}, DomainBindingSequences: []int64{1}}}
+	c := configuration{Admin: &adminConfiguration{NativeEnrollmentRecipesFile: "/missing-enrollment"}, NativeClaims: &nativeClaimConfiguration{Listen: "127.0.0.1:0", TLS: securefiles.TLSFiles{CA: "/missing", Certificate: "/missing", Key: "/missing"}, DomainBindingSequences: []int64{1}}}
 	before, e := store.Snapshot(t.Context())
 	if e != nil {
 		t.Fatal(e)
@@ -217,6 +219,29 @@ func TestNativeClaimBuilderUsesActualImmutableEnrollmentAndSeparateRoles(t *test
 		t.Fatal("native host client/owner leaf overlap")
 	}
 	c.Hosts = nil
+	// Real private recipe loading must include every outbound enrollment key in
+	// owner claim role separation, not merely operator-supplied fingerprints.
+	files := map[string]string{"bin/Runner.Listener": strings.Repeat("1", 64), "bin/Runner.Listener.dll": strings.Repeat("2", 64)}
+	imageBytes, _ := json.Marshal(files)
+	image := protectedboot.ImageDescriptor{InitSHA256: strings.Repeat("3", 64), LauncherSHA256: strings.Repeat("4", 64), BundleDigest: protectedboot.Hash(imageBytes), RunnerRelease: "2.321.0", UID: 1001, GID: 1001, Files: files}
+	spec := nativeapi.PolicySpec{Version: nativeapi.ProtectedPolicyVersion, Controller: "controller", Host: "host", DomainID: domain, NativeSHA256: strings.Repeat("b", 64), LauncherSHA256: strings.Repeat("c", 64), ServerVersion: nativeapi.NativeVersion, Pools: map[string]nativeapi.Pool{"pool": {Flavor: "small", Image: "runner", Fingerprint: strings.Repeat("d", 64), Type: "container", Arch: "amd64", ExpectedProfiles: []string{"runner"}, StoragePool: "storage", Bridge: "bridge", ZFSDataset: "pool/root", ProtectedImage: &image}}}
+	for _, pair := range []tls.Certificate{owner.Certificates[0], discovery.TLS.Certificates[0], claimTLS.TLS.Certificates[0], controller.Certificates[0]} {
+		path := filepath.Join(t.TempDir(), "enrollment.json")
+		data, _ := json.Marshal([]any{map[string]any{"id": "owner", "mode": "existing", "owners": []any{map[string]any{"endpoint": discovery.URL, "tls": writeClaimTLS(t, pair, discovery.TLS.Certificates[0].Certificate[1]), "owner_client_leaf": descriptor.OwnerClientLeaf, "owner_server_leaf": descriptor.OwnerServerLeaf, "policy": spec}}}})
+		if e := os.WriteFile(path, data, 0600); e != nil {
+			t.Fatal(e)
+		}
+		c.Admin = &adminConfiguration{TLS: c.ServerTLS, NativeEnrollmentRecipesFile: path}
+		_, e := buildNativeClaims(t.Context(), c, store)
+		isController := nativeidentity.Fingerprint(pair.Certificate[0]) == nativeidentity.Fingerprint(controller.Certificates[0].Certificate[0])
+		if isController && e != nil {
+			t.Fatal("separate enrollment role rejected", e)
+		}
+		if !isController && !errors.Is(e, nativecontrol.ErrControl) {
+			t.Fatal("enrollment outbound key collision did not reach role exclusion", e)
+		}
+	}
+	c.Admin = nil
 	c.Controller = "wrong"
 	if _, e := buildNativeClaims(t.Context(), c, store); e == nil {
 		t.Fatal("cross-controller enrollment")

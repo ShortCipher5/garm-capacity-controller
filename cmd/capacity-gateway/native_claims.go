@@ -182,6 +182,28 @@ func buildNativeClaims(ctx context.Context, config configuration, store *admissi
 			}
 		}
 	}
+	if config.Admin != nil && config.Admin.NativeEnrollmentRecipesFile != "" {
+		recipes, e := loadNativeEnrollmentRecipes(config.Admin.NativeEnrollmentRecipesFile)
+		if e != nil {
+			return nil, e
+		}
+		for _, recipe := range recipes {
+			for _, owner := range recipe.Owners {
+				if owner.Transport.TLS == nil || len(owner.Transport.TLS.Certificates) != 1 {
+					return nil, nativecontrol.ErrControl
+				}
+				cert := owner.Transport.TLS.Certificates[0]
+				if len(cert.Certificate) == 0 {
+					return nil, nativecontrol.ErrControl
+				}
+				leaf := nativeidentity.Fingerprint(cert.Certificate[0])
+				if leaf == claimLeaf {
+					return nil, nativecontrol.ErrControl
+				}
+				forbidden[leaf] = true
+			}
+		}
+	}
 	allowed := map[string]bool{}
 	for _, seq := range c.DomainBindingSequences {
 		binding, e := store.LookupNativeDomainBinding(ctx, seq)
