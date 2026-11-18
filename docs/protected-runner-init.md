@@ -80,3 +80,33 @@ assembly path resolution through the prepared mount require actual verification.
 The layout is not yet bound to owner-authenticated native incarnation, accepted
 operation history, or job terminal state. These remain real coding/integration
 and qualification gaps, not optional checks to bypass.
+
+## Dedicated manifest-to-listener boot entry
+
+`capacity-protected-boot` supplies a separate fixed-path PID1 entry, never a
+systemd service or cloud-init script. It reads only the schema22 owner-delivered
+root0600 launch manifest/JIT, rederives canonical file content, validates its own
+installed/running binary inode and hash, and requires one binary hash for both
+init and credential-drop helper roles. It prepares the real immutable asset
+layout, opens/rechecks the listener, and runs only `Runner.Listener run` as the
+configured non-root UID with no sudo. The guest journal is consumed before
+preparation/launch and never upgraded to job completion.
+
+The image must install that binary as
+`/usr/lib/garm-capacity/protected-init`, establish it as guest PID1, provide
+`/opt/actions-runner`, and precreate protected layout-marker parent directories.
+Image ownership/authentication comes from the external native owner and pinned
+image policy, NOT from root/PID1 checks or a self-asserted manifest UUID. No such
+image has been built or deployed here. The entry remains disconnected from the
+native command's activation path.
+
+Network configuration is not silently borrowed from cloud-init: the entry
+refuses startup unless eth0 already has a non-link-local IPv4 address and a
+root-controlled regular resolver file contains a non-loopback nameserver.
+These are necessary checks, NOT a connectivity guarantee. Trusted boot-time
+network/DNS setup remains a real image integration requirement. No DHCP helper,
+sudo, package installation or network fallback is executed by this code.
+
+Actual .NET apphost fd-exec path resolution, guest mount behavior and GitHub
+runner lifecycle remain unqualified. Local tests validate the exact manifest/JIT
+codec and refusal outside dedicated PID1; they do not exercise privileged boot.
