@@ -73,6 +73,7 @@ actual supervisor identity and controller). Every enrolled profile must match
 that actual identity. No caller-supplied expected source hash substitutes for the
 read. This identity binding is still not native or capacity-increase authority.
 
+
 Existing installations remain discovery/read-only inputs. The managed deployment
 is an explicit separate topology, not transparent adoption of an arbitrary GARM
 server. Direct changes through the GARM UI are incompatible with an enforced
