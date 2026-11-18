@@ -174,7 +174,7 @@ func (f *NativeStock) CreateStockProvider(ctx context.Context, b common.Bootstra
 	if !ok {
 		return empty, ErrUnavailable
 	}
-	result, e := host.coordinator.Execute(ctx, plan, binding, authority, digest, source.Payload())
+	result, e := host.coordinator.ExecuteProtected(ctx, plan, binding, authority, digest, source)
 	if e != nil || result.State != "confirmed" || result.ResourceID == "" {
 		return empty, ErrUnavailable
 	}
