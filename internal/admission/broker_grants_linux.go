@@ -38,6 +38,7 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
+	PoolProfiles   map[string]BrokerPoolProfile
 	Allocated      Allocations
 	HostBindings   map[string]HostBinding
 	ExecutionPlans map[string]ExecutionPlan
@@ -229,6 +230,9 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		}
 		v.Ready = v.Ready && sqliteObservationsFresh(v.Config, s.now())
 		if v.HostBindings, e = sqliteHostBindings(tx, v.Config); e != nil {
+			return e
+		}
+		if v.PoolProfiles, e = sqliteBrokerPoolProfiles(tx); e != nil {
 			return e
 		}
 		if v.Policy, e = sqliteBrokerPolicy(tx); e != nil {

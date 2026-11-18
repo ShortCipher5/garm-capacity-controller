@@ -21,6 +21,7 @@ import (
 const usage = `Usage:
   capacity-ledger initialize --destination NEW_LEDGER --identity-file NEW_IDENTITY --policy PRIVATE_POLICY_JSON
   capacity-ledger assess-recovery --source EXISTING_LEDGER [--after REQUEST_KEY] [--limit 100]
+  capacity-ledger register-pool-profile --source EXISTING_LEDGER --identity-file PRIVATE_IDENTITY --config PRIVATE_REGISTRATION_JSON
   capacity-ledger compact-grants --source EXISTING_LEDGER --identity-file PRIVATE_IDENTITY [--limit 20]
   capacity-ledger backup --source EXISTING_LEDGER --destination NEW_BACKUP
   capacity-ledger restore --source BACKUP --destination NEW_LEDGER --old-writers-fenced
@@ -46,6 +47,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		fmt.Fprint(stdout, usage)
 		return 0
+	}
+	if len(args) > 0 && args[0] == "register-pool-profile" {
+		return registerProfile(ctx, args[1:], stdout, stderr)
 	}
 	if len(args) > 0 && args[0] == "compact-grants" {
 		return compactGrants(ctx, args[1:], stdout, stderr)
