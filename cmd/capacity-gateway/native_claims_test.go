@@ -200,6 +200,13 @@ func TestNativeClaimBuilderUsesActualImmutableEnrollmentAndSeparateRoles(t *test
 		t.Fatal("provider/owner leaf overlap")
 	}
 	c.ProviderFingerprints = nil
+	for _, leaf := range []string{descriptor.OwnerClientLeaf, descriptor.OwnerServerLeaf, nativeidentity.Fingerprint(claimTLS.TLS.Certificates[0].Certificate[0])} {
+		c.ProviderInspectionFingerprint = leaf
+		if _, e := buildNativeClaims(t.Context(), c, store); e == nil {
+			t.Fatal("inspection role overlaps native claim authority")
+		}
+	}
+	c.ProviderInspectionFingerprint = ""
 	c.NativeStock = map[string]nativeStockPoolConfiguration{"pool": {Hosts: map[string]nativeStockHostConfiguration{"host": {OwnerTLS: writeClaimTLS(t, owner.Certificates[0], discovery.TLS.Certificates[0].Certificate[1])}}}}
 	if _, e := buildNativeClaims(t.Context(), c, store); e == nil {
 		t.Fatal("outbound controller/owner leaf overlap")

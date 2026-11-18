@@ -72,6 +72,9 @@ func buildNativeClaims(ctx context.Context, config configuration, store *admissi
 		return nil, e
 	}
 	forbidden := map[string]bool{}
+	if config.ProviderInspectionFingerprint != "" {
+		forbidden[config.ProviderInspectionFingerprint] = true
+	}
 	for _, leaf := range config.ProviderFingerprints {
 		forbidden[leaf] = true
 	}
