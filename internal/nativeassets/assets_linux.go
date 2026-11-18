@@ -212,6 +212,9 @@ func Prepare(ctx context.Context, source, expectedDigest string) (Receipt, error
 	return prepare(ctx, source, Parent, expectedDigest, 0)
 }
 func prepare(ctx context.Context, source, parent, want string, uid uint32) (Receipt, error) {
+	return prepareWithSpace(ctx, source, parent, want, uid, spaceAt)
+}
+func prepareWithSpace(ctx context.Context, source, parent, want string, uid uint32, checkSpace func(int, int64) error) (Receipt, error) {
 	if ctx == nil || ctx.Err() != nil || protectedDir(parent, uid) != nil {
 		return Receipt{}, ErrAssets
 	}
@@ -224,6 +227,23 @@ func prepare(ctx context.Context, source, parent, want string, uid uint32) (Rece
 		return Receipt{}, ErrAssets
 	}
 	defer src.Close()
+	lock, e := prepareLock(parent, uid)
+	if e != nil {
+		return Receipt{}, ErrAssets
+	}
+	defer lock.Close()
+	parentFD, e := os.OpenFile(parent, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if e != nil {
+		return Receipt{}, ErrAssets
+	}
+	defer parentFD.Close()
+	var remainingAssets int64
+	for _, entry := range m.Files {
+		remainingAssets += entry.Size
+	}
+	if checkSpace(int(parentFD.Fd()), remainingAssets) != nil {
+		return Receipt{}, ErrAssets
+	}
 	dest := filepath.Join(parent, m.ID)
 	if os.Mkdir(dest, 0700) != nil {
 		return Receipt{}, ErrAssets
@@ -243,18 +263,19 @@ func prepare(ctx context.Context, source, parent, want string, uid uint32) (Rece
 		return Receipt{}, ErrAssets
 	}
 	for _, n := range names {
-		if copyAsset(ctx, src, out, n, m, uid) != nil {
+		remainingAssets -= m.Files[n].Size
+		if copyAsset(ctx, src, out, n, m, uid, remainingAssets, checkSpace) != nil {
 			return Receipt{}, ErrAssets
 		}
 	}
 	receipt := Receipt{Version, m.ID, want, "artifacts_prepared_not_activated", false}
 	raw, _ = json.Marshal(receipt)
-	if ctx.Err() != nil || write(out, "complete.json", raw, 0400) != nil || syncDir(dest) != nil {
+	if ctx.Err() != nil || checkSpace(int(parentFD.Fd()), 0) != nil || write(out, "complete.json", raw, 0400) != nil || syncDir(dest) != nil {
 		return Receipt{}, ErrAssets
 	}
 	return receipt, nil
 }
-func copyAsset(ctx context.Context, src, out *os.Root, n string, m Manifest, uid uint32) error {
+func copyAsset(ctx context.Context, src, out *os.Root, n string, m Manifest, uid uint32, remainingOther int64, checkSpace func(int, int64) error) error {
 	e := m.Files[n]
 	f, err := openFile(src, n, uid, e.Size)
 	if err != nil {
@@ -304,7 +325,7 @@ func copyAsset(ctx context.Context, src, out *os.Root, n string, m Manifest, uid
 	remaining := e.Size
 	buf := make([]byte, 1<<20)
 	for remaining > 0 {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || (dst != nil && checkSpace(int(dst.Fd()), remaining+remainingOther) != nil) {
 			return ErrAssets
 		}
 		take := int64(len(buf))
@@ -376,7 +397,7 @@ func inspect(ctx context.Context, parent, id, want string, uid uint32) (Receipt,
 		if n == "runtime.raw" {
 			mode = 0400
 		}
-		if e != nil || s.Mode().Perm() != mode || copyAsset(ctx, r, nil, n, m, uid) != nil {
+		if e != nil || s.Mode().Perm() != mode || copyAsset(ctx, r, nil, n, m, uid, 0, nil) != nil {
 			return Receipt{}, ErrAssets
 		}
 	}
