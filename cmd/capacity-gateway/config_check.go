@@ -250,8 +250,18 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if a.EnableExperimentalGarmManagement && (!a.EnableExperimentalManagement || a.GarmManagement == nil) {
 		return fail()
 	}
-	if a.GarmManagement != nil {
+	if a.GarmManagement != nil && a.GarmManagement.ManagedSupervisor {
+		client, e := managedSettingsClient(a)
+		if e != nil {
+			return fail()
+		}
+		client.Close()
+	}
+	if a.GarmManagement != nil && !a.GarmManagement.ManagedSupervisor {
 		m := a.GarmManagement
+		if m.ProxyServerKeyPin != "" || m.ControllerID != "" {
+			return fail()
+		}
 		if a.EnableExperimentalGarmManagement && (!m.ExclusiveSettingsWriter || !m.QualifiedAdmissionRouting) {
 			return fail()
 		}
