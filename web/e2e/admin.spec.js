@@ -374,14 +374,20 @@ test("audit filters stay snapshot-local across clear, refresh and disconnect", a
   const snapshotResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/admin/api/v1/overview");
   await connect(page);
   const body = await (await snapshotResponse).json();
+  await expect(page.locator(".usage-panel")).toBeVisible();
+  await expect(page.locator(".usage-panel")).not.toContainText("Loading measured usage history");
   await page.route("**/admin/api/v1/overview", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", json: { ...body, events: refreshed ? [] : events } });
   });
   const requests = [];
   page.on("request", request => requests.push(request.url()));
+  const usageResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/admin/api/v1/usage/host-a");
   await page.getByRole("button", { name: "Refresh snapshot", exact: true }).click();
   const audit = page.locator("#events");
   await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
+  await usageResponse;
+  await expect(page.locator(".usage-panel")).not.toContainText("Loading measured usage history");
+  expect(requests.filter(url => new URL(url).pathname === "/admin/api/v1/usage/host-a")).toHaveLength(1);
   const initial = requests.length;
   await page.getByLabel("Event kind", { exact: true }).selectOption("denied");
   await page.getByLabel("Event host", { exact: true }).selectOption("host-a");
@@ -392,7 +398,6 @@ test("audit filters stay snapshot-local across clear, refresh and disconnect", a
   await page.getByRole("button", { name: "Clear filters", exact: true }).click();
   await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
   await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toBeDisabled();
-  console.info("audit filter network diagnostic", JSON.stringify({ initial, requests }));
   expect(requests, JSON.stringify(requests)).toHaveLength(initial);
   await page.getByLabel("Event host", { exact: true }).selectOption("host-b");
   refreshed = true;
