@@ -1,5 +1,7 @@
 // Package brokerinput joins saved policy and stock-GARM observations for capacity
-// planning. Its output is not an atomic admission snapshot or a provider permit.
+// planning. Advisory plans are not provider permits. GrantCycle additionally
+// commits capacity grants through the canonical ledger CAS; it does not activate
+// native execution or mutate remote pool settings.
 package brokerinput
 
 import (
