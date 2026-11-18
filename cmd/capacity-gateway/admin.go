@@ -11,11 +11,14 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type adminConfiguration struct {
+	Bootstrap                          *bootstrapConfiguration    `json:"prepared_host_bootstrap,omitempty"`
+	EnableBootstrap                    bool                       `json:"-"`
 	SSHInventory                       *sshInventoryConfiguration `json:"ssh_inventory,omitempty"`
 	EnableSSHTargetManagement          bool                       `json:"-"`
 	EnableSSHInventory                 bool                       `json:"-"`
@@ -159,6 +162,29 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, e
 		}
+	}
+	if config.EnableBootstrap {
+		targets, resolve, token, e := loadBootstrap(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = store.InitializeBootstrap(context.Background()); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		service, e := hostbootstrap.NewService(targets, store, resolve)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetBootstrap(service, token); e != nil {
+			service.Close()
+			cleanup()
+			return nil, noop, e
+		}
+		oldCleanup := cleanup
+		cleanup = func() { service.Close(); oldCleanup() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

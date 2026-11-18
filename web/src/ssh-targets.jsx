@@ -1,13 +1,15 @@
 import React,{useEffect,useRef,useState} from 'react';
+import {PreparedBootstrap} from './bootstrap.jsx';
 import {sshTargetsRequest} from './ssh-targets-client.js';
 const empty={id:'',address:'',port:22,user:'',host_key:'',credential_ref:''};
 export function SSHTargetRegistration(){
+ const [bootstrapEpoch,setBootstrapEpoch]=useState(0);
  const [replaceID,setReplaceID]=useState('');
  const [targets,setTargets]=useState([]),[revokeID,setRevokeID]=useState(''),[confirmRevoke,setConfirmRevoke]=useState(false);
  const [scopes,setScopes]=useState(null),[form,setForm]=useState(empty),[review,setReview]=useState(null),[verified,setVerified]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
  const token=useRef(null),active=useRef(null),pending=useRef(null),generation=useRef(0),mounted=useRef(true);
  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;generation.current++;active.current?.abort();if(token.current)token.current.value=''}},[]);
- function reset(){const uncertain=pending.current;pending.current=null;generation.current++;active.current?.abort();active.current=null;if(token.current)token.current.value='';setBusy(false);setScopes(null);setTargets([]);setReplaceID('');setRevokeID('');setConfirmRevoke(false);setForm(empty);setReview(null);setVerified(false);setMessage((uncertain==='approve'||uncertain==='replace')?'Approval may already have saved. Reload approved SSH targets before retrying; cancellation does not undo a committed configuration.':uncertain==='revoke'?'Revocation may already have saved. Reload approved SSH targets before retrying; cancellation does not restore permission.':'');}
+ function reset(){setBootstrapEpoch(v=>v+1);const uncertain=pending.current;pending.current=null;generation.current++;active.current?.abort();active.current=null;if(token.current)token.current.value='';setBusy(false);setScopes(null);setTargets([]);setReplaceID('');setRevokeID('');setConfirmRevoke(false);setForm(empty);setReview(null);setVerified(false);setMessage((uncertain==='approve'||uncertain==='replace')?'Approval may already have saved. Reload approved SSH targets before retrying; cancellation does not undo a committed configuration.':uncertain==='revoke'?'Revocation may already have saved. Reload approved SSH targets before retrying; cancellation does not restore permission.':'');}
  function change(key,value){setForm(old=>({...old,[key]:value}));setReview(null);setVerified(false);setMessage('');}
  async function run(action){
   if(action==='approve'&&replaceID)action='replace';
@@ -26,6 +28,7 @@ export function SSHTargetRegistration(){
  }
  const scope=scopes?.[form.credential_ref];
  return <details className="card management" id="ssh-target-registration" onToggle={e=>{if(!e.currentTarget.open)reset()}}><summary>Add an SSH server configuration</summary>
+ <PreparedBootstrap key={bootstrapEpoch}/>
  <p>Save a new server within administrator-approved credential and network scopes. This does not install software, contact the server, enroll capacity or upload private keys. Existing target IDs cannot be overwritten.</p>
  <label>SSH target-management token<input aria-label="SSH target-management token" type="password" autoComplete="off" ref={token} disabled={busy}/></label>
  <button type="button" disabled={busy} onClick={()=>run('scopes')}>Load permitted server scopes</button>

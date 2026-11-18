@@ -188,6 +188,12 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
+	if a.EnableBootstrap {
+		_, _, token, e := loadBootstrap(a)
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
 	if a.EnableSSHInventory {
 		_, sshToken, e := newSSHInventory(a.SSHInventory, nil)
 		if e != nil || !validToken([]byte(sshToken)) || bytes.Equal([]byte(sshToken), adminToken) {
