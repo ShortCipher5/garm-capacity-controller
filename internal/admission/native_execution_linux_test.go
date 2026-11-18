@@ -18,11 +18,13 @@ import (
 )
 
 type nativeFixture struct {
-	store       *SQLiteStore
-	binding     NativeDomainBinding
-	observation nativeidentity.Observation
-	owner       NativeOwnerAuthority
-	controller  NativeOwnerAuthority
+	evidenceConfig nativeidentity.Configuration
+	setEvidence    func(string, any)
+	store          *SQLiteStore
+	binding        NativeDomainBinding
+	observation    nativeidentity.Observation
+	owner          NativeOwnerAuthority
+	controller     NativeOwnerAuthority
 }
 
 // Reconstruct a genuine pre-native schema in historical migration fixtures.
@@ -43,6 +45,17 @@ func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture
 	s := sqliteFixtureStore(t, config, false)
 	fence, bindings := bindingFixture(t, s)
 	var descriptor nativeidentity.Descriptor
+	var evidenceMu sync.Mutex
+	evidence := map[string][]byte{}
+	setEvidence := func(path string, value any) {
+		raw, e := json.Marshal(value)
+		if e != nil {
+			t.Fatal(e)
+		}
+		evidenceMu.Lock()
+		evidence[path] = raw
+		evidenceMu.Unlock()
+	}
 	authority := make(chan NativeOwnerAuthority, 2)
 	server, controllerTLS, ownerTLS := testsupport.NativeTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/authenticate-test" {
@@ -52,6 +65,17 @@ func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture
 			}
 			authority <- a
 			w.WriteHeader(204)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/native/operations/") || strings.HasPrefix(r.URL.Path, "/v1/native/quotas/") {
+			evidenceMu.Lock()
+			raw, ok := evidence[r.URL.Path]
+			evidenceMu.Unlock()
+			if !ok {
+				w.WriteHeader(404)
+			} else {
+				w.Write(raw)
+			}
 			return
 		}
 		if r.URL.Path != nativeidentity.Path {
@@ -64,7 +88,8 @@ func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture
 	if len(policyDigests) > 0 {
 		descriptor.PolicyDigest = policyDigests[0]
 	}
-	observation, e := nativeidentity.Observe(ctx, nativeidentity.Configuration{Endpoint: server.URL, TLS: controllerTLS, OwnerServerLeaf: descriptor.OwnerServerLeaf, OwnerClientLeaf: descriptor.OwnerClientLeaf, PolicyDigest: descriptor.PolicyDigest, DomainID: domain})
+	evidenceConfig := nativeidentity.Configuration{Endpoint: server.URL, TLS: controllerTLS, OwnerServerLeaf: descriptor.OwnerServerLeaf, OwnerClientLeaf: descriptor.OwnerClientLeaf, PolicyDigest: descriptor.PolicyDigest, DomainID: domain}
+	observation, e := nativeidentity.Observe(ctx, evidenceConfig)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -103,7 +128,7 @@ func nativeExecutionFixture(t *testing.T, policyDigests ...string) nativeFixture
 		r.Body.Close()
 		return <-authority
 	}
-	return nativeFixture{s, enrolled, observation, authenticate(ownerTLS), authenticate(controllerTLS)}
+	return nativeFixture{evidenceConfig, setEvidence, s, enrolled, observation, authenticate(ownerTLS), authenticate(controllerTLS)}
 }
 func nativeEnvelope(t *testing.T, f nativeFixture, p DispatchPermit) (NativeExecutionEnvelope, string) {
 	t.Helper()
@@ -183,9 +208,9 @@ func TestNativeClaimIsOneShotAndCanonicalChargeUnchanged(t *testing.T) {
 		if _, e := s.ConsumeNativeExecution(ctx, f.owner, p.ID(), digest); !errors.Is(e, ErrNativeConsumed) {
 			t.Fatal("replay authorized", e)
 		}
-		return DispatchReceipt{State: "confirmed", OperationID: "11111111-1111-4111-8111-111111111111", ResourceID: plan.Execution.Name}, nil
+		return DispatchReceipt{}, errors.New("schema21 requires actual staged native completion")
 	})
-	if e != nil || calls != 1 {
+	if !errors.Is(e, ErrDispatchUnknown) || calls != 1 {
 		t.Fatal(e, calls)
 	}
 	if sqliteSnapshot(t, s).Allocated.Global.Runners != 1 {
