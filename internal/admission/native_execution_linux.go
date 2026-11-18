@@ -612,3 +612,14 @@ func sqliteCheckNativeExecutions(ctx context.Context, s *SQLiteStore) error {
 		return nil
 	})
 }
+
+// LookupNativeDomainBinding returns validated immutable enrollment data only.
+// It is not execution authority and does not reopen readiness or replace proof.
+func (s *SQLiteStore) LookupNativeDomainBinding(ctx context.Context, sequence int64) (NativeDomainBinding, error) {
+	var out NativeDomainBinding
+	err := s.readTransaction(ctx, func(tx *sql.Tx) error { var e error; out, e = nativeDomainRecord(tx, sequence); return e })
+	if err != nil {
+		return NativeDomainBinding{}, err
+	}
+	return out, nil
+}

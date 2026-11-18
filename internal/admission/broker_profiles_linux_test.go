@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/protectedboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/stockidentity"
 )
 
@@ -23,11 +24,18 @@ DELETE FROM audit WHERE kind IN ('broker_profile_recorded','schema_migrated_v20'
 const profilePool = "11111111-1111-4111-8111-111111111111"
 const profileRepo = "22222222-2222-4222-8222-222222222222"
 
-func poolProfileFixture(t *testing.T) (nativeFixture, BrokerPoolProfileRequest, stockidentity.Observation, map[int64]nativeapi.Policy) {
+func poolProfileFixture(t *testing.T, images ...protectedboot.ImageDescriptor) (nativeFixture, BrokerPoolProfileRequest, stockidentity.Observation, map[int64]nativeapi.Policy) {
 	t.Helper()
-	policy, err := nativeapi.NewPolicy(nativeapi.PolicySpec{Version: nativeapi.PolicyVersion, Controller: "controller", Host: "a", DomainID: strings.Repeat("a", 64),
+	spec := nativeapi.PolicySpec{Version: nativeapi.PolicyVersion, Controller: "controller", Host: "a", DomainID: strings.Repeat("a", 64),
 		NativeSHA256: strings.Repeat("b", 64), LauncherSHA256: strings.Repeat("c", 64), ServerVersion: nativeapi.NativeVersion,
-		Pools: map[string]nativeapi.Pool{profilePool: {Flavor: "small", Image: "prebuilt", Fingerprint: strings.Repeat("a", 64), Type: "container", Arch: "amd64", ExpectedProfiles: []string{"runner"}, StoragePool: "storage", Bridge: "bridge"}}})
+		Pools: map[string]nativeapi.Pool{profilePool: {Flavor: "small", Image: "prebuilt", Fingerprint: strings.Repeat("a", 64), Type: "container", Arch: "amd64", ExpectedProfiles: []string{"runner"}, StoragePool: "storage", Bridge: "bridge"}}}
+	if len(images) > 0 {
+		spec.Version = nativeapi.ProtectedPolicyVersion
+		pool := spec.Pools[profilePool]
+		pool.ProtectedImage = &images[0]
+		spec.Pools[profilePool] = pool
+	}
+	policy, err := nativeapi.NewPolicy(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,5 +222,21 @@ func TestBrokerProfileReviewedSizeCompareIsTransactional(t *testing.T) {
 	r.ExpectedResources = Resources{CPU: 2000, RAM: 2048, Disk: 8192, Runners: 1}
 	if _, err := f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBrokerProfileProtectedTemplateWithoutFabricatedJobPayload(t *testing.T) {
+	files := map[string]string{"bin/Runner.Listener": strings.Repeat("1", 64), "bin/Runner.Listener.dll": strings.Repeat("3", 64)}
+	raw, _ := json.Marshal(files)
+	image := protectedboot.ImageDescriptor{InitSHA256: strings.Repeat("2", 64), LauncherSHA256: strings.Repeat("2", 64), BundleDigest: protectedboot.Hash(raw), RunnerRelease: "2.321.0", UID: 1001, GID: 1001, Files: files}
+	f, r, o, p := poolProfileFixture(t, image)
+	v, err := f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p)
+	if err != nil || v.Sequence == 0 || v.Domains[0].PolicyDigest != p[f.binding.Sequence].Digest() {
+		t.Fatal("protected template registration refused", err)
+	}
+	r.ExpectedProfileSequence = v.Sequence
+	r.Execution.Image = "unreviewed"
+	if _, err = f.store.RegisterBrokerPoolProfile(context.Background(), r, o, p); err == nil {
+		t.Fatal("protected template mismatch accepted")
 	}
 }

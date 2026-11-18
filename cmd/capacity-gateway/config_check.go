@@ -128,19 +128,7 @@ func checkStaticConfig(c configuration, provision bool) error {
 			return fail()
 		}
 	}
-	token, e := securefiles.Read(c.Garm.TokenFile, 16384)
-	if e != nil {
-		return fail()
-	}
-	token = bytes.TrimSpace(token)
-	if len(token) == 0 {
-		return fail()
-	}
-	tls, e := securefiles.LoadTLS(c.Garm.TLS)
-	if e != nil {
-		return fail()
-	}
-	client, e := garmapi.New(c.Garm.Endpoint, string(token), tls, c.Garm.Providers, c.Garm.ScaleSets)
+	client, token, e := inventoryClient(c, provision)
 	if e != nil {
 		return fail()
 	}

@@ -221,10 +221,10 @@ func (s *SQLiteStore) RegisterBrokerPoolProfile(ctx context.Context, r BrokerPoo
 				return ErrBrokerProfile
 			}
 			e := r.Execution
-			_, err = policy.Compile(nativeapi.Allocation{Controller: d.Controller, Host: d.Host, Pool: pool.Pool, Name: "profile-validation",
+			err = policy.ValidateAllocation(nativeapi.Allocation{Controller: d.Controller, Host: d.Host, Pool: pool.Pool, Name: "profile-validation",
 				RequestKey: executionKey(ExecutionImage{Controller: d.Controller, Name: "profile-validation"}, pool.Pool),
 				CPU:        v.Resources.CPU, RAM: v.Resources.RAM, Disk: v.Resources.Disk, Runners: 1,
-				Flavor: e.Flavor, Image: e.Image, Fingerprint: e.Fingerprint, Type: e.Type, Arch: e.Arch, Profiles: append([]string(nil), e.Profiles...)}, "profile-validation")
+				Flavor: e.Flavor, Image: e.Image, Fingerprint: e.Fingerprint, Type: e.Type, Arch: e.Arch, Profiles: append([]string(nil), e.Profiles...)})
 			if err != nil {
 				return ErrBrokerProfile
 			}
