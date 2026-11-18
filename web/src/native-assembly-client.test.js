@@ -61,3 +61,17 @@ test('initial plan uses separate actual registration route and exact assembly id
  await assert.rejects(nativeAssemblyRequest(token,'initial_plan',paired,saved,current,report,{fetcher:async()=>{throw Error('must not call');}}),/Pending registration/);
  await assert.rejects(nativeAssemblyRequest(token,'initial_plan',paired,saved,pending,report,{fetcher:async()=>({status:200,json:async()=>({target_id:'server',assembly:{...report,plan_digest:hash},preparation:{...newView,review_digest:hash,state:{status:'not_started',review_digest:hash}},state:'registry_reloaded_not_prepared'})})}),/exact reviewed bundle/);
 });
+
+test('optional runtime asset reference is paired and preserved without inferring staging',()=>{
+ const linked={...report,runtime_asset_id:'1'.repeat(64),runtime_asset_manifest_digest:'2'.repeat(64)};
+ assert.deepEqual(validateNativeAssemblyReport(linked,target,selection),linked);
+ for(const patch of [{runtime_asset_id:linked.runtime_asset_id},{runtime_asset_manifest_digest:linked.runtime_asset_manifest_digest},{runtime_asset_id:null,runtime_asset_manifest_digest:null},{runtime_asset_id:'bad',runtime_asset_manifest_digest:linked.runtime_asset_manifest_digest}])assert.throws(()=>validateNativeAssemblyReport({...report,...patch},target,selection),/does not match/);
+});
+test('registry approval rejects changed, omitted or added runtime asset linkage',async()=>{
+ const linked={...report,runtime_asset_id:'1'.repeat(64),runtime_asset_manifest_digest:'2'.repeat(64)};
+ const pending={target_id:'server',binding:paired.binding,registration_digest:hash,state:'registered_configuration_without_preparation_plan'};
+ for(const action of ['reload','initial_plan'])for(const [reviewed,returned] of [[linked,linked],[linked,{...linked,runtime_asset_id:hash}],[linked,{...linked,runtime_asset_manifest_digest:hash}],[linked,report],[report,linked]]){
+  const request=nativeAssemblyRequest(token,action,paired,saved,action==='reload'?current:pending,reviewed,{fetcher:async()=>({status:200,json:async()=>({target_id:'server',assembly:returned,preparation:newView,state:'registry_reloaded_not_prepared'})})});
+  if(reviewed===returned)assert.equal((await request).assembly.runtime_asset_id,linked.runtime_asset_id);else await assert.rejects(request,/exact reviewed bundle/);
+ }
+});

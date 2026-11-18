@@ -5,6 +5,7 @@ const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 export function validateNativeAssemblyReport(value, target, selectionDigest) {
   if (!target || typeof target.target_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(target.target_id) || !hash(target.binding?.preparation_id) || !hash(selectionDigest) || value?.target_id !== target.target_id ||
       value.preparation_id !== target.binding?.preparation_id || value.selection_digest !== selectionDigest ||
+      ((value.runtime_asset_id !== undefined || value.runtime_asset_manifest_digest !== undefined) && (!hash(value.runtime_asset_id) || !hash(value.runtime_asset_manifest_digest))) ||
       !hash(value.manifest_digest) || !hash(value.plan_digest) || !hash(value.assembly_digest) ||
       value.state !== 'bundle_created_not_reloaded' || value.activation_authorized !== false) {
     throw new Error('Bundle result does not match the reviewed target and saved selection. Inspect the completed assembly; do not automatically build or reload again.');
@@ -13,6 +14,7 @@ export function validateNativeAssemblyReport(value, target, selectionDigest) {
     target_id: value.target_id, preparation_id: value.preparation_id,
     selection_digest: value.selection_digest, manifest_digest: value.manifest_digest,
     plan_digest: value.plan_digest, assembly_digest: value.assembly_digest,
+    ...(value.runtime_asset_id === undefined ? {} : {runtime_asset_id:value.runtime_asset_id,runtime_asset_manifest_digest:value.runtime_asset_manifest_digest}),
     state: value.state, activation_authorized: false,
   };
 }
@@ -79,6 +81,6 @@ export async function nativeAssemblyRequest(token,action,target,selection,curren
   const report=validateNativeAssemblyReport(value.assembly,target,selectionDigest);
   if(action!=='reload'&&action!=='initial_plan')return report;
   const view=await matchPreparation(validatePreparationView({targets:[value.preparation]}).targets[0],target);
-  if(value.state!=='registry_reloaded_not_prepared'||view.review_digest!==report.plan_digest||view.manifest_digest!==report.manifest_digest||view.state.status!=='not_started'||report.assembly_digest!==assembly.assembly_digest||report.plan_digest!==assembly.plan_digest||report.manifest_digest!==assembly.manifest_digest)throw Error('Registry response does not match the exact reviewed bundle. Reload current status; do not request SSH preparation from this response.');
+  if(value.state!=='registry_reloaded_not_prepared'||view.review_digest!==report.plan_digest||view.manifest_digest!==report.manifest_digest||view.state.status!=='not_started'||report.assembly_digest!==assembly.assembly_digest||report.plan_digest!==assembly.plan_digest||report.manifest_digest!==assembly.manifest_digest||report.runtime_asset_id!==assembly.runtime_asset_id||report.runtime_asset_manifest_digest!==assembly.runtime_asset_manifest_digest)throw Error('Registry response does not match the exact reviewed bundle. Reload current status; do not request SSH preparation from this response.');
   return {assembly:report,preparation:view,state:value.state};
 }

@@ -99,7 +99,11 @@ type Registration struct {
 	used     *atomic.Bool
 }
 
-func (r Registration) Metadata() RegistrationMetadata { return r.metadata }
+func (r Registration) Metadata() RegistrationMetadata {
+	m := r.metadata
+	m.Build.RuntimeAssets, _ = FreezeAssetReference(m.Build.RuntimeAssets, m.Build.Architecture)
+	return m
+}
 func (c *RegistrationCompiler) Revision() string {
 	if c == nil {
 		return ""
@@ -202,6 +206,12 @@ func NewRegistrationCompiler(c RegistrationCatalog) (*RegistrationCompiler, erro
 	}
 	for alias, t := range c.Templates {
 		b := t.Configuration
+		assets, e := FreezeAssetReference(b.RuntimeAssets, b.Architecture)
+		if e != nil {
+			return nil, ErrRegistration
+		}
+		b.RuntimeAssets = assets
+		t.Configuration = b
 		if !registrationLabel.MatchString(alias) || !registrationLabel.MatchString(t.ArtifactReference) || !registrationLabel.MatchString(t.StorageReference) || !registrationLabel.MatchString(t.NetworkReference) || b.ID != "" || b.OutputDirectory != "" || b.SelectionFile != "" || b.ExpectedBindingFile != "" || b.ExpectedSelectionDigest != "" || !hash(b.ExportManifestSHA256) || (b.Architecture != "amd64" && b.Architecture != "arm64") || protectedDirectory(b.ExportDirectory) != nil {
 			return nil, ErrRegistration
 		}
@@ -214,7 +224,7 @@ func NewRegistrationCompiler(c RegistrationCatalog) (*RegistrationCompiler, erro
 			return nil, ErrRegistration
 		}
 		v, e := decodeObject(raw)
-		if e != nil || registrationSections(v) != nil {
+		if e != nil || applyAssetReference(v, b.RuntimeAssets, b.Architecture) != nil || registrationSections(v) != nil {
 			return nil, ErrRegistration
 		}
 		control, e := object(v, "control")
@@ -237,6 +247,12 @@ func NewRegistrationCompiler(c RegistrationCatalog) (*RegistrationCompiler, erro
 		sums, e := checksumManifest(sumBytes)
 		if e != nil {
 			return nil, ErrRegistration
+		}
+		if b.RuntimeAssets != nil {
+			raw, e = json.Marshal(v)
+			if e != nil {
+				return nil, ErrRegistration
+			}
 		}
 		out.templates[alias] = frozenTemplate{t, raw, sums}
 		commitments["template:"+alias] = digest(raw)
@@ -328,6 +344,7 @@ func (c *RegistrationCompiler) Compile(r RegistrationRequest) (Registration, err
 		return Registration{}, ErrRegistration
 	}
 	build := t.spec.Configuration
+	build.RuntimeAssets, _ = FreezeAssetReference(build.RuntimeAssets, build.Architecture)
 	build.ID = r.PreparationID
 	build.PrivateDirectory = filepath.Join(c.privateParent, r.PreparationID)
 	build.ExpectedBindingFile = filepath.Join(build.PrivateDirectory, "binding.json")

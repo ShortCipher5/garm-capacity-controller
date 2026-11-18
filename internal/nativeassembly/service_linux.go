@@ -33,14 +33,16 @@ type Recipe struct {
 	OutputParent string
 }
 type Report struct {
-	TargetID             string `json:"target_id"`
-	PreparationID        string `json:"preparation_id"`
-	SelectionDigest      string `json:"selection_digest"`
-	ManifestDigest       string `json:"manifest_digest"`
-	PlanDigest           string `json:"plan_digest"`
-	AssemblyDigest       string `json:"assembly_digest"`
-	State                string `json:"state"`
-	ActivationAuthorized bool   `json:"activation_authorized"`
+	RuntimeAssetID             string `json:"runtime_asset_id,omitempty"`
+	RuntimeAssetManifestDigest string `json:"runtime_asset_manifest_digest,omitempty"`
+	TargetID                   string `json:"target_id"`
+	PreparationID              string `json:"preparation_id"`
+	SelectionDigest            string `json:"selection_digest"`
+	ManifestDigest             string `json:"manifest_digest"`
+	PlanDigest                 string `json:"plan_digest"`
+	AssemblyDigest             string `json:"assembly_digest"`
+	State                      string `json:"state"`
+	ActivationAuthorized       bool   `json:"activation_authorized"`
 }
 type Completed struct {
 	report Report
@@ -74,6 +76,11 @@ func NewService(planning *nativeplanning.Service, recipes map[string]Recipe) (*S
 	bindings := planning.Bindings()
 	owned := map[string]Recipe{}
 	for id, r := range recipes {
+		assets, e := nativebundle.FreezeAssetReference(r.Build.RuntimeAssets, r.Build.Architecture)
+		if e != nil {
+			return nil, ErrAssembly
+		}
+		r.Build.RuntimeAssets = assets
 		b, ok := bindings[id]
 		if !ok || nativeplanning.Digest(b) != nativeplanning.Digest(r.Binding) || nativeplanning.ValidateBinding(b) != nil ||
 			r.Build.ID != b.PreparationID || r.Build.SelectionFile != "" || r.Build.ExpectedSelectionDigest != "" || r.Build.ExpectedBindingFile == "" || r.Build.OutputDirectory != "" ||
@@ -247,7 +254,7 @@ func (s *Service) Build(ctx context.Context, id, selectionDigest string) (Comple
 	if e != nil || actualManifest != result.ManifestDigest {
 		return Completed{}, ErrAssembly
 	}
-	report := Report{TargetID: id, PreparationID: result.ID, SelectionDigest: selectionDigest, ManifestDigest: result.ManifestDigest, PlanDigest: nativeprovision.Digest(plan), State: "bundle_created_not_reloaded"}
+	report := Report{RuntimeAssetID: result.RuntimeAssetID, RuntimeAssetManifestDigest: result.RuntimeAssetManifestDigest, TargetID: id, PreparationID: result.ID, SelectionDigest: selectionDigest, ManifestDigest: result.ManifestDigest, PlanDigest: nativeprovision.Digest(plan), State: "bundle_created_not_reloaded"}
 	complete := record{version, nativeplanning.Digest(r), report}
 	complete.Report.AssemblyDigest = assemblyDigest(complete)
 	if writeRecord(filepath.Join(r.OutputParent, r.stem(selectionDigest)+".receipt.json"), complete) != nil {
@@ -284,6 +291,14 @@ func inspectCompletedLocked(ctx context.Context, id, selectionDigest string, r R
 	}
 	saved, e := readRecord(filepath.Join(r.OutputParent, r.stem(selectionDigest)+".receipt.json"))
 	if e != nil || saved.Version != version || saved.RecipeDigest != expected.RecipeDigest || saved.Report.TargetID != id || saved.Report.PreparationID != r.Binding.PreparationID || saved.Report.SelectionDigest != selectionDigest || saved.Report.State != "bundle_created_not_reloaded" || saved.Report.ActivationAuthorized || !hash(saved.Report.ManifestDigest) || !hash(saved.Report.PlanDigest) || saved.Report.AssemblyDigest != assemblyDigest(saved) {
+		return Completed{}, ErrAssembly
+	}
+	assetID, assetDigest := "", ""
+	if r.Build.RuntimeAssets != nil {
+		assetID = r.Build.RuntimeAssets.Manifest.ID
+		assetDigest = r.Build.RuntimeAssets.ManifestDigest
+	}
+	if saved.Report.RuntimeAssetID != assetID || saved.Report.RuntimeAssetManifestDigest != assetDigest {
 		return Completed{}, ErrAssembly
 	}
 	bundle, e := nativeprovision.LoadBundle(r.output(selectionDigest))
