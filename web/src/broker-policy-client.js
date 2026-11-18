@@ -1,3 +1,4 @@
+import {validateBrokerStatus} from "./broker-status.js";
 const uuid = v => typeof v === 'string' && v !== '00000000-0000-0000-0000-000000000000' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v);
 const count = v => Number.isSafeInteger(v) && v >= 0 && v <= 1000000;
 export function validateBrokerPolicy(p) {
@@ -16,7 +17,7 @@ export function validateBrokerPolicy(p) {
 }
 export function validateBrokerView(v) {
   if (!v || v.advisory_only !== true || typeof v.writes_enabled !== 'boolean') throw new Error('Unsupported advisory policy response.');
-  validateBrokerPolicy(v.policy); return v;
+  validateBrokerPolicy(v.policy); if(v.status!==undefined)validateBrokerStatus(v.status,v.policy); return v;
 }
 export function validateBrokerSaveInput(token, policy) {
   validateBrokerPolicy(policy);
