@@ -137,6 +137,16 @@ func TestActualDiscoveryToSavedSelectionAndNoAuthority(t *testing.T) {
 	if e != nil || saved.State != "saved_configuration_not_applied" || ValidateFreshSelection(saved.Selection, time.Now()) != nil || saved.Selection.PhysicalCapacityQualified || *saved.Selection.Observation.RAMMiB != 16384 {
 		t.Fatal(saved, e)
 	}
+	mix, e := s.ProposeMix(context.Background(), "host", saved.SelectionDigest, 8192)
+	if e != nil || mix.Host != binding.Host || mix.SelectionDigest != saved.SelectionDigest || mix.DiskFitVerified || len(mix.Entries) == 0 {
+		t.Fatal(mix, e)
+	}
+	if _, e = s.ProposeMix(context.Background(), "host", saved.SelectionDigest, 0); e == nil {
+		t.Fatal("missing explicit disk accepted")
+	}
+	if _, e = s.ProposeMix(context.Background(), "host", strings.Repeat("f", 64), 8192); e == nil {
+		t.Fatal("unrecorded selection accepted")
+	}
 	names, _ := os.ReadDir(dir)
 	if len(names) != 1 {
 		t.Fatal("unexpected persisted files")
@@ -148,6 +158,22 @@ func TestActualDiscoveryToSavedSelectionAndNoAuthority(t *testing.T) {
 	var actual Selection
 	if json.Unmarshal(raw, &actual) != nil || Digest(actual) != saved.SelectionDigest {
 		t.Fatal("wrong durable config")
+	}
+	aged := actual
+	aged.Observation.ObservedAt = aged.Observation.ObservedAt.Add(-2 * Lifetime)
+	aged.ObservationDigest = ObservationDigest(aged.Binding, aged.Observation)
+	aged.SavedAt = aged.SavedAt.Add(-2 * Lifetime)
+	aged.ExpiresAt = aged.ExpiresAt.Add(-2 * Lifetime)
+	if ValidateSelection(aged) != nil {
+		t.Fatal("aged fixture invalid")
+	}
+	agedRaw, _ := json.Marshal(aged)
+	agedDigest := Digest(aged)
+	if e = os.WriteFile(dir+"/selection-"+binding.PreparationID+"-"+agedDigest+".json", agedRaw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.ProposeMix(context.Background(), "host", agedDigest, 8192); e == nil {
+		t.Fatal("expired saved selection proposed")
 	}
 	item := s.cache["host"]
 	item.began = time.Now().Add(-Lifetime)

@@ -1,3 +1,4 @@
+import {MixPrefillProvider} from "./mix-prefill-context.jsx";
 import { PoolMappings } from "./broker-profiles.jsx";
 import { AllocatorStatus } from "./allocator-status.jsx";
 import { Lifecycle } from "./lifecycle.jsx";
@@ -73,7 +74,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
   return (
-    <>
+    <MixPrefillProvider>
       <aside className="sidebar">
         <Brand />
         <div className="nav-label">LEDGER MANAGEMENT</div>
@@ -267,7 +268,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           Usage history is measured monitoring data, not allocated capacity. No Garm registration, dynamic placement, provisioning, drain, retirement or resource release is available here.
         </footer>
       </main>
-    </>
+    </MixPrefillProvider>
   );
 }
 export function App() {
