@@ -36,19 +36,21 @@ type ProbeResult struct {
 	Inventory    Result `json:"inventory"`
 }
 type Service struct {
-	targets map[string]Target
-	clients map[string]*Client
-	audit   Audit
-	gate    chan struct{}
+	targets  map[string]Target
+	clients  map[string]*Client
+	audit    Audit
+	gate     chan struct{}
+	registry *Registry
+	resolve  KeyResolver
 }
 
 // NewService freezes deployment-authorized address/user/key/credential pairings.
 // No browser request can choose a different destination or credential.
 func NewService(configs map[string]Config, resolve KeyResolver, audit Audit) (*Service, error) {
-	if len(configs) == 0 || len(configs) > 32 || audit == nil {
+	if len(configs) > 32 || audit == nil {
 		return nil, ErrInventory
 	}
-	s := &Service{targets: map[string]Target{}, clients: map[string]*Client{}, audit: audit, gate: make(chan struct{}, 1)}
+	s := &Service{targets: map[string]Target{}, clients: map[string]*Client{}, audit: audit, gate: make(chan struct{}, 1), resolve: resolve}
 	for id, c := range configs {
 		if !targetID.MatchString(id) {
 			return nil, ErrInventory
@@ -57,15 +59,47 @@ func NewService(configs map[string]Config, resolve KeyResolver, audit Audit) (*S
 		if e != nil {
 			return nil, e
 		}
-		data, _ := json.Marshal(struct {
-			ID     string
-			Config Config
-		}{id, c})
-		hash := sha256.Sum256(data)
-		s.targets[id] = Target{ID: id, Address: c.Address, Port: c.Port, User: c.User, CredentialRef: c.CredentialRef, HostKeyFingerprint: ssh.FingerprintSHA256(client.hostKey), ReviewDigest: hex.EncodeToString(hash[:])}
+		s.targets[id] = describeTarget(id, c, client)
 		s.clients[id] = client
 	}
 	return s, nil
+}
+
+// ReviewDigest binds a durable approval to the exact target ID and configuration.
+func ReviewDigest(id string, c Config) string {
+	data, _ := json.Marshal(struct {
+		ID     string
+		Config Config
+	}{id, c})
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+func describeTarget(id string, c Config, client *Client) Target {
+	return Target{ID: id, Address: c.Address, Port: c.Port, User: c.User, CredentialRef: c.CredentialRef, HostKeyFingerprint: ssh.FingerprintSHA256(client.hostKey), ReviewDigest: ReviewDigest(id, c)}
+}
+
+// SetRegistry is startup-only. Dynamic targets are revalidated against current scope on every use.
+func (s *Service) SetRegistry(r *Registry) { s.registry = r }
+func (s *Service) ListTargets(ctx context.Context) ([]Target, error) {
+	out := s.Targets()
+	if s.registry != nil {
+		configs, e := s.registry.targets(ctx)
+		if e != nil {
+			return nil, e
+		}
+		for id, c := range configs {
+			client, e := New(c, s.resolve)
+			if e != nil {
+				return nil, e
+			}
+			out = append(out, describeTarget(id, c, client))
+		}
+	}
+	if len(out) > 32 {
+		return nil, ErrInventory
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 func (s *Service) Targets() []Target {
 	out := make([]Target, 0, len(s.targets))
@@ -80,6 +114,21 @@ func (s *Service) Probe(ctx context.Context, id, digest, request string) (ProbeR
 		return ProbeResult{}, ErrReview
 	}
 	t, ok := s.targets[id]
+	client := s.clients[id]
+	if !ok && s.registry != nil {
+		configs, e := s.registry.targets(ctx)
+		if e != nil {
+			return ProbeResult{}, ErrInventory
+		}
+		if c, found := configs[id]; found {
+			client, e = New(c, s.resolve)
+			if e != nil {
+				return ProbeResult{}, ErrInventory
+			}
+			t = describeTarget(id, c, client)
+			ok = true
+		}
+	}
 	if !ok || len(digest) != 64 || subtle.ConstantTimeCompare([]byte(digest), []byte(t.ReviewDigest)) != 1 {
 		return ProbeResult{}, ErrReview
 	}
@@ -92,7 +141,7 @@ func (s *Service) Probe(ctx context.Context, id, digest, request string) (ProbeR
 	if s.audit(ctx, request, id, t.ReviewDigest, "requested", false) != nil {
 		return ProbeResult{}, ErrInventory
 	}
-	result, e := s.clients[id].Probe(ctx)
+	result, e := client.Probe(ctx)
 	finish, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if s.audit(finish, request, id, t.ReviewDigest, "completed", e == nil) != nil {

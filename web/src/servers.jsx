@@ -1,3 +1,4 @@
+import { SSHTargetRegistration } from "./ssh-targets.jsx";
 import { SSHInventory } from "./ssh-inventory.jsx";
 import { ConnectionManager } from "./connections.jsx";
 import React, { useEffect, useRef, useState } from "react";
@@ -275,6 +276,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh }) {
         <h2>Servers <small>{data.hosts.length}</small></h2>
         <span className="muted">Detected physical totals, measured utilization and explicit enrollment</span>
       </div>
+      <SSHTargetRegistration />
       <SSHInventory />
       {data.management_enabled && <ConnectionManager onChanged={()=>{setResults({});setEnrolling("");setProfiles(null)}} />}
       <div className="card management" id="server-discovery">

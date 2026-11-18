@@ -10,9 +10,11 @@ import (
 )
 
 type sshInventoryConfiguration struct {
-	TokenFile string                         `json:"token_file"`
-	Keys      map[string]string              `json:"credential_files"`
-	Targets   map[string]sshinventory.Config `json:"targets"`
+	TargetManagementTokenFile string                         `json:"target_management_token_file,omitempty"`
+	Scopes                    map[string]sshinventory.Scope  `json:"registration_scopes,omitempty"`
+	TokenFile                 string                         `json:"token_file"`
+	Keys                      map[string]string              `json:"credential_files"`
+	Targets                   map[string]sshinventory.Config `json:"targets"`
 }
 
 func newSSHInventory(c *sshInventoryConfiguration, store *admission.SQLiteStore) (*sshinventory.Service, string, error) {
@@ -43,4 +45,25 @@ func newSSHInventory(c *sshInventoryConfiguration, store *admission.SQLiteStore)
 		return nil, "", adminview.ErrConfiguration
 	}
 	return service, strings.TrimSpace(string(token)), nil
+}
+
+func newSSHTargetRegistry(c *sshInventoryConfiguration, store *admission.SQLiteStore) (*sshinventory.Registry, string, error) {
+	if c == nil {
+		return nil, "", adminview.ErrConfiguration
+	}
+	token, e := securefiles.Read(c.TargetManagementTokenFile, 256)
+	if e != nil {
+		return nil, "", adminview.ErrConfiguration
+	}
+	resolve := sshinventory.PrivateKeyFiles(c.Keys)
+	for alias := range c.Scopes {
+		if _, e = resolve(context.Background(), alias); e != nil {
+			return nil, "", adminview.ErrConfiguration
+		}
+	}
+	registry, e := sshinventory.NewRegistry(c.Scopes, store, resolve, c.Targets)
+	if e != nil {
+		return nil, "", adminview.ErrConfiguration
+	}
+	return registry, strings.TrimSpace(string(token)), nil
 }

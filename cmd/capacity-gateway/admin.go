@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 type adminConfiguration struct {
 	SSHInventory                       *sshInventoryConfiguration `json:"ssh_inventory,omitempty"`
+	EnableSSHTargetManagement          bool                       `json:"-"`
 	EnableSSHInventory                 bool                       `json:"-"`
 	IncusOnboarding                    *onboardingConfiguration   `json:"incus_onboarding,omitempty"`
 	EnableExperimentalOnboardingProbes bool                       `json:"-"`
@@ -123,6 +125,36 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, e
 		}
+		if e = handler.SetSSHInventory(service, sshToken); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+	}
+	if config.EnableSSHTargetManagement {
+		if !config.EnableSSHInventory {
+			cleanup()
+			return nil, noop, adminview.ErrConfiguration
+		}
+		registry, token, e := newSSHTargetRegistry(config.SSHInventory, store)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetSSHTargetManagement(registry, token); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = store.InitializeSSHTargets(context.Background()); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		// Both services share the same immutable deployment policy and durable store.
+		service, sshToken, e := newSSHInventory(config.SSHInventory, store)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		service.SetRegistry(registry)
 		if e = handler.SetSSHInventory(service, sshToken); e != nil {
 			cleanup()
 			return nil, noop, e
