@@ -83,6 +83,7 @@ type frozenIdentity struct {
 	server, client string
 }
 type RegistrationCompiler struct {
+	snapshot                                             RegistrationCatalogSnapshot
 	templates                                            map[string]frozenTemplate
 	identities                                           map[string]frozenIdentity
 	administrators                                       map[string]RegistrationAdministrator
@@ -301,6 +302,13 @@ func NewRegistrationCompiler(c RegistrationCatalog) (*RegistrationCompiler, erro
 		out.identities[alias] = frozenIdentity{i, files, pins[0], pins[1]}
 	}
 	out.revision = nativeplanning.Digest(commitments)
+	out.snapshot = RegistrationCatalogSnapshot{Version: RegistrationVersion, Catalog: c, Commitments: map[string]string{}}
+	for name, value := range commitments {
+		if name != "version" && name != "catalog" {
+			out.snapshot.Commitments[name] = value.(string)
+		}
+	}
+	out.snapshot = cloneRegistrationSnapshot(out.snapshot)
 	return out, nil
 }
 func (c *RegistrationCompiler) Compile(r RegistrationRequest) (Registration, error) {

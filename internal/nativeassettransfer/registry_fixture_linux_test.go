@@ -142,9 +142,15 @@ func elfFixture() []byte {
 	return b
 }
 
-func registryAssemblyFixture(t *testing.T, m nativeassets.Manifest) nativeassembly.Completed {
+func registryAssemblyFixture(t *testing.T, m nativeassets.Manifest, labels ...string) nativeassembly.Completed {
 	t.Helper()
 	inventory, binding := actualInventory(t)
+	id := "host"
+	if len(labels) > 0 {
+		id = labels[0]
+	}
+	binding.PreparationID = m.ID
+	binding.Host = id + "-one"
 	cwd, _ := os.Getwd()
 	root, e := os.MkdirTemp(cwd, ".assembly-test-")
 	if e != nil {
@@ -159,15 +165,15 @@ func registryAssemblyFixture(t *testing.T, m nativeassets.Manifest) nativeassemb
 		return p
 	}
 	savedDir, output, export, private := dir("saved"), dir("output"), dir("export"), dir("private")
-	planning, e := nativeplanning.NewService(inventory, map[string]nativeplanning.Binding{"host": binding}, savedDir)
+	planning, e := nativeplanning.NewService(inventory, map[string]nativeplanning.Binding{id: binding}, savedDir)
 	if e != nil {
 		t.Fatal(e)
 	}
-	proposal, e := planning.Probe(context.Background(), "host", nativeplanning.Digest(binding), "11111111-1111-4111-8111-111111111111")
+	proposal, e := planning.Probe(context.Background(), id, nativeplanning.Digest(binding), "11111111-1111-4111-8111-111111111111")
 	if e != nil {
 		t.Fatal(e)
 	}
-	saved, e := planning.Save(context.Background(), "host", proposal.ReviewDigest, proposal.Defaults)
+	saved, e := planning.Save(context.Background(), id, proposal.ReviewDigest, proposal.Defaults)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -193,16 +199,16 @@ func registryAssemblyFixture(t *testing.T, m nativeassets.Manifest) nativeassemb
 	raw, _ = json.Marshal(binding)
 	expected := filepath.Join(private, "binding.json")
 	os.WriteFile(expected, raw, 0600)
-	recipes := map[string]nativeassembly.Recipe{"host": {Binding: binding, OutputParent: output, Build: nativebundle.Configuration{ExportDirectory: export, ExportManifestSHA256: hex.EncodeToString(pin[:]), PrivateDirectory: private, ID: binding.PreparationID, Architecture: "amd64", ExpectedBindingFile: expected}}}
+	recipes := map[string]nativeassembly.Recipe{id: {Binding: binding, OutputParent: output, Build: nativebundle.Configuration{ExportDirectory: export, ExportManifestSHA256: hex.EncodeToString(pin[:]), PrivateDirectory: private, ID: binding.PreparationID, Architecture: "amd64", ExpectedBindingFile: expected}}}
 	md, _ := nativeassets.ManifestDigest(m)
-	r := recipes["host"]
+	r := recipes[id]
 	r.Build.RuntimeAssets = &nativebundle.AssetReference{Manifest: m, ManifestDigest: md}
-	recipes["host"] = r
+	recipes[id] = r
 	service, e := nativeassembly.NewService(planning, recipes)
 	if e != nil {
 		t.Fatal(e)
 	}
-	completed, e := service.Build(t.Context(), "host", saved.SelectionDigest)
+	completed, e := service.Build(t.Context(), id, saved.SelectionDigest)
 	if e != nil {
 		t.Fatal(e)
 	}

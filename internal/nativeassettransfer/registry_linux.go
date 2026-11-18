@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -21,11 +22,12 @@ import (
 // assemblies. Registration is local configuration only, never an SSH operation.
 // An interrupted reservation consumes its slot permanently; there is no reset.
 type Registry struct {
-	mu       sync.Mutex
-	journal  *Service
-	slots    map[string]*Bundle
-	services map[string]*Service
-	revision string
+	mu         sync.Mutex
+	journal    *Service
+	slots      map[string]*Bundle
+	services   map[string]*Service
+	revision   string
+	identities map[string]string
 }
 type RegistrationReview struct {
 	Slot            string `json:"slot"`
@@ -74,6 +76,7 @@ func NewRegistry(directory string, slots map[string]*Bundle) (*Registry, error) 
 	}
 	raw, _ := json.Marshal(identities)
 	r.revision = digest(raw)
+	r.identities = identities
 	if r.validateRecords() != nil {
 		return nil, ErrUnknown
 	}
@@ -90,6 +93,9 @@ func (r *Registry) Slots() []string {
 	return names
 }
 func (r *Registry) review(slot string, c nativeassembly.Completed) (RegistrationReview, error) {
+	return r.reviewAt(slot, c, r.revision)
+}
+func (r *Registry) reviewAt(slot string, c nativeassembly.Completed, revision string) (RegistrationReview, error) {
 	b := r.slots[slot]
 	report := c.Report()
 	p, e := b.Plan(c.Target())
@@ -100,7 +106,7 @@ func (r *Registry) review(slot string, c nativeassembly.Completed) (Registration
 	if e != nil || report.RuntimeAssetID != p.Manifest.ID || report.RuntimeAssetManifestDigest != md {
 		return RegistrationReview{}, ErrInvalid
 	}
-	v := RegistrationReview{Slot: slot, TargetID: report.TargetID, PreparationID: report.PreparationID, CatalogDigest: r.revision, AssemblyDigest: report.AssemblyDigest, SelectionDigest: report.SelectionDigest, PlanDigest: report.PlanDigest, AssetID: p.Manifest.ID, ManifestDigest: md, TransferDigest: Digest(p), Target: c.Target()}
+	v := RegistrationReview{Slot: slot, TargetID: report.TargetID, PreparationID: report.PreparationID, CatalogDigest: revision, AssemblyDigest: report.AssemblyDigest, SelectionDigest: report.SelectionDigest, PlanDigest: report.PlanDigest, AssetID: p.Manifest.ID, ManifestDigest: md, TransferDigest: Digest(p), Target: c.Target()}
 	raw, _ := json.Marshal(v)
 	v.ReviewDigest = digest(raw)
 	return v, nil
@@ -128,7 +134,7 @@ func (r *Registry) Register(slot string, c nativeassembly.Completed, review stri
 		return nil, e
 	}
 	defer lock.Close()
-	if r.validateRecords() != nil {
+	if r.anchorCatalog() != nil {
 		return nil, ErrUnknown
 	}
 	for name := range r.slots {
@@ -140,7 +146,7 @@ func (r *Registry) Register(slot string, c nativeassembly.Completed, review stri
 			return nil, ErrUnknown
 		}
 		var old RegistrationReview
-		if json.Unmarshal(raw, &old) != nil || old.CatalogDigest != r.revision {
+		if json.Unmarshal(raw, &old) != nil {
 			return nil, ErrUnknown
 		}
 		if name == slot || old.TargetID == v.TargetID || old.AssetID == v.AssetID {
@@ -184,9 +190,20 @@ func (r *Registry) Restore(slot string, c nativeassembly.Completed) (*Service, e
 	if r.validateRecords() != nil {
 		return nil, ErrUnknown
 	}
-	raw, _ := json.Marshal(v)
 	a, e := r.read(slot, "-intent")
-	if e != nil || !bytes.Equal(a, raw) {
+	if e != nil {
+		return nil, ErrUnknown
+	}
+	var original RegistrationReview
+	if json.Unmarshal(a, &original) != nil {
+		return nil, ErrUnknown
+	}
+	v, e = r.reviewAt(slot, c, original.CatalogDigest)
+	if e != nil {
+		return nil, ErrUnknown
+	}
+	raw, _ := json.Marshal(v)
+	if !bytes.Equal(a, raw) {
 		return nil, ErrUnknown
 	}
 	b, e := r.read(slot, "-complete")
@@ -221,16 +238,27 @@ func (r *Registry) validateRecords() error {
 	if e != nil {
 		return ErrUnknown
 	}
-	entries, e := dir.ReadDir(26)
+	entries, e := dir.ReadDir(34)
 	dir.Close()
-	if len(entries) > 25 {
+	if len(entries) > 33 {
 		return ErrUnknown
 	}
 	if e != nil && e != io.EOF {
 		return ErrUnknown
 	}
+	names := []string{}
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	catalogs, e := r.catalogs(names)
+	if e != nil {
+		return ErrUnknown
+	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if strings.HasPrefix(name, catalogPrefix) {
+			continue
+		}
 		if name == "native-assets-workflow.lock" {
 			continue
 		}
@@ -265,7 +293,15 @@ func (r *Registry) validateRecords() error {
 			return ErrUnknown
 		}
 		canon, _ := json.Marshal(v)
-		if !bytes.Equal(canon, raw) || v.Slot != slot || v.CatalogDigest != r.revision || !validHash(v.ReviewDigest) {
+		if !bytes.Equal(canon, raw) || v.Slot != slot || !validHash(v.CatalogDigest) || !validHash(v.ReviewDigest) {
+			return ErrUnknown
+		}
+		snapshot, anchored := catalogs[v.CatalogDigest]
+		if anchored {
+			if snapshot.Identities[slot] != r.identities[slot] {
+				return ErrUnknown
+			}
+		} else if len(catalogs) != 0 || v.CatalogDigest != r.revision {
 			return ErrUnknown
 		}
 		want := v.ReviewDigest

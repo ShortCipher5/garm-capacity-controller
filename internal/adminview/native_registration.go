@@ -63,6 +63,9 @@ func (h *Handler) ConfigureNativeRegistration(catalog nativebundle.RegistrationC
 	if e != nil {
 		return ErrConfiguration
 	}
+	if e = registry.AnchorCatalog(context.Background()); e != nil {
+		return ErrConfiguration
+	}
 	configured, _, e := registry.Restore(context.Background())
 	if e != nil {
 		return ErrConfiguration

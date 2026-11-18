@@ -51,11 +51,14 @@ func protectedTemp(t *testing.T) string {
 	return p
 }
 func fixture(t *testing.T) (*Bundle, Target, ssh.Signer, string) {
+	return fixtureWithAssetID(t, strings.Repeat("a", 64))
+}
+func fixtureWithAssetID(t *testing.T, id string) (*Bundle, Target, ssh.Signer, string) {
 	t.Helper()
 	dir := protectedTemp(t)
 	bundle := filepath.Join(dir, "bundle")
 	os.Mkdir(bundle, 0700)
-	m := nativeassets.Manifest{Version: nativeassets.Version, ID: strings.Repeat("a", 64), Architecture: "amd64", Files: map[string]nativeassets.Entry{}}
+	m := nativeassets.Manifest{Version: nativeassets.Version, ID: id, Architecture: "amd64", Files: map[string]nativeassets.Entry{}}
 	for _, n := range nativeassets.Names() {
 		path := filepath.Join(bundle, n)
 		if n == "runtime.raw" {

@@ -38,11 +38,12 @@ not treated as missing state.
 - Dynamic configuration is deliberately separate from static target/recipe mode.
 - At most eight consumed target slots per registry, matching the actual planning
   and assembly service bound. Unknown attempts also retain their slot.
-- The catalog revision is immutable for a populated registry. Adding or changing
-  template/identity/admin inputs changes the revision and fails historical
-  verification. There is no automatic catalog migration or journal adoption;
-  an explicit independently reviewed migration is future work. Do not discard
-  the journal to bypass permanent key or ID reservations.
+- Catalog additions preserve exact earlier revisions through protected append-only
+  history. Existing aliases, bytes, scopes and paths cannot change. Upgrade a
+  legacy populated journal once with its unchanged original catalog before adding
+  entries; addition-first migration refuses. See [catalog history](native-registration-catalog-history.md).
+  The eight consumed-slot bound and permanent reservations remain unchanged;
+  never discard journals to reuse keys or IDs.
 - The template carries actual required storage roots/GUIDs, image identity and
   network specification. OS discovery fills no missing storage authority.
 - Protected configuration is not physical enforcement proof. Runtime activation
