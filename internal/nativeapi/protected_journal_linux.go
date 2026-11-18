@@ -38,7 +38,7 @@ func parseProtectedJournal(raw []byte, domain, resource, initHash string, now ti
 	}
 	switch r.State {
 	case "launch_unknown":
-		if r.ExitCode != -1 {
+		if r.ExitCode != -1 || r.GuestNetworkClosed {
 			return r, ErrNative
 		}
 	case "process_tree_exited_unqualified":

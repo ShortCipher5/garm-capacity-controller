@@ -24,5 +24,5 @@ func (o *executionOwner) protectedJournal(ctx context.Context, permit string) (n
 		return nativeidentity.ProtectedJournalRecord{}, ErrControl
 	}
 	r := journal.Record()
-	return nativeidentity.ProtectedJournalRecord{PermitID: permit, EnvelopeDigest: execution.parent.EnvelopeDigest, DomainID: env.DomainID, PolicyDigest: env.PolicyDigest, NativeName: env.NativeName, ResourceID: resource, ImageFingerprint: env.Execution.Fingerprint, InitSHA256: r.LauncherSHA256, State: r.State, RecordAt: r.At, ExitCode: r.ExitCode}, nil
+	return nativeidentity.ProtectedJournalRecord{PermitID: permit, EnvelopeDigest: execution.parent.EnvelopeDigest, DomainID: env.DomainID, PolicyDigest: env.PolicyDigest, NativeName: env.NativeName, ResourceID: resource, ImageFingerprint: env.Execution.Fingerprint, InitSHA256: r.LauncherSHA256, State: r.State, RecordAt: r.At, GuestNetworkClosed: r.GuestNetworkClosed, ExitCode: r.ExitCode}, nil
 }
