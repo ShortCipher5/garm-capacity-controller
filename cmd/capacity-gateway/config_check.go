@@ -243,10 +243,30 @@ func checkStaticConfig(c configuration, provision bool) error {
 		}
 	}
 	if a.EnableNativeAssets {
-		_, _, closeAssets, e := loadNativeAssets(a)
-		closeAssets()
+		assetTargets, _, closeAssets, e := loadNativeAssets(a)
+		defer closeAssets()
 		if e != nil {
 			return fail()
+		}
+		registry, e := loadNativeAssetRegistry(a.NativeAssets)
+		if e != nil {
+			return fail()
+		}
+		if registry != nil {
+			defer registry.Close()
+			ids := map[string]bool{}
+			for id, t := range assetTargets {
+				v, e := t.Service.View(id)
+				if e != nil {
+					return fail()
+				}
+				ids[v.AssetID] = true
+			}
+			for _, id := range registry.AssetIDs() {
+				if ids[id] {
+					return fail()
+				}
+			}
 		}
 	}
 	if a.EnableNativePreparation {
