@@ -24,7 +24,7 @@ export function validateGarm(value) {
     value.settings.pools.length + value.settings.repositories.length > 1000 || !uniqueSettingsIDs(value.settings.pools) || !uniqueSettingsIDs(value.settings.repositories) ||
     !value.settings.pools.every((p) => object(p) && [p.id,p.provider_name].every(string) && hash(p.fingerprint) && typeof p.enabled === "boolean" && [p.priority,p.max_runners,p.min_idle_runners,p.generation].every(integer) && Array.isArray(p.tags) && p.tags.every(string)) ||
     !value.settings.repositories.every((r) => object(r) && [r.id,r.owner,r.name].every(string) && ["","pack","roundrobin"].includes(r.pool_balancing_type) && hash(r.fingerprint)) ||
-    (value.pending !== undefined && (!object(value.pending) || ![value.pending.request_id,value.pending.kind,value.pending.target].every(string) || !Number.isFinite(Date.parse(value.pending.started_at))))) {
+    (value.pending !== undefined && (!object(value.pending) || ![value.pending.request_id,value.pending.kind,value.pending.target].every(string) || !Number.isFinite(Date.parse(value.pending.started_at)) || (value.pending.resolution_available !== undefined && typeof value.pending.resolution_available !== "boolean")))) {
     throw new Error("The server returned unsupported Garm management settings.");
   }
   if(value.discovery_only!==undefined && (typeof value.discovery_only!=="boolean" || (value.discovery_only && (value.writes_enabled || value.settings.writes_enabled || value.settings_available || value.settings.pools.length || value.settings.repositories.length))))throw new Error("The server returned unsupported discovery-only state.");

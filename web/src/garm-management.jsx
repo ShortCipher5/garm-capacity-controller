@@ -13,11 +13,13 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
   const [conflictLatest,setConflictLatest] = useState(null);
   const [needsRefresh,setNeedsRefresh] = useState(false), [syncError,setSyncError] = useState(false);
   const dirty = useRef(false), latestLoad = useRef(null);
+  const resolutionToken = useRef(null);
   const active = useRef(null), token = useRef(null), mounted = useRef(true), uncertain = useRef(false), readGeneration=useRef(0);
-  useEffect(() => { mounted.current=true; return () => { mounted.current=false; readGeneration.current++; active.current?.abort(); if(token.current) token.current.value=""; }; }, []);
+  useEffect(() => { mounted.current=true; return () => { mounted.current=false; readGeneration.current++; active.current?.abort(); if(resolutionToken.current) resolutionToken.current.value=""; if(token.current) token.current.value=""; }; }, []);
   async function load(background=false) {
     if(active.current || busy || (background && !snapshot)) return;
     const generation=++readGeneration.current;setBusy(true);
+    if(resolutionToken.current)resolutionToken.current.value="";
     if(!background){setFormEpoch(value=>value+1);setMessage("");dirty.current=false;setDraftDirty(false);setReview(null);if(token.current)token.current.value="";}
     try {
       const next=await read();
@@ -77,8 +79,8 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     finally {clearTimeout(timeout);active.current=null;if(mounted.current)setBusy(false);}
   }
   async function resolvePendingWrite(event) {
-    event.preventDefault();if(active.current || !snapshot?.pending)return;
-    const credential=token.current.value;token.current.value="";
+    event.preventDefault();if(active.current || busy || syncError || needsRefresh || !canEditGarm(snapshot) || snapshot?.pending?.resolution_available !== true)return;
+    const credential=resolutionToken.current?.value || "";if(resolutionToken.current)resolutionToken.current.value="";
     const controller=new AbortController();active.current=controller;setBusy(true);setMessage("");
     const timeout=setTimeout(()=>controller.abort(),15000);
     try {
@@ -109,7 +111,13 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
     {snapshot && !snapshot.discovery_only && !snapshot.settings_available && <p className="error">Remote settings are unavailable. Durable journal status is still shown; editing stays disabled.</p>}
     {snapshot?.write_blocked && <p className="error">A durable pending or unknown operation blocks Garm writes. Reading fresh state does not fence a delayed write and cannot safely clear this block.</p>}
-    {snapshot?.pending && <p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target} <button className="quiet" type="button" onClick={resolvePendingWrite} disabled={busy||!canEditGarm(snapshot)}>Resolve pending write</button></p>}
+    {snapshot?.pending && <div><p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target}</p>
+      {snapshot.pending.resolution_available === true ? <form onSubmit={resolvePendingWrite}>
+        <p>Attempt exact receipt-based resolution. An uncertain result remains blocked; this is not a fresh settings edit.</p>
+        <label>Resolution management token<input ref={resolutionToken} type="password" autoComplete="off" spellCheck={false} disabled={busy||syncError||needsRefresh||!canEditGarm(snapshot)} required /></label>
+        <button className="quiet" type="submit" disabled={busy||syncError||needsRefresh||!canEditGarm(snapshot)}>Resolve pending write</button>
+      </form> : <p>Automatic receipt resolution is unavailable for this operation. Stock Garm writes cannot be confirmed from matching settings alone. Preserve the journal and investigate the outstanding writer; do not replay or clear the intent.</p>}
+    </div>}
     {uncertain.current && <p className="error">This session has an uncertain write. Further changes are disabled. Inspect journal status and resolve the external operation before reconnecting.</p>}
     {snapshot && !canEditGarm(snapshot) && <p>Garm editing is unavailable. Discovery only.</p>}
     {snapshot && <div hidden={Boolean(review)}><GarmSettingsPresentation snapshot={snapshot}><form key={formEpoch} onSubmit={prepare} onChange={()=>{dirty.current=true;setDraftDirty(true);}}><fieldset disabled={busy || Boolean(review)} style={{border:0,padding:0,margin:0,minWidth:0}}>

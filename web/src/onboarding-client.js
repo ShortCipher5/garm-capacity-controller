@@ -5,7 +5,7 @@ const requestID = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]
 const classes = ["not_checked", "match_observed", "no_match_observed"];
 const blockers = ["enrollment_not_implemented", "physical_capacity_scope_unqualified", "stored_binding_match", "stored_binding_comparison_unavailable", "authenticated_identity_unavailable"];
 export function validateOnboardingDiscovery(value) {
-  if (!object(value) || value.mode !== "read-only-onboarding-preflight" || typeof value.probe_enabled !== "boolean" || value.enrollment_supported !== false || value.capacity_qualified !== false || !Array.isArray(value.profiles) || value.profiles.length > 32 || !value.profiles.every((profile) => object(profile) && profileID(profile.id)) || new Set(value.profiles.map((profile) => profile.id)).size !== value.profiles.length) {
+  if (!object(value) || value.mode !== "read-only-onboarding-preflight" || typeof value.probe_enabled !== "boolean" || value.enrollment_supported !== false || value.capacity_qualified !== false || !Array.isArray(value.profiles) || value.profiles.length > 64 || !value.profiles.every((profile) => object(profile) && profileID(profile.id)) || new Set(value.profiles.map((profile) => profile.id)).size !== value.profiles.length) {
     throw new OnboardingResponseError("Unsupported onboarding preflight response. No enrollment controls are available.");
   }
   return value;

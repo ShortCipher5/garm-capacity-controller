@@ -75,16 +75,18 @@ func evidenceTLS(t *testing.T, handler http.Handler) (*httptest.Server, *tls.Con
 }
 
 type createEvidenceFixture struct {
-	store      *SQLiteStore
-	request    Request
-	client     *incusapi.Client
-	unpinned   *incusapi.Client
-	serverName atomic.Value
-	kind       atomic.Value
-	binding    HostBinding
-	permit     DispatchPermit
-	writes     atomic.Int32
-	generation atomic.Value
+	store            *SQLiteStore
+	request          Request
+	client           *incusapi.Client
+	unpinned         *incusapi.Client
+	serverName       atomic.Value
+	kind             atomic.Value
+	operation        atomic.Value
+	operationUpdated atomic.Value
+	binding          HostBinding
+	permit           DispatchPermit
+	writes           atomic.Int32
+	generation       atomic.Value
 }
 
 func newCreateEvidenceFixture(t *testing.T, state string, bound bool) *createEvidenceFixture {
@@ -93,6 +95,8 @@ func newCreateEvidenceFixture(t *testing.T, state string, bound bool) *createEvi
 	f.generation.Store(evidenceGeneration)
 	f.serverName.Store("evidence-daemon")
 	f.kind.Store("Creating instance")
+	f.operation.Store(testOperationID)
+	f.operationUpdated.Store("2026-01-01T00:00:00Z")
 	config := fixture(time.Now())
 	delete(config.Hosts, "b")
 	for key, pool := range config.Pools {
@@ -133,8 +137,8 @@ func newCreateEvidenceFixture(t *testing.T, state string, bound bool) *createEvi
 			write(w, map[string]any{"api_version": "1.0", "auth": "trusted", "api_extensions": []string{"instance_create_start"}, "environment": map[string]any{"server_clustered": false, "server_name": f.serverName.Load(), "server_version": "6.0.4", "certificate": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})), "certificate_fingerprint": fmt.Sprintf("%x", digest)}})
 		case "/1.0/instances/runner-1":
 			write(w, map[string]any{"name": "runner-1", "status_code": 103, "created_at": "2026-01-01T00:00:00Z", "expanded_config": map[string]any{"limits.cpu": "1", "limits.memory": "2048MiB", "user.runner-controller-id": "controller-1", "user.runner-pool-id": f.request.Pool, "user.garm-capacity.reservation": f.request.Key, "volatile.uuid": evidenceInstanceUUID, "volatile.uuid.generation": f.generation.Load(), "user.user-data": "bootstrap-secret-not-journaled"}})
-		case "/1.0/operations/" + testOperationID:
-			write(w, map[string]any{"id": testOperationID, "class": "task", "description": f.kind.Load(), "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "resources": map[string][]string{"instances": {"/1.0/instances/runner-1?project=runners"}}, "metadata": map[string]any{"private": "operation-secret-not-journaled"}})
+		case "/1.0/operations/" + f.operation.Load().(string):
+			write(w, map[string]any{"id": f.operation.Load().(string), "class": "task", "description": f.kind.Load(), "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": f.operationUpdated.Load().(string), "resources": map[string][]string{"instances": {"/1.0/instances/runner-1?project=runners"}}, "metadata": map[string]any{"private": "operation-secret-not-journaled"}})
 		default:
 			http.NotFound(w, r)
 		}

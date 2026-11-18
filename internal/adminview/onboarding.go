@@ -48,6 +48,10 @@ func (h *Handler) serveOnboarding(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusNotFound, "onboarding preflight unavailable")
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/onboarding/connections" {
+		h.serveConnections(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/onboarding" {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -60,6 +64,14 @@ func (h *Handler) serveOnboarding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		view := h.onboarding.Discovery()
+		if service := h.onboarding.Connections(); service != nil {
+			profiles, err := service.ApprovedProfiles(r.Context())
+			if err != nil {
+				fail(http.StatusServiceUnavailable, "connection profiles unavailable")
+				return
+			}
+			view.Profiles = append(view.Profiles, profiles...)
+		}
 		view.ProbeEnabled = h.onboardingProbe && h.onboarding.ProbeEnabled()
 		_ = json.NewEncoder(w).Encode(view)
 		return
@@ -182,6 +194,37 @@ func (h *Handler) serveOnboardingProfileDiscovery(w http.ResponseWriter, r *http
 		h.audit("onboarding discovery or audit unavailable")
 		fail(http.StatusServiceUnavailable, "discovery or its audit unavailable; no enrollment or activation is implemented")
 	default:
+		proposal := onboarding.ProposeBudget(result)
+		profiles, profilesErr := h.store.Profiles(r.Context())
+		if profilesErr != nil || len(profiles) > 512 {
+			proposal.SizeSource = "unavailable"
+			proposal.Sizes = []onboarding.PlanningSize{}
+			proposal.Warnings = append(proposal.Warnings, "Saved runner-size profiles unavailable or exceed the 512-profile planning limit; no profile fit is proposed.")
+		} else if len(profiles) > 0 {
+			proposal.SizeSource = "saved-profiles"
+			proposal.Sizes = []onboarding.PlanningSize{}
+			for _, profile := range profiles {
+				proposal.Sizes = append(proposal.Sizes, onboarding.PlanningSize{Name: profile.Name, CPU: profile.CPUMillis, RAM: profile.RAMMiB, Disk: profile.DiskMiB})
+			}
+		}
+		result.Proposal = &proposal
+		// Persist exactly the sanitized view returned to the reviewer. This is
+		// enrollment provenance only, never a backend binding or health proof.
+		snapshot, encodeErr := json.Marshal(result)
+		var detected *admission.Resources
+		if t := result.Totals; t != nil && t.Complete && t.CPUMillis != nil && t.RAMMiB != nil && t.DiskMiB != nil {
+			detected = &admission.Resources{CPU: *t.CPUMillis, RAM: *t.RAMMiB, Disk: *t.DiskMiB}
+		}
+		if encodeErr != nil {
+			fail(http.StatusServiceUnavailable, "discovery review unavailable")
+			return
+		}
+		review, recordErr := h.store.RecordConnectionDiscoveryReview(r.Context(), requestID, parts[0], result.ObservedAt, snapshot, detected, result.ConnectionRevision)
+		if recordErr != nil {
+			fail(http.StatusServiceUnavailable, "discovery review unavailable; no enrollment performed")
+			return
+		}
+		result.Review = &review
 		var body bytes.Buffer
 		if json.NewEncoder(&body).Encode(result) != nil || body.Len() > 2<<20 {
 			fail(http.StatusServiceUnavailable, "discovery view unavailable")

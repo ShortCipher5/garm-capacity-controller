@@ -81,7 +81,15 @@ func (f *Facade) Delete(ctx context.Context, controller, pool, name string) (Del
 		// this slice refuses to delete what the ledger cannot place.
 		return DeletionReceipt{}, ErrNotFound
 	}
-	// Do not even mark deleting or call the backend. A name-based DELETE can
+	// Persist only an incarnation-bound held intent. Missing original creation
+	// evidence fails closed; do not reconstruct it from the current name.
+	if _, err := f.store.RequestRetirement(ctx, req); err != nil {
+		return DeletionReceipt{}, ErrUnavailable
+	}
+	if _, err := f.store.ClaimRetirement(ctx, req); err != nil {
+		return DeletionReceipt{}, ErrUnavailable
+	}
+	// Claim is unconditionally denied today. Never mark deleting or call the backend. A name-based DELETE can
 	// race job assignment or incarnation replacement before absence is read.
 	return DeletionReceipt{}, ErrUnavailable
 }

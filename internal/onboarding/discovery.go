@@ -86,15 +86,18 @@ type DiscoveryUtilization struct {
 // include physical_capacity_scope_unqualified: no discovery observation is
 // physical-hardware, whole-project, parent-quota or capacity qualification.
 type DiscoveryResult struct {
-	Profile         string                `json:"profile_id"`
-	ObservedAt      time.Time             `json:"observed_at"`
-	Identity        DiscoveryIdentity     `json:"identity"`
-	Totals          *DiscoveryTotals      `json:"totals,omitempty"`
-	Guests          []GuestView           `json:"guests"`
-	Utilization     *DiscoveryUtilization `json:"utilization,omitempty"`
-	SuggestedBudget admission.Resources   `json:"suggested_budget"`
-	Warnings        []string              `json:"warnings"`
-	Blockers        []string              `json:"blockers"`
+	ConnectionRevision int64                      `json:"connection_revision,omitempty"`
+	Proposal           *BudgetProposal            `json:"proposal,omitempty"`
+	Review             *admission.DiscoveryReview `json:"review,omitempty"`
+	Profile            string                     `json:"profile_id"`
+	ObservedAt         time.Time                  `json:"observed_at"`
+	Identity           DiscoveryIdentity          `json:"identity"`
+	Totals             *DiscoveryTotals           `json:"totals,omitempty"`
+	Guests             []GuestView                `json:"guests"`
+	Utilization        *DiscoveryUtilization      `json:"utilization,omitempty"`
+	SuggestedBudget    admission.Resources        `json:"suggested_budget"`
+	Warnings           []string                   `json:"warnings"`
+	Blockers           []string                   `json:"blockers"`
 }
 
 // Headroom reserved from detected physical totals before any runner workload:
@@ -138,10 +141,14 @@ func (m *Manager) Discover(ctx context.Context, request Request) (DiscoveryResul
 	if !m.allowProbe {
 		return DiscoveryResult{}, ErrDisabled
 	}
-	observer, exists := m.profiles[request.ProfileID]
-	if !exists || !admission.ValidOnboardingRequestID(request.RequestID) || !validReason(request.Reason) {
+	if !admission.ValidOnboardingRequestID(request.RequestID) || !validReason(request.Reason) {
 		return DiscoveryResult{}, ErrDenied
 	}
+	ctx, observer, connectionRevision, close, resolveErr := m.resolve(ctx, request.ProfileID)
+	if resolveErr != nil {
+		return DiscoveryResult{}, resolveErr
+	}
+	defer close()
 	source, ok := observer.(DiscoverySource)
 	if !ok {
 		return DiscoveryResult{}, ErrDenied
@@ -156,7 +163,7 @@ func (m *Manager) Discover(ctx context.Context, request Request) (DiscoveryResul
 	if m.store.RecordOnboardingDiscoveryAudit(ctx, record) != nil {
 		return DiscoveryResult{}, ErrUnavailable
 	}
-	result := DiscoveryResult{Profile: request.ProfileID, ObservedAt: time.Now().UTC(), Identity: DiscoveryIdentity{BindingClass: "not_checked"}, Guests: []GuestView{}, Warnings: []string{}, Blockers: []string{"physical_capacity_scope_unqualified"}}
+	result := DiscoveryResult{ConnectionRevision: connectionRevision, Profile: request.ProfileID, ObservedAt: time.Now().UTC(), Identity: DiscoveryIdentity{BindingClass: "not_checked"}, Guests: []GuestView{}, Warnings: []string{}, Blockers: []string{"physical_capacity_scope_unqualified"}}
 
 	result.Identity, record.ObservationAvailable, record.ServerVersion, record.BindingClass = m.discoverIdentity(ctx, source, &result)
 	result.Totals, record.TotalsComplete = m.discoverTotals(ctx, source, &result)
@@ -166,7 +173,6 @@ func (m *Manager) Discover(ctx context.Context, request Request) (DiscoveryResul
 	result.Utilization = m.discoverUtilization(ctx, source, &result)
 
 	result.Warnings = append(result.Warnings, "point-in-time snapshot: observations go stale immediately and are not reconciliation evidence")
-	result.ObservedAt = time.Now().UTC()
 	record.Phase = "completed"
 	record.WarningCount = len(result.Warnings)
 	// A canceled HTTP caller cannot erase a completed run's sanitized audit.

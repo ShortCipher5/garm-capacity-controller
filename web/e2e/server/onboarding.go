@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
@@ -89,5 +90,14 @@ func browserOnboarding(store *admission.SQLiteStore) (*onboarding.Manager, func(
 		server.Close()
 		return nil, noop, err
 	}
+	connections, err := onboarding.NewConnectionService(store, map[string]onboarding.ConnectionTarget{"fixture-target": {Endpoint: "https://192.0.2.10:8443", Project: "runners", ExpectedKey: strings.Repeat("a", 64), Factory: func(admission.Connection) (onboarding.Observer, func(), error) {
+		return &browserDiscoverySource{}, func() {}, nil
+	}}}, []string{"candidate-b", "candidate-discover"})
+	if err != nil {
+		client.Close()
+		server.Close()
+		return nil, noop, err
+	}
+	manager.SetConnections(connections)
 	return manager, func() { client.Close(); server.Close() }, nil
 }

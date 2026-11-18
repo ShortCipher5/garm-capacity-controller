@@ -117,3 +117,36 @@ func TestGarmRoutesSeparateReadWriteAndExplicitOptIn(t *testing.T) {
 		t.Fatal("credential leaked into mutation data")
 	}
 }
+
+func TestResolutionRouteUsesSeparateWriteAuthorization(t *testing.T) {
+	h, _, read := fixture(t)
+	write := strings.Repeat("c", 64)
+	m := &testGarmManager{}
+	if err := h.EnableManagement(write); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.SetGarmManager(m, true); err != nil {
+		t.Fatal(err)
+	}
+	send := func(token, origin string) int {
+		r := httptest.NewRequest("POST", "https://127.0.0.1/admin/api/v1/garm/resolve", strings.NewReader(`{"request_id":"11111111-1111-4111-8111-111111111111"}`))
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if send(read, "") != 401 || send(write, "https://evil.example") != 403 || m.writes != 0 {
+		t.Fatal("unauthorized resolution")
+	}
+	if send(write, "") != 200 || m.writes != 1 {
+		t.Fatal("resolution route unreachable")
+	}
+	m.err = garmapi.ErrManagementOutcomeUnknown
+	if send(write, "") != 503 || m.writes != 2 {
+		t.Fatal("ambiguous result not held")
+	}
+}

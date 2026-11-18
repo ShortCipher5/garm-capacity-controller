@@ -42,26 +42,35 @@ func (s *SQLiteStore) EnrollHost(ctx context.Context, hostID string, budget Reso
 		return ErrDenied
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		config, _, _, _, err := sqliteMetadata(tx)
-		if err != nil {
-			return err
-		}
-		if _, exists := config.Hosts[hostID]; exists {
-			return ErrConflict
-		}
-		config.Hosts[hostID] = Host{Budget: budget, Mode: mode, Healthy: false, ObservedAt: s.now()}
-		if err := validateConfig(config); err != nil {
-			return err
-		}
-		encoded, err := json.Marshal(config)
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec("UPDATE metadata SET config=?,ready=0,nonce='',began_at='' WHERE id=1", encoded); err != nil {
-			return err
-		}
-		return sqliteAudit(tx, "host_enrolled", hostID, s.now())
+		return s.enrollHostTx(tx, hostID, budget, mode, nil, time.Time{})
 	})
+}
+
+func (s *SQLiteStore) enrollHostTx(tx *sql.Tx, hostID string, budget Resources, mode string, detected *Resources, observedAt time.Time) error {
+	config, _, _, _, err := sqliteMetadata(tx)
+	if err != nil {
+		return err
+	}
+	if _, exists := config.Hosts[hostID]; exists {
+		return ErrConflict
+	}
+	config.Hosts[hostID] = Host{Budget: budget, Mode: mode, Healthy: false, ObservedAt: observedAt, Detected: detected}
+	if observedAt.IsZero() {
+		host := config.Hosts[hostID]
+		host.ObservedAt = s.now()
+		config.Hosts[hostID] = host
+	}
+	if err := validateConfig(config); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec("UPDATE metadata SET config=?,ready=0,nonce='',began_at='' WHERE id=1", encoded); err != nil {
+		return err
+	}
+	return sqliteAudit(tx, "host_enrolled", hostID, s.now())
 }
 
 // SetHostDetected records the last discovered physical totals for an existing
