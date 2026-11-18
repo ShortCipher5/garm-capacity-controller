@@ -59,7 +59,11 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 	if !state.Ready || state.Sequence < 0 || state.Config.MaxObservationAge <= 0 || len(profiles) != len(state.Config.Pools) || len(state.Config.Hosts) == 0 || admission.ValidateBrokerPolicy(state.Policy) != nil {
 		return fail()
 	}
-	s := capacitybroker.Snapshot{Global: resources(state.Config.Global), Hosts: map[string]capacitybroker.Host{}, Repositories: map[string]capacitybroker.Repository{}, Pools: map[string]capacitybroker.Pool{}, Complete: true}
+	globalBudget, hostBudgets, err := overheadBudgets(state)
+	if err != nil {
+		return fail()
+	}
+	s := capacitybroker.Snapshot{Global: globalBudget, Hosts: map[string]capacitybroker.Host{}, Repositories: map[string]capacitybroker.Repository{}, Pools: map[string]capacitybroker.Pool{}, Complete: true}
 	for id, h := range state.Config.Hosts {
 		if h.ObservedAt.IsZero() || h.ObservedAt.After(opt.Now) || opt.Now.Sub(h.ObservedAt) > state.Config.MaxObservationAge {
 			return fail()
@@ -67,7 +71,7 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 		if s.ObservedAt.IsZero() || h.ObservedAt.Before(s.ObservedAt) {
 			s.ObservedAt = h.ObservedAt
 		}
-		s.Hosts[id] = capacitybroker.Host{Budget: resources(h.Budget), AcceptNew: h.Mode == "enabled" && h.Healthy}
+		s.Hosts[id] = capacitybroker.Host{Budget: hostBudgets[id], AcceptNew: h.Mode == "enabled" && h.Healthy}
 	}
 	for id, p := range state.Config.Pools {
 		profile, ok := profiles[id]

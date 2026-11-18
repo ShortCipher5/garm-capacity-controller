@@ -46,6 +46,7 @@ type Record struct {
 	ExitCode       int       `json:"exit_code"`
 	// Always false: neither process exit nor this journal proves a GitHub job ended.
 	JobCompletionAuthorized bool `json:"job_completion_authorized"`
+	GuestNetworkClosed      bool `json:"guest_network_closed,omitempty"`
 }
 
 func digest(s string) bool {
@@ -241,6 +242,10 @@ func Run(c Config) error {
 	if e != nil {
 		return ErrRefused
 	}
+	if e = closeGuestNetwork(); e != nil {
+		return ErrRefused
+	}
+	r.GuestNetworkClosed = true
 	r.State = "process_tree_exited_unqualified"
 	r.At = time.Now().UTC()
 	r.ExitCode = exit

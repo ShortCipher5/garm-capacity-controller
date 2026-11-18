@@ -116,6 +116,15 @@ func (o *executionOwner) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/native/"), "/")
+	if len(parts) == 3 && parts[0] == "executions" && parts[2] == "journal" && r.Method == http.MethodGet {
+		record, e := o.protectedJournal(r.Context(), parts[1])
+		if e != nil {
+			http.Error(w, "protected journal unavailable", 503)
+			return
+		}
+		respond(w, 200, record)
+		return
+	}
 	if len(parts) == 3 && parts[0] == "executions" && (parts[2] == "start" || parts[2] == "bootstrap") && r.Method == http.MethodPost {
 		raw, e := io.ReadAll(io.LimitReader(r.Body, 3))
 		if e != nil || string(raw) != "{}" || r.Header.Get("Content-Type") != "application/json" {

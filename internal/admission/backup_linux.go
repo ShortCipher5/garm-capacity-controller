@@ -350,6 +350,18 @@ func sqliteCheckArtifact(ctx context.Context, s *SQLiteStore) error {
 	if err := s.checkBrokerProfiles(ctx); err != nil {
 		return err
 	}
+	if err := s.checkNativeArtifactOverheads(ctx); err != nil {
+		return err
+	}
+	if err := s.checkNativeDomainOverheads(ctx); err != nil {
+		return err
+	}
+	if err := s.checkNativeRetirements(ctx); err != nil {
+		return err
+	}
+	if err := s.checkNativeRootFences(ctx); err != nil {
+		return err
+	}
 	if err := s.checkNativeJobs(ctx); err != nil {
 		return err
 	}

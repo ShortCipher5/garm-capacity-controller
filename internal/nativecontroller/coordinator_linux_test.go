@@ -4,6 +4,7 @@ package nativecontroller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -392,5 +393,67 @@ func TestExecuteProtectedRejectsAbsentSourceBeforeMutation(t *testing.T) {
 	var c *Coordinator
 	if _, e := c.ExecuteProtected(context.Background(), admission.ExecutionPlan{}, admission.HostBinding{}, admission.StockProviderAuthority{}, "", stockjit.ProtectedBootstrap{}); e == nil {
 		t.Fatal("absent source accepted")
+	}
+}
+
+func TestTerminalReceiptWriteTimeoutNeverReplaysNativeMutation(t *testing.T) {
+	f := setup(t, "")
+	db, e := sql.Open("sqlite3", f.path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	// Delay the actual terminal INSERT after it has entered SQLite. Its bounded
+	// context must interrupt the transaction, never turn the timeout into retry.
+	_, e = db.Exec(`CREATE TRIGGER test_slow_terminal AFTER INSERT ON native_operation_receipts
+ WHEN NEW.kind='succeeded' BEGIN
+ SELECT sum(x) FROM (WITH RECURSIVE delay(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM delay WHERE x<100000000) SELECT x FROM delay);
+ END;`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx := context.Background()
+	if _, e = f.c.Execute(ctx, f.plan, f.host, f.auth, f.digest, f.userData); !errors.Is(e, admission.ErrDispatchUnknown) {
+		t.Fatal(e)
+	}
+	// Reopen validates the durable journal even if cancellation made the old
+	// database handle uncertain. No native mutation may be reissued either way.
+	if e = f.s.Close(); e != nil {
+		t.Fatal(e)
+	}
+	restored, e := admission.OpenSQLite(f.path, admission.Config{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer restored.Close()
+	f.config.Store = restored
+	f.owner.mu.Lock()
+	f.owner.store = restored
+	f.owner.mu.Unlock()
+	c, e := New(ctx, f.config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = c.Execute(ctx, f.plan, f.host, f.auth, f.digest, f.userData); !errors.Is(e, admission.ErrDispatchClaimed) {
+		t.Fatal("terminal timeout replay", e)
+	}
+	var accepted, terminal int
+	if e = db.QueryRow("SELECT count(*) FROM native_operation_receipts WHERE kind='accepted'").Scan(&accepted); e != nil {
+		t.Fatal(e)
+	}
+	if e = db.QueryRow("SELECT count(*) FROM native_operation_receipts WHERE kind='succeeded'").Scan(&terminal); e != nil {
+		t.Fatal(e)
+	}
+	if accepted != 1 || terminal != 0 {
+		t.Fatal("unexpected durable receipt", accepted, terminal)
+	}
+	snap, e := restored.Snapshot(ctx)
+	if e != nil || snap.Allocated.Global.Runners != 1 {
+		t.Fatal("charge lost", e)
+	}
+	f.owner.mu.Lock()
+	defer f.owner.mu.Unlock()
+	if f.owner.createCalls != 1 || f.owner.startCalls != 0 || f.owner.bootstrapCalls != 0 {
+		t.Fatal("mutation replay")
 	}
 }
