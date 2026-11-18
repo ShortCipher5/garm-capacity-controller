@@ -74,3 +74,44 @@ Tests use disposable SSH protocol doubles and synthetic nonexecuted artifacts.
 They cover real encrypted/pinned transport and exact streaming, not root/sudo,
 remote Python availability, actual helper execution or live-host qualification.
 The owner runtime/dispatch guards remain unchanged.
+
+## Optional existing Add Server workflow
+
+The gateway can expose the same asset staging through its existing Add Server
+screen with explicit `--allow-native-asset-staging`, alongside either approved
+native owner preparation or dynamic native registration. This is a separate
+`admin.native_assets` configuration and a separate token, not the preparation,
+inventory, planning, read-only or normal management token.
+
+Configuration contains `token_file` and at most eight fixed `targets`. Each map
+key is an existing native preparation target ID. A target recipe contains
+`preparation_id`, the exact `target` SSH tuple, `bundle_directory`, `helper_path`,
+`manifest_sha256`, `helper_sha256`, `journal_directory` and `review_digest` from
+the standalone CLI review. Local files and helper pins remain deployment-owned;
+the browser cannot choose an endpoint, path, executable, manifest or credentials.
+The gateway reuses only the actual matching preparation target's approved
+administrator signer. Every read/action requires exact preparation ID, address,
+port, username and both SSH fingerprints to match the current preparation record.
+Missing or changed bindings are unavailable, not fabricated pending plans.
+
+A newly registered server is not automatically assigned runtime image/tool bytes.
+An operator must provide its approved immutable asset recipe and restart/reload
+the gateway configuration. A dynamic target becomes eligible only after its real
+bundle has been assembled and explicitly installed into the preparation registry.
+The integration does not rewrite owner templates to the staged paths. Operators
+must separately review the appropriate fixed references. The staged image/tool
+copies still have no capsule quota, live readiness or boot qualification.
+
+`GET /admin/api/v1/native-assets` returns only review metadata and local durable
+history. It does not contact the server. POST requires `target_id`, exact
+`review_digest`, displayed `preparation_id`, `confirm_asset_staging:true`, and `inspect_only`. The preparation association must still match and is echoed in202, so a configuration restart cannot silently accept an old association review. Successful202
+means permanent unknown plus a numbered attempt was fsynced before the response,
+not transfer success. Closing the browser does not undo an accepted request.
+Gateway shutdown cancels/joins the worker; unknown state remains and can never
+permit another upload. A separate explicit inspect approval makes only the fixed
+read-back request. At most1024 attempts are retained, with no reset/cleanup API.
+
+A receipt is historical evidence that the approved files were staged at that
+observation. Latest attempt status is separate: a later failed/unknown inspection
+cannot be disguised by an older successful receipt. No live process status,
+capacity enrollment, ledger refund or runtime permission is represented here.

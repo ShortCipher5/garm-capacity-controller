@@ -33,7 +33,7 @@ func (h *Handler) ConfigureNativeRegistration(catalog nativebundle.RegistrationC
 			return ErrConfiguration
 		}
 		hash := sha256.Sum256([]byte("Bearer " + token))
-		for _, other := range append([][32]byte{h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash, h.rotationHash}, hashes...) {
+		for _, other := range append([][32]byte{h.nativeAssetsHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash, h.rotationHash}, hashes...) {
 			if subtle.ConstantTimeCompare(hash[:], other[:]) == 1 {
 				return ErrConfiguration
 			}

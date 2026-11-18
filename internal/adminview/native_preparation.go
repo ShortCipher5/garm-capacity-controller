@@ -27,7 +27,7 @@ func (h *Handler) SetNativePreparation(targets map[string]NativePreparationTarge
 	if e != nil || len(b) != 32 || token != strings.ToLower(token) || len(targets) < 1 || len(targets) > 8 {
 		return ErrConfiguration
 	}
-	for _, other := range [][32]byte{h.nativePlanningHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash, h.rotationHash} {
+	for _, other := range [][32]byte{h.nativeAssetsHash, h.nativePlanningHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash, h.rotationHash} {
 		if subtle.ConstantTimeCompare(hash[:], other[:]) == 1 {
 			return ErrConfiguration
 		}
