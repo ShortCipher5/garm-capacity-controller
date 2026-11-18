@@ -1,8 +1,8 @@
 # Isolated inventory key rotation and scoped revocation
 
 `capacity-inventory-key-rotate` is an explicit Linux CLI operation for the owned
-isolated listener installed by `capacity-firstboot`. It is not yet a browser
-rotation form, and it cannot revoke permissions on other SSH services.
+isolated listener installed by `capacity-firstboot`. It cannot revoke permissions on other SSH services. An optional separately
+enabled Servers form integrates rotation with controller target replacement.
 
 The exact reviewed plan contains a fresh UUID `request_id`, the original `installation` plan and
 `installation_digest`, authenticated `listener_host_key`, exact `old_key` and
@@ -63,3 +63,51 @@ controller target registration/credential alias updates remain separate explicit
 operations. Real-host SSH/session teardown, systemd/PAM/nftables and network fault
 qualification is not established by mocked tests. No live hosts were accessed
 while developing this change.
+
+
+## Optional combined Servers workflow
+
+Enable `--allow-inventory-key-rotation` only alongside read-only SSH inventory
+and SSH target-management capabilities. Configure deployment-owned
+`admin.inventory_key_rotation` with its own `token_file`,
+`admin_credential_files`, and `targets`. Each target fixes the complete managed
+`plan`, `review_digest`, original `artifact_file` and `manifest_file`. The managed
+plan includes `remote` (the exact rotation plan above), `admin_credential_alias`,
+`old_target_id`/`old_config` and `new_target_id`/`new_config`. Both tuples must point
+to the reviewed isolated listener and use distinct inventory credential aliases;
+the new alias must exist in the deployment credential map and registration scope.
+Full-admin keys cannot be inventory/prepared-helper keys. No browser request can
+upload credentials, choose arbitrary endpoints, supply commands or change hashes.
+
+The separate rotation token authorizes the explicitly reviewed **combined**
+operation: staging a new remote key, proving its pinned access, atomically
+replacing the old controller target, revoking the old remote key/sessions, and
+final verification. Existing read/bootstrap/target-management tokens are not
+accepted for this capability, including reverse initialization order.
+
+The controller first records audited `unknown/approved`. A read-only registry
+preflight rejects missing/revoked/mismatched old permission before credentials or
+network access; exact own replacement receipts permit recovery after a lost reply.
+It then records verified milestones `staged`, `proved`, `registry_switched`, and
+`committed`. Registry replacement revalidates permissions atomically after the
+new-key proof, with a distinct rotation audit role. If that switch fails, no
+remote old-key removal is requested. A failed phase write halts later effects.
+After remote revocation, a second pinned inventory probe and exact registry replay
+check must succeed before the authenticated receipt and `complete/verified` are
+committed atomically.
+
+Milestones are historical facts, not proof that no later effect occurred. A lost
+reply can leave the local target switched or remote old key removed while status
+is unknown. Explicit same-request retry re-proves access and safely resumes;
+progress never regresses and new target IDs never overwrite revoked identities.
+Closing/cancelling/navigation clears the browser view and secrets, not the remote
+operation. Concurrent manual local permission revocation does not cancel already
+approved remote work; subsequent registry checks fail closed and completion stays
+unknown if the new permission has been withdrawn. A recorded complete result is
+historical, not continuous current-host/current-registry attestation.
+
+This adds a separate optional `host_inventory_rotation_operations` table, without
+changing SQLite user_version. It does not modify capacity, pool settings or runner
+jobs. Browser regression sources cover exact approval, explicit retry and late
+responses after cancellation; local browser execution remains unavailable, so
+hosted CI is required. Real supported-host qualification remains outstanding.
