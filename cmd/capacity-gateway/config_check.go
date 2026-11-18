@@ -150,6 +150,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if e != nil {
 		return fail()
 	}
+	if validateProviderProfileRole(c, server.Certificates[0]) != nil {
+		return fail()
+	}
 	if _, e = gatewayrpc.ServerTLS(server.Certificates[0], server.RootCAs); e != nil {
 		return fail()
 	}
