@@ -82,7 +82,7 @@ func server(t *testing.T, output string, forced ...bool) (Config, KeyResolver, *
 					return
 				}
 				req.Reply(true, nil)
-				script, e := io.ReadAll(io.LimitReader(stream, 8192))
+				script, e := io.ReadAll(io.LimitReader(stream, 8193))
 				if e != nil {
 					return
 				}
