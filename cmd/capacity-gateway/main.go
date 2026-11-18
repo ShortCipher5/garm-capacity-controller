@@ -295,6 +295,7 @@ func main() {
 	remoteManagement := flag.Bool("allow-experimental-garm-management", false, "allow separately journalled scoped Garm settings writes; requires qualified gateway routing, exclusive external settings writer, separate upstream token and management opt-in")
 	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
 	sshTargetManagement := flag.Bool("allow-ssh-target-management", false, "allow separately authorized durable SSH target registration within deployment scopes; no installation or activation")
+	bootstrap := flag.Bool("allow-prepared-host-bootstrap", false, "allow separately authorized installation on deployment-approved prepared hosts; no account creation or sshd changes")
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
 	monitoring := flag.Bool("allow-experimental-monitoring", false, "allow periodic host utilization sampling into the admission usage history; monitoring data never gates admission, fits or retirement")
 	flag.Parse()
@@ -342,6 +343,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableSSHTargetManagement = true
+	}
+	if *bootstrap {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "bootstrap requires separate admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableBootstrap = true
 	}
 	if *checkConfig {
 		if checkStaticConfig(config, *provision) != nil {

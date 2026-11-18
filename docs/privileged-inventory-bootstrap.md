@@ -106,3 +106,45 @@ from stdin: its permission boundary is the host's preconfigured sudo policy plus
 protected artifact/endpoint allowlist. A directly authorized sudo caller can
 submit a different claimed administrator fingerprint. Do not treat this field as
 host-side proof of credential separation or an independent authorization grant.
+
+## Optional Servers UI / API integration
+
+Gateway `--allow-prepared-host-bootstrap` enables a distinct bootstrap role. With
+no opt-in the route is disabled. `admin.prepared_host_bootstrap` contains:
+
+- `token_file`: separate owner-private64-hex bootstrap token, unequal to every
+  existing read/write/inventory/target-management token.
+- `admin_credential_files`: deployment-owned alias-to-private-key-file map.
+- `targets`: at most8 fixed target IDs, each with `plan` (the complete reviewed
+  plan above), `review_digest`, `admin_credential_alias`, and `artifact_file`.
+
+Artifact files are read once at startup through owner-private file validation;
+use a trusted mode0600 artifact copy. Credential fingerprints must match the plan
+and must not equal any configured inventory key, including another bootstrap
+plan's inventory key. No browser may upload keys/artifacts, select filesystem
+paths, change destinations or supply commands. Config validation is local-only.
+
+The existing Servers **Add an SSH server configuration** panel contains the
+prepared-host installer. Load targets/status using the separate bootstrap token,
+select a target, review its exact destination/keys/artifact/digest, re-enter the
+token and explicitly approve installation. An async worker returns promptly;
+re-enter the token and reload durable status to check its outcome. The token is
+cleared after use and on closing/clearing the panel. No background polling retains
+an operator token.
+
+Before credential resolution or network contact, SQLite atomically records the
+request, audit and `unknown` outcome. Success only changes that record to
+`installed` after the pinned helper returns the exact confirmation. Credential,
+transport, audit-completion or shutdown errors leave it unknown. Restart never
+replays the operation. Closing the browser does not cancel or roll back an
+approved installation. A changed deployment plan conflicts with prior durable
+state rather than replacing it.
+
+An exact approval replay is a read of its existing outcome, not another attempt.
+Retry requires loading the durable request ID and explicitly approving
+`retry_unknown` for the same target/digest/request. Same-process overlap is
+rejected. Different processes may overlap an explicitly approved identical
+retry; protected remote immutable publication prevents a new or conflicting
+installation. Retries are bounded to100 attempts and retained operations to1024.
+Success cannot regress to unknown because of a late failed attempt. No automatic
+retry, key rotation, server enrollment or capacity claim is implied.

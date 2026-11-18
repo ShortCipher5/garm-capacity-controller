@@ -1,0 +1,13 @@
+const digest=v=>typeof v==='string'&&/^[0-9a-f]{64}$/.test(v);
+const id=v=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(v);
+export function validBootstrapOperation(v){return v&&id(v.target_id)&&digest(v.review_digest)&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v.request_id)&&['unknown','installed'].includes(v.state)&&Number.isInteger(v.attempts)&&v.attempts>=1&&v.attempts<=100}
+export async function bootstrapRequest(token,body,{fetcher=fetch,signal}={}){
+ if(!digest(token))throw new Error('Enter the separate bootstrap token.');
+ if(body&&(!id(body.target_id)||!digest(body.review_digest)||body.confirm_install!==true||typeof body.retry_unknown!=='boolean'||! /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(body.request_id)))throw new Error('Confirm this exact installation first.');
+ let r;try{r=await fetcher('/admin/api/v1/bootstrap',{method:body?'POST':'GET',headers:{Authorization:`Bearer ${token}`,Accept:'application/json',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),credentials:'omit',redirect:'error',cache:'no-store',signal})}catch{throw new Error('Outcome unknown. Closing or cancelling does not undo installation. Reload durable status before considering an explicit same-plan retry.');}
+ if(!r.ok)throw new Error(r.status===404?'Prepared-host bootstrap is disabled.':r.status===401?'Bootstrap token rejected.':'Bootstrap request rejected or unavailable. Reload durable status before retrying.');
+ let value;try{value=await r.json()}catch{throw new Error('Outcome unknown: invalid response. Reload durable status.');}
+ if(body){if(!validBootstrapOperation(value)||value.target_id!==body.target_id||value.review_digest!==body.review_digest||value.request_id!==body.request_id)throw new Error('Outcome unknown: mismatched operation. Reload durable status.');return value;}
+ if(!Array.isArray(value?.targets)||value.targets.length>8||new Set(value.targets.map(t=>t.id)).size!==value.targets.length||!value.targets.every(t=>id(t.id)&&id(t.credential_alias)&&digest(t.review_digest)&&Number.isInteger(t.artifact_bytes)&&t.artifact_bytes>0&&t.artifact_bytes<=16777216&&typeof t.running==='boolean'&&t.plan&&typeof t.plan.address==='string'&&Number.isInteger(t.plan.port)&&typeof t.plan.admin_user==='string'&&typeof t.plan.host_key==='string'&&typeof t.plan.inventory_key==='string'&&typeof t.plan.controller_ip==='string'&&typeof t.plan.admin_key_fingerprint==='string'&&digest(t.plan.artifact_sha256)&&['amd64','arm64'].includes(t.plan.architecture)&&(!t.operation||validBootstrapOperation(t.operation)&&t.operation.target_id===t.id)))throw new Error('Unsupported bootstrap target/status response.');
+ return value;
+}
