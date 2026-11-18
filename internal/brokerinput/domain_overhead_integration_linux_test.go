@@ -14,6 +14,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeartifacts"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeenforcement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/profilesnapshot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 )
@@ -193,6 +194,17 @@ func TestDomainOverheadRealLedgerPlanner(t *testing.T) {
 			decoded, err := profilesnapshot.Decode(raw, projected.Controller, projected.Nonce, time.Now())
 			if err != nil || decoded.Accounting.Allocated.ArtifactOverhead != retained.Resources || len(decoded.Accounting.ArtifactOverheads) != 1 || decoded.Accounting.ArtifactOverheads[0].Sequence != retained.Sequence || decoded.Accounting.Allocated.DomainOverhead != recorded.Resources {
 				t.Fatal("actual artifact snapshot", err)
+			}
+
+			targets := []overheadrefresh.Target{{BindingSequence: enrolled.Sequence, Endpoint: native.URL, TLS: controllerTLS, Kind: "both"}}
+			refreshed, e := overheadrefresh.Refresh(ctx, store, targets)
+			if e != nil || len(refreshed) != 1 || refreshed[0].DomainSequence != recorded.Sequence || refreshed[0].ArtifactSequence != retained.Sequence {
+				t.Fatal("actual collector replay", refreshed, e)
+			}
+			targets = append(targets, overheadrefresh.Target{BindingSequence: 999999, Endpoint: native.URL, TLS: controllerTLS, Kind: "domain"})
+			partial, e := overheadrefresh.Refresh(ctx, store, targets)
+			if e == nil || len(partial) != 1 || partial[0].DomainSequence != recorded.Sequence || partial[0].ArtifactSequence != retained.Sequence {
+				t.Fatal("partial collector lost durable sequences", partial, e)
 			}
 
 		})
