@@ -15,11 +15,14 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type adminConfiguration struct {
-	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
+	NativeEnrollmentRecipesFile        string                        `json:"native_enrollment_recipes_file,omitempty"`
+	OverheadRefresh                    *overheadRefreshConfiguration `json:"owner_overhead_refresh,omitempty"`
+	BrokerProfileRecipesFile           string                        `json:"broker_profile_recipes_file,omitempty"`
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
@@ -96,6 +99,36 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, err
 		}
+	}
+	if config.NativeEnrollmentRecipesFile != "" {
+		recipes, e := loadNativeEnrollmentRecipes(config.NativeEnrollmentRecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativeEnrollmentRecipes(recipes); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+	}
+	if config.OverheadRefresh != nil {
+		recipes, e := loadOverheadRecipes(config.OverheadRefresh.RecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		service, e := overheadrefresh.NewService(context.Background(), store, config.OverheadRefresh.JournalDirectory, recipes)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetOverheadRefresh(service); e != nil {
+			service.Close()
+			cleanup()
+			return nil, noop, e
+		}
+		previousCleanup := cleanup
+		cleanup = func() { service.Close(); previousCleanup() }
 	}
 	if config.BrokerProfileRecipesFile != "" {
 		recipes, e := loadBrokerProfileRecipes(config.BrokerProfileRecipesFile)

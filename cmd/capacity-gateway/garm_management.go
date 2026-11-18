@@ -15,6 +15,9 @@ import (
 // This operator-only configuration never comes from a browser or job payload.
 // The explicit acknowledgement is not an implemented external writer fence.
 type garmManagementConfiguration struct {
+	ManagedSupervisor bool   `json:"managed_supervisor,omitempty"`
+	ProxyServerKeyPin string `json:"proxy_server_key_pin,omitempty"`
+	ControllerID      string `json:"controller_id,omitempty"`
 	// DiscoveryOnly permits provider-scoped reads with no enrolled targets or journal.
 	DiscoveryOnly  bool                 `json:"discovery_only"`
 	Endpoint       string               `json:"endpoint"`
@@ -50,6 +53,21 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 		return nil, noop, nil
 	}
 	remote := config.GarmManagement
+	if remote.ManagedSupervisor {
+		client, e := managedSettingsClient(config)
+		if e != nil {
+			return nil, noop, e
+		}
+		view, e := adminview.NewManagedSettingsView(client, config.EnableExperimentalGarmManagement, remote.PoolIDs)
+		if e != nil {
+			client.Close()
+			return nil, noop, e
+		}
+		return view, client.Close, nil
+	}
+	if remote.ProxyServerKeyPin != "" || remote.ControllerID != "" {
+		return nil, noop, adminview.ErrConfiguration
+	}
 	if remote.DiscoveryOnly && (config.EnableExperimentalGarmManagement || len(remote.PoolIDs) != 0 || len(remote.RepositoryIDs) != 0 || remote.Journal != "" || remote.JournalLineage != "" || remote.QualifiedAdmissionRouting || remote.ExclusiveSettingsWriter || remote.ExperimentalConditionalSettings) {
 		return nil, noop, adminview.ErrConfiguration
 	}
@@ -153,6 +171,10 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 // startup. Configuration agreement is not proof of the installed Garm binary,
 // provider patch or exclusivity; those still require external qualification.
 func validateGarmManagementRouting(config configuration) error {
+	if config.Admin != nil && config.Admin.GarmManagement != nil && config.Admin.GarmManagement.ManagedSupervisor {
+		return validateManagedSettingsRouting(config)
+	}
+
 	if config.Admin == nil || !config.Admin.EnableExperimentalGarmManagement {
 		return nil
 	}

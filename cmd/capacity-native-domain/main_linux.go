@@ -41,6 +41,7 @@ func run(args []string, output io.Writer) error {
 	directory := flags.String("domain-dir", "", "fresh root-owned domain directory")
 	binary := flags.String("incusd", "", "qualified root-owned Incus daemon executable")
 	helper := flags.String("launcher", "", "qualified root-owned capacity-native-launch executable")
+	checkCapsule := flags.Bool("check-capsule-config", false, "read and validate private capsule configuration and TLS roles only; never start")
 	capsulePath := flags.String("capsule-config", "", "root0600 fresh capsule configuration (activation refused)")
 	controlPath := flags.String("control-config", "", "root0600 experimental authenticated owner control configuration")
 	renderUnit := flags.Bool("render-bounded-unit", false, "print required manager unit; never install or start")
@@ -52,8 +53,14 @@ func run(args []string, output io.Writer) error {
 		if flags.NArg() != 0 || *directory != "" || *binary != "" || *helper != "" || *controlPath != "" || *boundaryPath != "" || *renderUnit {
 			return errOwner
 		}
+		if *checkCapsule {
+			return checkCapsuleConfig(*capsulePath, output)
+		}
 		// No config read, manager request, device install or native birth.
 		return errConfinement
+	}
+	if *checkCapsule {
+		return errOwner
 	}
 	if flags.NArg() != 0 || *directory == "" || *binary == "" || *helper == "" {
 		return errOwner
