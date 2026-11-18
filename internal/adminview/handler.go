@@ -169,6 +169,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveManagedRotation(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/firstboot/preflight" {
+		h.serveFirstbootPreflight(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/firstboot" {
 		h.serveFirstboot(w, r)
 		return

@@ -63,7 +63,7 @@ func TestServiceDurableUnknownAndExplicitRetry(t *testing.T) {
 		}
 		return key, nil
 	}
-	s, e := newService(map[string]DeploymentTarget{"one": {r, "admin"}}, store, resolve, func(context.Context, Request, ssh.Signer) (Receipt, error) {
+	s, e := newService(map[string]DeploymentTarget{"one": {Request: r, CredentialAlias: "admin"}}, store, resolve, func(context.Context, Request, ssh.Signer) (Receipt, error) {
 		calls++
 		entered <- struct{}{}
 		<-release
@@ -124,7 +124,7 @@ func TestServiceDurableUnknownAndExplicitRetry(t *testing.T) {
 func TestFailedDurableStartNeverResolvesCredential(t *testing.T) {
 	r, _ := fixture(t)
 	m := &memoryStore{fail: true}
-	s, e := newService(map[string]DeploymentTarget{"one": {r, "admin"}}, m, func(context.Context, string) (ssh.Signer, error) {
+	s, e := newService(map[string]DeploymentTarget{"one": {Request: r, CredentialAlias: "admin"}}, m, func(context.Context, string) (ssh.Signer, error) {
 		t.Error("resolved without audit")
 		return nil, ErrState
 	}, func(context.Context, Request, ssh.Signer) (Receipt, error) {
