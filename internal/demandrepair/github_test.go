@@ -18,7 +18,7 @@ func fixture(t *testing.T, h http.HandlerFunc) *GitHubClient {
 	t.Cleanup(server.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
-	c, e := NewGitHub(server.URL, "test-ref", func(_ context.Context, ref string) (string, error) {
+	c, e := NewGitHub(server.URL, repo.Host, "test-ref", func(_ context.Context, ref string) (string, error) {
 		if ref != "test-ref" {
 			t.Error("wrong reference")
 		}
@@ -110,5 +110,23 @@ func TestGitHubObservationRetainsAbsentBaseline(t *testing.T) {
 	got, e := ObserveGitHub(context.Background(), c, []Repository{repo}, []Baseline{{repo.GarmID, Job{ID: 1, Status: "queued"}}}, now.Add(-time.Hour), now)
 	if e != nil || len(got.Items) != 1 || !got.Items[0].MissingFromReader || !got.EnumerationComplete {
 		t.Fatalf("%+v %v", got, e)
+	}
+}
+
+func TestGitHubRejectsMixedAuthoritiesBeforeCredentials(t *testing.T) {
+	roots := x509.NewCertPool()
+	called := false
+	resolve := func(context.Context, string) (string, error) { called = true; return "synthetic", nil }
+	other := repo
+	other.GarmID = "second"
+	other.Host = "other.example"
+	if _, err := NewGitHub("https://api.github.example", repo.Host, "ref", resolve, &tls.Config{RootCAs: roots}, []Repository{repo, other}); err != ErrObservation {
+		t.Fatal("accepted mixed web authorities")
+	}
+	if _, err := NewGitHub("https://api.github.example", "other.example", "ref", resolve, &tls.Config{RootCAs: roots}, []Repository{repo}); err != ErrObservation {
+		t.Fatal("accepted mismatched authority")
+	}
+	if called {
+		t.Fatal("resolved credential during rejected configuration")
 	}
 }

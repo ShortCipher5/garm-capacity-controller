@@ -28,9 +28,9 @@ var segment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 
 // NewGitHub permits one exact HTTPS API origin/path and an explicit repository
 // allowlist. No proxy, redirects, caller-supplied URLs or write methods are used.
-func NewGitHub(endpoint, ref string, resolve CredentialResolver, trust *tls.Config, repos []Repository) (*GitHubClient, error) {
+func NewGitHub(endpoint, authority, ref string, resolve CredentialResolver, trust *tls.Config, repos []Repository) (*GitHubClient, error) {
 	u, e := url.Parse(endpoint)
-	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/api/v3") || u.RawPath != "" || ref == "" || len(ref) > 256 || resolve == nil || trust == nil || trust.RootCAs == nil || trust.InsecureSkipVerify || len(repos) == 0 || len(repos) > 100 {
+	if authority == "" || len(authority) > 253 || strings.ToLower(authority) != authority || strings.ContainsAny(authority, "/\\:@?# \r\n\x00") || e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/api/v3") || u.RawPath != "" || ref == "" || len(ref) > 256 || resolve == nil || trust == nil || trust.RootCAs == nil || trust.InsecureSkipVerify || len(repos) == 0 || len(repos) > 100 {
 		return nil, ErrObservation
 	}
 	t := trust.Clone()
@@ -49,7 +49,7 @@ func NewGitHub(endpoint, ref string, resolve CredentialResolver, trust *tls.Conf
 	seen := map[string]bool{}
 	for _, r := range repos {
 		identity := strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name)
-		if r.GarmID == "" || r.Host == "" || !segment.MatchString(r.Owner) || !segment.MatchString(r.Name) || seen[identity] {
+		if r.GarmID == "" || r.Host != authority || !segment.MatchString(r.Owner) || !segment.MatchString(r.Name) || seen[identity] {
 			return nil, ErrObservation
 		}
 		if _, ok := c.scope[r.GarmID]; ok {

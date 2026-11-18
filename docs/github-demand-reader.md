@@ -1,6 +1,6 @@
 # Bounded read-only GitHub demand transport
 
-`demandrepair.NewGitHub` accepts an exact HTTPS API endpoint, explicit repository
+`demandrepair.NewGitHub` accepts an explicit web-authority to exact HTTPS API endpoint mapping, repository
 mapping, verified CA trust and an injected credential-reference resolver. It has
 only read methods. No real credentials, secret storage, app installation,
 permission changes, scheduler or runtime activation are included.
@@ -35,8 +35,9 @@ some drift, not every replacement or state transition. EnumerationComplete is
 still only successful bounded traversal, not complete missed-webhook coverage.
 
 A configured enterprise API must support the pinned version/response contract;
-this code does not auto-downgrade. The explicit repository Host is an identity
-label bound by operator configuration to the one API endpoint. No host is inferred
+this code does not auto-downgrade. Every repository Host must exactly match the single configured web authority.
+That authority is explicitly bound by operator configuration to the one API
+endpoint; mixed or mismatched authorities are rejected before credential lookup. No host is inferred
 from an untrusted job. Credentials are resolved per request and never returned in
 errors; resolver failures and HTTP response bodies are not surfaced to callers.
 
