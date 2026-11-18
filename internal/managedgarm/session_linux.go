@@ -197,10 +197,8 @@ func (s *Session) exchange(ctx context.Context, method, path, token string, body
 	if _, e = s.check(ctx); e != nil {
 		return nil, ErrBoundary
 	}
-	if response.StatusCode != 200 {
-		s.revoked = true
-		s.token = ""
-		return nil, ErrBoundary
+	if e := s.checkResponseStatus(method, path, response.StatusCode); e != nil {
+		return nil, e
 	}
 	return raw, nil
 }

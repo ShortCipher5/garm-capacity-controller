@@ -25,12 +25,16 @@ func loadBrokerProfileRecipes(path string) ([]adminview.BrokerProfileRecipe, err
 		return nil, adminview.ErrConfiguration
 	}
 	var config []struct {
-		ID        string                             `json:"id"`
-		Endpoint  string                             `json:"endpoint"`
-		CAFile    string                             `json:"ca_file"`
-		TokenFile string                             `json:"token_file"`
-		Request   admission.BrokerPoolProfileRequest `json:"request"`
-		Domains   []struct {
+		ManagedServerKeyPin   string                             `json:"managed_server_key_pin"`
+		ManagedControllerID   string                             `json:"managed_controller_id"`
+		ClientCertificateFile string                             `json:"client_certificate_file"`
+		ClientKeyFile         string                             `json:"client_key_file"`
+		ID                    string                             `json:"id"`
+		Endpoint              string                             `json:"endpoint"`
+		CAFile                string                             `json:"ca_file"`
+		TokenFile             string                             `json:"token_file"`
+		Request               admission.BrokerPoolProfileRequest `json:"request"`
+		Domains               []struct {
 			Sequence int64                `json:"sequence"`
 			Policy   nativeapi.PolicySpec `json:"policy"`
 		} `json:"domains"`
@@ -50,13 +54,39 @@ func loadBrokerProfileRecipes(path string) ([]adminview.BrokerProfileRecipe, err
 		if !roots.AppendCertsFromPEM(ca) {
 			return nil, adminview.ErrConfiguration
 		}
-		secret, e := securefiles.Read(c.TokenFile, 16384)
-		if e != nil {
-			return nil, adminview.ErrConfiguration
-		}
-		token := strings.TrimSpace(string(secret))
-		if token == "" || strings.ContainsAny(token, "\r\n\x00") {
-			return nil, adminview.ErrConfiguration
+		token := ""
+		trust := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		trustMaterial := append([]byte(nil), ca...)
+		if c.ManagedServerKeyPin != "" {
+			if c.TokenFile != "" || c.ManagedControllerID == "" {
+				return nil, adminview.ErrConfiguration
+			}
+			trust, e = securefiles.LoadTLS(securefiles.TLSFiles{CA: c.CAFile, Certificate: c.ClientCertificateFile, Key: c.ClientKeyFile})
+			if e != nil {
+				return nil, adminview.ErrConfiguration
+			}
+			// Bind the review to the exact roots and certificate actually used.
+			// LoadTLS reads key material, but its second CA read is not authority.
+			trust.RootCAs = roots
+			cert, e := json.Marshal(trust.Certificates[0].Certificate)
+			if e != nil {
+				return nil, adminview.ErrConfiguration
+			}
+			trustMaterial = append(trustMaterial, 0)
+			trustMaterial = append(trustMaterial, cert...)
+
+		} else {
+			if c.ManagedControllerID != "" || c.ClientCertificateFile != "" || c.ClientKeyFile != "" {
+				return nil, adminview.ErrConfiguration
+			}
+			secret, e := securefiles.Read(c.TokenFile, 16384)
+			if e != nil {
+				return nil, adminview.ErrConfiguration
+			}
+			token = strings.TrimSpace(string(secret))
+			if token == "" || strings.ContainsAny(token, "\r\n\x00") {
+				return nil, adminview.ErrConfiguration
+			}
 		}
 		policies := map[int64]nativeapi.Policy{}
 		if len(c.Domains) == 0 || len(c.Domains) > 1000 {
@@ -72,8 +102,8 @@ func loadBrokerProfileRecipes(path string) ([]adminview.BrokerProfileRecipe, err
 			}
 			policies[domain.Sequence] = p
 		}
-		trustHash := sha256.Sum256(ca)
-		out = append(out, adminview.BrokerProfileRecipe{ID: c.ID, TrustIdentity: hex.EncodeToString(trustHash[:]), Request: c.Request, Policies: policies, Transport: stockidentity.Configuration{Endpoint: c.Endpoint, Token: token, Provider: c.Request.Authority.ProviderName, Pool: c.Request.Authority.PoolID, TLS: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}})
+		trustHash := sha256.Sum256(trustMaterial)
+		out = append(out, adminview.BrokerProfileRecipe{ID: c.ID, TrustIdentity: hex.EncodeToString(trustHash[:]), Request: c.Request, Policies: policies, Transport: stockidentity.Configuration{Endpoint: c.Endpoint, Token: token, Provider: c.Request.Authority.ProviderName, Pool: c.Request.Authority.PoolID, TLS: trust, ManagedServerKeyPin: c.ManagedServerKeyPin, ManagedControllerID: c.ManagedControllerID}})
 	}
 	if err := adminview.ValidateBrokerProfileRecipes(out); err != nil {
 		return nil, err
