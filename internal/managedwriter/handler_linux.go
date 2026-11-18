@@ -94,6 +94,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(503)
 			return
 		}
+		h.sourceHeaders(w)
 		json.NewEncoder(w).Encode(v)
 		return
 	}
@@ -103,6 +104,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(503)
 			return
 		}
+		h.sourceHeaders(w)
 		json.NewEncoder(w).Encode(v)
 		return
 	}
