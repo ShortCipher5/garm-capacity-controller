@@ -66,11 +66,12 @@ sequence/lineage drift revocation, unchanged ledger sequence, and rooted file
 and configuration refusal paths. No real root-managed Docker deployment or
 upstream process startup was performed in the development environment.
 
-The current inspector compares enrolled controller/pool/provider/template facts,
-not the composite managed-source identity (proxy URL, server pin and actual
-supervisor identity). An enrollment from a different origin with identical facts
-must not be treated as activation authority. Binding that exact transport origin
-is still required before any capacity-increase permit can consume this evidence.
+The inspector also requires the root writer's separate authenticated source
+descriptor on canonical managed loopback port 9445. A nonce-bound response over
+pinned TLS yields the composite managed-source identity (proxy URL, server key,
+actual supervisor identity and controller). Every enrolled profile must match
+that actual identity. No caller-supplied expected source hash substitutes for the
+read. This identity binding is still not native or capacity-increase authority.
 
 Existing installations remain discovery/read-only inputs. The managed deployment
 is an explicit separate topology, not transparent adoption of an arbitrary GARM
