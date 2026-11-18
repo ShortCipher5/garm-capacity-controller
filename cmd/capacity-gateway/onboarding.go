@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
@@ -11,9 +12,10 @@ import (
 // These transport references are distinct from enrolled backend/ledger hosts.
 // No address/path/key may be supplied by a browser or a job payload.
 type onboardingProfileConfiguration struct {
-	Endpoint string               `json:"endpoint"`
-	Project  string               `json:"project"`
-	TLS      securefiles.TLSFiles `json:"tls"`
+	ServerKeySHA256 string               `json:"server_key_sha256,omitempty"`
+	Endpoint        string               `json:"endpoint"`
+	Project         string               `json:"project"`
+	TLS             securefiles.TLSFiles `json:"tls"`
 }
 type onboardingConfiguration struct {
 	Profiles map[string]onboardingProfileConfiguration `json:"profiles"`
@@ -49,7 +51,7 @@ func newOnboardingControl(config *adminConfiguration, store *admission.SQLiteSto
 			closeAll()
 			return nil, noop, adminview.ErrConfiguration
 		}
-		credentials, err := securefiles.LoadTLS(profile.TLS)
+		credentials, err := onboardingTLS(profile)
 		if err != nil {
 			closeAll()
 			return nil, noop, adminview.ErrConfiguration
@@ -68,4 +70,17 @@ func newOnboardingControl(config *adminConfiguration, store *admission.SQLiteSto
 		return nil, noop, adminview.ErrConfiguration
 	}
 	return manager, closeAll, nil
+}
+
+// onboardingTLS is shared with the offline config checker so runtime cannot
+// bypass a malformed or rejected pin accepted by a different validation path.
+func onboardingTLS(profile onboardingProfileConfiguration) (*tls.Config, error) {
+	credentials, err := securefiles.LoadTLS(profile.TLS)
+	if err != nil {
+		return nil, err
+	}
+	if profile.ServerKeySHA256 != "" {
+		return securefiles.WithServerKeyPin(credentials, profile.ServerKeySHA256)
+	}
+	return credentials, nil
 }

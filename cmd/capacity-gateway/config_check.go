@@ -243,7 +243,7 @@ func checkStaticConfig(c configuration, provision bool) error {
 			if !admission.ValidOnboardingProfileID(id) {
 				return fail()
 			}
-			trust, e := securefiles.LoadTLS(p.TLS)
+			trust, e := onboardingTLS(p)
 			if e != nil {
 				return fail()
 			}

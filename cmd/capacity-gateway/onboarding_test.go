@@ -110,3 +110,47 @@ type nilObserver struct{}
 func (nilObserver) PhysicalIdentity(context.Context) (incusapi.PhysicalServerIdentity, error) {
 	return incusapi.PhysicalServerIdentity{}, nil
 }
+
+func TestOnboardingConfiguredServerPinAllowsOnlyReviewedKey(t *testing.T) {
+	fixture := testsupport.Identity(t, "disposable-pin-daemon")
+	raw, err := os.ReadFile(fixture.Configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transport struct {
+		Endpoint string               `json:"endpoint"`
+		TLS      securefiles.TLSFiles `json:"tls"`
+	}
+	if json.Unmarshal(raw, &transport) != nil {
+		t.Fatal("fixture config")
+	}
+	identity, err := fixture.Client.PhysicalIdentity(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		pin       string
+		available bool
+	}{{identity.ServerKeyFingerprint(), true}, {strings.Repeat("0", 64), false}} {
+		profile := onboardingProfileConfiguration{Endpoint: transport.Endpoint, Project: "runners", TLS: transport.TLS, ServerKeySHA256: test.pin}
+		config := &adminConfiguration{IncusOnboarding: &onboardingConfiguration{Profiles: map[string]onboardingProfileConfiguration{"candidate": profile}}, EnableExperimentalOnboardingProbes: true}
+		manager, close, err := newOnboardingControl(config, managementStore(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := manager.Probe(context.Background(), onboarding.Request{RequestID: "11111111-1111-4111-8111-111111111111", ProfileID: "candidate", Reason: "disposable server pin check"})
+		close()
+		if err != nil || result.ObservationAvailable != test.available {
+			t.Fatalf("pin result available=%v expected=%v error=%v", result.ObservationAvailable, test.available, err)
+		}
+	}
+	bad := onboardingProfileConfiguration{Endpoint: transport.Endpoint, Project: "runners", TLS: transport.TLS, ServerKeySHA256: "not-a-pin"}
+	if _, err := onboardingTLS(bad); err == nil {
+		t.Fatal("offline validator accepted malformed pin")
+	}
+	config := &adminConfiguration{IncusOnboarding: &onboardingConfiguration{Profiles: map[string]onboardingProfileConfiguration{"candidate": bad}}}
+	if _, close, err := newOnboardingControl(config, managementStore(t)); err == nil {
+		close()
+		t.Fatal("runtime accepted malformed pin")
+	}
+}
