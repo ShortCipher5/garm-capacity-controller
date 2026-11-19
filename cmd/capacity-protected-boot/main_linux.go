@@ -18,6 +18,10 @@ func main() {
 	} else {
 		e = protectedinit.ErrRefused
 	}
+	// Success is returned only after durable local fence and a halt request.
+	if e == nil {
+		return
+	}
 	if e != nil {
 		fmt.Fprintln(os.Stderr, "protected boot unavailable; retain unknown state")
 		if os.Getpid() != 1 {

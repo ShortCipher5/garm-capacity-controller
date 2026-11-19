@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -157,13 +156,9 @@ func Boot() error {
 	if _, e = layout.listener.Seek(0, 0); e != nil {
 		return ErrRefused
 	}
-	sig := make(chan os.Signal, 16)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(sig)
-	go func() {
-		for range sig {
-		}
-	}()
+	// Keep the signal shield installed even after a later failure: the main
+	// process retains unknown state rather than restoring fatal dispositions.
+	shutdown, _ := watchShutdown()
 	null, e := os.OpenFile("/dev/null", os.O_RDWR, 0)
 	if e != nil {
 		return ErrRefused
@@ -189,6 +184,8 @@ func Boot() error {
 	if e = writeRecord(journal, record); e != nil {
 		return ErrRefused
 	}
+	shutdown.fenceCommitted()
+	<-shutdown.done
 	return nil
 }
 func networkPrepared() bool {
