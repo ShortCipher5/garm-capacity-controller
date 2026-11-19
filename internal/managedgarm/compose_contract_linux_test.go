@@ -24,6 +24,10 @@ func TestGeneratedComposeMatchesPureTopologyContract(t *testing.T) {
 }
 
 func checkGeneratedCompose(raw []byte, spec Specification) error {
+	return checkGeneratedComposePublication(raw, spec, false)
+}
+
+func checkGeneratedComposePublication(raw []byte, spec Specification, omit bool) error {
 	type volume struct {
 		Type, Source, Target string
 		ReadOnly             bool `json:"read_only"`
@@ -81,11 +85,17 @@ func checkGeneratedCompose(raw []byte, spec Specification) error {
 		c.State.Running, c.State.Pid = true, 100+i
 		c.HostConfig.ReadonlyRootfs, c.HostConfig.CapDrop, c.HostConfig.SecurityOpt = v.ReadOnly, v.CapDrop, v.SecurityOpt
 		if i == 0 {
-			if v.NetworkMode != "" || !reflect.DeepEqual(v.Ports, []string{"8443:8443"}) {
+			expectedPorts := []string{"8443:8443"}
+			if omit {
+				expectedPorts = nil
+			}
+			if v.NetworkMode != "" || !reflect.DeepEqual(v.Ports, expectedPorts) {
 				return fmt.Errorf("unexpected public binding")
 			}
 			c.HostConfig.NetworkMode = "fixture_default"
-			c.HostConfig.PortBindings = map[string][]struct{ HostIP, HostPort string }{"8443/tcp": {{"", "8443"}}}
+			if !omit {
+				c.HostConfig.PortBindings = map[string][]struct{ HostIP, HostPort string }{"8443/tcp": {{"", "8443"}}}
+			}
 		} else {
 			if v.NetworkMode != "service:garm" || len(v.Ports) != 0 {
 				return fmt.Errorf("unexpected namespace: %s", name)
@@ -138,5 +148,48 @@ func TestGeneratedComposeRejectsDroppedOrAdditionalFields(t *testing.T) {
 				t.Fatal("tampered generated field accepted")
 			}
 		})
+	}
+}
+
+func TestPreparationPublicationOptionChangesOnlyDeclaredPort(t *testing.T) {
+	spec, _ := topologyFixture()
+	p := Preparation{Directory: "/private/deployment", GarmImage: spec.GarmImage, ControllerImage: spec.ControllerImage, IngressImage: spec.IngressImage}
+	defaultDoc := composeDocument(p, "fixture")
+	for _, omit := range []bool{false, true} {
+		p.OmitIngressPublication = omit
+		doc := composeDocument(p, "fixture")
+		garm := doc["services"].(map[string]any)["garm"].(map[string]any)
+		_, hasPorts := garm["ports"]
+		if hasPorts == omit {
+			t.Fatal("wrong publication presence")
+		}
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkGeneratedComposePublication(raw, spec, omit); err != nil {
+			t.Fatal(err)
+		}
+		metadata, err := json.Marshal(preparationMetadata(p, "fixture", strings.Repeat("1", 64)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if json.Unmarshal(metadata, &fields) != nil {
+			t.Fatal("metadata")
+		}
+		value, present := fields["omit_ingress_publication"]
+		if present != omit || (omit && value != true) {
+			t.Fatal("publication intent not recorded")
+		}
+		if fields["Version"] != "managed-garm/v1" {
+			t.Fatal("unexpected manifest version")
+		}
+		if omit {
+			garm["ports"] = []string{"8443:8443"}
+		}
+		if !reflect.DeepEqual(doc, defaultDoc) {
+			t.Fatal("option changed unrelated launch fields")
+		}
 	}
 }
