@@ -73,6 +73,29 @@ class FormatProbe(unittest.TestCase):
             self.assertEqual(result['files'], 7)
             self.assertEqual(list(Path(parent).iterdir()), [])
 
+    def test_optional_single_role_samples_share_budget_and_cleanup(self):
+        samples=[]
+        with tempfile.TemporaryDirectory() as parent:
+            def one(path, ids, max_bytes):
+                # Multi archive and previous role sample have already been erased.
+                self.assertEqual(len(list(Path(parent).iterdir())), 1)
+                self.assertEqual(len(ids), 1)
+                samples.append((next(iter(ids)), max_bytes))
+                # Existing mock checks whole ID mapping; construct matching one-role tar.
+                with tarfile.open(path, 'w') as out:
+                    for name, data in [('manifest.json',b'[]'), ('index.json',b'{"manifests":[]}'),
+                                       ('oci-layout',b'{"imageLayoutVersion":"1.0.0"}')]:
+                        info=tarfile.TarInfo(name);info.size=len(data);out.addfile(info,io.BytesIO(data))
+            result=probe.probe(json.dumps(self.record).encode(), parent, 'a'*40, '123', '1',
+                               lambda p,i:self.save(p,i,True), sample_roles=True, role_save=one)
+            self.assertEqual([r for r,_ in samples],list(probe.pack.ROLES))
+            self.assertTrue(all(samples[i][1] > samples[i+1][1] for i in range(3)))
+            self.assertLess(samples[0][1],probe.pack.MAX_ARCHIVE)
+            self.assertEqual(set(result['per_role_structure']),set(probe.pack.ROLES))
+            self.assertEqual(list(Path(parent).iterdir()), [])
+            self.assertFalse(result['archive_identity_verified'])
+            self.assertTrue(all(v['structure']['diagnostic_only'] for v in result['per_role_structure'].values()))
+
     def test_failed_save_or_invalid_tar_is_cleaned(self):
         for invalid_tar in (False,True):
             def broken(path, ids):

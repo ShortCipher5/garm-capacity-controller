@@ -36,6 +36,7 @@ jobs:
         run: |
           python3 deploy/runtime/test_pack_pilot_images.py
           python3 deploy/runtime/test_probe_image_save_format.py
+          python3 deploy/runtime/test_image_save_structure.py
       - name: Build digest-locked artifacts and exercise isolated Compose topology
         env:
           GARM_ARCHIVE_FORMAT_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.archive_format_probe == true && 'true' || 'false' }}
