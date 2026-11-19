@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -220,13 +219,9 @@ func Run(c Config) error {
 	}
 	// PID1 ignores termination requests instead of forwarding them to running jobs.
 	// Cancellation/host reboot still cannot be called a completed job.
-	signals := make(chan os.Signal, 16)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(signals)
-	go func() {
-		for range signals {
-		}
-	}()
+	// Keep the signal shield installed even after a later failure: the main
+	// process retains unknown state rather than restoring fatal dispositions.
+	shutdown, _ := watchShutdown()
 	null, e := os.OpenFile("/dev/null", os.O_RDWR, 0)
 	if e != nil {
 		return ErrRefused
@@ -252,6 +247,8 @@ func Run(c Config) error {
 	if e = writeRecord(c.Journal, r); e != nil {
 		return ErrRefused
 	}
+	shutdown.fenceCommitted()
+	<-shutdown.done
 	return nil
 }
 
