@@ -18,6 +18,7 @@ type stockReadLifecycle struct {
 	held    *stockReadListener
 	done    chan struct{}
 	closed  bool
+	auth    stockReadAuthBinding
 }
 
 func newStockReadLifecycle(ctx context.Context) (*stockReadLifecycle, error) {
@@ -29,6 +30,11 @@ func newStockReadLifecycle(ctx context.Context) (*stockReadLifecycle, error) {
 		return nil, ErrBoundary
 	}
 	owner := &stockReadLifecycle{binding: binding, done: make(chan struct{})}
+	owner.auth, err = loadStockReadAuthBinding(ctx, binding.observed.profile)
+	if err != nil {
+		owner.close()
+		return nil, ErrBoundary
+	}
 	if binding.recheck(ctx) != nil {
 		owner.close()
 		return nil, ErrBoundary
@@ -41,22 +47,23 @@ func newStockReadLifecycle(ctx context.Context) (*stockReadLifecycle, error) {
 	}
 	done := make(chan result, 1)
 	go func() {
+		outcome := result{err: ErrBoundary}
+		// Registered first: publish only after later descriptor cleanup defers.
+		// Buffered result delivery cannot block a failed-restore locked thread.
+		defer func() { done <- outcome }()
 		runtime.LockOSThread()
 		original, e := os.Open("/proc/thread-self/ns/net")
 		if e != nil {
 			runtime.UnlockOSThread()
-			done <- result{err: ErrBoundary}
 			return
 		}
 		defer original.Close()
 		if ctx.Err() != nil || !stockReadNamespaceMatches(binding.namespace, binding.observed.samples[0]) {
 			runtime.UnlockOSThread()
-			done <- result{err: ErrBoundary}
 			return
 		}
 		if unix.Setns(int(binding.namespace.Fd()), unix.CLONE_NEWNET) != nil {
 			runtime.UnlockOSThread()
-			done <- result{err: ErrBoundary}
 			return
 		}
 		// Fixed numeric IPv4 only; no resolution, caller-selected address or options.
@@ -87,7 +94,6 @@ func newStockReadLifecycle(ctx context.Context) (*stockReadLifecycle, error) {
 			}
 			// Returning while locked terminates this OS thread; never put it back in
 			// the Go pool with the wrong namespace, including on restoration failure.
-			done <- result{err: ErrBoundary}
 			return
 		}
 		runtime.UnlockOSThread()
@@ -95,10 +101,9 @@ func newStockReadLifecycle(ctx context.Context) (*stockReadLifecycle, error) {
 			if listener != nil {
 				listener.Close()
 			}
-			done <- result{err: ErrBoundary}
 			return
 		}
-		done <- result{listener: listener}
+		outcome = result{listener: listener}
 	}()
 	// Always join before releasing/closing namespace. Cancellation is not a
 	// license to abandon a worker that may still hold a socket or changed thread.
@@ -136,6 +141,7 @@ func (o *stockReadLifecycle) closeLocked() {
 		return
 	}
 	o.closed = true
+	o.auth = stockReadAuthBinding{}
 	if o.held != nil {
 		o.held.listener.Close()
 		o.held = nil
@@ -169,7 +175,8 @@ func (o *stockReadLifecycle) recheck(ctx context.Context) error {
 	b := o.binding
 	b.mu.Lock()
 	now, err := observeStockReadPhase(ctx, o.held)
-	valid := err == nil && ctx.Err() == nil && stockReadSameLifetime(b.observed, now) && stockReadNamespaceMatches(b.namespace, now.samples[0])
+	auth, authErr := loadStockReadAuthBinding(ctx, b.observed.profile)
+	valid := authErr == nil && auth == o.auth && err == nil && ctx.Err() == nil && stockReadSameLifetime(b.observed, now) && stockReadNamespaceMatches(b.namespace, now.samples[0])
 	if valid {
 		b.observed = now
 	}

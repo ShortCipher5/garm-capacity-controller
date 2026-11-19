@@ -1,9 +1,11 @@
-# Unwired protected stock-read-only preboot observation
+# Protected stock-read-only pilot qualification components
 
 The private `observeStockReadOnly` implementation is a bounded diagnostic
 snapshot, not a permission, durable namespace seal or authenticated session.
-There is no CLI or production caller, successful runtime test hook, conversion to
-managed evidence, namespace opener, login/bootstrap, writer or restart operation.
+The observation itself exports no runtime test hook, conversion to managed
+evidence, namespace opener, login/bootstrap, writer or restart operation. The
+explicit bounded qualification caller is described at the end; no normal
+production service calls this path.
 Existing managed verification is unchanged.
 
 It reads only `/etc/capacity-stock-readonly/reviewed-profile.json`, with protected
@@ -96,3 +98,147 @@ acquisition, synchronous filesystem/hash operations or kernel calls. Cancellatio
 cleanup can therefore wait for an in-progress recheck; it is not a hard real-time
 revocation guarantee. Sampled checks still cannot exclude privileged interference
 or prove exclusive socket custody.
+
+### Fixed existing-lineage prerequisite (no authentication)
+
+The private lifecycle now additionally requires the reviewed pilot directory's
+`supervisor-admin` directory, under root-controlled ancestry, owned by root with
+mode 0700. Its five fixed root-owned 0600 single-link regular files are
+`stock-auth-binding.json`, `stock-api.der`, `bootstrap-attempt.json`,
+`bootstrap-record.json`, and `bootstrap-user.json`. Reads are bounded,
+non-following and nonblocking, and bracket the complete file set. The canonical
+binding record (`stock-read-auth-binding/v1`) commits `GarmID`, `LeafSHA256`,
+`AttemptSHA256`, and `RecordSHA256`; hashes cover exact DER/canonical JSON bytes.
+The existing attempt and record must agree with the container and actual
+credential hash using the existing bootstrap grammar. Public commitments and
+controller identity is retained, never credential bytes or tokens. UserID must
+be empty, matching the actual existing authentication record producer; stock
+provides no authenticated current-user read. Nonempty inferred IDs are refused.
+Drift during lifecycle recheck revokes the listener and retained binding.
+
+This does not authenticate the DER certificate against a live server, assert
+certificate validity/trust, create an account or repair any missing record. A
+future fixed TLS exchange must verify the actual peer against this commitment
+and appropriate trust before login. No setup writes are supplied here. The
+uninitialized disposable specimen has none of these records and must refuse;
+only synthetic offline lineage transitions are tested. Existing bootstrap and
+writer/session paths are unchanged.
+
+
+### Private existing-record-only read session candidate
+
+The separate private session consumes the supervised lifecycle and the same
+bracketed five-file material. Its constructor performs only the existing fixed
+login and controller-read protocol, with exact whole-record equality before and
+after, and no first-run, repair, record creation or renewal branch. TLS 1.3 uses
+normal certificate validity/hostname verification plus the reviewed exact DER
+leaf. Each exchange is restricted to the fixed stock origin in the retained
+namespace and bracketed by lifecycle/lineage verification. There is no public
+transport or arbitrary request interface. After construction only Instances,
+Pools, Jobs and UUID-selected Pool reads, opaque source identity and Close are
+available on the private type. Errors revoke the token, listener and holder.
+
+Tests use the actual authentication protocol with synthetic responses, ordinary
+local TLS for expiry/name/leaf checks, and refusal/closed-state cases. They cannot
+inject a successful protected lifecycle/session. No actual stock login,
+namespace dial, deployment, authentication readiness or serving is qualified.
+The separate fresh preboot specimen still cannot construct this existing-record
+session. No production consumer or facade is wired.
+
+## Private read service composition
+
+`serveStockReadOnly` is reached only by the separate explicit qualification caller,
+not a normal production service. It composes only the
+concrete existing-record session, its owned fixed loopback 9445 listener, and the
+GET-only managed read facade. It cannot accept a listener, handler, transport,
+URL, scope or credential callback. Initial scope is fixed to provider `capacity`,
+with no repository or individual-pool enrollment; this permits inventory under
+existing projection rules, not queued repository demand or settings access.
+
+The exact verified pilot directory's `supervisor-admin` must already contain
+root-owned mode0600 regular single-link files: `read-serve.json`,
+`read-serve-ca.der`, `read-serve-server.pem`, `read-serve-server.key`, and
+`read-serve-client.der`. The root0700 directory and ancestors are verified;
+nonblocking/nofollow bounded reads and repeated file/directory identity checks
+reject incomplete or changing material. Nothing is created or repaired.
+
+The canonical `stock-read-serve/v1` JSON record binds GarmID and ControllerID to
+the actual authenticated session; CASHA256, ServerSHA256 and ClientSHA256 pin DER
+certificates. GatewaySPKI and IngressSPKI are separately reviewed public role
+commitments, not inferred from the preboot fixture placeholder. CA, serving leaf,
+gateway client, stock server, gateway server and ingress server keys must all be
+distinct. The dedicated CA is not stock-upstream trust. Normal chain/time/server
+loopback-name/EKU validation precedes TLS1.3 client-CA verification plus exact
+client-leaf matching. Missing/unreviewed commitments refuse startup.
+
+Cancellation, owned lifecycle loss, serving error, observed topology/auth drift
+or material change terminates the service; there is no automatic recovery.
+A one-second periodic check uses bounded five-second observations and closes
+active HTTP connections on termination and joins the Serve loop, not a separate
+all-handler wait group. In-flight source operations retain the
+existing bounded exchange and session close behavior. This is sampled drift
+revocation, not a promise that privileged changes are atomically excluded.
+
+Local tests use synthetic generated certificates and invalid/canceled contexts;
+they do not install protected material, authenticate stock, create a namespace,
+or exercise successful privileged service startup. That runtime path remains
+unqualified; the qualification command has not been invoked.
+
+
+## Explicit qualification caller, not production activation
+
+The separate `capacity-stock-read-pilot` command accepts exactly one verb,
+`serve-existing-readonly`. No arguments, extra arguments, paths, flags, address,
+scope or duration controls are accepted. It is not added to any default image,
+installer, service unit or existing managed-garm/writer command. There is no
+host/runtime invocation as part of this implementation.
+
+Its only package entry accepts a context, imposes a fixed ten-minute context deadline,
+and calls the private fixed read service. SIGINT/SIGTERM cancel that context;
+the deadline initiates cancellation, with existing bounded cleanup potentially
+extending exit beyond ten minutes. Normal deadline/stop/failure emits a fixed unavailable/stopped diagnostic and
+exit1, not a success or readiness certificate. There is no automatic restart,
+repair, credential creation or fresh-bootstrap fallback.
+
+A separately reviewed completed existing bootstrap attempt/record (empty UserID)
+and explicit `stock-auth-binding.json` commitments must already exist. Bootstrap
+alone does not create this review or the dedicated serving roles. The session
+currently performs existing-record authentication before serving-role validation;
+a malformed serving configuration may therefore cause a login followed by refusal,
+never first-run, repair, authority or a served endpoint. No secrets are logged.
+
+Tests of this caller deliberately exercise only rejected arguments and invalid or
+already-canceled contexts. Successful protected startup, real signal-driven host
+shutdown and the ten-minute runtime ceiling require later disposable qualification.
+
+### Separate explicit fresh-pilot bootstrap (currently uncalled)
+
+`bootstrapStockReadPilot` is private code for a later, separately approved
+setup invocation. It uses only retained **exact four-port preboot** identity,
+not the supervised listener/read session. It reads the same fixed protected
+`supervisor-admin` location; it creates neither that directory nor credentials.
+The provisional canonical `stock-bootstrap-binding.json` must have version
+`stock-pilot-bootstrap/v1`, exact `GarmID`, `LeafSHA256` over `stock-api.der`, and
+`CredentialDigest` using the existing generated-credential grammar. This
+provisional record is not a completed `stock-auth-binding.json` and cannot
+satisfy read admission. Normal TLS chain/time/hostname checks plus exact leaf
+pinning apply to the fixed 127.0.0.1:9998 endpoint.
+
+The existing bootstrap protocol is reused through a private read/create store
+interface; its old writer implementation is unchanged. The pilot store uses
+bounded no-follow/nonblocking reads and exclusive fsynced attempt/record writes.
+The durable attempt is created before the sole first-run POST. A lost response
+never permits another first-run: a later explicit invocation can only try the
+same credential login and controller GET. Concurrent exclusive creation losers
+fail without first-run. Partial/uncertain records remain in place, never removed
+or repaired. Returned real records have an empty UserID, not JWT-derived data.
+Only those three exact routes exist; there is no settings/provider/read-facade
+route, automatic invocation, token output, listener9445 or completed-review
+creation. Retained topology and protected provisional inputs are checked before
+and after each exchange. Shared fixed dialing verifies thread namespace entry
+and restoration, joins the worker and never returns a generic namespace handle.
+
+Tests exercise the protocol with synthetic responses and temporary local files,
+not a pilot account, Docker, setns or stock authentication. Real setup still
+requires an explicit reviewed preparation/invocation and separately reviewed
+completed commitments before opening an existing-only read session.

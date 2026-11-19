@@ -13,6 +13,12 @@ on:
       - integration/garm-v0.2.1/**
       - web/**
   workflow_dispatch:
+    inputs:
+      archive_format_probe:
+        description: Measure temporary image-save layout only; no archive upload or deployment
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -26,7 +32,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Check offline archive-format contracts
+        run: |
+          python3 deploy/runtime/test_pack_pilot_images.py
+          python3 deploy/runtime/test_probe_image_save_format.py
+          python3 deploy/runtime/test_image_save_structure.py
       - name: Build digest-locked artifacts and exercise isolated Compose topology
+        env:
+          GARM_ARCHIVE_FORMAT_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.archive_format_probe == true && 'true' || 'false' }}
         run: deploy/runtime/test.sh
       - name: Report boundaries without uploading fixtures or credentials
         if: always()

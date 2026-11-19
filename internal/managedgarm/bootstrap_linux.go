@@ -122,7 +122,12 @@ func stockUUID(s string) bool {
 // Session. Production supplies only the observed namespace-bound transport.
 type bootstrapExchange func(context.Context, string, string, string, any) ([]byte, error)
 
-func bootstrapProtocol(ctx context.Context, files *bootstrapFiles, garmID string, exchange bootstrapExchange) (bootstrapRecord, string, error) {
+type bootstrapProtocolStore interface {
+	read(string, any) error
+	create(string, any) error
+}
+
+func bootstrapProtocol(ctx context.Context, files bootstrapProtocolStore, garmID string, exchange bootstrapExchange) (bootstrapRecord, string, error) {
 	var c credential
 	if files.read("bootstrap-user.json", &c) != nil || !validBootstrapCredential(c) || !digest.MatchString(garmID) {
 		return bootstrapRecord{}, "", ErrBoundary

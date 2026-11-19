@@ -281,3 +281,11 @@ deploy/runtime/garm-least-privilege.sh --joined-service \
   "$(docker image inspect --format '{{.Id}}' capacity-gateway:qualification)" \
   "$(docker image inspect --format '{{.Id}}' "$ingress_tag")" \
   "$(docker image inspect --format '{{.Id}}' capacity-ledger:qualification)"
+
+# The successful joined call above has emitted v2 after its fixture cleanup.
+# Measure while this invocation's unique ingress image still exists; the EXIT
+# trap below remains installed and will remove it only after this optional phase.
+if [[ ${GARM_ARCHIVE_FORMAT_PROBE:-false} = true ]]; then
+  [[ ${GITHUB_EVENT_NAME:-} = workflow_dispatch ]]
+  timeout --kill-after=10s 360s python3 deploy/runtime/probe-image-save-format.py
+fi
