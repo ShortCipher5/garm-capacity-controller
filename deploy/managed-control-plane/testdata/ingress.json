@@ -1,0 +1,1 @@
+{"Listen":"0.0.0.0:8443","Upstream":"https://127.0.0.1:9998","Controller":"","TLSCertificate":"/run/controlplane/ingress/server.pem","TLSKey":"/run/controlplane/ingress/server-key.pem","StockCertificate":"/run/controlplane/ingress/api-cert.pem","StockFingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
