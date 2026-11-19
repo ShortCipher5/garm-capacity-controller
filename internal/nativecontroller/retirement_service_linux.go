@@ -23,6 +23,7 @@ type RetirementConfiguration struct {
 }
 type RetirementCycle struct {
 	Examined, AwaitingEvidence, OutsideScope, OperationsCompleted, Unresolved int
+	RetainedDiagnosticsAvailable, RetainedDiagnosticsUnavailable              int
 	ReleaseAuthorized                                                         bool
 }
 type RetirementStatus struct {
@@ -126,6 +127,12 @@ func (s *RetirementService) Cycle(ctx context.Context) (result RetirementCycle, 
 			continue
 		}
 		result.OperationsCompleted++
+		// Diagnostics are separate from operation completion and never authorize release.
+		if observation, diagnosticErr := owner.ObserveRetirementDiagnostics(ctx, b.PermitID); diagnosticErr == nil && observation.Valid() {
+			result.RetainedDiagnosticsAvailable++
+		} else {
+			result.RetainedDiagnosticsUnavailable++
+		}
 	}
 	return result, nil
 }

@@ -108,6 +108,9 @@ func NewExecutionServer(api *nativeapi.Client, policy nativeapi.Policy, claims *
 			discovery.ServeHTTP(w, r)
 			return
 		}
+		if owner.serveRetainedEvidence(w, r, fingerprint(serverTLS), fingerprint(claimTLS)) {
+			return
+		}
 		if r.URL.RawQuery != "" {
 			http.Error(w, "query not supported", 400)
 			return
