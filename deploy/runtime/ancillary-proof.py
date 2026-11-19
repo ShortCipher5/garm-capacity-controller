@@ -71,7 +71,11 @@ def gather(path, ids, metadata):
                 'nodes':nodes,'exporter':metadata}
 
 def prove(path, ids, metadata, binary):
-    payload=json.dumps(gather(path,ids,metadata),separators=(',',':')).encode()
+    return prove_payload(gather(path,ids,metadata),binary)
+
+def prove_payload(value, binary):
+    # Caller must bind these private bytes to its held archive and closure.
+    payload=json.dumps(value,separators=(',',':')).encode()
     require(len(payload)<=112*1024**2)
     # Only the reviewed locally built helper is supplied by the hosted harness.
     # It emits a fixed bounded result; no private bytes/errors are relayed.
