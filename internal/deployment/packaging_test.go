@@ -188,7 +188,7 @@ func TestHostedQualificationHasNoLiveOrSecretInputs(t *testing.T) {
 
 func TestUpstreamGarmLeastPrivilegeLabCannotImplyInstalledQualification(t *testing.T) {
 	harness := repositoryFile(t, "deploy/runtime/garm-least-privilege.sh")
-	for _, required := range []string{"RUNNER_ENVIRONMENT", "github-hosted", "--network none", "--user 65531:65531", "--cap-drop ALL", "no-new-privileges", "umask 077", "CapBnd", "NoNewPrivs", "installed_stack_qualified", "deployment_authorized"} {
+	for _, required := range []string{"RUNNER_ENVIRONMENT", "github-hosted", "--network none", `--user "$lab_uid:$lab_uid"`, "lab_uid=65531", "lab_uid=65530", "--prospective-service", "direct_executable_launch_qualified=False", "--cap-drop ALL", "no-new-privileges", "umask 077", "CapBnd", "NoNewPrivs", "installed_stack_qualified", "deployment_authorized"} {
 		if !strings.Contains(harness, required) {
 			t.Fatalf("missing least-privilege lab boundary: %s", required)
 		}

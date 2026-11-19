@@ -4,9 +4,25 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 : "${RUNNER_TEMP:?A disposable GitHub-hosted runner workspace is required}"
 [[ ${GITHUB_ACTIONS:-} = true && ${RUNNER_ENVIRONMENT:-} = github-hosted ]] || { echo 'Refusing non-hosted execution' >&2; exit 1; }
+# Closed test variants only; no caller-supplied UID/path/runtime configuration.
+lab_uid=65531
+specimen=standalone
+workdir_args=()
+result_name=garm-nonroot-lab.json
+case "${1:-}" in
+  "") [[ $# = 0 ]] || exit 1 ;;
+  --prospective-service)
+    [[ $# = 1 ]] || exit 1
+    lab_uid=65530
+    specimen=prospective-service
+    workdir_args=(--workdir /)
+    result_name=garm-prospective-service-lab.json
+    ;;
+  *) echo 'Unknown disposable specimen' >&2; exit 1 ;;
+esac
 image=ghcr.io/cloudbase/garm:v0.2.1@sha256:5ccdc29c31084ed4f30ec85e09a57b5105cf3dcc5fa8c1aba9e68de461e7e635
 python_image=python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
-name="garm-identity-lab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+name="garm-identity-lab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${specimen}"
 work=$(mktemp -d "$RUNNER_TEMP/garm-identity.XXXXXXXX")
 results=$PWD/qualification-results
 mkdir -p "$results"
@@ -23,6 +39,7 @@ trap cleanup EXIT
 
 python3 deploy/runtime/test_garm_native_executable.py
 python3 deploy/runtime/test_garm_lifetime_evidence.py
+python3 deploy/runtime/test_garm_service_specimen.py
 docker pull "$image"
 docker pull "$python_image"
 # Validate the pulled platform metadata once; all execution below uses its ID.
@@ -32,39 +49,39 @@ python3 deploy/runtime/garm-native-executable.py "$work/stock-image.json" "$imag
 garm_executable=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["executable"])' "$results/garm-native-executable.json")
 image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["image_id"])' "$results/garm-native-executable.json")
 python3 deploy/runtime/garm-identity.py prepare "$work/fixture"
-sudo chown -R 65531:65531 "$work/fixture/private" "$work/fixture/state"
+sudo chown -R "$lab_uid:$lab_uid" "$work/fixture/private" "$work/fixture/state"
 sudo chown -R 65532:65532 "$work/fixture/gateway-canary"
 base=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 1 --memory 512m)
 # Garm version exits before config loading. Never construct an Incus provider
 # merely for discovery: bundled providers may require config before GetVersion.
 # Hash only a bounded regular native executable, refusing symlink path components.
-garm_sha=$(docker run --rm --network none "${base[@]}" --user 65531:65531 --entrypoint /bin/sh "$image" -ec '
+garm_sha=$(docker run --rm --network none "${base[@]}" --user "$lab_uid:$lab_uid" --entrypoint /bin/sh "$image" -ec '
  p=$1; while test "$p" != /; do test ! -L "$p"; p=${p%/*}; test -n "$p" || p=/; done
  test -f "$1" && test -x "$1"
  size=$(stat -c %s "$1"); test "$size" -gt 0 && test "$size" -le 134217728
  test "$(stat -c %h "$1")" = 1
  sha256sum "$1"' probe "$garm_executable" | cut -d' ' -f1)
 [[ $garm_sha =~ ^[0-9a-f]{64}$ ]]
-docker run --rm --network none "${base[@]}" --user 65531:65531 --entrypoint "$garm_executable" "$image" --version >/dev/null
+docker run --rm --network none "${base[@]}" --user "$lab_uid:$lab_uid" --entrypoint "$garm_executable" "$image" --version >/dev/null
 # Positive owner-read controls prove the paths/mounts work before denial tests.
 docker run --rm --network none "${base[@]}" --user 65532:65532 --mount "type=bind,src=$work/fixture/gateway-canary,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/canary >/dev/null 2>&1'
-docker run --rm --network none "${base[@]}" --user 65531:65531 --mount "type=bind,src=$work/fixture/private,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/config.toml >/dev/null 2>&1'
+docker run --rm --network none "${base[@]}" --user "$lab_uid:$lab_uid" --mount "type=bind,src=$work/fixture/private,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/config.toml >/dev/null 2>&1'
 # Even an accidentally mounted other-role directory must be unreadable by DAC.
 # No canary bytes are printed, including on an unexpected permission failure.
-docker run --rm --network none "${base[@]}" --user 65531:65531 --mount "type=bind,src=$work/fixture/gateway-canary,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec '! cat /other-role/canary >/dev/null 2>&1'
+docker run --rm --network none "${base[@]}" --user "$lab_uid:$lab_uid" --mount "type=bind,src=$work/fixture/gateway-canary,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec '! cat /other-role/canary >/dev/null 2>&1'
 docker run --rm --network none "${base[@]}" --user 65532:65532 --mount "type=bind,src=$work/fixture/private,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec '! cat /other-role/config.toml >/dev/null 2>&1'
 
 start_garm() {
   # umask is explicit lab launcher setup, not an edit to the upstream image/live stack.
   # No bootstrap admin, repository, pool, credential or provider is configured.
-  docker run -d --name "$name" --network none "${base[@]}" --user 65531:65531 \
-    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65531,gid=65531,mode=0700 \
+  docker run -d --name "$name" --network none "${base[@]}" --user "$lab_uid:$lab_uid" "${workdir_args[@]}" \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=$lab_uid,gid=$lab_uid,mode=0700 \
     --mount "type=bind,src=$work/fixture/private,dst=/run/garm-private,readonly" \
     --mount "type=bind,src=$work/fixture/state,dst=/var/lib/garm" \
     --entrypoint /bin/sh "$image" -ec 'umask 077; exec "$1" -config /run/garm-private/config.toml' probe "$garm_executable" >/dev/null
 }
 probe() {
-  docker run --rm --network "container:$name" "${base[@]}" --user 65531:65531 \
+  docker run --rm --network "container:$name" "${base[@]}" --user "$lab_uid:$lab_uid" \
     --mount "type=bind,src=$PWD/deploy/runtime/garm-identity.py,dst=/probe.py,readonly" \
     --mount "type=bind,src=$work/fixture/private/ca.pem,dst=/lab-ca.pem,readonly" \
     "$python_image" python /probe.py probe
@@ -79,7 +96,8 @@ verify_boundary() {
   docker inspect "$name" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)[0];h=x["HostConfig"]
-assert x["Config"]["User"]=="65531:65531"
+assert x["Config"]["User"]==sys.argv[1]+":"+sys.argv[1]
+if sys.argv[2]=="prospective-service": assert x["Config"]["WorkingDir"]=="/"
 assert h["ReadonlyRootfs"] and not h["Privileged"] and h["CapDrop"]==["ALL"] and not h["CapAdd"]
 assert h["NetworkMode"]=="none" and not h["PortBindings"] and h["PidMode"]==""
 assert h["RestartPolicy"]["Name"]=="no" and h["Memory"]>0 and h["PidsLimit"]==256 and h["NanoCpus"]>0
@@ -89,9 +107,9 @@ assert set(h["Tmpfs"])=={"/tmp"}
 m={p["Destination"]:p for p in x["Mounts"] if p["Type"]=="bind"}
 assert set(m)=={"/run/garm-private","/var/lib/garm"}
 assert not m["/run/garm-private"]["RW"] and m["/var/lib/garm"]["RW"]
-print("PASS exact lab container user/capabilities/NNP/network/mount isolation")'
+print("PASS exact lab container user/capabilities/NNP/network/mount isolation")' "$lab_uid" "$specimen"
   # The shell launcher execs Garm. Check the actual daemon, not merely a helper UID.
-  docker exec --user 65531:65531 "$name" /bin/sh -ec '
+  docker exec --user "$lab_uid:$lab_uid" "$name" /bin/sh -ec '
  lifetime() {
    raw=$(head -c 8193 /proc/1/stat) || return 1
    test "${#raw}" -le 8192 || return 1
@@ -101,6 +119,7 @@ print("PASS exact lab container user/capabilities/NNP/network/mount isolation")'
    test "$start" -gt 0 || return 1; printf "%s" "$start"
  }
  before=$(lifetime)
+ if test "$4" = prospective-service; then test "$(readlink /proc/1/cwd)" = /; fi
  test "$(sha256sum /proc/1/cmdline | cut -d" " -f1)" = "$3"
  test "$(tr "\\000" " " </proc/1/cmdline)" = "$1 -config /run/garm-private/config.toml "
  test "$(readlink /proc/1/exe)" = "$1"
@@ -108,14 +127,14 @@ print("PASS exact lab container user/capabilities/NNP/network/mount isolation")'
  test "$(sha256sum /proc/1/exe | cut -d" " -f1)" = "$2"
  status=$(cat /proc/1/status)
  after=$(lifetime); test "$before" = "$after"
- printf "%s\n" "$status"' probe "$garm_executable" "$garm_sha" "$expected_command_sha" | python3 -c '
+ printf "%s\n" "$status"' probe "$garm_executable" "$garm_sha" "$expected_command_sha" "$specimen" | python3 -c '
 import sys
 fields=dict(line.split(":",1) for line in sys.stdin.read().splitlines() if ":" in line)
-assert fields["Uid"].split()==["65531"]*4 and fields["Gid"].split()==["65531"]*4
+assert fields["Uid"].split()==[sys.argv[1]]*4 and fields["Gid"].split()==[sys.argv[1]]*4
 for key in ("CapInh","CapPrm","CapEff","CapBnd","CapAmb"): assert int(fields[key].strip(),16)==0
 assert fields["NoNewPrivs"].strip()=="1"
-print("PASS actual Garm PID1 is UID/GID65531, all capability sets zero, NNP enabled")'
-  docker exec --user 65531:65531 "$name" /bin/sh -ec '! touch /must-not-be-writable 2>/dev/null; test ! -e /var/run/docker.sock; test ! -e /var/lib/capacity-gateway; test ! -e /run/capacity-private'
+print("PASS actual Garm PID1 has expected UID/GID, all capability sets zero, NNP enabled")' "$lab_uid"
+  docker exec --user "$lab_uid:$lab_uid" "$name" /bin/sh -ec '! touch /must-not-be-writable 2>/dev/null; test ! -e /var/run/docker.sock; test ! -e /var/lib/capacity-gateway; test ! -e /run/capacity-private'
 }
 
 start_garm
@@ -124,12 +143,12 @@ verify_boundary
 # Stop the ONLY disposable writer before inspecting Garm's own database.
 docker stop --time 60 "$name" >/dev/null
 [[ $(docker inspect --format '{{.State.ExitCode}}' "$name") = 0 ]]
-sudo python3 - "$work/fixture/state" "$work/before.json" <<'PY'
+sudo python3 - "$work/fixture/state" "$work/before.json" "$lab_uid" <<'PY'
 import json,pathlib,sqlite3,sys
 path=pathlib.Path(sys.argv[1])/'controller.db'
-assert path.stat().st_uid==65531 and path.stat().st_mode&0o077==0
+assert path.stat().st_uid==int(sys.argv[3]) and path.stat().st_mode&0o077==0
 for child in path.parent.rglob('*'):
- assert not child.is_symlink() and child.stat().st_uid==65531 and child.stat().st_mode&0o077==0
+ assert not child.is_symlink() and child.stat().st_uid==int(sys.argv[3]) and child.stat().st_mode&0o077==0
 connection=sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)
 assert connection.execute('pragma integrity_check').fetchone()[0]=='ok'
 rows=connection.execute('select controller_id from controller_infos').fetchall()
@@ -147,20 +166,22 @@ probe
 verify_boundary
 docker stop --time 60 "$name" >/dev/null
 [[ $(docker inspect --format '{{.State.ExitCode}}' "$name") = 0 ]]
-sudo python3 - "$work/fixture/state" "$work/before.json" <<'PY'
+sudo python3 - "$work/fixture/state" "$work/before.json" "$lab_uid" <<'PY'
 import json,pathlib,sqlite3,sys
 path=pathlib.Path(sys.argv[1])/'controller.db';before=json.loads(pathlib.Path(sys.argv[2]).read_text())
+for child in path.parent.rglob('*'):
+ assert not child.is_symlink() and child.stat().st_uid==int(sys.argv[3]) and child.stat().st_mode&0o077==0
 connection=sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)
 assert connection.execute('select controller_id from controller_infos').fetchone()[0]==before['controller']
 assert path.stat().st_ino==before['inode']
 connection.close()
 print('PASS same Garm database/controller identity survives non-root container recreation')
 PY
-python3 - "$image" "$results/garm-nonroot-lab.json" "$stock_reference" "$garm_executable" "$garm_sha" <<'PY'
+python3 - "$image" "$results/$result_name" "$stock_reference" "$garm_executable" "$garm_sha" "$lab_uid" "$specimen" <<'PY'
 import hashlib,json,pathlib,subprocess,sys
-image,output,reference,executable,sha=sys.argv[1:]
+image,output,reference,executable,sha,uid,specimen=sys.argv[1:]
 info=json.loads(subprocess.check_output(['docker','image','inspect',image]))[0]
-record={'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'image':image,'pinned_stock_reference':reference,'native_executable':executable,'executable_sha256':sha,'runtime_executable_identity_verified':True,'os':info['Os'],'architecture':info['Architecture'],'lab_uid':65531,'all_capability_sets_zero':True,'read_only_root':True,'network':'none','fresh_empty_state_startup_and_recreation_passed':True,'installed_stack_qualified':False,'deployment_authorized':False,'scope':'Stock public Garm image with generated empty state only; no live volumes, credentials, providers, jobs or migration.'}
+record={'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'image':image,'pinned_stock_reference':reference,'native_executable':executable,'executable_sha256':sha,'runtime_executable_identity_verified':True,'os':info['Os'],'architecture':info['Architecture'],'lab_uid':int(uid),'all_capability_sets_zero':True,'read_only_root':True,'network':'none','fresh_empty_state_startup_and_recreation_passed':True,'installed_stack_qualified':False,'deployment_authorized':False,'scope':'Stock public Garm image with generated empty state only; no live volumes, credentials, providers, jobs or migration.'}
 # Hash argv as exact UTF-8 arguments, each terminated by NUL. Do not expose
 # private fixture paths or raw PID/inode/start-time values in public artifacts.
 native=info['Config']['Entrypoint']
@@ -175,7 +196,14 @@ record.update(native_image_entrypoint_sha256=argv_hash(native),
  native_image_entrypoint_is_test_command=(native==observed),
  process_lifetime_consistent_during_checks=True,
  process_lifetime_scope='container-local samples within each startup; not continuity across recreation',
- native_default_config_startup_verified=False)
+ native_default_config_startup_verified=False,
+ specimen=specimen,
+ explicit_working_directory_verified=(specimen=='prospective-service'),
+ private_created_state_modes_verified=True,
+ fixture_launcher_umask_077=True,
+ direct_executable_launch_qualified=False,
+ managed_topology_qualified=False,
+ startup_authority=False)
 pathlib.Path(output).write_text(json.dumps(record,indent=2))
 print('PASS disposable non-root lab only; installed-stack qualification remains BLOCKED')
 PY

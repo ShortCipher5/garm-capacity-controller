@@ -32,7 +32,7 @@ class Lifetime(unittest.TestCase):
         self.assertNotEqual(hashlib.sha256(expected).digest(), hashlib.sha256(ambiguous).digest())
         source = pathlib.Path(__file__).with_name('garm-least-privilege.sh').read_text()
         self.assertIn('sha256sum /proc/1/cmdline', source)
-        self.assertIn('"$expected_command_sha" | python3', source)
+        self.assertIn('"$expected_command_sha" "$specimen" | python3', source)
 
     def test_missing_malformed_zero_and_unbounded_fail(self):
         prefix = '1 (garm) ' + ' '.join(['S'] + ['0'] * 18) + ' '

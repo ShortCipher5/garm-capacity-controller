@@ -142,3 +142,21 @@ sample consistency, not an atomic snapshot, host process identity, or continuity
 across container recreation. No raw process IDs, inodes, start times or private
 fixture paths are added to the public record. Actual Docker qualification remains
 a hosted-job gate; local shell/unit checks alone do not establish these booleans.
+
+### Independent prospective service specimen
+
+The same hosted-only harness has a closed `--prospective-service` variant. The
+unchanged default remains the UID65531 standalone baseline. The second invocation
+uses fresh private state, a distinct container/result name, UID65530 and explicit
+working directory `/`. It reuses the exact pinned stock image, discovered native
+executable, tested private-config argv, zero capabilities and network isolation.
+It checks actual PID1 cwd/UID/executable/lifetime and created-state ownership/modes
+before and after recreation, not merely Docker configuration. Both runs retain
+the explicit fixture shell `umask 077; exec` launcher. Neither qualifies direct
+executable launch without that private-mode setup, three-service topology,
+authentication, deployment or a managed runtime. No provider is configured.
+
+This adds one bounded startup/recreation pair to the existing hosted job, using
+only its existing disposable ownership setup. It does not start anything in local
+unit tests. The separate public result is emitted only after all specimen checks;
+actual success remains dependent on the hosted run, not the static tests.
