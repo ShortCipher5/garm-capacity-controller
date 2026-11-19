@@ -22,6 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 python3 deploy/runtime/test_garm_native_executable.py
+python3 deploy/runtime/test_garm_lifetime_evidence.py
 docker pull "$image"
 docker pull "$python_image"
 # Validate the pulled platform metadata once; all execution below uses its ID.
@@ -68,6 +69,12 @@ probe() {
     --mount "type=bind,src=$work/fixture/private/ca.pem,dst=/lab-ca.pem,readonly" \
     "$python_image" python /probe.py probe
 }
+# Exact NUL-delimited argv digest; space-rendered text alone is ambiguous.
+expected_command_sha=$(python3 - "$garm_executable" <<'PYARGV'
+import hashlib,sys
+print(hashlib.sha256(b''.join(v.encode()+b'\0' for v in [sys.argv[1],'-config','/run/garm-private/config.toml'])).hexdigest())
+PYARGV
+)
 verify_boundary() {
   docker inspect "$name" | python3 -c '
 import json,sys
@@ -85,11 +92,23 @@ assert not m["/run/garm-private"]["RW"] and m["/var/lib/garm"]["RW"]
 print("PASS exact lab container user/capabilities/NNP/network/mount isolation")'
   # The shell launcher execs Garm. Check the actual daemon, not merely a helper UID.
   docker exec --user 65531:65531 "$name" /bin/sh -ec '
+ lifetime() {
+   raw=$(head -c 8193 /proc/1/stat) || return 1
+   test "${#raw}" -le 8192 || return 1
+   case "$raw" in "1 ("*") "*) ;; *) return 1;; esac
+   tail=${raw##*) }; start=$(printf "%s" "$tail" | cut -d " " -f 20)
+   case "$start" in ""|*[!0-9]*) return 1;; esac
+   test "$start" -gt 0 || return 1; printf "%s" "$start"
+ }
+ before=$(lifetime)
+ test "$(sha256sum /proc/1/cmdline | cut -d" " -f1)" = "$3"
  test "$(tr "\\000" " " </proc/1/cmdline)" = "$1 -config /run/garm-private/config.toml "
  test "$(readlink /proc/1/exe)" = "$1"
  test "$(stat -Lc %d:%i /proc/1/exe)" = "$(stat -c %d:%i "$1")"
  test "$(sha256sum /proc/1/exe | cut -d" " -f1)" = "$2"
- cat /proc/1/status' probe "$garm_executable" "$garm_sha" | python3 -c '
+ status=$(cat /proc/1/status)
+ after=$(lifetime); test "$before" = "$after"
+ printf "%s\n" "$status"' probe "$garm_executable" "$garm_sha" "$expected_command_sha" | python3 -c '
 import sys
 fields=dict(line.split(":",1) for line in sys.stdin.read().splitlines() if ":" in line)
 assert fields["Uid"].split()==["65531"]*4 and fields["Gid"].split()==["65531"]*4
@@ -138,10 +157,25 @@ connection.close()
 print('PASS same Garm database/controller identity survives non-root container recreation')
 PY
 python3 - "$image" "$results/garm-nonroot-lab.json" "$stock_reference" "$garm_executable" "$garm_sha" <<'PY'
-import json,pathlib,subprocess,sys
+import hashlib,json,pathlib,subprocess,sys
 image,output,reference,executable,sha=sys.argv[1:]
 info=json.loads(subprocess.check_output(['docker','image','inspect',image]))[0]
 record={'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'image':image,'pinned_stock_reference':reference,'native_executable':executable,'executable_sha256':sha,'runtime_executable_identity_verified':True,'os':info['Os'],'architecture':info['Architecture'],'lab_uid':65531,'all_capability_sets_zero':True,'read_only_root':True,'network':'none','fresh_empty_state_startup_and_recreation_passed':True,'installed_stack_qualified':False,'deployment_authorized':False,'scope':'Stock public Garm image with generated empty state only; no live volumes, credentials, providers, jobs or migration.'}
+# Hash argv as exact UTF-8 arguments, each terminated by NUL. Do not expose
+# private fixture paths or raw PID/inode/start-time values in public artifacts.
+native=info['Config']['Entrypoint']
+assert len(native)==3 and native[0]==executable and native[1]=='-config'
+observed=[executable,'-config','/run/garm-private/config.toml']
+def argv_hash(argv):
+ return hashlib.sha256(b''.join(v.encode('utf-8')+b'\0' for v in argv)).hexdigest()
+record.update(native_image_entrypoint_sha256=argv_hash(native),
+ observed_test_command_sha256=argv_hash(observed),
+ command_hash_encoding='utf8-argv-nul-terminated',
+ observed_test_command_verified=True,
+ native_image_entrypoint_is_test_command=(native==observed),
+ process_lifetime_consistent_during_checks=True,
+ process_lifetime_scope='container-local samples within each startup; not continuity across recreation',
+ native_default_config_startup_verified=False)
 pathlib.Path(output).write_text(json.dumps(record,indent=2))
 print('PASS disposable non-root lab only; installed-stack qualification remains BLOCKED')
 PY

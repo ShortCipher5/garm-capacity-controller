@@ -131,3 +131,14 @@ isolation, empty-state and recreation assertions remain in place.
 The public discovery record is disposable-lab evidence only. No production
 Specification, inspector, authentication, provider or admission code consumes
 it. It does not authorize deployment, adoption, allocation or activation.
+
+The public nonroot record distinguishes the native image entrypoint from the
+actual disposable test command using SHA256 of UTF-8 argv with a NUL after every
+argument. The lab checks the latter command against `/proc/1/cmdline`; it does
+not claim to exercise the native default configuration location. Bounded reads
+of `/proc/1/stat` bracket the executable and process-status checks, requiring a
+stable nonzero start time within each container startup. This is container-local
+sample consistency, not an atomic snapshot, host process identity, or continuity
+across container recreation. No raw process IDs, inodes, start times or private
+fixture paths are added to the public record. Actual Docker qualification remains
+a hosted-job gate; local shell/unit checks alone do not establish these booleans.
