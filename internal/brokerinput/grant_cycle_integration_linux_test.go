@@ -278,7 +278,7 @@ func publicCycleTransport(t *testing.T, managed bool) {
 		}
 		poolRow["max_runners"] = 8
 		result, e := ReconcilePolicyCaps(ctx, store, client)
-		if e != nil || result.Confirmed != 1 || reductions.Load() != 1 {
+		if e != nil || result.Confirmed != 1 || reductions.Load() != 1 || len(result.PoolResults) != 1 || result.PoolResults[0].Outcome != "confirmed_reduction" {
 			t.Fatal(result, e)
 		}
 		client.Close()
@@ -288,13 +288,13 @@ func publicCycleTransport(t *testing.T, managed bool) {
 		}
 		defer client.Close()
 		result, e = ReconcilePolicyCaps(ctx, store, client)
-		if e != nil || result.Confirmed != 0 || reductions.Load() != 1 {
+		if e != nil || result.Confirmed != 0 || reductions.Load() != 1 || len(result.PoolResults) != 1 || result.PoolResults[0].Outcome != "no_downward_change" {
 			t.Fatal("restart reissued", result, e)
 		}
 		poolRow["max_runners"] = 8
 		reductionFailure.Store(true)
 		result, e = ReconcilePolicyCaps(ctx, store, client)
-		if e == nil || result.LastRequestID == "" || reductions.Load() != 2 {
+		if e == nil || result.LastRequestID == "" || reductions.Load() != 2 || len(result.PoolResults) != 1 || result.PoolResults[0].Outcome != "unconfirmed" {
 			t.Fatal("unknown not retained", result, e)
 		}
 		if _, e = ReconcilePolicyCaps(ctx, store, client); e == nil || reductions.Load() != 2 {

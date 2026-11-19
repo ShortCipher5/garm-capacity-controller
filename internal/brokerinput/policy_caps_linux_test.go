@@ -32,3 +32,25 @@ func TestPolicyCapsNeverZeroIncreaseIdleOrForeignSource(t *testing.T) {
 		}
 	}
 }
+
+func TestCapSkipReasonIsDiagnosticOnly(t *testing.T) {
+	for _, tc := range []struct {
+		cap  int64
+		want string
+	}{
+		{0, "zero_cap_unsupported"}, {-1, "unsupported_cap"}, {1000001, "unsupported_cap"},
+		{1, "below_idle_minimum"}, {2, "not_examined"}, {4, "no_downward_change"}, {5, "no_downward_change"},
+	} {
+		if got := capSkipReason(tc.cap, 4, 2); got != tc.want {
+			t.Fatalf("cap %d: %s, want %s", tc.cap, got, tc.want)
+		}
+	}
+}
+func TestCapSnapshotDoesNotExposeMutableResults(t *testing.T) {
+	s := &CapService{status: CapStatus{PoolResults: []CapPoolResult{{PoolID: pool, Outcome: "unconfirmed"}}}}
+	first := s.Snapshot()
+	first.PoolResults[0].Outcome = "confirmed_reduction"
+	if s.Snapshot().PoolResults[0].Outcome != "unconfirmed" {
+		t.Fatal("snapshot mutated service results")
+	}
+}
