@@ -7,6 +7,8 @@ package hostmetrics
 import (
 	"context"
 	"errors"
+	"math"
+	"math/bits"
 	"sync"
 	"time"
 	"unicode"
@@ -195,6 +197,10 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 		c.backOff(host, at, "host totals witness unavailable")
 		return
 	}
+	if usage.CPUUsedMillis < 0 {
+		c.backOff(host, at, "invalid cumulative CPU observation")
+		return
+	}
 	delta := usage.CPUUsedMillis - state.baselineMillis
 	elapsed := at.Sub(state.baselineAt)
 	state.baselineMillis = usage.CPUUsedMillis
@@ -211,7 +217,11 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	case elapsed < minSweepElapsed:
 		return
 	}
-	rate := delta * int64(1000) / int64(elapsed/time.Millisecond)
+	rate, ok := cpuRate(delta, elapsed)
+	if !ok {
+		c.backOff(host, at, "CPU observation rate out of range")
+		return
+	}
 	if err := c.recorder.RecordUsageSample(sweep, host, at, rate, usage.RAMUsedMiB, usage.DiskUsedMiB, GuestStateSource); err != nil {
 		c.backOff(host, at, "usage sample record unavailable")
 	}
@@ -222,4 +232,23 @@ func (c *Collector) backOff(host string, at time.Time, reason string) {
 	c.states[host].skipUntil = at.Add(c.backoff)
 	c.mu.Unlock()
 	c.log(reason + " for " + host + "; backing off")
+}
+
+// cpuRate converts cumulative CPU milliseconds into millicores without allowing
+// multiplication overflow to turn a high observation into apparently low usage.
+// An unrepresentable rate is unavailable, never clamped or reported as zero.
+func cpuRate(delta int64, elapsed time.Duration) (int64, bool) {
+	if delta < 0 || elapsed < minSweepElapsed {
+		return 0, false
+	}
+	divisor := uint64(elapsed / time.Millisecond)
+	hi, lo := bits.Mul64(uint64(delta), 1000)
+	if hi >= divisor {
+		return 0, false
+	}
+	rate, _ := bits.Div64(hi, lo, divisor)
+	if rate > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(rate), true
 }

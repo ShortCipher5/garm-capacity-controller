@@ -158,3 +158,29 @@ The existing `Stock`/grant-cycle path ignores these new advisory-only edges.
 Only `ReadPlan`/advisory projections opt in. No setting, grant, charge, reservation
 or physical runner is mutated, and a proposed idle/job correlation is not proof
 that GitHub assigned that job. Disabled pools still have zero new/warm eligibility.
+
+### Offline stock maximum proposals
+
+`brokerinput.SampleStockScaling` can compare the canonical, weighted stock
+broker's assigned demand with observed GARM maximums. The existing cap
+reconciler still only reduces a maximum to saved policy; this separate pure
+comparison has no runtime caller and does not change a setting.
+
+`ProposeStockMaximums` requires two non-overlapping, still-fresh observations
+separated by at least 15 seconds, with the same source, policy, pool settings
+and proposal direction. Each suggestion is at most one slot. Growth follows
+the existing weighted assignment order, bounded by the enrolled pool and
+repository limits and the scoped aggregate runner budget. A pending decrease
+never funds a simultaneous increase; existing live maxima and durable charges
+still consume the comparison's headroom. Missing scope or a zero maximum on
+an enabled pool suppresses proposals.
+
+A decrease preserves observed minimum idle, configured warm-idle policy and all
+charged slots, plus one spare where permitted. Unmatched queue demand prevents
+decreases. This is hysteresis for advice, not a durable controller cooldown,
+physical admission boundary, assurance of global inventory completeness, or
+evidence that a runner can be retired.
+
+Only this offline scaling comparison matches existing supply oldest-job-first
+(equal timestamps use job ID), while retaining augmenting maximum-cardinality
+matching. Existing stock and grant-cycle behavior is unchanged.

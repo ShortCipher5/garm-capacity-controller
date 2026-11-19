@@ -43,16 +43,22 @@ type jobQueue struct {
 // including creating, unknown and outstanding grants. This does NOT issue grants.
 // Pool.Waiting/OldestWaiting are derived here and must be empty in the input.
 func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error) {
-	return buildForJobs(s, opt, jobs, nil)
+	return buildForJobs(s, opt, jobs, nil, false)
 }
 
 // BuildForJobsWithIdleOnly adds advisory existing-idle edges for stopped pools.
 // These edges never enter grant/inflight matching or new/warm placement.
 func BuildForJobsWithIdleOnly(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
-	return buildForJobs(s, opt, jobs, idleOnly)
+	return buildForJobs(s, opt, jobs, idleOnly, false)
 }
 
-func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
+// BuildForStockScaling compares demand by age for offline maximum proposals
+// only. It preserves charge and supply semantics, and never binds jobs.
+func BuildForStockScaling(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
+	return buildForJobs(s, opt, jobs, idleOnly, true)
+}
+
+func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string, chronological bool) (JobPlan, error) {
 	if len(idleOnly) > 1000 {
 		return JobPlan{}, ErrSnapshot
 	}
@@ -142,16 +148,31 @@ func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[str
 			q.byPool[p] = append(q.byPool[p], i)
 		}
 	}
-	match, e := MatchDemand(matchJobs, idle)
+	if chronological {
+		rank := make(map[string]int, len(q.rows))
+		for i, row := range q.rows {
+			rank[row.ID] = i
+		}
+		sort.Slice(matchJobs, func(i, j int) bool { return rank[matchJobs[i].ID] < rank[matchJobs[j].ID] })
+	}
+	match, e := matchDemand(matchJobs, idle, chronological)
 	if e != nil {
 		return JobPlan{}, e
 	}
 	coveredIdle, coveredGrant, deferred := map[string]string{}, map[string]string{}, map[string]string{}
 	matchedIDs := make([]string, 0, len(match.Covered))
-	for id := range match.Covered {
-		matchedIDs = append(matchedIDs, id)
+	if chronological {
+		for _, job := range matchJobs {
+			if _, matched := match.Covered[job.ID]; matched {
+				matchedIDs = append(matchedIDs, job.ID)
+			}
+		}
+	} else {
+		for id := range match.Covered {
+			matchedIDs = append(matchedIDs, id)
+		}
+		sort.Strings(matchedIDs)
 	}
-	sort.Strings(matchedIDs)
 	for _, id := range matchedIDs {
 		pool := match.Covered[id]
 		q.done[id] = true

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writerRecoveryReport, writerRecoveryState } from "./garm-recovery.js";
+import { writerRecoveryEvidence, writerRecoveryEvidenceGuidance, writerRecoveryReport, writerRecoveryState } from "./garm-recovery.js";
 
 test("writer recovery prioritizes unknown writes over refresh conflicts", () => {
  assert.equal(writerRecoveryState(), null);
@@ -25,4 +25,24 @@ test("report refuses malformed field types and control characters", () => {
  const report = writerRecoveryReport({ uncertain: true, snapshot: { pending: { request_id: "bad\nvalue", kind: {}, target: "x".repeat(257) } } });
  assert.equal(report.pending.request_id, ""); assert.equal(report.pending.kind, ""); assert.equal(report.pending.target, "");
  assert.equal(writerRecoveryReport({}), null);
+});
+
+test("classifies durable, historical and browser-only uncertainty without late promotion",()=>{
+ const known={write_blocked:true,pending:{state:"unknown"}};
+ const recorded={write_blocked:true,pending:{state:"pending"}};
+ assert.equal(writerRecoveryEvidence({snapshot:known,uncertain:true}),"durable-unknown");
+ assert.equal(writerRecoveryEvidence({snapshot:recorded}),"durable-pending");
+ assert.equal(writerRecoveryEvidence({snapshot:{write_blocked:true,pending:{}}}),"durable-unclassified");
+ assert.equal(writerRecoveryEvidence({snapshot:{write_blocked:true,pending:{state:"confirmed"}}}),"durable-unclassified");
+ assert.equal(writerRecoveryEvidence({snapshot:known,unavailable:true}),"historical-unknown");
+ assert.equal(writerRecoveryEvidence({snapshot:recorded,unavailable:true}),"historical-pending");
+ assert.equal(writerRecoveryEvidence({snapshot:known,unavailable:true,uncertain:true}),"browser-uncertain");
+ assert.equal(writerRecoveryEvidence({snapshot:{write_blocked:false,pending:{state:"unknown"}},uncertain:true}),"browser-uncertain");
+ assert.equal(writerRecoveryEvidence({snapshot:{write_blocked:false,pending:{state:"pending"}}}),null);
+ assert.match(writerRecoveryEvidenceGuidance("durable-pending"),/does not prove a request was sent/);
+ assert.match(writerRecoveryEvidenceGuidance("historical-pending"),/not current evidence/);
+ const report=writerRecoveryReport({snapshot:{write_blocked:true,pending:{state:"secret"}}});
+ assert.equal(report.evidence,"durable-unclassified");
+ assert.equal(report.pending.state,"");
+ assert.equal(report.write_blocked,true);
 });

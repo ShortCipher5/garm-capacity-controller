@@ -22,6 +22,13 @@ type DemandMatch struct {
 // are not idle supply. Callers must not infer a complete/fresh observation from
 // this pure function or use its result as admission authority.
 func MatchDemand(jobs []DemandJob, idle map[string]int) (DemandMatch, error) {
+	return matchDemand(jobs, idle, false)
+}
+
+// inPriorityOrder is reserved for the offline stock maximum proposal. It lets
+// the same augmenting matcher prefer older jobs without changing its public
+// legacy ordering or giving up maximum cardinality.
+func matchDemand(jobs []DemandJob, idle map[string]int, inPriorityOrder bool) (DemandMatch, error) {
 	if len(jobs) > 1000 || len(idle) > 1000 {
 		return DemandMatch{}, ErrSnapshot
 	}
@@ -66,7 +73,9 @@ func MatchDemand(jobs []DemandJob, idle map[string]int) (DemandMatch, error) {
 	}
 	// Stable ordering avoids dependence on maps/caller order. Eligibility is more
 	// important than preference; augmenting paths repair greedy flexible matches.
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	if !inPriorityOrder {
+		sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	}
 	owners := make([]int, len(slotPool))
 	for i := range owners {
 		owners[i] = -1

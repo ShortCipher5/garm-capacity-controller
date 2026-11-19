@@ -24,6 +24,10 @@ func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 }
 
 func stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, observation garmapi.DemandObservation, opt capacitybroker.Options, includeDisabledIdle bool) (capacitybroker.JobPlan, error) {
+	return stockPlan(capacity, policy, observation, opt, includeDisabledIdle, false)
+}
+
+func stockPlan(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, observation garmapi.DemandObservation, opt capacitybroker.Options, includeDisabledIdle, chronological bool) (capacitybroker.JobPlan, error) {
 	fail := func() (capacitybroker.JobPlan, error) { return capacitybroker.JobPlan{}, capacitybroker.ErrSnapshot }
 	if capacity.ObservedAt.IsZero() || capacity.ObservedAt.After(opt.Now) || capacity.Revision == "" || len(capacity.Charges) > 100000 || admission.ValidateBrokerPolicy(policy) != nil || observation.Digest == "" || observation.StartedAt.IsZero() || observation.FinishedAt.Before(observation.StartedAt) || observation.FinishedAt.After(opt.Now) || len(observation.Pools) > 1000 || len(observation.Jobs) > 1000 || len(observation.Supply) > 1000 {
 		return fail()
@@ -176,6 +180,9 @@ func stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 	}
 	hash := sha256.Sum256(raw)
 	capacity.Revision = hex.EncodeToString(hash[:])
+	if chronological {
+		return capacitybroker.BuildForStockScaling(capacity, opt, jobs, idleOnly)
+	}
 	if includeDisabledIdle {
 		return capacitybroker.BuildForJobsWithIdleOnly(capacity, opt, jobs, idleOnly)
 	}

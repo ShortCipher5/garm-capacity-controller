@@ -2,8 +2,9 @@ package adminview
 
 import (
 	"encoding/json"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"net/http"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 )
 
 func (h *Handler) SetNativeRetirement(s *nativecontroller.RetirementService) { h.nativeRetirement = s }
@@ -19,7 +20,7 @@ func (h *Handler) serveNativeRetirementStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 	state := "unconfigured"
-	status := h.nativeRetirement.Latest()
+	status, freshness := h.nativeRetirement.LatestWithFreshness()
 	if h.nativeRetirement != nil {
 		state = "awaiting_first_cycle"
 		if !status.At.IsZero() {
@@ -31,8 +32,9 @@ func (h *Handler) serveNativeRetirementStatus(w http.ResponseWriter, r *http.Req
 	}
 	_ = json.NewEncoder(w).Encode(struct {
 		State             string                            `json:"state"`
+		Freshness         string                            `json:"freshness"`
 		Scope             string                            `json:"scope"`
 		Status            nativecontroller.RetirementStatus `json:"status"`
 		ReleaseAuthorized bool                              `json:"release_authorized"`
-	}{state, "canonical_retirement_operations_only", status, false})
+	}{state, freshness, "canonical_retirement_operations_only", status, false})
 }

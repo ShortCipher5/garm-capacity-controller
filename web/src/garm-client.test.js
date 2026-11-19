@@ -94,3 +94,11 @@ test("pending resolution capability is optional for older servers and strictly b
 test('restricted managed mode rejects malformed capability or unsupported resolution',()=>{const v={...structuredClone(settings),maximum_reduction_only:true};assert.equal(validateGarm(v),v);assert.throws(()=>validateGarm({...v,maximum_reduction_only:'true'}));assert.throws(()=>validateGarm({...v,pending:{request_id:'x',kind:'pool',target:'x',started_at:'2026-01-01T00:00:00Z',resolution_available:true}}));const withRepo=structuredClone(v);withRepo.settings.repositories=[{id:'repo',owner:'o',name:'r',pool_balancing_type:'pack',fingerprint:'f'.repeat(64)}];assert.throws(()=>validateGarm(withRepo));});
 
 test("managed history availability is explicit and typed",()=>{assert.equal(validateGarm({...settings,managed_history_available:false}).managed_history_available,false);assert.throws(()=>validateGarm({...settings,managed_history_available:"true"}));});
+
+test("pending evidence is an optional closed enum and does not alter write blocking",()=>{
+ const v=structuredClone(settings);v.write_blocked=true;
+ v.pending={request_id:"11111111-1111-4111-8111-111111111111",kind:"pool",target:"pool",started_at:"2026-01-01T00:00:00Z"};
+ assert.equal(validateGarm(v),v);
+ for(const state of ["pending","unknown"]) {v.pending.state=state;assert.equal(validateGarm(v),v);assert.equal(v.write_blocked,true);}
+ for(const state of ["confirmed","rejected","",null,1,{}]) {v.pending.state=state;assert.throws(()=>validateGarm(v),/unsupported/);}
+});

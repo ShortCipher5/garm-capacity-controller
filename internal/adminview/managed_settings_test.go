@@ -39,6 +39,12 @@ func TestManagedSettingsAdapterRejectsEveryNonMaximumField(t *testing.T) {
 func TestOptionalHistoryDeadlinePreservesRequiredSettings(t *testing.T) {
 	poolID := "11111111-1111-4111-8111-111111111111"
 	controller := "22222222-2222-4222-8222-222222222222"
+	pending := garmmanagement.Intent{
+		RequestID: "33333333-3333-4333-8333-333333333333", Kind: "pool", Target: poolID,
+		State: "pending", CreatedAt: "2026-11-18T10:00:00Z",
+	}
+	unknown := pending
+	unknown.State = "unknown"
 	var settings atomic.Bool
 	cancelled := make(chan struct{})
 	server, trust, _ := testsupport.NativeTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,10 +52,10 @@ func TestOptionalHistoryDeadlinePreservesRequiredSettings(t *testing.T) {
 		w.Header().Set(managedsource.ControllerHeader, controller)
 		switch r.URL.Path {
 		case "/v1/managed/status":
-			json.NewEncoder(w).Encode(garmmanagement.Status{Pending: []garmmanagement.Intent{}})
+			json.NewEncoder(w).Encode(garmmanagement.Status{WriteBlocked: true, Pending: []garmmanagement.Intent{pending}})
 		case "/v1/managed/settings":
 			settings.Store(true)
-			json.NewEncoder(w).Encode(garmmanagement.Snapshot{ManagementSnapshot: garmapi.ManagementSnapshot{WritesEnabled: true, Pools: []garmapi.ManagedPool{{ID: poolID, ProviderName: "capacity", Fingerprint: strings.Repeat("b", 64), MaxRunners: 3, MinIdleRunners: 1}}, Repositories: []garmapi.ManagedRepository{}}, Status: garmmanagement.Status{Pending: []garmmanagement.Intent{}}})
+			json.NewEncoder(w).Encode(garmmanagement.Snapshot{ManagementSnapshot: garmapi.ManagementSnapshot{WritesEnabled: true, Pools: []garmapi.ManagedPool{{ID: poolID, ProviderName: "capacity", Fingerprint: strings.Repeat("b", 64), MaxRunners: 3, MinIdleRunners: 1}}, Repositories: []garmapi.ManagedRepository{}}, Status: garmmanagement.Status{WriteBlocked: true, Pending: []garmmanagement.Intent{unknown}}})
 		case "/v1/managed/history":
 			if !settings.Load() {
 				t.Error("optional read preceded required settings")
@@ -74,7 +80,7 @@ func TestOptionalHistoryDeadlinePreservesRequiredSettings(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	out, e := v.Snapshot(ctx)
-	if e != nil || !out.SettingsAvailable || out.ManagedHistoryAvailable || !out.HistoryTruncated || len(out.Settings.Pools) != 1 {
+	if e != nil || !out.SettingsAvailable || out.ManagedHistoryAvailable || !out.HistoryTruncated || len(out.Settings.Pools) != 1 || !out.WriteBlocked || out.Pending == nil || out.Pending.State != "unknown" || out.Pending.ResolutionAvailable {
 		t.Fatal(out, e)
 	}
 	if ctx.Err() != nil {
