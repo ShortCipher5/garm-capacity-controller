@@ -33,8 +33,10 @@ type scalingPool struct {
 // StockMaximumProposal is advice about one positive stock setting, not a
 // promise that stock GARM will start or stop a runner.
 type StockMaximumProposal struct {
-	PoolID, RepositoryID string
-	Observed, Suggested  int64
+	PoolID       string `json:"pool_id"`
+	RepositoryID string `json:"repository_id"`
+	Observed     int64  `json:"observed"`
+	Suggested    int64  `json:"suggested"`
 }
 
 // SampleStockScaling reuses the ledger- and ownership-checked weighted broker

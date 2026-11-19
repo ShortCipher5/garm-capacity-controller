@@ -37,7 +37,7 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
     <button type="button" disabled={busy||!readPolicy} onClick={load}>Reload policy (discard edits)</button>
     {message&&<p role="status">{message}</p>}
     {view&&<BrokerStatus status={view.status} stale={comparisonStale} />}
-    <AllocatorPlan readPlan={readPlan} policyRevision={view?.policy.revision} policyStale={comparisonStale}/ >
+    <AllocatorPlan readPlan={readPlan} policyRevision={view?.policy.revision} ledgerSequence={view?.status?.sequence} policyStale={comparisonStale} />
     {view&&<form onSubmit={save}><p>Revision {view.policy.revision}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
       {view.policy.repositories.map((r,i)=><div className="card" key={i}>
         <label>GARM repository UUID<input required value={r.id} onChange={e=>repo(i,'id',e.target.value)}/></label>

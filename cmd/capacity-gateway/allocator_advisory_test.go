@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestAdvisoryStaticConfigurationRefusesUnsupportedMode(t *testing.T) {
 	if source, err := allocatorAdvisorySource(configuration{}); err != nil || source != nil {
@@ -15,5 +18,18 @@ func TestAdvisoryStaticConfigurationRefusesUnsupportedMode(t *testing.T) {
 	c := configuration{AllocatorAdvisory: &allocatorAdvisoryConfiguration{IntervalSeconds: 30, RepositoryIDs: []string{"repo"}}}
 	if _, err := allocatorAdvisorySource(c); err == nil {
 		t.Fatal("unsupported transport accepted")
+	}
+}
+
+func TestStockMaximumPreviewConfigIsExplicitAndRequiresAdvisory(t *testing.T) {
+	var c allocatorAdvisoryConfiguration
+	if err := json.Unmarshal([]byte(`{"repository_ids":["repo"],"interval_seconds":30}`), &c); err != nil || c.StockMaximumPreview {
+		t.Fatal(c, err)
+	}
+	if err := json.Unmarshal([]byte(`{"stock_maximum_preview":true}`), &c); err != nil || !c.StockMaximumPreview {
+		t.Fatal(c, err)
+	}
+	if source, err := allocatorAdvisorySource(configuration{AllocatorAdvisory: &c}); err == nil || source != nil {
+		t.Fatal("preview bypassed managed read-only advisory configuration")
 	}
 }

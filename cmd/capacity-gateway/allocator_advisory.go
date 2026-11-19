@@ -12,8 +12,9 @@ import (
 // This configuration is independent of allocator_loop: no lifecycle transition
 // or grant writer is reachable through this reader.
 type allocatorAdvisoryConfiguration struct {
-	RepositoryIDs   []string `json:"repository_ids"`
-	IntervalSeconds int      `json:"interval_seconds"`
+	RepositoryIDs       []string `json:"repository_ids"`
+	StockMaximumPreview bool     `json:"stock_maximum_preview,omitempty"`
+	IntervalSeconds     int      `json:"interval_seconds"`
 }
 
 func configuredAllocatorAdvisory(ctx context.Context, c configuration, store *admission.SQLiteStore) (*brokerinput.AdvisoryLoop, func(), error) {
@@ -25,7 +26,11 @@ func configuredAllocatorAdvisory(ctx context.Context, c configuration, store *ad
 	if err != nil {
 		return nil, noop, err
 	}
-	reader, err := brokerinput.NewAdvisoryReader(store, source)
+	newReader := brokerinput.NewAdvisoryReader
+	if c.AllocatorAdvisory.StockMaximumPreview {
+		newReader = brokerinput.NewAdvisoryReaderWithStockMaximumPreview
+	}
+	reader, err := newReader(store, source)
 	if err != nil {
 		source.Close()
 		return nil, noop, err
@@ -43,7 +48,13 @@ func allocatorAdvisorySource(c configuration) (*garmapi.DemandClient, error) {
 	if c.AllocatorAdvisory == nil {
 		return nil, nil
 	}
-	if c.AllocatorAdvisory.IntervalSeconds < 15 || c.AllocatorAdvisory.IntervalSeconds > 60 || c.Admin == nil || len(c.AllocatorAdvisory.RepositoryIDs) == 0 || !c.Garm.ManagedProxy || c.Garm.TokenFile != "" {
+	// At 60 seconds the previous one-minute sample always expires before
+	// the next poll. Leave the usual advisory interval unchanged when off.
+	intervalLimit := 60
+	if c.AllocatorAdvisory.StockMaximumPreview {
+		intervalLimit = 45
+	}
+	if c.AllocatorAdvisory.IntervalSeconds < 15 || c.AllocatorAdvisory.IntervalSeconds > intervalLimit || c.Admin == nil || len(c.AllocatorAdvisory.RepositoryIDs) == 0 || !c.Garm.ManagedProxy || c.Garm.TokenFile != "" {
 		return nil, brokerinput.ErrRuntimeAuthority
 	}
 	trust, err := securefiles.LoadTLS(c.Garm.TLS)

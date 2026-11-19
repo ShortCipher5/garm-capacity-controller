@@ -184,3 +184,18 @@ evidence that a runner can be retired.
 Only this offline scaling comparison matches existing supply oldest-job-first
 (equal timestamps use job ID), while retaining augmenting maximum-cardinality
 matching. Existing stock and grant-cycle behavior is unchanged.
+
+The production branch exposes this comparison only if
+`allocator_advisory.stock_maximum_preview` is explicitly enabled under the
+existing authenticated, managed read-only advisory, with a 15–45 second
+interval so two one-minute samples can overlap in freshness. Its optional
+`stock_maximum_preview` field on the allocator plan reports only state, expiry,
+and proposed pool/repository/current/suggested maximums. No second collection
+or timer is started. A failed comparison clears its prior evidence, while the
+ordinary advisory plan remains available if its own checks pass.
+
+High, stale, missing or truncated pressure evidence vetoes the entire
+optional maximum preview (including decreases); it cannot create a suggestion.
+Partial low samples do not establish physical headroom. Both participating
+samples must still be fresh, and a cached suggestion disappears when either
+sample's evidence expires.

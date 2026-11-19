@@ -14,19 +14,20 @@ import (
 // Stock reads are non-atomic; exact source, ownership and ledger revision are
 // checked, and the capture interval is explicit rather than called a live total.
 type ReadPlan struct {
-	Source         string           `json:"source"`
-	SourceIdentity string           `json:"source_identity"`
-	DemandDigest   string           `json:"demand_digest"`
-	LedgerSequence int64            `json:"ledger_sequence"`
-	PolicyRevision int64            `json:"policy_revision"`
-	StartedAt      time.Time        `json:"started_at"`
-	FinishedAt     time.Time        `json:"finished_at"`
-	CapturedAt     time.Time        `json:"captured_at"`
-	ExpiresAt      time.Time        `json:"expires_at"`
-	Atomic         bool             `json:"atomic"`
-	Pools          []ReadPlanPool   `json:"pools"`
-	RemainingJobs  int              `json:"remaining_jobs"`
-	Pressure       []PressureStatus `json:"pressure,omitempty"`
+	Source              string               `json:"source"`
+	SourceIdentity      string               `json:"source_identity"`
+	DemandDigest        string               `json:"demand_digest"`
+	LedgerSequence      int64                `json:"ledger_sequence"`
+	PolicyRevision      int64                `json:"policy_revision"`
+	StartedAt           time.Time            `json:"started_at"`
+	FinishedAt          time.Time            `json:"finished_at"`
+	CapturedAt          time.Time            `json:"captured_at"`
+	ExpiresAt           time.Time            `json:"expires_at"`
+	Atomic              bool                 `json:"atomic"`
+	Pools               []ReadPlanPool       `json:"pools"`
+	RemainingJobs       int                  `json:"remaining_jobs"`
+	Pressure            []PressureStatus     `json:"pressure,omitempty"`
+	StockMaximumPreview *StockMaximumPreview `json:"stock_maximum_preview,omitempty"`
 }
 type ReadPlanPool struct {
 	Pool                 string                `json:"pool"`
@@ -43,11 +44,13 @@ type ReadPlanPool struct {
 	DeferredByInflight   int64                 `json:"deferred_by_inflight"`
 }
 type planReader struct {
-	mu       sync.Mutex
-	store    *admission.SQLiteStore
-	source   *garmapi.DemandClient
-	opt      capacitybroker.Options
-	pressure bool
+	mu                  sync.Mutex
+	store               *admission.SQLiteStore
+	source              *garmapi.DemandClient
+	opt                 capacitybroker.Options
+	pressure            bool
+	stockMaximumPreview bool
+	scalingHistory      scalingPreviewHistory
 }
 
 func (s *Service) ReadPlan(ctx context.Context) (ReadPlan, error) {
@@ -56,11 +59,16 @@ func (s *Service) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	}
 	return s.reader.read(ctx)
 }
-func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
+func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	if p.source == nil || !p.mu.TryLock() {
 		return ReadPlan{}, capacitybroker.ErrSnapshot
 	}
-	defer p.mu.Unlock()
+	defer func() {
+		if resultErr != nil {
+			p.scalingHistory.reset()
+		}
+		p.mu.Unlock()
+	}()
 	observed, err := p.source.Observe(ctx)
 	if err != nil {
 		return ReadPlan{}, unavailable("observation_unavailable", err)
@@ -113,6 +121,11 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	if err != nil {
 		return ReadPlan{}, unavailable("planning_unavailable", err)
 	}
+	var scale scalingPreviewSample
+	var scaleErr error
+	if p.stockMaximumPreview {
+		scale, scaleErr = sampleStockMaximumPreview(state, snapshot, observed, identity, opt, pressure)
+	}
 	// Reject a ledger revision changed during the read/plan window. This is not
 	// a cross-system transaction and does not stop future changes after response.
 	current, err := p.store.ReadBrokerGrantState(ctx)
@@ -136,6 +149,9 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	}
 	if !result.ExpiresAt.After(now) {
 		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
+	}
+	if p.stockMaximumPreview {
+		result.StockMaximumPreview = p.scalingHistory.accept(scale, scaleErr, now, result.ExpiresAt)
 	}
 	return result, nil
 }

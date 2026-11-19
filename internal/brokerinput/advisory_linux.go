@@ -15,10 +15,19 @@ import (
 type AdvisoryReader struct{ reader *planReader }
 
 func NewAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClient) (*AdvisoryReader, error) {
+	return newAdvisoryReader(store, source, false)
+}
+
+// NewAdvisoryReaderWithStockMaximumPreview reuses the existing read-only
+// observation and pressure veto. It adds no writer or independent poller.
+func NewAdvisoryReaderWithStockMaximumPreview(store *admission.SQLiteStore, source *garmapi.DemandClient) (*AdvisoryReader, error) {
+	return newAdvisoryReader(store, source, true)
+}
+func newAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClient, preview bool) (*AdvisoryReader, error) {
 	if store == nil || source == nil {
 		return nil, capacitybroker.ErrSnapshot
 	}
-	return &AdvisoryReader{reader: &planReader{store: store, source: source, opt: capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 1000}, pressure: true}}, nil
+	return &AdvisoryReader{reader: &planReader{store: store, source: source, opt: capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 1000}, pressure: true, stockMaximumPreview: preview}}, nil
 }
 func (r *AdvisoryReader) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	if r == nil || r.reader == nil || ctx == nil || ctx.Err() != nil {
@@ -183,12 +192,22 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 		}
 		return ReadPlan{}, unavailable("awaiting_observation", capacitybroker.ErrSnapshot)
 	}
-	if !s.plan.ExpiresAt.After(time.Now()) {
+	now := time.Now()
+	if !s.plan.ExpiresAt.After(now) {
 		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
-	return cloneReadPlan(*s.plan), nil
+	result := cloneReadPlan(*s.plan)
+	if result.StockMaximumPreview != nil && !result.StockMaximumPreview.ExpiresAt.After(now) {
+		result.StockMaximumPreview = nil
+	}
+	return result, nil
 }
 func cloneReadPlan(v ReadPlan) ReadPlan {
+	if v.StockMaximumPreview != nil {
+		copy := *v.StockMaximumPreview
+		copy.Proposals = append([]StockMaximumProposal{}, copy.Proposals...)
+		v.StockMaximumPreview = &copy
+	}
 	v.Pressure = append([]PressureStatus(nil), v.Pressure...)
 	v.Pools = append([]ReadPlanPool(nil), v.Pools...)
 	for i := range v.Pools {
