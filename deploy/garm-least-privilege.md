@@ -131,3 +131,32 @@ isolation, empty-state and recreation assertions remain in place.
 The public discovery record is disposable-lab evidence only. No production
 Specification, inspector, authentication, provider or admission code consumes
 it. It does not authorize deployment, adoption, allocation or activation.
+
+The public nonroot record distinguishes the native image entrypoint from the
+actual disposable test command using SHA256 of UTF-8 argv with a NUL after every
+argument. The lab checks the latter command against `/proc/1/cmdline`; it does
+not claim to exercise the native default configuration location. Bounded reads
+of `/proc/1/stat` bracket the executable and process-status checks, requiring a
+stable nonzero start time within each container startup. This is container-local
+sample consistency, not an atomic snapshot, host process identity, or continuity
+across container recreation. No raw process IDs, inodes, start times or private
+fixture paths are added to the public record. Actual Docker qualification remains
+a hosted-job gate; local shell/unit checks alone do not establish these booleans.
+
+### Independent prospective service specimen
+
+The same hosted-only harness has a closed `--prospective-service` variant. The
+unchanged default remains the UID65531 standalone baseline. The second invocation
+uses fresh private state, a distinct container/result name, UID65530 and explicit
+working directory `/`. It reuses the exact pinned stock image, discovered native
+executable, tested private-config argv, zero capabilities and network isolation.
+It checks actual PID1 cwd/UID/executable/lifetime and created-state ownership/modes
+before and after recreation, not merely Docker configuration. Both runs retain
+the explicit fixture shell `umask 077; exec` launcher. Neither qualifies direct
+executable launch without that private-mode setup, three-service topology,
+authentication, deployment or a managed runtime. No provider is configured.
+
+This adds one bounded startup/recreation pair to the existing hosted job, using
+only its existing disposable ownership setup. It does not start anything in local
+unit tests. The separate public result is emitted only after all specimen checks;
+actual success remains dependent on the hosted run, not the static tests.
