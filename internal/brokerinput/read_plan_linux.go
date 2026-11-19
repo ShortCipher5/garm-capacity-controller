@@ -99,7 +99,8 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	if err != nil {
 		return ReadPlan{}, unavailable("enrollment_or_evidence_unavailable", err)
 	}
-	plan, err := Stock(snapshot, state.Policy, observed, opt)
+	// Read-only advice alone includes disabled-pool existing idle edges.
+	plan, err := stock(snapshot, state.Policy, observed, opt, true)
 	baseline := plan
 	var pressure []PressureStatus
 	if err == nil && p.pressure {

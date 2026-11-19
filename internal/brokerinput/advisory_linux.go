@@ -98,7 +98,7 @@ func advisoryStock(snapshot capacitybroker.Snapshot, policy admission.BrokerPoli
 		hosts[id] = h
 	}
 	snapshot.Hosts = hosts
-	return Stock(snapshot, policy, observed, opt)
+	return stock(snapshot, policy, observed, opt, true)
 }
 
 // AdvisoryLoop refreshes a cache of read-only projections. It contains no
