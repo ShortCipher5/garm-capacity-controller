@@ -105,10 +105,11 @@ func advisoryStock(snapshot capacitybroker.Snapshot, policy admission.BrokerPoli
 // allocation callback or writer. Failed/expired observations are unavailable,
 // never replaced by a fabricated empty plan.
 type AdvisoryLoop struct {
-	mu     sync.Mutex
-	plan   *ReadPlan
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu      sync.Mutex
+	plan    *ReadPlan
+	failure error
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 func StartAdvisoryLoop(ctx context.Context, reader *AdvisoryReader, interval time.Duration) (*AdvisoryLoop, error) {
@@ -122,7 +123,12 @@ func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan
 	s := &AdvisoryLoop{cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
-		defer func() { s.mu.Lock(); s.plan = nil; s.mu.Unlock() }()
+		defer func() {
+			s.mu.Lock()
+			s.plan = nil
+			s.failure = unavailable("preview_stopped", capacitybroker.ErrSnapshot)
+			s.mu.Unlock()
+		}()
 		delay := interval
 		for {
 			if ctx.Err() != nil {
@@ -133,9 +139,11 @@ func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan
 			stop()
 			s.mu.Lock()
 			s.plan = nil
+			s.failure = unavailable(PlanFailureReason(err), capacitybroker.ErrSnapshot)
 			if err == nil && ctx.Err() == nil && result.ExpiresAt.After(time.Now()) {
 				copy := cloneReadPlan(result)
 				s.plan = &copy
+				s.failure = nil
 			}
 			s.mu.Unlock()
 			if err != nil {
@@ -169,8 +177,14 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.plan == nil || !s.plan.ExpiresAt.After(time.Now()) {
-		return ReadPlan{}, capacitybroker.ErrSnapshot
+	if s.plan == nil {
+		if s.failure != nil {
+			return ReadPlan{}, s.failure
+		}
+		return ReadPlan{}, unavailable("awaiting_observation", capacitybroker.ErrSnapshot)
+	}
+	if !s.plan.ExpiresAt.After(time.Now()) {
+		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
 	return cloneReadPlan(*s.plan), nil
 }

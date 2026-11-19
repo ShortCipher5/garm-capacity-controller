@@ -26,24 +26,28 @@ func (h *Handler) serveAllocatorPlan(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	fail := func(reason string) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"state": "unavailable", "reason": reason})
+	}
 	source := h.allocatorPlan
 	if source == nil {
 		source, _ = h.allocatorStatus.(allocatorPlanSource)
 	}
 	if source == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		fail("source_not_configured")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 	plan, err := source.ReadPlan(ctx)
 	if err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		fail(brokerinput.PlanFailureReason(err))
 		return
 	}
 	raw, err := json.Marshal(plan)
 	if err != nil || len(raw) > 2<<20 {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		fail("preview_unavailable")
 		return
 	}
 	_, _ = w.Write(raw)

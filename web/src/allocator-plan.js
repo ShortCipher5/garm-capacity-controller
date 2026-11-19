@@ -21,3 +21,29 @@ export function validateAllocatorPlan(v,now=Date.now()){
  return v;
 }
 export function allocatorPlanStale(v,now=Date.now()){return !v||Date.parse(v.expires_at)<=now;}
+
+const readinessMessages = Object.freeze({
+ source_not_configured: 'The advisory preview source is not configured.',
+ preview_unavailable: 'The advisory preview is unavailable.',
+ observation_unavailable: 'A fresh stock runner observation is unavailable.',
+ ledger_unavailable: 'The required ledger snapshot is unavailable.',
+ pool_mapping_missing: 'A required enrolled pool mapping is missing.',
+ host_binding_unavailable: 'A required host binding is unavailable or has changed.',
+ enrollment_or_evidence_unavailable: 'Required enrollment or supporting evidence is unavailable.',
+ planning_unavailable: 'The advisory calculation could not be completed.',
+ snapshot_changed_or_expired: 'The observation changed or expired during the preview.',
+ awaiting_observation: 'The advisory preview is waiting for its first observation.',
+ preview_stopped: 'The advisory preview process has stopped.',
+});
+export class AllocatorReadinessError extends Error {
+ constructor(body) {
+  super('Allocation plan unavailable.');
+  this.reason = body && !Array.isArray(body) && body.state === 'unavailable' &&
+    typeof body.reason === 'string' && Object.hasOwn(readinessMessages, body.reason) ? body.reason : null;
+ }
+}
+export function allocatorFailureMessage(error) {
+ const generic = 'Current observation and plan are unknown. The source, enrolled mapping or ledger may be unavailable or changed. No writes were attempted.';
+ if (!(error instanceof AllocatorReadinessError) || typeof error.reason !== 'string' || !Object.hasOwn(readinessMessages, error.reason)) return generic;
+ return `Current observation and plan are unknown. ${readinessMessages[error.reason]} No writes were attempted. This is advisory readiness, not permission to start runners or release capacity.`;
+}

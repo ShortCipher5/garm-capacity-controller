@@ -1,5 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {allocatorPlanStale} from './allocator-plan.js';
+import {allocatorPlanStale,allocatorFailureMessage} from './allocator-plan.js';
 export function AllocatorPlan({readPlan,policyRevision,policyStale}){
  const [view,setView]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[now,setNow]=useState(Date.now());
  const active=useRef(null),alive=useRef(true);
@@ -8,7 +8,7 @@ export function AllocatorPlan({readPlan,policyRevision,policyStale}){
   if(!readPlan||active.current)return;
   const control=new AbortController();active.current=control;setBusy(true);setView(null);setError('');
   try{const v=await readPlan({signal:control.signal});if(alive.current&&!control.signal.aborted){setView(v);setNow(Date.now());}}
-  catch{if(alive.current)setError('Current observation and plan are unknown. The source, enrolled mapping or ledger may be unavailable or changed. No writes were attempted.');}
+  catch(error){if(alive.current)setError(allocatorFailureMessage(error));}
   finally{active.current=null;if(alive.current)setBusy(false);}
  }
  const stale=policyStale||allocatorPlanStale(view,now)||(view&&policyRevision!==view.policy_revision);

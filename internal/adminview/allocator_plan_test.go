@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -42,7 +43,7 @@ func TestAllocatorPlanReadOnlyAuthAndFailure(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	p.fail = true
-	if w := request(t, h, "GET", path, token); w.Code != 503 || w.Body.Len() != 0 {
+	if w := request(t, h, "GET", path, token); w.Code != 503 || !strings.Contains(w.Body.String(), `"reason":"preview_unavailable"`) || strings.Contains(w.Body.String(), "private failure") {
 		t.Fatal("failure leaked data", w.Code, w.Body.String())
 	}
 	after, _ := store.ReadSnapshot(context.Background())
