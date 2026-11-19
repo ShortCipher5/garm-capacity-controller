@@ -1,3 +1,4 @@
+import {validateOverhead} from "./overhead.js";
 import {validateDemandObserverStatus} from "./demand-observer-status.js";
 import { mixHost, validateMixView } from "./runner-mix-client.js";
 import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
@@ -88,6 +89,7 @@ export function validateOverview(value) {
       "The server returned an unsupported overview. Disconnected.",
     );
   }
+  if(value.non_pool_overhead!==undefined)validateOverhead(value.non_pool_overhead,value.global.allocated);
   return value;
 }
 export class ReadSession {

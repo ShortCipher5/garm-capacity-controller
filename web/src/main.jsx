@@ -1,3 +1,4 @@
+import {Overhead} from "./overhead.jsx";
 import {DemandObserverStatus} from "./demand-observer-status.jsx";
 import {MixPrefillProvider} from "./mix-prefill-context.jsx";
 import { PoolMappings } from "./broker-profiles.jsx";
@@ -146,6 +147,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         <div className="metrics">
           <Usage allocation={data.global} metric />
         </div>
+        <Overhead value={data.non_pool_overhead} />
         <section id="hosts">
           <div className="section-heading">
             <h2>
