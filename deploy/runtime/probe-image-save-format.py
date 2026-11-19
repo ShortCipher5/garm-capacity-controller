@@ -14,6 +14,15 @@ spec.loader.exec_module(pack)
 structure_spec = importlib.util.spec_from_file_location('structure', Path(__file__).with_name('image-save-structure.py'))
 structure = importlib.util.module_from_spec(structure_spec)
 structure_spec.loader.exec_module(structure)
+metadata_spec = importlib.util.spec_from_file_location('metadata', Path(__file__).with_name('docker-exporter-metadata.py'))
+metadata = importlib.util.module_from_spec(metadata_spec)
+metadata_spec.loader.exec_module(metadata)
+ancillary_spec = importlib.util.spec_from_file_location('ancillary', Path(__file__).with_name('image-save-ancillary.py'))
+ancillary = importlib.util.module_from_spec(ancillary_spec)
+ancillary_spec.loader.exec_module(ancillary)
+modern_spec = importlib.util.spec_from_file_location('modern', Path(__file__).with_name('verify-single-role-archive.py'))
+modern = importlib.util.module_from_spec(modern_spec)
+modern_spec.loader.exec_module(modern)
 
 
 def layout(path):
@@ -35,7 +44,7 @@ def layout(path):
         return kind, files, directories
 
 
-def probe(raw, parent, expected_commit, run_id, run_attempt, save=pack.save_images, sample_roles=False, role_save=pack.save_images):
+def probe(raw, parent, expected_commit, run_id, run_attempt, save=pack.save_images, sample_roles=False, role_save=pack.save_images, exporter=None, proof_binary=None):
     record, ids = pack.evidence(raw)
     pack.require((record['source_commit'], record['run_id'], record['run_attempt']) ==
                  (expected_commit, run_id, run_attempt))
@@ -91,6 +100,12 @@ def probe(raw, parent, expected_commit, run_id, run_attempt, save=pack.save_imag
                            'files': sample_files, 'directories': sample_dirs}
                 if sample_kind == 'docker-and-oci':
                     summary['structure'] = structure.describe(archive, {role: identity})
+                    summary['ancillary'] = ancillary.describe(archive, {role: identity})
+                    if proof_binary is not None:
+                        try:
+                            summary['modern_closure'] = modern.verify_modern_single_role_archive(archive, identity, exporter, proof_binary)
+                        except (ValueError, KeyError, TypeError, OSError, tarfile.TarError, subprocess.SubprocessError):
+                            summary['modern_closure'] = {'status':'unavailable', 'archive_accepted':False, 'deployment_authorized':False}
             samples[role] = summary
         result['per_role_structure'] = samples
     # No result is returned/printed unless private temporary archive removal succeeds.
@@ -105,8 +120,10 @@ def main():
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True, timeout=5).strip()
     with Path('qualification-results/garm-three-service-preboot.json').open('rb') as stream:
         raw = stream.read(16385)
+    exporter = metadata.collect()
     result = probe(raw, os.environ['RUNNER_TEMP'], commit,
-                   os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'], sample_roles=True)
+                   os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'], sample_roles=True, exporter=exporter, proof_binary=os.environ['GARM_ANCILLARY_PROOF'])
+    result['exporter_metadata'] = exporter
     # Closed metadata only; never write into uploaded qualification-results.
     print(json.dumps(result, sort_keys=True, separators=(',', ':')))
 

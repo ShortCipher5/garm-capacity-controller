@@ -23,6 +23,7 @@ import (
 )
 
 type adminConfiguration struct {
+	managedInventoryObservation func(time.Time) adminview.ManagedInventoryObservation
 	NativeAssets                *nativeAssetsConfiguration `json:"native_assets,omitempty"`
 	EnableNativeAssets          bool                       `json:"-"`
 	demandObserverRuntime       *demandobserver.Service
@@ -64,6 +65,15 @@ type adminConfiguration struct {
 	Assets                             string               `json:"assets"`
 }
 
+// forRuntime isolates run-scoped services and callbacks from caller-owned settings.
+func (config *adminConfiguration) forRuntime() *adminConfiguration {
+	if config == nil {
+		return nil
+	}
+	local := *config
+	return &local
+}
+
 func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, provision bool) (*http.Server, func(), error) {
 	noop := func() {}
 	if config == nil {
@@ -103,6 +113,7 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	if config.allocatorAdvisory != nil {
 		handler.SetAllocatorPlanSource(config.allocatorAdvisory)
 	}
+	handler.SetManagedInventoryObservation(config.managedInventoryObservation)
 	handler.SetDemandObserver(config.demandObserverRuntime)
 	handler.SetJobObserver(config.jobObserverRuntime)
 	handler.SetNativeRetirement(config.nativeRetirementRuntime)

@@ -40,6 +40,7 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	ManagedInventoryObservation   bool                                     `json:"managed_inventory_observation,omitempty"`
 	DemandObserverConfigFile      string                                   `json:"demand_observer_config_file,omitempty"`
 	NativeRetirement              *nativeRetirementConfiguration           `json:"native_retirement,omitempty"`
 	EnableNativeRetirement        bool                                     `json:"-"`
@@ -102,6 +103,9 @@ func serveOnListener(ctx context.Context, config configuration, provision, monit
 
 func serveOnListeners(ctx context.Context, config configuration, provision, monitoring bool, listener, adminListener net.Listener) error {
 	defer listener.Close()
+	if !managedInventoryObservationAllowed(config, provision) {
+		return gatewayrpc.ErrConfiguration
+	}
 	address, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !address.IP.IsLoopback() {
 		return gatewayrpc.ErrConfiguration
@@ -109,6 +113,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if provision && (config.BootstrapMode != "gateway-owned-default-cloudinit/v1" || len(config.PreparationPools) != len(config.Pools) || len(config.SourceFingerprints) == 0) {
 		return gatewayrpc.ErrConfiguration
 	}
+	config.Admin = config.Admin.forRuntime()
 	store, err := admission.OpenRuntimeSQLite(config.Database, config.IdentityFile)
 	if err != nil {
 		return err
@@ -247,6 +252,13 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if config.Admin != nil {
 		config.Admin.onboardingRuntime = onboardingManager
 	}
+	runctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var managedInventory *managedInventoryObserver
+	if config.ManagedInventoryObservation {
+		managedInventory = &managedInventoryObserver{ctx: runctx, read: garm.Instances}
+		config.Admin.managedInventoryObservation = managedInventory.snapshot
+	}
 	adminServer, closeAdmin, err := newAdminServer(config.Admin, store, provision)
 	if err != nil {
 		return err
@@ -268,8 +280,6 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		adminListener.Close()
 		return gatewayrpc.ErrConfiguration
 	}
-	runctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	interval := time.Second
 	// Existing persisted policy wins over initial policy, including freshness.
 	snapshot, err := store.Snapshot(ctx)
@@ -289,6 +299,12 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		if f.Reconcile(check, garm) != nil {
 			log.Print("inventory unavailable; admission remains blocked")
 		}
+	}
+	if managedInventory != nil {
+		done := make(chan struct{})
+		go func() { defer close(done); managedInventory.run() }()
+		// Join the canceled read before the shared inventory client is closed.
+		defer func() { cancel(); <-done }()
 	}
 	reconcile()
 	if err := runctx.Err(); err != nil {

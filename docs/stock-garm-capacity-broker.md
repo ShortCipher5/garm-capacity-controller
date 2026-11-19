@@ -138,3 +138,23 @@ deduplicates actual assignments. Duplicate host entries are rejected by snapshot
 validation before either pool or job planning. It produces advisory
 assignments only: no GARM settings writes, reservations, dispatch authority,
 runtime activation or release are added.
+
+### Disabled pool existing-idle advice
+
+Pinned stock v0.2.1 (`154638445c3949c1958b01812f69d9a1e4d82684`)
+returns without creation in `addRunnerToPool` and without idle maintenance in
+`ensureIdleRunnersForOnePool`/`scaleDownOnePool` when `Enabled` is false.
+`UpdatePoolByID` updates pool settings; it does not drain existing registered
+runners. This is distinct from stopping this controller's admission.
+
+The read-only advisory path therefore retains separate label-matched edges for
+observed running idle runners in disabled repository pools. Such edges cannot
+match unused grants, creating/inflight, busy, unknown or missing runners. They
+are globally disjoint from creation candidates and never enter new/warm placement.
+They use the same bounded single-use matching and canonical charged occupancy;
+pressure suppression cannot erase already-existing idle visibility.
+
+The existing `Stock`/grant-cycle path ignores these new advisory-only edges.
+Only `ReadPlan`/advisory projections opt in. No setting, grant, charge, reservation
+or physical runner is mutated, and a proposed idle/job correlation is not proof
+that GitHub assigned that job. Disabled pools still have zero new/warm eligibility.

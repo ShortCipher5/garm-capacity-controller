@@ -32,6 +32,9 @@ type QueuedJob struct {
 	// Each job appears once even when several pools match. Do not count each
 	// candidate as an independent job or infer an authoritative assignment.
 	CandidatePoolIDs []string `json:"candidate_pool_ids"`
+	// Disabled pools with matching labels and observed running idle supply.
+	// Advisory-only: never grant, inflight or new-runner eligibility.
+	IdleOnlyPoolIDs []string `json:"idle_only_pool_ids,omitempty"`
 }
 type RunnerSupply struct {
 	PoolID   string `json:"pool_id"`
@@ -289,7 +292,7 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 			if comparisons > 1000000 || ctx.Err() != nil {
 				return DemandObservation{}, ErrManagement
 			}
-			if !p.Enabled || p.OwnerID != jobs[i].RepositoryID {
+			if p.OwnerID != jobs[i].RepositoryID {
 				continue
 			}
 			tags := poolTags[p.ID]
@@ -301,7 +304,11 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 				}
 			}
 			if match {
-				jobs[i].CandidatePoolIDs = append(jobs[i].CandidatePoolIDs, p.ID)
+				if p.Enabled {
+					jobs[i].CandidatePoolIDs = append(jobs[i].CandidatePoolIDs, p.ID)
+				} else if supplies[p.ID].Idle > 0 {
+					jobs[i].IdleOnlyPoolIDs = append(jobs[i].IdleOnlyPoolIDs, p.ID)
+				}
 			}
 		}
 	}

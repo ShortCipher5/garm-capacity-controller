@@ -20,6 +20,10 @@ import (
 // charge sizes with current profile sizes or drops unmanaged pool charges.
 // Stock idle observations may cover queue demand, not authorize physical release.
 func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, observation garmapi.DemandObservation, opt capacitybroker.Options) (capacitybroker.JobPlan, error) {
+	return stock(capacity, policy, observation, opt, false)
+}
+
+func stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, observation garmapi.DemandObservation, opt capacitybroker.Options, includeDisabledIdle bool) (capacitybroker.JobPlan, error) {
 	fail := func() (capacitybroker.JobPlan, error) { return capacitybroker.JobPlan{}, capacitybroker.ErrSnapshot }
 	if capacity.ObservedAt.IsZero() || capacity.ObservedAt.After(opt.Now) || capacity.Revision == "" || len(capacity.Charges) > 100000 || admission.ValidateBrokerPolicy(policy) != nil || observation.Digest == "" || observation.StartedAt.IsZero() || observation.FinishedAt.Before(observation.StartedAt) || observation.FinishedAt.After(opt.Now) || len(observation.Pools) > 1000 || len(observation.Jobs) > 1000 || len(observation.Supply) > 1000 {
 		return fail()
@@ -67,6 +71,7 @@ func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 		cr[id] = r
 	}
 	enrolled := map[string]string{}
+	stopped := map[string]string{}
 	for _, r := range policy.Repositories {
 		if _, ok := cr[r.ID]; !ok {
 			return fail()
@@ -101,12 +106,15 @@ func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 				p.MaxRunners = desired.MaxRunners
 				p.WarmIdle = desired.WarmIdle
 				enrolled[desired.ID] = r.ID
+			} else {
+				stopped[desired.ID] = r.ID
 			}
 			p.AvailableIdle = current.Idle
 			cp[desired.ID] = p
 		}
 	}
 	jobs := make([]capacitybroker.QueuedDemand, 0, len(observation.Jobs))
+	idleOnly := map[string][]string{}
 	for _, j := range observation.Jobs {
 		if j.WorkflowJobID <= 0 {
 			return fail()
@@ -129,7 +137,29 @@ func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 				candidates = append(candidates, id)
 			}
 		}
-		jobs = append(jobs, capacitybroker.QueuedDemand{ID: j.RepositoryID + ":" + strconv.FormatInt(j.WorkflowJobID, 10), Candidates: candidates, CreatedAt: j.CreatedAt})
+		id := j.RepositoryID + ":" + strconv.FormatInt(j.WorkflowJobID, 10)
+		if includeDisabledIdle {
+			if len(j.IdleOnlyPoolIDs) > 1000 {
+				return fail()
+			}
+			for _, pool := range j.IdleOnlyPoolIDs {
+				if seen[pool] {
+					return fail()
+				}
+				seen[pool] = true
+				observed, exists := pools[pool]
+				if !exists || observed.Enabled || observed.RepositoryID != j.RepositoryID {
+					return fail()
+				}
+				if repository, ok := stopped[pool]; ok {
+					if repository != j.RepositoryID {
+						return fail()
+					}
+					idleOnly[id] = append(idleOnly[id], pool)
+				}
+			}
+		}
+		jobs = append(jobs, capacitybroker.QueuedDemand{ID: id, Candidates: candidates, CreatedAt: j.CreatedAt})
 	}
 	capacity.Pools = cp
 	capacity.Repositories = cr
@@ -146,5 +176,8 @@ func Stock(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, obse
 	}
 	hash := sha256.Sum256(raw)
 	capacity.Revision = hex.EncodeToString(hash[:])
+	if includeDisabledIdle {
+		return capacitybroker.BuildForJobsWithIdleOnly(capacity, opt, jobs, idleOnly)
+	}
 	return capacitybroker.BuildForJobs(capacity, opt, jobs)
 }

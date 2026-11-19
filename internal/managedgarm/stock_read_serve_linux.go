@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -182,63 +183,124 @@ func (s *stockReadSession) ControllerID() string {
 	return s.life.auth.record.ControllerID
 }
 
-// Private to the explicit qualification caller. No arbitrary source, listener, TLS callback,
-// handler or scope can be supplied. Opening is exclusively the existing owned
-// fixed-9445 lifecycle; any failure terminates it, with no restart or repair.
-func serveStockReadOnly(ctx context.Context) error {
+// Private ownership retained for the actual qualification caller and future
+// same-owner probe. No listener, source, TLS, path or callback is supplied.
+type stockReadService struct {
+	mu              sync.Mutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	session         *stockReadSession
+	life            *stockReadLifecycle
+	profile         stockReadProfile
+	auth            stockReadAuthBinding
+	material        stockReadServeMaterial
+	server          *http.Server
+	listener        net.Listener
+	started, closed bool
+	done            chan struct{}
+}
+
+func newStockReadService(ctx context.Context) (*stockReadService, error) {
 	if ctx == nil || ctx.Err() != nil {
-		return ErrBoundary
+		return nil, ErrBoundary
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	session, e := newStockReadSession(ctx)
 	if e != nil {
-		return ErrBoundary
+		cancel()
+		return nil, ErrBoundary
 	}
-	defer session.Close()
+	fail := func() (*stockReadService, error) { cancel(); session.Close(); return nil, ErrBoundary }
 	life := session.life
 	life.mu.Lock()
 	if life.closed || life.binding == nil || life.held == nil {
 		life.mu.Unlock()
-		return ErrBoundary
+		return fail()
 	}
 	profile, auth, listener := life.binding.observed.profile, life.auth, life.held.listener
 	life.mu.Unlock()
 	material, e := loadStockReadServeMaterial(ctx, profile, auth)
 	if e != nil {
-		return ErrBoundary
+		return fail()
 	}
 	handler, e := managedread.New(session, material.review.ClientSHA256, []string{"capacity"}, nil, nil)
-	if e != nil {
-		return ErrBoundary
-	}
-	if life.recheck(ctx) != nil {
-		return ErrBoundary
+	if e != nil || life.recheck(ctx) != nil {
+		return fail()
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 16384, BaseContext: func(net.Listener) context.Context { return ctx }}
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(tls.NewListener(listener, material.tls)) }()
-	defer func() { cancel(); server.Close(); <-done }()
+	return &stockReadService{ctx: ctx, cancel: cancel, session: session, life: life, profile: profile, auth: auth, material: material, server: server, listener: tls.NewListener(listener, material.tls), done: make(chan struct{})}, nil
+}
+func (s *stockReadService) Run() error {
+	if s == nil {
+		return ErrBoundary
+	}
+	s.mu.Lock()
+	if s.closed || s.started || s.ctx == nil || s.ctx.Err() != nil || s.session == nil || s.life == nil || s.server == nil || s.listener == nil || s.done == nil {
+		s.mu.Unlock()
+		return ErrBoundary
+	}
+	s.started = true
+	s.mu.Unlock()
+	served := make(chan error, 1)
+	go func() { served <- s.server.Serve(s.listener) }()
+	defer func() {
+		s.cancel()
+		s.server.Close()
+		<-served
+		s.session.Close()
+		s.mu.Lock()
+		s.closed = true
+		close(s.done)
+		s.mu.Unlock()
+	}()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			return ErrBoundary
-		case <-life.done:
+		case <-s.life.done:
 			return ErrBoundary
-		case err := <-done:
-			// Preserve a single joined result for the deferred cleanup.
-			done <- err
+		case e := <-served:
+			served <- e
 			return ErrBoundary
 		case <-tick.C:
-			check, stop := context.WithTimeout(ctx, 5*time.Second)
-			e := life.recheck(check)
-			latest, loadErr := loadStockReadServeMaterial(check, profile, auth)
+			check, stop := context.WithTimeout(s.ctx, 5*time.Second)
+			e := s.life.recheck(check)
+			latest, loadErr := loadStockReadServeMaterial(check, s.profile, s.auth)
 			stop()
-			if e != nil || loadErr != nil || latest.commitment != material.commitment {
+			if e != nil || loadErr != nil || latest.commitment != s.material.commitment {
 				return ErrBoundary
 			}
 		}
 	}
+}
+func (s *stockReadService) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.closed = true
+	started, done := s.started, s.done
+	s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.server != nil {
+		s.server.Close()
+	}
+	if s.session != nil {
+		s.session.Close()
+	}
+	if started && done != nil {
+		<-done
+	}
+}
+func serveStockReadOnly(ctx context.Context) error {
+	owner, e := newStockReadService(ctx)
+	if e != nil {
+		return ErrBoundary
+	}
+	defer owner.Close()
+	return owner.Run()
 }

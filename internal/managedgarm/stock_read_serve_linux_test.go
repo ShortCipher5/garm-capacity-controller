@@ -153,3 +153,52 @@ func TestStockReadServeTrustOwnsClearedInput(t *testing.T) {
 		t.Fatal("loader cleanup corrupted serving leaf", err)
 	}
 }
+
+func TestStockReadOwnedServiceNoRuntimeOnInvalidLifecycle(t *testing.T) {
+	if _, e := newStockReadService(nil); e == nil {
+		t.Fatal("nil context")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, e := newStockReadService(ctx); e == nil {
+		t.Fatal("canceled constructor")
+	}
+	var nilOwner *stockReadService
+	nilOwner.Close()
+	if nilOwner.Run() == nil {
+		t.Fatal("nil run")
+	}
+	owner := &stockReadService{}
+	owner.Close()
+	owner.Close()
+	if owner.Run() == nil {
+		t.Fatal("closed incomplete run")
+	}
+}
+
+func TestStockReadOwnedCloseJoinsStartedLifetime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	owner := &stockReadService{ctx: ctx, cancel: cancel, started: true, done: make(chan struct{})}
+	returned := make(chan struct{})
+	go func() { owner.Close(); close(returned) }()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("close did not cancel")
+	}
+	select {
+	case <-returned:
+		t.Fatal("close returned before run joined")
+	default:
+	}
+	close(owner.done)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("close did not join")
+	}
+	owner.Close()
+	if owner.Run() == nil {
+		t.Fatal("closed owner reused")
+	}
+}
