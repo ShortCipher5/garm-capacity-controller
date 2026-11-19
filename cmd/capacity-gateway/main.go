@@ -47,6 +47,7 @@ type configuration struct {
 	JobObserver                   *jobObserverConfiguration                `json:"job_observer,omitempty"`
 	EnableJobObserver             bool                                     `json:"-"`
 	NativeStock                   map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
+	AllocatorAdvisory             *allocatorAdvisoryConfiguration          `json:"allocator_advisory,omitempty"`
 	AllocatorLoop                 *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	StockProviderScopes           []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
 	EnableStockProvider           bool                                     `json:"-"`
@@ -131,6 +132,14 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	defer closeObserver()
 	if config.Admin != nil {
 		config.Admin.jobObserverRuntime = observer
+	}
+	advisory, closeAdvisory, err := configuredAllocatorAdvisory(ctx, config, store)
+	if err != nil {
+		return err
+	}
+	defer closeAdvisory()
+	if config.Admin != nil {
+		config.Admin.allocatorAdvisory = advisory
 	}
 	allocator, closeAllocator, err := startConfiguredAllocatorLoop(ctx, config, store)
 	if err != nil {

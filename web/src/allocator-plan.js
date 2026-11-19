@@ -6,9 +6,15 @@ export function validateAllocatorPlan(v,now=Date.now()){
  if(!v||v.source!=='scoped-stock-and-coherent-ledger'||v.atomic!==false||!hash(v.source_identity)||!hash(v.demand_digest)||!Number.isSafeInteger(v.ledger_sequence)||v.ledger_sequence<0||!Number.isSafeInteger(v.policy_revision)||v.policy_revision<0||!count(v.remaining_jobs)||!Array.isArray(v.pools)||v.pools.length>1000)fail();
  const [start,end,captured,expires]=['started_at','finished_at','captured_at','expires_at'].map(k=>Date.parse(v[k]));
  if(![start,end,captured,expires].every(Number.isFinite)||start>end||end>captured||captured>now+1000||expires<=now||expires-start>60000||captured>=expires)fail();
+ if(v.pressure!==undefined){
+  if(!Array.isArray(v.pressure)||v.pressure.length>64)fail();
+  const hosts=new Set();
+  for(const p of v.pressure){if(!p||typeof p.host!=='string'||!p.host||p.host.length>256||hosts.has(p.host)||!['missing_or_stale_not_headroom','window_overflow_suppressed','partial_sample_not_headroom','high_partial_pressure_suppressed'].includes(p.state))fail();hosts.add(p.host);}
+ }
  const seen=new Set();
  for(const p of v.pools){
   if(!id(p.pool)||!id(p.repository)||seen.has(p.pool)||!['cap','warm_idle','additional','additional_warm','covered_by_idle','covered_by_grant','deferred_by_inflight'].every(k=>count(p[k]))||p.warm_idle>p.cap||p.additional_warm>p.additional||!p.charged||!['cpu_millis','ram_mib','disk_mib','runners'].every(k=>Number.isSafeInteger(p.charged[k])&&p.charged[k]>=0))fail();
+  if(p.suppressed_by_pressure!==undefined&&!count(p.suppressed_by_pressure))fail();
   seen.add(p.pool);
   if(p.supply!==null&&(!p.supply||p.supply.pool_id!==p.pool||!['idle','busy','creating','other'].every(k=>count(p.supply[k]))))fail();
  }

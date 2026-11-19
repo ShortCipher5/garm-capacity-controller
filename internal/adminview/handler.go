@@ -112,6 +112,7 @@ type Handler struct {
 	overheadRefresh             *overheadrefresh.Service
 	brokerProfiles              map[string]BrokerProfileRecipe
 	allocatorStatus             AllocatorStatusSource
+	allocatorPlan               allocatorPlanSource
 	rotation                    *firstboot.ManagedRotationService
 	rotationHash                [32]byte
 	firstboot                   *firstboot.Service

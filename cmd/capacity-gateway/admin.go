@@ -40,6 +40,7 @@ type adminConfiguration struct {
 	BrokerProfileRecipesFile    string                           `json:"broker_profile_recipes_file,omitempty"`
 
 	allocatorRuntime                   *brokerinput.Service
+	allocatorAdvisory                  *brokerinput.AdvisoryLoop
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
 	Firstboot                          *firstbootConfiguration    `json:"isolated_inventory_firstboot,omitempty"`
@@ -99,6 +100,9 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		return nil, noop, err
 	}
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
+	if config.allocatorAdvisory != nil {
+		handler.SetAllocatorPlanSource(config.allocatorAdvisory)
+	}
 	handler.SetDemandObserver(config.demandObserverRuntime)
 	handler.SetJobObserver(config.jobObserverRuntime)
 	handler.SetNativeRetirement(config.nativeRetirementRuntime)

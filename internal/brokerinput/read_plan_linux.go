@@ -14,44 +14,49 @@ import (
 // Stock reads are non-atomic; exact source, ownership and ledger revision are
 // checked, and the capture interval is explicit rather than called a live total.
 type ReadPlan struct {
-	Source         string         `json:"source"`
-	SourceIdentity string         `json:"source_identity"`
-	DemandDigest   string         `json:"demand_digest"`
-	LedgerSequence int64          `json:"ledger_sequence"`
-	PolicyRevision int64          `json:"policy_revision"`
-	StartedAt      time.Time      `json:"started_at"`
-	FinishedAt     time.Time      `json:"finished_at"`
-	CapturedAt     time.Time      `json:"captured_at"`
-	ExpiresAt      time.Time      `json:"expires_at"`
-	Atomic         bool           `json:"atomic"`
-	Pools          []ReadPlanPool `json:"pools"`
-	RemainingJobs  int            `json:"remaining_jobs"`
+	Source         string           `json:"source"`
+	SourceIdentity string           `json:"source_identity"`
+	DemandDigest   string           `json:"demand_digest"`
+	LedgerSequence int64            `json:"ledger_sequence"`
+	PolicyRevision int64            `json:"policy_revision"`
+	StartedAt      time.Time        `json:"started_at"`
+	FinishedAt     time.Time        `json:"finished_at"`
+	CapturedAt     time.Time        `json:"captured_at"`
+	ExpiresAt      time.Time        `json:"expires_at"`
+	Atomic         bool             `json:"atomic"`
+	Pools          []ReadPlanPool   `json:"pools"`
+	RemainingJobs  int              `json:"remaining_jobs"`
+	Pressure       []PressureStatus `json:"pressure,omitempty"`
 }
 type ReadPlanPool struct {
-	Pool               string                `json:"pool"`
-	Repository         string                `json:"repository"`
-	Supply             *garmapi.RunnerSupply `json:"supply"`
-	Charged            admission.Resources   `json:"charged"`
-	Cap                int64                 `json:"cap"`
-	WarmIdle           int64                 `json:"warm_idle"`
-	Additional         int64                 `json:"additional"`
-	AdditionalWarm     int64                 `json:"additional_warm"`
-	CoveredByIdle      int64                 `json:"covered_by_idle"`
-	CoveredByGrant     int64                 `json:"covered_by_grant"`
-	DeferredByInflight int64                 `json:"deferred_by_inflight"`
+	Pool                 string                `json:"pool"`
+	Repository           string                `json:"repository"`
+	Supply               *garmapi.RunnerSupply `json:"supply"`
+	Charged              admission.Resources   `json:"charged"`
+	Cap                  int64                 `json:"cap"`
+	WarmIdle             int64                 `json:"warm_idle"`
+	Additional           int64                 `json:"additional"`
+	SuppressedByPressure int64                 `json:"suppressed_by_pressure"`
+	AdditionalWarm       int64                 `json:"additional_warm"`
+	CoveredByIdle        int64                 `json:"covered_by_idle"`
+	CoveredByGrant       int64                 `json:"covered_by_grant"`
+	DeferredByInflight   int64                 `json:"deferred_by_inflight"`
 }
 type planReader struct {
-	mu     sync.Mutex
-	store  *admission.SQLiteStore
-	source *garmapi.DemandClient
-	opt    capacitybroker.Options
+	mu       sync.Mutex
+	store    *admission.SQLiteStore
+	source   *garmapi.DemandClient
+	opt      capacitybroker.Options
+	pressure bool
 }
 
 func (s *Service) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	if s == nil || s.reader == nil || ctx == nil || ctx.Err() != nil {
 		return ReadPlan{}, capacitybroker.ErrSnapshot
 	}
-	p := s.reader
+	return s.reader.read(ctx)
+}
+func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	if p.source == nil || !p.mu.TryLock() {
 		return ReadPlan{}, capacitybroker.ErrSnapshot
 	}
@@ -82,6 +87,16 @@ func (s *Service) ReadPlan(ctx context.Context) (ReadPlan, error) {
 		return ReadPlan{}, capacitybroker.ErrSnapshot
 	}
 	result := projectReadPlan(state, observed, plan, now, opt.MaxAge)
+	if p.pressure {
+		if err := p.applyPressure(ctx, state, plan, &result, now); err != nil {
+			return ReadPlan{}, err
+		}
+		now = time.Now().UTC()
+		current, err = p.store.ReadBrokerGrantState(ctx)
+		if err != nil || ctx.Err() != nil || !current.Ready || current.Sequence != state.Sequence || current.Policy.Revision != state.Policy.Revision {
+			return ReadPlan{}, capacitybroker.ErrSnapshot
+		}
+	}
 	if !result.ExpiresAt.After(now) {
 		return ReadPlan{}, capacitybroker.ErrSnapshot
 	}
