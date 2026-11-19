@@ -73,6 +73,19 @@ FROM scratch AS native-runtime-assets-helper
 COPY --from=native-runtime-assets-build /runtime-assets-out/ /
 
 
+# Explicit disposable-qualification target. This is not the default image and
+# supplies no credentials, config, ports, volumes or automatic server command.
+FROM go-build AS stock-ingress-build
+RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-stock-ingress ./cmd/capacity-stock-ingress
+FROM runtime-base AS stock-ingress
+USER 65531:65531
+WORKDIR /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY --from=stock-ingress-build --chmod=0555 /out/capacity-stock-ingress /usr/local/bin/capacity-stock-ingress
+ENTRYPOINT []
+CMD []
+
+
 FROM runtime-base AS gateway
 COPY --from=go-build --chmod=0555 /out/capacity-gateway /usr/local/bin/capacity-gateway
 COPY --from=web-build /src/web/dist /usr/local/share/capacity-admin
