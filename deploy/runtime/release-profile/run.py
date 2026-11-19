@@ -8,6 +8,7 @@ HERE=Path(__file__).resolve().parent
 MARKER='PROFILE_DISPOSABLE_LAB=generated-image-qualification/v1'
 PROBE='/probe/profile-probe'
 DOCKER_CONFIG_PATH=None
+HARNESS_FILES=('run.py','fixture.py','prepare.py')
 class Failed(Exception):pass
 PROBE_KINDS={'ok','unknown-authority','hostname','missing-loader','asset-mismatch','identity-mismatch','body-mismatch','missing-library','unsupported-elf','artifact-mismatch','http-status','response-too-large','invalid-input','environment-override','transport','filesystem','permission-denied','network-mismatch','unapproved-context'}
 class ProbeMismatch(Failed):
@@ -64,6 +65,16 @@ def data(args):
  r=command(args);need(r.returncode==0);return r.stdout
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def harness_hashes():
+ # Public checkout provenance, not a signature or proof of runtime integrity.
+ # Keep the list fixed: no caller path, directory traversal or generated state.
+ result={}
+ for name in HARNESS_FILES:
+  path=HERE/name
+  need(path.is_file() and not path.is_symlink() and path.stat().st_size<=1024*1024)
+  result[name]=digest(path)
+ return result
 
 def result_kind(result,wanted,code):
  try:x=json.loads(result.stdout)
@@ -162,6 +173,7 @@ def run():
  results=repo/'qualification-results-release-profile';need(not results.exists() and not results.is_symlink());results.mkdir() # NEW, before build/network.
  work=Path(tempfile.mkdtemp(prefix='profile-lab-',dir=temp));global DOCKER_CONFIG_PATH;DOCKER_CONFIG_PATH=work/'docker-config';DOCKER_CONFIG_PATH.mkdir(mode=0o700);(work/'docker-home').mkdir(mode=0o700);lab=Lab(work);phase='context'
  try:
+  harness=harness_hashes()
   context,source=public_sources(work,repo)
   phase='build';daemon=lab.build(context,'daemon','baseline');tools=lab.build(context,'tools','baseline');missing=lab.build(context,'daemon','missing-js');broken=lab.build(context,'missing-loader','baseline')
   artifacts=lab.export(context,'baseline');negative=lab.export(context,'missing-js')
@@ -241,17 +253,39 @@ def run():
   wait_expected(missing,65531,'assets',['-port','9998'],'asset-mismatch',45)
   lab.stop(bad)
   running=start_garm(daemon,root/'state');ui_ready(daemon);lab.stop(running);need(state_stat()==initial_state)
-  phase='recreate'
-  lab.stop(anchor)
+  # Keep the old disposable namespace alive until its distinct replacement is
+  # observed. Destroying it first permits legitimate namespace inode reuse.
+  # Only read-only synthetic anchors overlap; stock Garm is already stopped.
+  old_anchor=anchor
+  phase='recreate-start-anchor'
   anchor=lab.start(daemon,65530,'none','/probe/tls-anchor',mounts=[(artifacts/'tls-anchor','/probe/tls-anchor',False),(root/'anchor','/run/anchor-private',False)])
-  net='container:'+lab.inspect(anchor)['id'];wait_expected(daemon,65531,'health',['-port','9444','-nonce',nonce])
-  new_netns=data(['docker','exec',anchor,'/usr/bin/readlink','/proc/self/ns/net']).decode().strip();need(new_netns!=old_netns)
+  phase='recreate-inspect-anchor'
+  net='container:'+lab.inspect(anchor)['id']
+  phase='recreate-anchor-health'
+  wait_expected(daemon,65531,'health',['-port','9444','-nonce',nonce])
+  phase='recreate-read-namespace'
+  new_netns=data(['docker','exec',anchor,'/usr/bin/readlink','/proc/self/ns/net']).decode().strip()
+  phase='recreate-namespace-different'
+  need(new_netns!=old_netns)
+  phase='recreate-stop-old-anchor'
+  lab.stop(old_anchor)
+  phase='recreate-client-network'
   for image,uid in ((daemon,65531),(tools,65533)):check(image,uid,'network',['-netns',new_netns])
-  running=start_garm(daemon,root/'state');ui_ready(daemon)
+  phase='recreate-start-garm'
+  running=start_garm(daemon,root/'state')
+  phase='recreate-garm-ui'
+  ui_ready(daemon)
+  phase='recreate-garm-identity'
   result_kind(command(['docker','exec','--user','65531:65531','--env',MARKER,running,PROBE,'-action','identity','-role','garm']), 'ok',0)
-  lab.stop(running);need(state_stat()==initial_state);lab.stop(anchor)
+  phase='recreate-stop-garm'
+  lab.stop(running)
+  phase='recreate-state-continuity'
+  need(state_stat()==initial_state)
+  phase='recreate-stop-new-anchor'
+  lab.stop(anchor)
   phase='result'
-  record={'schema':'disposable-historical-image-profile/v1','source':source,'image_ids':{'daemon':lab.images[daemon],'tools':lab.images[tools],'missing_js':lab.images[missing],'missing_loader':lab.images[broken]},'artifact_hashes':hashes,'actual_default_go_ca_path_both_images':True,'actual_garm_ui_and_missing_js_negative':True,'actual_elf_structure_and_missing_loader_negative':True,'actual_missing_loader_exec_attributed':True,'actual_role_dac_positive_negative':True,'actual_loopback_namespace_recreation':True,'actual_garm_pid1_identity':True,'generated_pair_inode_mode_continuity':True,'fixture_only_umask077':True,'provider_discovery_only':True,'tools_default_uid_boundary_not_direct_cli_pid1':True,'system_trust_changed_on_host':False,'real_issuer_qualified':False,'provider_gateway_runtime_qualified':False,'browser_functionality_qualified':False,'latest_controller_qualified':False,'jit_or_job_lifecycle_qualified':False,'native_physical_scope_qualified':False,'signed_release':False,'installed_stack_qualified':False,'startup_authority':False,'recovery_authority':False,'deployment_authorized':False}
+  record={'schema':'disposable-historical-image-profile/v1','harness_sha256':harness,'source':source,'image_ids':{'daemon':lab.images[daemon],'tools':lab.images[tools],'missing_js':lab.images[missing],'missing_loader':lab.images[broken]},'artifact_hashes':hashes,'actual_default_go_ca_path_both_images':True,'actual_garm_ui_and_missing_js_negative':True,'actual_elf_structure_and_missing_loader_negative':True,'actual_missing_loader_exec_attributed':True,'actual_role_dac_positive_negative':True,'actual_loopback_namespace_recreation':True,'actual_garm_pid1_identity':True,'generated_pair_inode_mode_continuity':True,'fixture_only_umask077':True,'provider_discovery_only':True,'tools_default_uid_boundary_not_direct_cli_pid1':True,'system_trust_changed_on_host':False,'real_issuer_qualified':False,'provider_gateway_runtime_qualified':False,'browser_functionality_qualified':False,'latest_controller_qualified':False,'jit_or_job_lifecycle_qualified':False,'native_physical_scope_qualified':False,'signed_release':False,'installed_stack_qualified':False,'startup_authority':False,'recovery_authority':False,'deployment_authorized':False}
+  need(harness_hashes()==harness) # Refuse changed public harness files during the run.
   phase='cleanup';need(lab.cleanup());need(command(['sudo','-n','rm','-rf','--',str(work)]).returncode==0)
   with (results/'result.json').open('x') as f:json.dump(record,f,sort_keys=True,indent=2)
   print('PASS disposable historical image/profile test only; all deployment authorities false')

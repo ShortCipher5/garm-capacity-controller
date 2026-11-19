@@ -1,9 +1,111 @@
-import copy,json,os,subprocess,tempfile,unittest
+import ast,contextlib,io
+import copy,hashlib,json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 import prepare,run,fixture
 
 class RunnerTest(unittest.TestCase):
+ def test_harness_provenance_fixed_files_and_assertion_change(self):
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp)
+   for name in ('run.py','fixture.py','prepare.py'):
+    (root/name).write_bytes(b'assert True\n')
+   (root/'private.key').write_bytes(b'never included')
+   with patch.object(run,'HERE',root),patch.object(run,'command',side_effect=AssertionError('no execution')) as commands:
+    before=run.harness_hashes()
+    self.assertEqual(set(before),{'run.py','fixture.py','prepare.py'})
+    self.assertEqual(set(before.values()),{hashlib.sha256(b'assert True\n').hexdigest()})
+    (root/'run.py').write_bytes(b'assert False\n')
+    after=run.harness_hashes()
+    self.assertNotEqual(before['run.py'],after['run.py'])
+    self.assertEqual(after['run.py'],hashlib.sha256(b'assert False\n').hexdigest())
+    self.assertEqual(before['fixture.py'],after['fixture.py'])
+    self.assertEqual(before['prepare.py'],after['prepare.py'])
+    (root/'private.key').write_bytes(b'changed, still not included')
+    self.assertEqual(after,run.harness_hashes())
+    commands.assert_not_called()
+ def test_harness_provenance_refuses_missing_linked_or_oversized_file(self):
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp)
+   for name in run.HARNESS_FILES:(root/name).write_bytes(b'public')
+   with patch.object(run,'HERE',root):
+    (root/'fixture.py').unlink()
+    with self.assertRaises(run.Failed):run.harness_hashes()
+    (root/'fixture.py').symlink_to(root/'run.py')
+    with self.assertRaises(run.Failed):run.harness_hashes()
+    (root/'fixture.py').unlink()
+    (root/'fixture.py').write_bytes(b'x'*(1024*1024+1))
+    with self.assertRaises(run.Failed):run.harness_hashes()
+ def test_recreate_labels_are_literal_and_generic_failure_never_prints_raw_error(self):
+  tree=ast.parse(Path(run.__file__).read_text())
+  function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+  block=next(n for n in function.body if isinstance(n,ast.Try))
+  expected=['recreate-start-anchor','recreate-inspect-anchor',
+   'recreate-anchor-health','recreate-read-namespace','recreate-namespace-different',
+   'recreate-stop-old-anchor','recreate-client-network','recreate-start-garm','recreate-garm-ui',
+   'recreate-garm-identity','recreate-stop-garm','recreate-state-continuity','recreate-stop-new-anchor']
+  labels=[]
+  for statement in block.body:
+   if isinstance(statement,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='phase' for t in statement.targets):
+    # Every stage label, not just recreate, is a literal or existing fixed linkage label.
+    if isinstance(statement.value,ast.Constant) and isinstance(statement.value.value,str) and statement.value.value.startswith('recreate'):
+     labels.append(statement.value.value)
+  self.assertEqual(labels,expected)
+  begin=next(i for i,n in enumerate(block.body) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value==expected[0])
+  end=next(i for i,n in enumerate(block.body[begin:],begin) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value=='result')
+  for node in ast.walk(ast.Module(body=block.body[begin:end],type_ignores=[])):
+   if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='phase' for t in node.targets):
+    self.assertIsInstance(node.value,ast.Constant)
+    self.assertIn(node.value.value,expected)
+  # Execute ONLY the existing error handler around a synthetic exception. No
+  # runner body, command, Docker, network, filesystem cleanup or retry executes.
+  handler=ast.Try(body=[ast.Raise(exc=ast.Call(func=ast.Name(id='RuntimeError',ctx=ast.Load()),args=[ast.Constant(value='PRIVATE path=/secret nonce=raw stderr=raw')],keywords=[]),cause=None)],handlers=block.handlers,orelse=[],finalbody=[])
+  code=compile(ast.fix_missing_locations(ast.Module(body=[handler],type_ignores=[])),'synthetic-error-handler','exec')
+  for label in expected:
+   output=io.StringIO()
+   with contextlib.redirect_stderr(output),patch.object(run,'command',side_effect=AssertionError('no execution')):
+    with self.assertRaises(run.Failed):exec(code,{**vars(run),'phase':label})
+   self.assertEqual(output.getvalue(),'Disposable image/profile test failed at '+label+'\n')
+ def test_recreate_keeps_only_old_anchor_until_distinct_namespace_observed(self):
+  tree=ast.parse(Path(run.__file__).read_text())
+  function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+  block=next(n for n in function.body if isinstance(n,ast.Try))
+  begin=next(i for i,n in enumerate(block.body) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='old_anchor' for t in n.targets))
+  end=next(i for i,n in enumerate(block.body[begin:],begin) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value=='recreate-start-garm')
+  code=compile(ast.fix_missing_locations(ast.Module(body=block.body[begin:end],type_ignores=[])),'synthetic-recreate-sequence','exec')
+  for distinct in (True,False):
+   events=[];live={'old-anchor'};owner=self
+   class FakeLab:
+    def start(self,image,uid,network,entry,mounts):
+     owner.assertEqual(live,{'old-anchor'})
+     owner.assertEqual((image,uid,network,entry),('daemon',65530,'none','/probe/tls-anchor'))
+     owner.assertTrue(all(not rw for _,_,rw in mounts))
+     events.append('start-new');live.add('new-anchor');return 'new-anchor'
+    def inspect(self,name):
+     owner.assertEqual(name,'new-anchor');return {'id':'synthetic-new-id'}
+    def stop(self,name):
+     owner.assertEqual(name,'old-anchor');owner.assertEqual(events[-1],'read-namespace')
+     events.append('stop-old');live.remove(name)
+   def health(*args):
+    owner.assertEqual(live,{'old-anchor','new-anchor'});events.append('health')
+   def read_namespace(args):
+    owner.assertEqual(live,{'old-anchor','new-anchor'})
+    owner.assertEqual(args,['docker','exec','new-anchor','/usr/bin/readlink','/proc/self/ns/net'])
+    events.append('read-namespace');return b'net:[2]\n' if distinct else b'net:[1]\n'
+   def check(image,uid,action,args):
+    owner.assertEqual(live,{'new-anchor'});owner.assertEqual(action,'network')
+    owner.assertEqual(args,['-netns','net:[2]']);events.append('check-'+image)
+   scope={**vars(run),'lab':FakeLab(),'anchor':'old-anchor','daemon':'daemon','tools':'tools',
+    'artifacts':Path('/synthetic/artifacts'),'root':Path('/synthetic/generated'),
+    'nonce':'synthetic','old_netns':'net:[1]','wait_expected':health,'data':read_namespace,'check':check}
+   with patch.object(run,'command',side_effect=AssertionError('no engine execution')):
+    if distinct:
+     exec(code,scope)
+     self.assertEqual(events,['start-new','health','read-namespace','stop-old','check-daemon','check-tools'])
+    else:
+     with self.assertRaises(run.Failed):exec(code,scope)
+     self.assertEqual(events,['start-new','health','read-namespace'])
+     self.assertEqual(live,{'old-anchor','new-anchor'}) # Existing finally owns cleanup on failure.
  def test_actual_rendered_recipe_uses_retained_pins_and_known_graph(self):
   text,lock=prepare.render();self.assertNotIn('{{',text);self.assertNotIn('latest',text)
   self.assertEqual(sum(l.startswith('FROM ') for l in text.splitlines()),6)
