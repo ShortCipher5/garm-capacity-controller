@@ -119,15 +119,17 @@ test("runner-size profile CRUD, validation and per-host fit estimates including 
 
 test('profile controls follow admin capability and discard a draft on downgrade', async ({page}) => {
  let enabled=false, writes=0;
- await page.route('**/admin/api/v1/overview',async route=>{
-  const response=await route.fetch();const body=await response.json();
-  return route.fulfill({response,json:{...body,management_enabled:enabled}});
- });
+ // Read the fixture through Chromium's exact pinned TLS session, not Node route.fetch.
+ const initial=page.waitForResponse(response=>response.url().endsWith('/admin/api/v1/overview')&&response.request().method()==='GET'&&response.status()===200);
+ await connect(page);
+ const body=await (await initial).json();
+ await page.route('**/admin/api/v1/overview',route=>route.fulfill({status:200,json:{...body,management_enabled:enabled}}));
  await page.route('**/admin/api/v1/profiles**',route=>{
   if(route.request().method()!=='GET'){writes++;return route.abort();}
   return route.continue();
  });
- await connect(page);
+ await page.getByRole('link',{name:'Profiles',exact:true}).click();
+ await page.getByRole('button',{name:'Refresh snapshot',exact:true}).click();
  const panel=page.locator('#profile-management');
  await expect(panel.getByRole('button',{name:'New profile',exact:true})).toHaveCount(0);
  await expect(panel.getByText('Profile management is disabled',{exact:false})).toBeVisible();
@@ -140,5 +142,6 @@ test('profile controls follow admin capability and discard a draft on downgrade'
  enabled=true;await page.getByRole('button',{name:'Refresh snapshot',exact:true}).click();
  await panel.getByRole('button',{name:'New profile',exact:true}).click();
  await expect(panel.getByLabel('Profile management write token')).toHaveValue('');
+ await expect(page).toHaveURL(/#profiles$/);
  expect(writes).toBe(0);
 });
