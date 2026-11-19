@@ -68,7 +68,7 @@ for role in ingress gateway; do
   [[ $child_pid != "$stock_pid" && $child_pid != "$previous_pid" ]]
   previous_pid=$child_pid
   joined_check "$role" process-checks
-  docker exec --user "$uid:$uid" "$child" /bin/sh -ec '
+  role_sha=$(timeout 30s docker exec --user "$uid:$uid" "$child" /bin/sh -ec '
     case "$2" in ingress|gateway) ;; *) exit 1 ;; esac
     check() {
       case "$1" in executable|cwd|readonly-root|no-docker-socket|status-read) ;; *) exit 1 ;; esac
@@ -76,6 +76,15 @@ for role in ingress gateway; do
     }
     check executable "$2"
     test "$(readlink /proc/1/exe)" = "$1"
+    # Bounded regular executable, same runtime inode and bytes as the fixed path.
+    test -f "$1"
+    size=$(stat -Lc %s /proc/1/exe)
+    test "$size" -gt 0 && test "$size" -le 134217728
+    test "$(stat -Lc %d:%i /proc/1/exe)" = "$(stat -Lc %d:%i "$1")"
+    actual_sha=$(sha256sum /proc/1/exe | cut -d" " -f1)
+    test "$actual_sha" = "$(sha256sum "$1" | cut -d" " -f1)"
+    test "$(readlink /proc/1/exe)" = "$1"
+    printf "ExecutableSHA256: %s\n" "$actual_sha"
     check cwd "$2"
     test "$(readlink /proc/1/cwd)" = /
     check readonly-root "$2"
@@ -84,7 +93,7 @@ for role in ingress gateway; do
     test ! -e /var/run/docker.sock
     check status-read "$2"
     cat /proc/1/status' probe "$exe" "$role" | python3 -c '
-import sys
+import re,sys
 fields=dict(line.split(":",1) for line in sys.stdin.read().splitlines() if ":" in line)
 uid,role=sys.argv[1:]
 assert role in ("ingress","gateway")
@@ -93,7 +102,12 @@ assert fields["Uid"].split()==[uid]*4 and fields["Gid"].split()==[uid]*4
 print("Joined process check:",role,"capabilities",file=sys.stderr)
 assert all(int(fields[k].strip(),16)==0 for k in ("CapInh","CapPrm","CapEff","CapBnd","CapAmb"))
 print("Joined process check:",role,"no-new-privileges",file=sys.stderr)
-assert fields["NoNewPrivs"].strip()=="1"' "$uid" "$role"
+assert fields["NoNewPrivs"].strip()=="1"
+digest=fields["ExecutableSHA256"].strip()
+assert re.fullmatch("[0-9a-f]{64}",digest)
+print(digest)' "$uid" "$role")
+  [[ $role_sha =~ ^[0-9a-f]{64}$ ]]
+  if [[ $role = ingress ]]; then ingress_executable_sha=$role_sha; else gateway_executable_sha=$role_sha; fi
 done
 # Retire the children before stock recreation; never retain stale namespace users.
 for role in gateway ingress; do
@@ -117,12 +131,3 @@ if code!=0 or status!="exited" or oom or state["Running"]:
   docker rm "$child" >/dev/null
 done
 joined_gateway=; joined_ingress=
-python3 - "$results/garm-three-service-preboot.json" "$image" "$gateway_image" "$ingress_image" <<'PY'
-import json,pathlib,sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({'schema':'disposable-three-service-preboot/v1',
- 'stock_image':sys.argv[2], 'gateway_image':sys.argv[3], 'ingress_image':sys.argv[4],
- 'actual_three_binaries_started':True,'exact_four_ipv4_loopback_listeners_verified':True,'shared_isolated_network':True,'host_ports_published':False,
- 'stock_uninitialized':True,'supervisor_present':False,'admission_ready':False,
- 'upstream_inventory_integrated':False,'managed_topology_qualified':False,
- 'startup_authority':False,'deployment_authorized':False},indent=2))
-PY

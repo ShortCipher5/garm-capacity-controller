@@ -142,7 +142,7 @@ class Joined(unittest.TestCase):
         self.assertIn('garm-least-privilege.sh --joined-service',(HERE/'test.sh').read_text())
         self.assertNotIn('--privileged',shell)
 
-if __name__=='__main__': unittest.main()
+
 
 class ExactListeners(unittest.TestCase):
     header = ' sl local_address rem_address st'

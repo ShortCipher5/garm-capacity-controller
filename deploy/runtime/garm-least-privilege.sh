@@ -41,6 +41,11 @@ name="garm-identity-lab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${specimen}"
 work=$(mktemp -d "$RUNNER_TEMP/garm-identity.XXXXXXXX")
 results=$PWD/qualification-results
 mkdir -p "$results"
+if [[ $joined = true ]]; then
+  # Never leave a previous joined success artifact after a failed rerun.
+  rm -f -- "$results/garm-three-service-preboot.json"
+  joined_source_commit=$(git rev-parse HEAD)
+fi
 cleanup() {
   local outcome=$?
   if [[ $outcome != 0 ]]; then
@@ -59,6 +64,7 @@ python3 deploy/runtime/test_garm_native_executable.py
 python3 deploy/runtime/test_garm_lifetime_evidence.py
 python3 deploy/runtime/test_garm_service_specimen.py
 python3 deploy/runtime/test_garm_joined.py
+python3 deploy/runtime/test_garm_joined_evidence.py
 docker pull "$image"
 docker pull "$python_image"
 # Validate the pulled platform metadata once; all execution below uses its ID.
@@ -232,3 +238,15 @@ record.update(native_image_entrypoint_sha256=argv_hash(native),
 pathlib.Path(output).write_text(json.dumps(record,indent=2))
 print('PASS disposable non-root lab only; installed-stack qualification remains BLOCKED')
 PY
+
+if [[ $joined = true ]]; then
+  # Joined evidence is success-only: recreation and final removal must complete.
+  docker rm "$name" >/dev/null
+  sudo rm -rf -- "$work"
+  trap - EXIT
+  [[ $(git rev-parse HEAD) = "$joined_source_commit" ]]
+  python3 deploy/runtime/garm-joined-evidence.py "$results/garm-three-service-preboot.json" \
+    "$joined_source_commit" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+    "$image" "$gateway_image" "$ingress_image" "$ledger_image" \
+    "$gateway_executable_sha" "$ingress_executable_sha"
+fi

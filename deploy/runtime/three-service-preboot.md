@@ -35,3 +35,21 @@ Offline tests check generated config separation and assertions only. The actual
 three-service start is unproven until this exact candidate passes the hosted job.
 Existing protected Observe, bootstrap, Session, providers and restart code are
 untouched; this fixture cannot produce their authority objects.
+
+The joined public result uses schema `disposable-three-service-preboot/v2`.
+It additionally binds the exact ledger initializer image, actual checkout
+`git rev-parse HEAD`, and hosted run ID/attempt. The checkout SHA can be GitHub's
+synthetic PR merge commit; it is **not claimed to be the PR head**. These are
+unsigned public provenance fields, not artifact signatures or release approval.
+The fixed result is cleared before a joined rerun and emitted only after the
+joined assertions, stock recreation checks, final stock removal and successful
+fixture cleanup. A failed run does not retain an earlier joined success result.
+No image archive, state snapshot, registry push or new upload is introduced.
+
+V2 also records gateway/ingress executable SHA256 values measured from their
+actual running PID1 executables. Each bounded role check requires the fixed
+installed executable path and runtime executable to have matching inode identity
+and bytes, with a 128 MiB maximum and 30-second outer timeout. Only the two
+64-character hashes enter the public record, not command lines or mount contents.
+This is a measurement of these disposable processes, not an admission or release
+signature and not proof of a live installed stack.
