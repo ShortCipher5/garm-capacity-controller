@@ -113,3 +113,23 @@ func TestPreBootstrapIngressHasNoControllerSuffix(t *testing.T) {
 		}
 	}
 }
+
+// The joined hosted preboot probe uses this exact unauthenticated GET with
+// an uninitialized stock controller. Refusal is 404, never an upstream call.
+func TestPrebootControllerGETIsNotFoundWithoutUpstream(t *testing.T) {
+	var requests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Error("denied controller GET reached upstream")
+	}))
+	defer backend.Close()
+	h, err := New(backend.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/controller", nil))
+	if w.Code != http.StatusNotFound || requests.Load() != 0 {
+		t.Fatalf("status=%d upstream=%d", w.Code, requests.Load())
+	}
+}

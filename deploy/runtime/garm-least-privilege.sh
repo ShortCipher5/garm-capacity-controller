@@ -5,6 +5,9 @@ cd "$(dirname "$0")/../.."
 : "${RUNNER_TEMP:?A disposable GitHub-hosted runner workspace is required}"
 [[ ${GITHUB_ACTIONS:-} = true && ${RUNNER_ENVIRONMENT:-} = github-hosted ]] || { echo 'Refusing non-hosted execution' >&2; exit 1; }
 # Closed test variants only; no caller-supplied UID/path/runtime configuration.
+joined=false
+joined_gateway=
+joined_ingress=
 lab_uid=65531
 specimen=standalone
 workdir_args=()
@@ -18,6 +21,18 @@ case "${1:-}" in
     workdir_args=(--workdir /)
     result_name=garm-prospective-service-lab.json
     ;;
+  --joined-service)
+    [[ $# = 4 ]] || exit 1
+    joined=true
+    gateway_image=$2; ingress_image=$3; ledger_image=$4
+    for pinned in "$gateway_image" "$ingress_image" "$ledger_image"; do
+      [[ $pinned =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+    done
+    lab_uid=65530
+    specimen=prospective-service
+    workdir_args=(--workdir /)
+    result_name=garm-joined-stock-lab.json
+    ;;
   *) echo 'Unknown disposable specimen' >&2; exit 1 ;;
 esac
 image=ghcr.io/cloudbase/garm:v0.2.1@sha256:5ccdc29c31084ed4f30ec85e09a57b5105cf3dcc5fa8c1aba9e68de461e7e635
@@ -26,11 +41,19 @@ name="garm-identity-lab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${specimen}"
 work=$(mktemp -d "$RUNNER_TEMP/garm-identity.XXXXXXXX")
 results=$PWD/qualification-results
 mkdir -p "$results"
+if [[ $joined = true ]]; then
+  # Never leave a previous joined success artifact after a failed rerun.
+  rm -f -- "$results/garm-three-service-preboot.json"
+  joined_source_commit=$(git rev-parse HEAD)
+fi
 cleanup() {
   local outcome=$?
   if [[ $outcome != 0 ]]; then
     docker inspect "$name" 2>/dev/null | python3 -c 'import json,sys;items=json.load(sys.stdin);print(json.dumps({"container_not_created":True} if not items else {"status":items[0]["State"]["Status"],"exit":items[0]["State"]["ExitCode"],"oom":items[0]["State"]["OOMKilled"]}))' || true
   fi
+  for child in "$joined_gateway" "$joined_ingress"; do
+    if [[ -n $child ]]; then docker rm -f "$child" >/dev/null 2>&1 || true; fi
+  done
   docker rm -f "$name" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
   return "$outcome"
@@ -40,6 +63,8 @@ trap cleanup EXIT
 python3 deploy/runtime/test_garm_native_executable.py
 python3 deploy/runtime/test_garm_lifetime_evidence.py
 python3 deploy/runtime/test_garm_service_specimen.py
+python3 deploy/runtime/test_garm_joined.py
+python3 deploy/runtime/test_garm_joined_evidence.py
 docker pull "$image"
 docker pull "$python_image"
 # Validate the pulled platform metadata once; all execution below uses its ID.
@@ -49,6 +74,11 @@ python3 deploy/runtime/garm-native-executable.py "$work/stock-image.json" "$imag
 garm_executable=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["executable"])' "$results/garm-native-executable.json")
 image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["image_id"])' "$results/garm-native-executable.json")
 python3 deploy/runtime/garm-identity.py prepare "$work/fixture"
+# Snapshot ONLY public certificates while still runner-owned. Never read the
+# role-owned private directory again when preparing joined roles.
+if [[ $joined = true ]]; then
+  python3 deploy/runtime/garm-joined.py snapshot-public "$work/fixture/private" "$work/stock-public"
+fi
 sudo chown -R "$lab_uid:$lab_uid" "$work/fixture/private" "$work/fixture/state"
 sudo chown -R 65532:65532 "$work/fixture/gateway-canary"
 base=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 1 --memory 512m)
@@ -140,6 +170,7 @@ print("PASS actual Garm PID1 has expected UID/GID, all capability sets zero, NNP
 start_garm
 probe
 verify_boundary
+if [[ $joined = true ]]; then source deploy/runtime/garm-joined.sh; fi
 # Stop the ONLY disposable writer before inspecting Garm's own database.
 docker stop --time 60 "$name" >/dev/null
 [[ $(docker inspect --format '{{.State.ExitCode}}' "$name") = 0 ]]
@@ -207,3 +238,15 @@ record.update(native_image_entrypoint_sha256=argv_hash(native),
 pathlib.Path(output).write_text(json.dumps(record,indent=2))
 print('PASS disposable non-root lab only; installed-stack qualification remains BLOCKED')
 PY
+
+if [[ $joined = true ]]; then
+  # Joined evidence is success-only: recreation and final removal must complete.
+  docker rm "$name" >/dev/null
+  sudo rm -rf -- "$work"
+  trap - EXIT
+  [[ $(git rev-parse HEAD) = "$joined_source_commit" ]]
+  python3 deploy/runtime/garm-joined-evidence.py "$results/garm-three-service-preboot.json" \
+    "$joined_source_commit" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+    "$image" "$gateway_image" "$ingress_image" "$ledger_image" \
+    "$gateway_executable_sha" "$ingress_executable_sha"
+fi
