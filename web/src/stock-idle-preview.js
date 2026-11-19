@@ -19,10 +19,11 @@ export function stockIdlePreviewView(plan,comparison,now=Date.now()){
  }
  if(expires<=now||captured>now+1000)return {state:'expired',proposals:[]};
  if(comparison!=='linked_at_capture')return {state:'comparison_unavailable',proposals:[]};
- const reason=typeof p.reason==='string'&&((p.state==='unavailable'&&p.reason==='evidence_unavailable')||(p.state==='no_confirmed_proposals'&&p.reason==='awaiting_matching_sample'))?p.reason:null;
+ const reason=typeof p.reason==='string'&&((p.state==='unavailable'&&['evidence_unavailable','scope_limit_exceeded'].includes(p.reason))||(p.state==='no_confirmed_proposals'&&p.reason==='awaiting_matching_sample'))?p.reason:null;
  return {state:p.state,proposals:p.proposals,expiresAt:expires,...(reason?{reason}:{}),...(p.host_evidence==='configured_only'?{hostEvidence:'configured_only'}:{})};
 }
 export function stockIdlePreviewMessage(view){
+ if(view.state==='unavailable'&&view.reason==='scope_limit_exceeded')return 'The minimum-idle preview supports up to 8 observed pools, 8 configured pools and 8 policy repositories. Disabled pools still count within the observed scope. This scope exceeds a preview limit; no suggestions are shown and no configuration was changed.';
  if(view.state==='no_confirmed_proposals'&&view.reason==='awaiting_matching_sample')return 'No minimum-idle decrease is confirmed. Another eligible matching observation is required; this does not prove an empty queue.';
  return ({
   proposed:'Two captured observations support these minimum-idle decrease suggestions.',

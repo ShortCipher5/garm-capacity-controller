@@ -32,3 +32,19 @@ test('reason allowlist hides raw and malformed diagnostics',()=>{
  const p=plan();Object.assign(p.stock_idle_preview,{state:'no_confirmed_proposals',proposals:[],reason:'awaiting_matching_sample'});
  assert.match(stockIdlePreviewMessage(stockIdlePreviewView(p,'linked_at_capture',now)),/does not prove an empty queue/);
 });
+
+test('bounded scope reason is specific only for current unavailable previews',()=>{
+ const p=plan();p.stock_idle_preview={state:'unavailable',reason:'scope_limit_exceeded',expires_at:new Date(now+10000).toISOString(),proposals:[]};
+ const v=stockIdlePreviewView(p,'linked_at_capture',now);
+ assert.equal(v.reason,'scope_limit_exceeded');
+ assert.match(stockIdlePreviewMessage(v),/8 observed pools/);
+ assert.match(stockIdlePreviewMessage(v),/Disabled pools still count/);
+ assert.match(stockIdlePreviewMessage(v),/no configuration was changed/);
+ for(const [comparison,at] of [['preview_superseded',now],['linked_at_capture',now+10000]]){
+  const stale=stockIdlePreviewView(p,comparison,at);assert.equal(stale.reason,undefined);assert.doesNotMatch(stockIdlePreviewMessage(stale),/scope exceeds/);
+ }
+ const mismatch=plan();mismatch.stock_idle_preview.reason='scope_limit_exceeded';
+ assert.equal(stockIdlePreviewView(mismatch,'linked_at_capture',now).reason,undefined);
+ p.stock_idle_preview.reason=['scope_limit_exceeded'];
+ assert.equal(stockIdlePreviewView(p,'linked_at_capture',now).reason,undefined);
+});

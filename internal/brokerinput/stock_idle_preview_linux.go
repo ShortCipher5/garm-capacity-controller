@@ -1,6 +1,8 @@
 package brokerinput
 
 import (
+	"errors"
+	"fmt"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
@@ -27,10 +29,16 @@ type stockIdleHistory struct{ prior map[string]stockIdleSample }
 
 func (h *stockIdleHistory) reset() { h.prior = nil }
 
+// Preserve snapshot classification while exposing only the closed scope-limit reason.
+var errStockIdleScopeLimit = fmt.Errorf("stock idle preview scope limit exceeded: %w", capacitybroker.ErrSnapshot)
+
 // Bounds expensive canonical/hash checks independently of installation size.
 // Every target uses the SAME authenticated capture; this adds no API reads.
 func sampleStockIdlePreview(state admission.BrokerGrantState, charges []admission.BrokerPlanningCharge, observation garmapi.DemandObservation, source string, opt capacitybroker.Options) (map[string]stockIdleSample, error) {
-	if len(state.Config.Pools) == 0 || len(state.Config.Pools) > 8 || len(state.Policy.Repositories) == 0 || len(state.Policy.Repositories) > 8 || len(observation.Pools) > 8 {
+	if len(state.Config.Pools) > 8 || len(state.Policy.Repositories) > 8 || len(observation.Pools) > 8 {
+		return nil, errStockIdleScopeLimit
+	}
+	if len(state.Config.Pools) == 0 || len(state.Policy.Repositories) == 0 {
 		return nil, capacitybroker.ErrSnapshot
 	}
 	out := map[string]stockIdleSample{}
@@ -45,6 +53,9 @@ func sampleStockIdlePreview(state admission.BrokerGrantState, charges []admissio
 func (h *stockIdleHistory) accept(samples map[string]stockIdleSample, err error, now, expiry time.Time) *StockIdlePreview {
 	out := &StockIdlePreview{State: "unavailable", Reason: "evidence_unavailable", ExpiresAt: expiry, Proposals: []StockIdleProposal{}}
 	if err != nil || len(samples) == 0 || len(samples) > 8 {
+		if errors.Is(err, errStockIdleScopeLimit) {
+			out.Reason = "scope_limit_exceeded"
+		}
 		h.reset()
 		return out
 	}
