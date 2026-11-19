@@ -116,3 +116,19 @@ This checklist is a plan, not authorization or a startup/deployment command.
    durable state identity/history and conservative fresh reconciliation. Stop on
    uncertainty. External writer fencing, complete physical scope, monotonic
    recovery authority and job-safe retirement/drain remain independent gates.
+
+## Disposable managed executable-layout probe
+
+The same hosted-only lab now derives a temporary image from the already pinned
+stock v0.2.1 image. It records the resolved platform image ID and repository
+digests, requires the exact inherited PATH-only environment, and copies the
+unchanged `/bin/garm` bytes to a root-owned, single-link regular
+`/usr/bin/garm`. It checks identical SHA-256 bytes and runs only `--version`
+at that path as UID/GID 65530, read-only, without network or capabilities.
+The original stock rootfs layers remain intact; no provider is added and no
+configuration is supplied to the version probe. The temporary image is removed
+on exit and is never published. Existing empty-state/non-root assertions remain.
+
+`garm-managed-layout-lab.json` records artifact/layout compatibility only. It is
+not provider inspection, managed startup, enrollment, installation, deployment
+or activation qualification. No inspector paths or authentication are changed.

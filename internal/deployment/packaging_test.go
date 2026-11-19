@@ -259,3 +259,30 @@ func TestPairedArtifactsAreReadOnlyDisposableAndContentVersioned(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedLayoutProbeOnlyCopiesPinnedStockBytes(t *testing.T) {
+	dockerfile := repositoryFile(t, "deploy/runtime/garm-managed-layout.Dockerfile")
+	for _, want := range []string{"ARG STOCK_IMAGE", "FROM ${STOCK_IMAGE} AS stock", "FROM stock AS managed-layout", "COPY --from=stock --chmod=0555 /bin/garm /usr/bin/garm", "USER 65530:65530", "WORKDIR /", "ENTRYPOINT []", "CMD []"} {
+		if !strings.Contains(dockerfile, want) {
+			t.Fatal("missing layout constraint", want)
+		}
+	}
+	for _, line := range strings.Split(dockerfile, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !(strings.HasPrefix(line, "ARG ") || strings.HasPrefix(line, "FROM ") || line == "COPY --from=stock --chmod=0555 /bin/garm /usr/bin/garm" || line == "USER 65530:65530" || line == "WORKDIR /" || line == "ENTRYPOINT []" || line == "CMD []") {
+			t.Fatal("unexpected image operation", line)
+		}
+	}
+	script := repositoryFile(t, "deploy/runtime/garm-least-privilege.sh")
+	for _, want := range []string{"--pull=false --network=none --platform", "layout['RootFS']['Layers'][:-1]==stock['RootFS']['Layers']", "a[0]==b[0]", "test ! -L /usr/bin/garm", "stat -c %h /usr/bin/garm", "--entrypoint /usr/bin/garm", "'provider_added':False", "'provider_inspection_qualified':False", "'deployment_authorized':False"} {
+		if !strings.Contains(script, want) {
+			t.Fatal("missing probe boundary", want)
+		}
+	}
+	if !strings.Contains(repositoryFile(t, ".github/workflows/packaging.yml"), "qualification-results/garm-managed-layout-lab.json") {
+		t.Fatal("missing public result artifact")
+	}
+}

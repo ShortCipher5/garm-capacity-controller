@@ -8,6 +8,7 @@ image=ghcr.io/cloudbase/garm:v0.2.1@sha256:5ccdc29c31084ed4f30ec85e09a57b5105cf3
 python_image=python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 name="garm-identity-lab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 work=$(mktemp -d "$RUNNER_TEMP/garm-identity.XXXXXXXX")
+layout_image="garm-managed-layout-lab:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 results=$PWD/qualification-results
 mkdir -p "$results"
 cleanup() {
@@ -16,6 +17,7 @@ cleanup() {
     docker inspect "$name" 2>/dev/null | python3 -c 'import json,sys;items=json.load(sys.stdin);print(json.dumps({"container_not_created":True} if not items else {"status":items[0]["State"]["Status"],"exit":items[0]["State"]["ExitCode"],"oom":items[0]["State"]["OOMKilled"]}))' || true
   fi
   docker rm -f "$name" >/dev/null 2>&1 || true
+  docker image rm "$layout_image" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
   return "$outcome"
 }
@@ -30,6 +32,53 @@ base=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 2
 # Garm version exits before config loading. Never construct an Incus provider
 # merely for discovery: bundled providers may require config before GetVersion.
 docker run --rm --network none "${base[@]}" --user 65531:65531 --entrypoint /bin/garm "$image" --version >/dev/null
+# Inspect the pulled platform artifact, not merely its multi-platform tag/index.
+# No arbitrary environment is erased to make the managed contract appear to fit.
+docker image inspect "$image" > "$work/stock-image.json"
+platform=$(python3 - "$work/stock-image.json" <<'PYMETA'
+import json,re,sys
+x=json.load(open(sys.argv[1]))[0]
+assert re.fullmatch(r'sha256:[0-9a-f]{64}',x['Id'])
+assert x['Os']=='linux' and x['Architecture'] in ('amd64','arm64')
+assert x['Config']['Env']==['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin']
+assert x['Config'].get('Entrypoint')==['/bin/garm','-config','/etc/garm/config.toml']
+assert x.get('RepoDigests') and all('@sha256:' in d for d in x['RepoDigests'])
+assert not x['Config'].get('Volumes') and not x['Config'].get('OnBuild')
+print(x['Os']+'/'+x['Architecture']+('/'+x['Variant'] if x.get('Variant') else ''))
+PYMETA
+)
+# Tiny context contains only the public Dockerfile. No repository/private files.
+mkdir "$work/layout-context"
+cp deploy/runtime/garm-managed-layout.Dockerfile "$work/layout-context/Dockerfile"
+docker build --pull=false --network=none --platform "$platform" --build-arg "STOCK_IMAGE=$image" -t "$layout_image" "$work/layout-context"
+docker image inspect "$layout_image" > "$work/layout-image.json"
+python3 - "$work/stock-image.json" "$work/layout-image.json" <<'PYMETA'
+import json,sys
+stock,layout=(json.load(open(p))[0] for p in sys.argv[1:])
+assert (stock['Os'],stock['Architecture'])==(layout['Os'],layout['Architecture'])
+assert layout['RootFS']['Layers'][:-1]==stock['RootFS']['Layers']
+c=layout['Config']
+assert c['Env']==stock['Config']['Env'] and c['User']=='65530:65530' and c['WorkingDir']=='/'
+assert not c.get('Entrypoint') and not c.get('Cmd') and not c.get('Volumes') and not c.get('OnBuild')
+PYMETA
+# Bounded hashing only; no filesystem extraction or provider execution.
+docker run --rm --network none "${base[@]}" --user 65530:65530 --entrypoint /bin/sh "$image" -ec 'test ! -e /usr/bin/garm; test ! -L /usr/bin/garm; sha256sum /bin/garm' > "$work/stock-garm.sha256"
+docker run --rm --network none "${base[@]}" --user 65530:65530 --entrypoint /bin/sh "$layout_image" -ec '
+ test -f /usr/bin/garm && test ! -L /usr/bin/garm
+ test "$(stat -c %h /usr/bin/garm)" = 1
+ test "$(stat -c %u:%g:%a /usr/bin/garm)" = 0:0:555
+ test "$(stat -c %i /usr/bin/garm)" != "$(stat -c %i /bin/garm)"
+ sha256sum /usr/bin/garm' > "$work/layout-garm.sha256"
+docker run --rm --network none "${base[@]}" --user 65530:65530 --entrypoint /usr/bin/garm "$layout_image" --version >/dev/null
+python3 - "$work" "$results/garm-managed-layout-lab.json" "$image" <<'PYMETA'
+import json,pathlib,re,sys
+w=pathlib.Path(sys.argv[1]);stock=json.loads((w/'stock-image.json').read_text())[0];layout=json.loads((w/'layout-image.json').read_text())[0]
+a=(w/'stock-garm.sha256').read_text().split();b=(w/'layout-garm.sha256').read_text().split()
+assert len(a)==len(b)==2 and re.fullmatch('[0-9a-f]{64}',a[0]) and a[0]==b[0]
+record={'stock_reference':sys.argv[3],'stock_platform_image_id':stock['Id'],'stock_repository_digests':stock['RepoDigests'],'layout_image_id':layout['Id'],'os':stock['Os'],'architecture':stock['Architecture'],'garm_sha256':a[0],'unchanged_binary_bytes':True,'regular_single_link_copy':True,'exact_managed_environment':True,'direct_version_nonroot_readonly_no_network':True,'provider_added':False,'provider_inspection_qualified':False,'deployment_authorized':False,'scope':'Disposable artifact/layout compatibility only; no configuration, enrollment, host adoption or activation.'}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(record,indent=2))
+print('PASS disposable managed executable layout only; no deployment or provider qualification')
+PYMETA
 # Positive owner-read controls prove the paths/mounts work before denial tests.
 docker run --rm --network none "${base[@]}" --user 65532:65532 --mount "type=bind,src=$work/fixture/gateway-canary,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/canary >/dev/null 2>&1'
 docker run --rm --network none "${base[@]}" --user 65531:65531 --mount "type=bind,src=$work/fixture/private,dst=/other-role,readonly" --entrypoint /bin/sh "$image" -ec 'cat /other-role/config.toml >/dev/null 2>&1'

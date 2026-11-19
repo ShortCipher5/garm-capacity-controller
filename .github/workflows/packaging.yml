@@ -70,7 +70,9 @@ jobs:
         if: always()
         with:
           name: garm-nonroot-lab-public-status
-          path: qualification-results/garm-nonroot-lab.json
+          path: |
+            qualification-results/garm-nonroot-lab.json
+            qualification-results/garm-managed-layout-lab.json
           if-no-files-found: ignore
           retention-days: 7
   patched-garm-state-transfer-lab:
