@@ -216,6 +216,42 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	if err != nil || beforePreview.Sequence != afterPreview.Sequence || len(afterPreview.Grants) != 0 {
 		t.Fatal("read plan mutated ledger", err)
 	}
+	advisory, err := NewAdvisoryReader(store, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.RecordUsageSample(ctx, "host", time.Now().Add(-3*time.Minute), beforePreview.Config.Hosts["host"].Budget.CPU, 0, 0, "guest-state"); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.RecordUsageSample(ctx, "host", time.Now().Add(-2*time.Second), beforePreview.Config.Hosts["host"].Budget.CPU, 0, 0, "foreign-source"); err != nil {
+		t.Fatal(err)
+	}
+	missing, err := advisory.ReadPlan(ctx)
+	if err != nil || len(missing.Pressure) != 1 || missing.Pressure[0].State != "missing_or_stale_not_headroom" || missing.Pools[0].Additional != 1 {
+		t.Fatalf("missing monitoring %+v %v", missing, err)
+	}
+	if err = store.RecordUsageSample(ctx, "host", time.Now().Add(-1500*time.Millisecond), 0, 0, 0, "guest-state"); err != nil {
+		t.Fatal(err)
+	}
+	low, err := advisory.ReadPlan(ctx)
+	if err != nil || low.Pressure[0].State != "partial_sample_not_headroom" || low.Pools[0].Additional != 1 {
+		t.Fatalf("low partial sample %+v %v", low, err)
+	}
+	if err = store.RecordUsageSample(ctx, "host", time.Now().Add(-time.Second), beforePreview.Config.Hosts["host"].Budget.CPU, 0, 0, "guest-state"); err != nil {
+		t.Fatal(err)
+	}
+	chargedBefore, err := store.ReadBrokerGrantState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suppressed, err := advisory.ReadPlan(ctx)
+	if err != nil || suppressed.Pools[0].Additional != 0 || suppressed.Pools[0].SuppressedByPressure != 1 || suppressed.RemainingJobs != 1 || suppressed.Pressure[0].State != "high_partial_pressure_suppressed" || suppressed.Pools[0].Charged != preview.Pools[0].Charged {
+		t.Fatalf("pressure projection %+v %v", suppressed, err)
+	}
+	chargedAfter, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || chargedAfter.Sequence != chargedBefore.Sequence || len(chargedAfter.Grants) != 0 {
+		t.Fatal("advisory wrote ledger", err)
+	}
 	poolRow["flavor"] = "changed-outside-controller"
 	if _, err := previewService.ReadPlan(ctx); err == nil {
 		t.Fatal("drifted pool ownership produced a plan")

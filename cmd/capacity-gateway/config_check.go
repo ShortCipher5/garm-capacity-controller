@@ -49,6 +49,13 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if allocatorSource != nil {
 		allocatorSource.Close()
 	}
+	advisorySource, advisoryErr := allocatorAdvisorySource(c)
+	if advisoryErr != nil {
+		return fail()
+	}
+	if advisorySource != nil {
+		advisorySource.Close()
+	}
 	loopback := func(address string) bool {
 		host, port, e := net.SplitHostPort(address)
 		ip := net.ParseIP(host)

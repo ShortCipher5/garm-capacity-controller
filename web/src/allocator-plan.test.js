@@ -11,3 +11,9 @@ test('plan read cannot restore a disconnected session and only uses fixed GET',a
  let finish;const calls=[];const session=new ReadSession(async(url,opt)=>{calls.push([url,opt]);if(url.endsWith('/overview'))return{ok:true,json:async()=>overview};return new Promise(resolve=>finish=resolve);});
  await session.connect('a'.repeat(64));const pending=session.allocatorPlanSnapshot();session.disconnect();finish({ok:true,json:async()=>view()});await assert.rejects(pending,SessionEnded);assert.equal(calls[1][0],'/admin/api/v1/allocator-plan');assert.equal(calls[1][1].method,'GET');assert.equal(calls[1][1].signal.aborted,true);
 });
+test('monitoring veto remains distinct from capacity and rejects malformed fields',()=>{
+ const v=view();v.pressure=[{host:'host',state:'missing_or_stale_not_headroom',sampled_at:'0001-01-01T00:00:00Z'}];v.pools[0].suppressed_by_pressure=1;
+ assert.equal(validateAllocatorPlan(v,n).pools[0].charged.runners,1);
+ v.pressure[0].state='free_capacity';assert.throws(()=>validateAllocatorPlan(v,n));
+ v.pressure[0].state='partial_sample_not_headroom';v.pools[0].suppressed_by_pressure=-1;assert.throws(()=>validateAllocatorPlan(v,n));
+});

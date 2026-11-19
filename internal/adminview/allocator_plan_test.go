@@ -54,3 +54,19 @@ func TestAllocatorPlanReadOnlyAuthAndFailure(t *testing.T) {
 		t.Fatal("missing source zero plan", w.Code)
 	}
 }
+
+func TestAllocatorPlanIndependentOfGrantLoop(t *testing.T) {
+	h, _, token := fixture(t)
+	p := &planFixture{}
+	h.SetAllocatorPlanSource(p)
+	if w := request(t, h, "GET", "/admin/api/v1/allocator-plan", token); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if h.allocatorStatus != nil || p.reads != 1 {
+		t.Fatal("advisory configured grant lifecycle")
+	}
+	h.SetAllocatorPlanSource(nil)
+	if w := request(t, h, "GET", "/admin/api/v1/allocator-plan", token); w.Code != 503 {
+		t.Fatal(w.Code)
+	}
+}
