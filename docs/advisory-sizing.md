@@ -16,7 +16,8 @@ configuration of this reader never implies the grant loop is running.
 
 Monitoring is a veto only: any actual `guest-state` sample in the last two minutes
 at or above 90% of a configured CPU/RAM/disk budget suppresses new proposed
-assignments on that host. This short high-water window avoids immediately undoing
+assignments on that host. The advisory planner can instead choose another
+already-eligible host using the same canonical budgets and charges. This short high-water window avoids immediately undoing
 a veto after one lower sample. These are partial guest measurements, not physical
 host totals. Missing, stale, foreign-source or low measurements do not establish
 headroom. The baseline planner still requires its independent fresh host and
@@ -26,9 +27,12 @@ busy, creating, unknown, outstanding-grant or in-flight accounting.
 At most 64 hosts and 1,000 recent samples per host are examined. A full sample
 window suppresses new proposals rather than silently treating truncated history
 as low pressure. More than 64 participating hosts returns unavailable. Resource
-threshold arithmetic is overflow-safe. Suppressed queued assignments return to
-the displayed unallocated count; warm suppression does not invent queued jobs.
-No rerouting or capacity increase is inferred. The existing allocation comparison
+threshold arithmetic is overflow-safe. Queued items that still cannot fit remain in the displayed unallocated count;
+warm suppression does not invent queued jobs. The per-pool suppression count
+is the net decrease in additional proposals versus the same snapshot without
+the veto; same-pool placements on an eligible alternate host are not suppressed.
+This is advisory placement selection, not physical runner relocation. No
+capacity increase is inferred. The existing allocation comparison
 shows monitoring diagnostics and suppression separately from observed supply.
 
 This is advisory sizing, not automatic cross-repository scaling or a claim of

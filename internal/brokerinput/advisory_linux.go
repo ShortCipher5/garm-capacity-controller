@@ -37,11 +37,12 @@ type PressureStatus struct {
 
 const pressureAge = 2 * time.Minute
 
-func (p *planReader) applyPressure(ctx context.Context, state admission.BrokerGrantState, plan capacitybroker.JobPlan, out *ReadPlan, now time.Time) error {
+func (p *planReader) readPressure(ctx context.Context, state admission.BrokerGrantState, now time.Time) ([]PressureStatus, map[string]bool, error) {
+	statuses := []PressureStatus{}
 	// Bound both database work and returned diagnostics. Large installations must
 	// be scoped rather than silently skipping participating hosts.
 	if len(state.Config.Hosts) > 64 {
-		return capacitybroker.ErrSnapshot
+		return nil, nil, capacitybroker.ErrSnapshot
 	}
 	ids := make([]string, 0, len(state.Config.Hosts))
 	for id := range state.Config.Hosts {
@@ -52,7 +53,7 @@ func (p *planReader) applyPressure(ctx context.Context, state admission.BrokerGr
 	for _, id := range ids {
 		rows, err := p.store.UsageHistory(ctx, id, now.Add(-pressureAge), 1000)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		status := PressureStatus{Host: id, State: "missing_or_stale_not_headroom"}
 		// Oldest-first history may truncate newer data. Refuse to characterize it
@@ -76,38 +77,28 @@ func (p *planReader) applyPressure(ctx context.Context, state admission.BrokerGr
 				blocked[id] = true
 			}
 		}
-		out.Pressure = append(out.Pressure, status)
+		statuses = append(statuses, status)
 	}
-	suppressPressure(plan, out, blocked)
-	return nil
+	return statuses, blocked, nil
 }
 func pressureHigh(v admission.UsageSample, b admission.Resources) bool {
 	// ceil(90% of budget), calculated without multiplication overflow.
 	high := func(used, limit int64) bool { return limit > 0 && used >= limit-limit/10 }
 	return high(v.CPUUsedMillis, b.CPU) || high(v.RAMUsedMiB, b.RAM) || high(v.DiskUsedMiB, b.Disk)
 }
-func suppressPressure(plan capacitybroker.JobPlan, out *ReadPlan, blocked map[string]bool) {
-	for _, a := range plan.Assignments {
-		if !blocked[a.Host] {
-			continue
+
+// advisoryStock avoids vetoed hosts only for NEW placements, after canonical
+// charges and provisional supply have been mapped. It cannot enable any host.
+func advisoryStock(snapshot capacitybroker.Snapshot, policy admission.BrokerPolicy, observed garmapi.DemandObservation, opt capacitybroker.Options, blocked map[string]bool) (capacitybroker.JobPlan, error) {
+	hosts := make(map[string]capacitybroker.Host, len(snapshot.Hosts))
+	for id, h := range snapshot.Hosts {
+		if blocked[id] {
+			h.AcceptNew = false
 		}
-		for i := range out.Pools {
-			row := &out.Pools[i]
-			if row.Pool != a.Pool {
-				continue
-			}
-			row.Additional--
-			row.SuppressedByPressure++
-			if a.Warm {
-				row.AdditionalWarm--
-			} else {
-				out.RemainingJobs++
-			}
-			break
-		}
+		hosts[id] = h
 	}
-	// Existing stock supply, charged reservations, pending grants and unknown
-	// work are intentionally untouched. Suppression does not free any capacity.
+	snapshot.Hosts = hosts
+	return Stock(snapshot, policy, observed, opt)
 }
 
 // AdvisoryLoop refreshes a cache of read-only projections. It contains no

@@ -5,22 +5,11 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 	"math"
+	"reflect"
 	"testing"
 	"time"
 )
 
-func TestPressureOnlySuppressesNewAssignments(t *testing.T) {
-	out := ReadPlan{RemainingJobs: 2, Pools: []ReadPlanPool{{Pool: "p", Additional: 3, AdditionalWarm: 1, Charged: admission.Resources{Runners: 9}, CoveredByIdle: 1, CoveredByGrant: 2, DeferredByInflight: 3}}}
-	plan := capacitybroker.JobPlan{Plan: capacitybroker.Plan{Assignments: []capacitybroker.Assignment{{Pool: "p", Host: "hot", JobID: "j"}, {Pool: "p", Host: "hot", Warm: true}, {Pool: "p", Host: "other", JobID: "k"}}}}
-	suppressPressure(plan, &out, map[string]bool{"hot": true})
-	row := out.Pools[0]
-	if row.Additional != 1 || row.AdditionalWarm != 0 || row.SuppressedByPressure != 2 || out.RemainingJobs != 3 || row.Charged.Runners != 9 || row.CoveredByIdle != 1 || row.CoveredByGrant != 2 || row.DeferredByInflight != 3 {
-		t.Fatal(out)
-	}
-	if len(plan.Assignments) != 3 {
-		t.Fatal("mutated planner")
-	}
-}
 func TestPressureThresholdBoundaries(t *testing.T) {
 	for _, limit := range []int64{1, 10, 101, math.MaxInt64} {
 		threshold := limit - limit/10
@@ -130,5 +119,87 @@ func TestAdvisoryFailureClearsPreviousCache(t *testing.T) {
 			t.Fatal("failure kept prior result")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAdvisoryPressureFitsAlternateWithoutChangingOccupancy(t *testing.T) {
+	snapshot, policy, demand, opt := fixture()
+	snapshot.Hosts["other"] = snapshot.Hosts["host"]
+	p := snapshot.Pools[pool]
+	p.Hosts = append(p.Hosts, "other")
+	snapshot.Pools[pool] = p
+	baseline, err := Stock(snapshot, policy, demand, opt)
+	if err != nil || len(baseline.Assignments) != 1 || baseline.Assignments[0].Host != "host" {
+		t.Fatalf("baseline %+v %v", baseline, err)
+	}
+	plan, err := advisoryStock(snapshot, policy, demand, opt, map[string]bool{"host": true})
+	if err != nil || len(plan.Assignments) != 1 || plan.Assignments[0].Host != "other" || len(plan.RemainingJobs) != 0 {
+		t.Fatalf("avoidable backlog %+v %v", plan, err)
+	}
+	if !snapshot.Hosts["host"].AcceptNew {
+		t.Fatal("mutated source host")
+	}
+	// Full unknown occupancy on the vetoed host still exhausts global capacity.
+	snapshot.Charges = []capacitybroker.Charge{{ID: "unknown", Host: "host", Pool: pool, Resources: snapshot.Global}}
+	want := append([]capacitybroker.Charge(nil), snapshot.Charges...)
+	plan, err = advisoryStock(snapshot, policy, demand, opt, map[string]bool{"host": true})
+	if err != nil || len(plan.Assignments) != 0 || len(plan.RemainingJobs) != 1 || !reflect.DeepEqual(want, snapshot.Charges) {
+		t.Fatalf("unknown charge discarded %+v %v", plan, err)
+	}
+}
+func TestAdvisoryPressureRetainsHotHostExistingIdleAndGrants(t *testing.T) {
+	for _, kind := range []string{"idle", "grant", "inflight"} {
+		t.Run(kind, func(t *testing.T) {
+			s, p, d, o := fixture()
+			s.Charges = []capacitybroker.Charge{{ID: "existing", Host: "host", Pool: pool, Resources: s.Pools[pool].Size}}
+			if kind == "idle" {
+				d.Supply[0].Idle = 1
+			} else {
+				v := s.Pools[pool]
+				if kind == "grant" {
+					v.OutstandingGrants = 1
+				} else {
+					v.Inflight = 1
+				}
+				v.PendingWarm = 1
+				s.Pools[pool] = v
+			}
+			before, err := Stock(s, p, d, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := advisoryStock(s, p, d, o, map[string]bool{"host": true})
+			if err != nil || len(after.Assignments) != 0 || !reflect.DeepEqual(before.CoveredByIdle, after.CoveredByIdle) || !reflect.DeepEqual(before.CoveredByGrant, after.CoveredByGrant) || !reflect.DeepEqual(before.DeferredByInflight, after.DeferredByInflight) {
+				t.Fatalf("coverage changed %+v %+v %v", before, after, err)
+			}
+		})
+	}
+}
+func TestAdvisoryPressureCannotEnableOrOverfillAlternative(t *testing.T) {
+	for _, kind := range []string{"disabled", "cpu", "ram", "disk", "not-pool-member"} {
+		t.Run(kind, func(t *testing.T) {
+			s, p, d, o := fixture()
+			h := s.Hosts["host"]
+			switch kind {
+			case "disabled":
+				h.AcceptNew = false
+			case "cpu":
+				h.Budget[0] = 999
+			case "ram":
+				h.Budget[1] = 999
+			case "disk":
+				h.Budget[2] = 999
+			}
+			s.Hosts["other"] = h
+			if kind != "not-pool-member" {
+				v := s.Pools[pool]
+				v.Hosts = append(v.Hosts, "other")
+				s.Pools[pool] = v
+			}
+			plan, err := advisoryStock(s, p, d, o, map[string]bool{"host": true})
+			if err != nil || len(plan.Assignments) != 0 || len(plan.RemainingJobs) != 1 {
+				t.Fatalf("invalid alternative %+v %v", plan, err)
+			}
+		})
 	}
 }

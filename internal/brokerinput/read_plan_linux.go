@@ -75,7 +75,20 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	}
 	opt := p.opt
 	opt.Now = time.Now().UTC()
-	plan, _, err := enrolledCycle(state, charges, observed, identity, opt, time.Minute)
+	snapshot, _, err := enrolledPlanningSnapshot(state, charges, observed, identity, opt)
+	if err != nil {
+		return ReadPlan{}, err
+	}
+	plan, err := Stock(snapshot, state.Policy, observed, opt)
+	baseline := plan
+	var pressure []PressureStatus
+	if err == nil && p.pressure {
+		var blocked map[string]bool
+		pressure, blocked, err = p.readPressure(ctx, state, opt.Now)
+		if err == nil {
+			plan, err = advisoryStock(snapshot, state.Policy, observed, opt, blocked)
+		}
+	}
 	if err != nil {
 		return ReadPlan{}, err
 	}
@@ -87,14 +100,17 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 		return ReadPlan{}, capacitybroker.ErrSnapshot
 	}
 	result := projectReadPlan(state, observed, plan, now, opt.MaxAge)
+	result.Pressure = pressure
 	if p.pressure {
-		if err := p.applyPressure(ctx, state, plan, &result, now); err != nil {
-			return ReadPlan{}, err
-		}
-		now = time.Now().UTC()
-		current, err = p.store.ReadBrokerGrantState(ctx)
-		if err != nil || ctx.Err() != nil || !current.Ready || current.Sequence != state.Sequence || current.Policy.Revision != state.Policy.Revision {
-			return ReadPlan{}, capacitybroker.ErrSnapshot
+		// Net additional proposals withheld compared with the same snapshot without
+		// the monitoring veto, per pool. Same-pool alternate-host placements are
+		// not counted as suppressed; this is not physical runner relocation.
+		before := projectReadPlan(state, observed, baseline, now, opt.MaxAge)
+		for i := range result.Pools {
+			difference := before.Pools[i].Additional - result.Pools[i].Additional
+			if difference > 0 {
+				result.Pools[i].SuppressedByPressure = difference
+			}
 		}
 	}
 	if !result.ExpiresAt.After(now) {

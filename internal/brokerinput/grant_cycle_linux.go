@@ -79,11 +79,13 @@ func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garma
 	return GrantCycleResult{BatchID: batch.ID, Plan: plan, Grants: grants}, nil
 }
 
-func enrolledCycle(state admission.BrokerGrantState, charges []admission.BrokerPlanningCharge, observation garmapi.DemandObservation, source string, opt capacitybroker.Options, ttl time.Duration) (capacitybroker.JobPlan, admission.BrokerGrantBatch, error) {
-	fail := func() (capacitybroker.JobPlan, admission.BrokerGrantBatch, error) {
-		return capacitybroker.JobPlan{}, admission.BrokerGrantBatch{}, capacitybroker.ErrSnapshot
+// enrolledPlanningSnapshot validates the exact stock/profile/ledger join without
+// creating a grant batch or changing any capacity accounting.
+func enrolledPlanningSnapshot(state admission.BrokerGrantState, charges []admission.BrokerPlanningCharge, observation garmapi.DemandObservation, source string, opt capacitybroker.Options) (capacitybroker.Snapshot, map[string]map[string]admission.BrokerProfileDomain, error) {
+	fail := func() (capacitybroker.Snapshot, map[string]map[string]admission.BrokerProfileDomain, error) {
+		return capacitybroker.Snapshot{}, nil, capacitybroker.ErrSnapshot
 	}
-	if source == "" || observation.SourceIdentity() != source || len(state.PoolProfiles) != len(state.Config.Pools) || ttl < time.Minute || ttl > time.Hour {
+	if source == "" || observation.SourceIdentity() != source || len(state.PoolProfiles) != len(state.Config.Pools) {
 		return fail()
 	}
 	observed := map[string]garmapi.DiscoveredPool{}
@@ -122,6 +124,20 @@ func enrolledCycle(state admission.BrokerGrantState, charges []admission.BrokerP
 		return fail()
 	}
 	if err = inflight(&snapshot, state, observation); err != nil {
+		return fail()
+	}
+	return snapshot, domains, nil
+}
+
+func enrolledCycle(state admission.BrokerGrantState, charges []admission.BrokerPlanningCharge, observation garmapi.DemandObservation, source string, opt capacitybroker.Options, ttl time.Duration) (capacitybroker.JobPlan, admission.BrokerGrantBatch, error) {
+	fail := func() (capacitybroker.JobPlan, admission.BrokerGrantBatch, error) {
+		return capacitybroker.JobPlan{}, admission.BrokerGrantBatch{}, capacitybroker.ErrSnapshot
+	}
+	if ttl < time.Minute || ttl > time.Hour {
+		return fail()
+	}
+	snapshot, domains, err := enrolledPlanningSnapshot(state, charges, observation, source, opt)
+	if err != nil {
 		return fail()
 	}
 	plan, err := Stock(snapshot, state.Policy, observation, opt)
