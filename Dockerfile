@@ -52,6 +52,22 @@ COPY --from=go-build /out/capacity-native-bundle /capacity-native-bundle
 FROM scratch AS provider-artifact
 COPY --from=go-build /out/capacity-provider /capacity-provider
 
+# Optional source-pinned, stdlib-only archive metadata proof helper. No service,
+# host installation or default target depends on it.
+FROM go-build AS ancillary-proof-build
+COPY --from=ancillary-proof-source /neutral.go /src/ancillary-proof/neutral.go
+COPY --from=ancillary-proof-source /neutral_test.go /src/ancillary-proof/neutral_test.go
+COPY --from=ancillary-proof-source /final_v28.go /src/ancillary-proof/final_v28.go
+COPY --from=ancillary-proof-source /final_v28_test.go /src/ancillary-proof/final_v28_test.go
+COPY --from=ancillary-proof-source /main.go /src/ancillary-proof/main.go
+COPY --from=ancillary-proof-source /main_test.go /src/ancillary-proof/main_test.go
+COPY --from=ancillary-proof-source /LICENSE /src/ancillary-proof/LICENSE
+COPY --from=ancillary-proof-source /NOTICE /src/ancillary-proof/NOTICE
+RUN CGO_ENABLED=0 go test -p 1 ./ancillary-proof && \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /ancillary-proof ./ancillary-proof
+FROM scratch AS ancillary-proof-artifact
+COPY --from=ancillary-proof-build --chmod=0555 /ancillary-proof /ancillary-proof
+
 FROM debian:bookworm-slim AS runtime-base
 USER 65532:65532
 WORKDIR /

@@ -287,5 +287,15 @@ deploy/runtime/garm-least-privilege.sh --joined-service \
 # trap below remains installed and will remove it only after this optional phase.
 if [[ ${GARM_ARCHIVE_FORMAT_PROBE:-false} = true ]]; then
   [[ ${GITHUB_EVENT_NAME:-} = workflow_dispatch ]]
+  # Build only when explicitly selected. The named context contains only this
+  # explicit reviewed source list, never the deploy tree or private fixtures.
+  mkdir -m 0700 "$work/ancillary-proof-source"
+  for source in neutral.go neutral_test.go final_v28.go final_v28_test.go main.go main_test.go LICENSE NOTICE; do
+    path="deploy/runtime/ancillary-proof/$source"
+    [[ -f $path && ! -L $path ]]
+    install -m 0444 "$path" "$work/ancillary-proof-source/$source"
+  done
+  timeout --kill-after=10s 180s docker build -f "$work/locked.Dockerfile" --target ancillary-proof-artifact --build-context "ancillary-proof-source=$work/ancillary-proof-source" --output "type=local,dest=$work/ancillary-proof" .
+  export GARM_ANCILLARY_PROOF="$work/ancillary-proof/ancillary-proof"
   timeout --kill-after=10s 360s python3 deploy/runtime/probe-image-save-format.py
 fi
