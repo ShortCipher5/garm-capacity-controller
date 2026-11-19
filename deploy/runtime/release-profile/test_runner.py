@@ -1,3 +1,4 @@
+import ast,contextlib,io
 import copy,hashlib,json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +36,36 @@ class RunnerTest(unittest.TestCase):
     (root/'fixture.py').unlink()
     (root/'fixture.py').write_bytes(b'x'*(1024*1024+1))
     with self.assertRaises(run.Failed):run.harness_hashes()
+ def test_recreate_labels_are_literal_and_generic_failure_never_prints_raw_error(self):
+  tree=ast.parse(Path(run.__file__).read_text())
+  function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+  block=next(n for n in function.body if isinstance(n,ast.Try))
+  expected=['recreate-stop-old-anchor','recreate-start-anchor','recreate-inspect-anchor',
+   'recreate-anchor-health','recreate-read-namespace','recreate-namespace-different',
+   'recreate-client-network','recreate-start-garm','recreate-garm-ui',
+   'recreate-garm-identity','recreate-stop-garm','recreate-state-continuity','recreate-stop-new-anchor']
+  labels=[]
+  for statement in block.body:
+   if isinstance(statement,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='phase' for t in statement.targets):
+    # Every stage label, not just recreate, is a literal or existing fixed linkage label.
+    if isinstance(statement.value,ast.Constant) and isinstance(statement.value.value,str) and statement.value.value.startswith('recreate'):
+     labels.append(statement.value.value)
+  self.assertEqual(labels,expected)
+  begin=next(i for i,n in enumerate(block.body) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value==expected[0])
+  end=next(i for i,n in enumerate(block.body[begin:],begin) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value=='result')
+  for node in ast.walk(ast.Module(body=block.body[begin:end],type_ignores=[])):
+   if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='phase' for t in node.targets):
+    self.assertIsInstance(node.value,ast.Constant)
+    self.assertIn(node.value.value,expected)
+  # Execute ONLY the existing error handler around a synthetic exception. No
+  # runner body, command, Docker, network, filesystem cleanup or retry executes.
+  handler=ast.Try(body=[ast.Raise(exc=ast.Call(func=ast.Name(id='RuntimeError',ctx=ast.Load()),args=[ast.Constant(value='PRIVATE path=/secret nonce=raw stderr=raw')],keywords=[]),cause=None)],handlers=block.handlers,orelse=[],finalbody=[])
+  code=compile(ast.fix_missing_locations(ast.Module(body=[handler],type_ignores=[])),'synthetic-error-handler','exec')
+  for label in expected:
+   output=io.StringIO()
+   with contextlib.redirect_stderr(output),patch.object(run,'command',side_effect=AssertionError('no execution')):
+    with self.assertRaises(run.Failed):exec(code,{**vars(run),'phase':label})
+   self.assertEqual(output.getvalue(),'Disposable image/profile test failed at '+label+'\n')
  def test_actual_rendered_recipe_uses_retained_pins_and_known_graph(self):
   text,lock=prepare.render();self.assertNotIn('{{',text);self.assertNotIn('latest',text)
   self.assertEqual(sum(l.startswith('FROM ') for l in text.splitlines()),6)
