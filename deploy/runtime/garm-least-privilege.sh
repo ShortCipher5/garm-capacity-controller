@@ -5,6 +5,9 @@ cd "$(dirname "$0")/../.."
 : "${RUNNER_TEMP:?A disposable GitHub-hosted runner workspace is required}"
 [[ ${GITHUB_ACTIONS:-} = true && ${RUNNER_ENVIRONMENT:-} = github-hosted ]] || { echo 'Refusing non-hosted execution' >&2; exit 1; }
 # Closed test variants only; no caller-supplied UID/path/runtime configuration.
+joined=false
+joined_gateway=
+joined_ingress=
 lab_uid=65531
 specimen=standalone
 workdir_args=()
@@ -17,6 +20,18 @@ case "${1:-}" in
     specimen=prospective-service
     workdir_args=(--workdir /)
     result_name=garm-prospective-service-lab.json
+    ;;
+  --joined-service)
+    [[ $# = 4 ]] || exit 1
+    joined=true
+    gateway_image=$2; ingress_image=$3; ledger_image=$4
+    for pinned in "$gateway_image" "$ingress_image" "$ledger_image"; do
+      [[ $pinned =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+    done
+    lab_uid=65530
+    specimen=prospective-service
+    workdir_args=(--workdir /)
+    result_name=garm-joined-stock-lab.json
     ;;
   *) echo 'Unknown disposable specimen' >&2; exit 1 ;;
 esac
@@ -31,6 +46,9 @@ cleanup() {
   if [[ $outcome != 0 ]]; then
     docker inspect "$name" 2>/dev/null | python3 -c 'import json,sys;items=json.load(sys.stdin);print(json.dumps({"container_not_created":True} if not items else {"status":items[0]["State"]["Status"],"exit":items[0]["State"]["ExitCode"],"oom":items[0]["State"]["OOMKilled"]}))' || true
   fi
+  for child in "$joined_gateway" "$joined_ingress"; do
+    if [[ -n $child ]]; then docker rm -f "$child" >/dev/null 2>&1 || true; fi
+  done
   docker rm -f "$name" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
   return "$outcome"
@@ -40,6 +58,7 @@ trap cleanup EXIT
 python3 deploy/runtime/test_garm_native_executable.py
 python3 deploy/runtime/test_garm_lifetime_evidence.py
 python3 deploy/runtime/test_garm_service_specimen.py
+python3 deploy/runtime/test_garm_joined.py
 docker pull "$image"
 docker pull "$python_image"
 # Validate the pulled platform metadata once; all execution below uses its ID.
@@ -140,6 +159,7 @@ print("PASS actual Garm PID1 has expected UID/GID, all capability sets zero, NNP
 start_garm
 probe
 verify_boundary
+if [[ $joined = true ]]; then source deploy/runtime/garm-joined.sh; fi
 # Stop the ONLY disposable writer before inspecting Garm's own database.
 docker stop --time 60 "$name" >/dev/null
 [[ $(docker inspect --format '{{.State.ExitCode}}' "$name") = 0 ]]
