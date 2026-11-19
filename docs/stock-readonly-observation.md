@@ -42,3 +42,57 @@ Tests inject only descriptions into pure checks and exercise canceled/nil calls
 before I/O. No test launches Docker or successfully invokes protected observation.
 Root-owned protected measurement, actual v2 artifact review, authentication and
 Menkent qualification remain separate prerequisites.
+
+## Held listener comparison primitive
+
+The private listener-set comparison now distinguishes four-port preboot from a
+five-port description only when a retained accepting IPv4 TCP socket has exact
+address `127.0.0.1:9445`, no reuse-port setting, and an inode matching the table's
+single extra listener. Its actual descriptor identity is checked before and after
+comparison; closing or replacing it invalidates the comparison. Tests create only
+local disposable sockets and synthetic tables, not a protected runtime.
+
+The actual observer still calls only the four-port branch. No supervised observer,
+namespace-opening capability, server, authentication or session is added. A later
+sealed lifecycle must establish the provenance of the namespace table and socket,
+retain and revoke the listener, and prevent descriptor handoff. This comparison
+cannot establish sole custody, atomicity, or immunity to privileged duplication or
+changes between/after samples. It is not an admission or connection permit.
+
+## Retained preboot identity
+
+A separate private constructor now brackets retention of the actual observed
+stock network nsfs descriptor with two complete protected preboot observations,
+within one five-second context budget. It compares exact role PIDs, process start
+times, PID/network namespace identities and protected profile, plus nsfs inode.
+The descriptor is neither exported nor usable through an accessor. Recheck repeats
+the actual preboot observer; any failure closes and clears the retained object.
+Explicit close is idempotent. Tests use canceled contexts, ordinary disposable
+files and pure lifetime comparisons, not successful injected runtime admissions.
+
+This preserves a namespace reference, not a live process guarantee. It does not
+freeze processes or make sequential observations atomic. The holder alone remains preboot-only: adding a fifth listener causes its
+preboot recheck to fail and revoke. Only the separate private lifecycle below
+owns the supervised transition; the holder exposes no namespace capability.
+
+## Private supervised lifecycle candidate
+
+The private lifecycle now consumes the retained holder, rechecks exact preboot,
+then creates only `127.0.0.1:9445` on a dedicated locked OS thread in that retained
+network namespace. It verifies entry and restoration against actual namespace
+inodes; restoration failure closes the socket and exits the still-locked thread,
+so that thread is never returned to the Go pool. The constructor joins the worker
+before releasing the namespace holder. It then runs the full observer with the
+actual held accepting socket identity and exact five-port table, retaining the
+same role lifetime/profile identity. Drift, cancellation or failure revokes both
+socket and binding. No Accept/Serve, credentials, session, exported handle or
+production caller exists.
+
+Local tests cover only refusal, close/revocation and race-safe lifetime cleanup;
+no namespace transition or lifecycle bind has been executed. Cross-namespace
+creation/restoration and cancellation still require separately approved disposable
+qualification. The context deadlines bound context-aware operations, not mutex
+acquisition, synchronous filesystem/hash operations or kernel calls. Cancellation
+cleanup can therefore wait for an in-progress recheck; it is not a hard real-time
+revocation guarantee. Sampled checks still cannot exclude privileged interference
+or prove exclusive socket custody.

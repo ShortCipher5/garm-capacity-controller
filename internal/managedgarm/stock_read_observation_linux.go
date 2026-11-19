@@ -40,6 +40,8 @@ type stockReadSample struct {
 type stockReadObservation struct {
 	at      time.Time
 	samples [3]stockReadSample
+	profile stockReadProfile
+	pids    [3]int
 }
 
 func validStockReadProfile(p stockReadProfile) bool {
@@ -175,6 +177,9 @@ func sampleStockReadProcess(pid int) (stockReadSample, error) {
 	return stockReadSample{start, net, ns}, nil
 }
 func stockReadListeners(tables [2][]byte) bool {
+	return stockReadListenerSet(tables, nil)
+}
+func stockReadPrebootListeners(tables [2][]byte) bool {
 	seen := map[uint64]bool{}
 	for i, raw := range tables {
 		lines := strings.Split(string(raw), "\n")
@@ -207,6 +212,11 @@ func stockReadListeners(tables [2][]byte) bool {
 // caller exists yet. Success is only a bracketed preboot snapshot: a privileged
 // actor can change the world after return; no continuity/atomicity is claimed.
 func observeStockReadOnly(ctx context.Context) (stockReadObservation, error) {
+	return observeStockReadPhase(ctx, nil)
+}
+
+// The sole supervised caller is the private lifecycle holding its actual socket.
+func observeStockReadPhase(ctx context.Context, held *stockReadListener) (stockReadObservation, error) {
 	fail := func() (stockReadObservation, error) { return stockReadObservation{}, ErrBoundary }
 	if ctx == nil || ctx.Err() != nil || os.Geteuid() != 0 {
 		return fail()
@@ -341,7 +351,7 @@ func observeStockReadOnly(ctx context.Context) (stockReadObservation, error) {
 			return fail()
 		}
 	}
-	if !stockReadListeners(tables) {
+	if !stockReadListenerSet(tables, held) {
 		return fail()
 	}
 	for i, id := range p.IDs {
@@ -363,7 +373,7 @@ func observeStockReadOnly(ctx context.Context) (stockReadObservation, error) {
 	if e != nil || again != p || ctx.Err() != nil {
 		return fail()
 	}
-	return stockReadObservation{at: time.Now().UTC(), samples: before}, nil
+	return stockReadObservation{at: time.Now().UTC(), samples: before, profile: p, pids: [3]int{c[0].State.Pid, c[1].State.Pid, c[2].State.Pid}}, nil
 }
 
 func stockReadProfileFile(root *os.Root) ([]byte, os.FileInfo, error) {

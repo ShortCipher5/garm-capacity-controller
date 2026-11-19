@@ -1,0 +1,38 @@
+package managedprojection
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedgarm"
+)
+
+func TestProjectionBoundsAndInputOwnership(t *testing.T) {
+	providers := map[string]bool{"native": true}
+	repositories := map[string]bool{"repo": true}
+	raw := []byte(`[{"id":"pool","provider_name":"native","repo_id":"repo","tags":[{"name":"linux","secret":"hidden"}]}]`)
+	before := bytes.Clone(raw)
+	out, err := Demand(raw, "/api/v1/pools", providers, repositories)
+	if err != nil || string(out) != `[{"id":"pool","provider_name":"native","repo_id":"repo","tags":[{"name":"linux"}]}]` {
+		t.Fatalf("projection: %s %v", out, err)
+	}
+	out[0] = '!'
+	if !bytes.Equal(raw, before) || len(providers) != 1 || !providers["native"] || len(repositories) != 1 || !repositories["repo"] {
+		t.Fatal("projection mutated input")
+	}
+	oversized := []byte(strings.Repeat(" ", 4<<20+1))
+	if _, err := Instances(oversized, providers); err != managedgarm.ErrBoundary {
+		t.Fatal("inventory bound changed")
+	}
+	if _, err := Demand(oversized, "/api/v1/jobs", providers, repositories); err != managedgarm.ErrBoundary {
+		t.Fatal("demand bound changed")
+	}
+	if _, err := Demand([]byte(`[]`), "/api/v1/auth/login", providers, repositories); err != managedgarm.ErrBoundary {
+		t.Fatal("unsupported projection accepted")
+	}
+	jobs, err := Demand([]byte(`[{"repo_id":"repo","status":"queued","labels":["linux"],"secret":"hidden"},{"repo_id":"foreign","status":"queued"}]`), "/api/v1/jobs", providers, repositories)
+	if err != nil || string(jobs) != `[{"labels":["linux"],"repo_id":"repo","status":"queued"}]` {
+		t.Fatalf("jobs: %s %v", jobs, err)
+	}
+}
