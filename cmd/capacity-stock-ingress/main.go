@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
@@ -21,7 +24,12 @@ import (
 
 type config struct{ Listen, Upstream, Controller, TLSCertificate, TLSKey, StockCertificate, StockFingerprint string }
 
-func run(args []string) error {
+func run(args []string) error { return runContext(context.Background(), args) }
+
+func runContext(ctx context.Context, args []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(args) != 1 {
 		return stockingress.ErrConfiguration
 	}
@@ -75,10 +83,19 @@ func run(args []string) error {
 		return stockingress.ErrConfiguration
 	}
 	server := &http.Server{Addr: c.Listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{pair}}}
-	return server.ListenAndServeTLS("", "")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return err
+	}
+	return serveIngress(ctx, server, listener)
 }
 func main() {
-	if run(os.Args[1:]) != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if runContext(ctx, os.Args[1:]) != nil {
 		fmt.Fprintln(os.Stderr, "stock ingress unavailable")
 		os.Exit(1)
 	}

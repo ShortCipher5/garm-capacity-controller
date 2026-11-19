@@ -274,3 +274,10 @@ record={'image':image,'os':info['Os'],'architecture':info['Architecture'],'image
 print('Exact-image provider executable:',compatible,'; image default UID:',record['image_default_uid'])
 print('Installed-stack qualification: BLOCKED; no provider or runtime change attempted')
 PY
+
+# Actual stock + ingress + gateway, with no supervisor and admission unready.
+# This is separate from the synthetic inventory packaging success above.
+deploy/runtime/garm-least-privilege.sh --joined-service \
+  "$(docker image inspect --format '{{.Id}}' capacity-gateway:qualification)" \
+  "$(docker image inspect --format '{{.Id}}' "$ingress_tag")" \
+  "$(docker image inspect --format '{{.Id}}' capacity-ledger:qualification)"
