@@ -18,6 +18,7 @@ import (
 // Lifecycle methods perform actions, not grant authority; a restart coordinator
 // must independently reobserve the resulting source descriptor and topology.
 type Service struct {
+	options                        Options
 	mu                             sync.Mutex
 	boundary                       managedgarm.Specification
 	journal                        *garmmanagement.Journal
@@ -33,6 +34,10 @@ type Service struct {
 }
 
 func NewService(ctx context.Context, boundary managedgarm.Specification, journal *garmmanagement.Journal, trust *tls.Config, clientLeaf, inspectorLeaf string, providers, pools, repositories []string) (*Service, error) {
+	return NewServiceWithOptions(ctx, boundary, journal, trust, clientLeaf, inspectorLeaf, providers, pools, repositories, Options{})
+}
+
+func NewServiceWithOptions(ctx context.Context, boundary managedgarm.Specification, journal *garmmanagement.Journal, trust *tls.Config, clientLeaf, inspectorLeaf string, providers, pools, repositories []string, options Options) (*Service, error) {
 	if ctx == nil || ctx.Err() != nil || journal == nil || trust == nil || trust.ClientAuth != tls.RequireAndVerifyClientCert || trust.ClientCAs == nil || len(trust.Certificates) != 1 || trust.InsecureSkipVerify || trust.VerifyConnection != nil || trust.VerifyPeerCertificate != nil || trust.GetCertificate != nil || trust.GetConfigForClient != nil || trust.KeyLogWriter != nil {
 		return nil, managedgarm.ErrBoundary
 	}
@@ -48,7 +53,7 @@ func NewService(ctx context.Context, boundary managedgarm.Specification, journal
 	if trust.MinVersion < tls.VersionTLS13 {
 		trust.MinVersion = tls.VersionTLS13
 	}
-	s := &Service{boundary: boundary, journal: journal, trust: trust.Clone(), clientLeaf: clientLeaf, inspectorLeaf: inspectorLeaf, providers: append([]string(nil), providers...), pools: append([]string(nil), pools...), repositories: append([]string(nil), repositories...), stopped: true, terminal: make(chan error, 1)}
+	s := &Service{options: options, boundary: boundary, journal: journal, trust: trust.Clone(), clientLeaf: clientLeaf, inspectorLeaf: inspectorLeaf, providers: append([]string(nil), providers...), pools: append([]string(nil), pools...), repositories: append([]string(nil), repositories...), stopped: true, terminal: make(chan error, 1)}
 	if err := s.Resume(ctx); err != nil {
 		return nil, err
 	}
@@ -73,7 +78,7 @@ func (s *Service) Resume(ctx context.Context) error {
 			session.Close()
 		}
 	}()
-	handler, err := New(session, s.journal, s.clientLeaf, s.providers, s.pools, s.repositories)
+	handler, err := NewWithOptions(session, s.journal, s.clientLeaf, s.providers, s.pools, s.repositories, s.options)
 	if err != nil {
 		return err
 	}
