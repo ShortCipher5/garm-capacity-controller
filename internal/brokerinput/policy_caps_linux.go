@@ -16,19 +16,27 @@ import (
 
 var ErrPolicyCaps = errors.New("policy cap reconciliation unavailable; inspect managed journal")
 
+// CapPoolResult is historical reporting only, never capacity or write authority.
+type CapPoolResult struct {
+	PoolID  string `json:"pool_id"`
+	Outcome string `json:"outcome"`
+}
+
 type CapStatus struct {
-	PolicyRevision int64     `json:"policy_revision"`
-	State          string    `json:"state"`
-	LastAttempt    time.Time `json:"last_attempt,omitempty"`
-	LastSuccess    time.Time `json:"last_success,omitempty"`
-	Confirmed      int       `json:"confirmed"`
-	Skipped        int       `json:"skipped"`
-	LastRequestID  string    `json:"last_request_id,omitempty"`
+	PolicyRevision int64           `json:"policy_revision"`
+	State          string          `json:"state"`
+	LastAttempt    time.Time       `json:"last_attempt,omitempty"`
+	LastSuccess    time.Time       `json:"last_success,omitempty"`
+	Confirmed      int             `json:"confirmed"`
+	Skipped        int             `json:"skipped"`
+	LastRequestID  string          `json:"last_request_id,omitempty"`
+	PoolResults    []CapPoolResult `json:"pool_results,omitempty"`
 }
 type CapResult struct {
 	PolicyRevision     int64
 	Confirmed, Skipped int
 	LastRequestID      string
+	PoolResults        []CapPoolResult
 }
 
 // CapService only lowers positive pool maximum settings to saved policy caps.
@@ -49,7 +57,13 @@ func NewCapService(store *admission.SQLiteStore, client *managedsettings.Client,
 	}
 	return &CapService{store: store, client: client, interval: interval, status: CapStatus{State: "not_started"}}, nil
 }
-func (s *CapService) Snapshot() CapStatus { s.mu.Lock(); defer s.mu.Unlock(); return s.status }
+func (s *CapService) Snapshot() CapStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.status
+	out.PoolResults = append([]CapPoolResult(nil), s.status.PoolResults...)
+	return out
+}
 func (s *CapService) Run(ctx context.Context) error {
 	if ctx == nil {
 		return ErrPolicyCaps
@@ -85,6 +99,7 @@ func (s *CapService) Run(ctx context.Context) error {
 		s.status.Confirmed = r.Confirmed
 		s.status.Skipped = r.Skipped
 		s.status.LastRequestID = r.LastRequestID
+		s.status.PoolResults = append([]CapPoolResult(nil), r.PoolResults...)
 		if e != nil {
 			s.status.State = "blocked"
 			s.mu.Unlock()
@@ -128,6 +143,9 @@ func ReconcilePolicyCaps(ctx context.Context, store *admission.SQLiteStore, clie
 		return out, e
 	}
 	for _, target := range targets {
+		out.PoolResults = append(out.PoolResults, CapPoolResult{PoolID: target.pool, Outcome: "not_examined"})
+	}
+	for index, target := range targets {
 		if out.Confirmed >= 10 {
 			break
 		}
@@ -137,6 +155,7 @@ func ReconcilePolicyCaps(ctx context.Context, store *admission.SQLiteStore, clie
 		}
 		if target.maximum == 0 {
 			out.Skipped++
+			out.PoolResults[index].Outcome = target.skipReason
 			continue
 		}
 		id, e := capRequestID()
@@ -146,9 +165,11 @@ func ReconcilePolicyCaps(ctx context.Context, store *admission.SQLiteStore, clie
 		out.LastRequestID = id
 		_, e = client.ReduceMaximum(ctx, id, target.pool, target.fingerprint, target.maximum, fmt.Sprintf("Reconcile saved policy revision %d pool cap; no runner retirement", initial.Policy.Revision))
 		if e != nil {
+			out.PoolResults[index].Outcome = "unconfirmed"
 			return out, ErrPolicyCaps
 		}
 		out.Confirmed++
+		out.PoolResults[index].Outcome = "confirmed_reduction"
 	}
 	return out, nil
 }
@@ -156,6 +177,7 @@ func ReconcilePolicyCaps(ctx context.Context, store *admission.SQLiteStore, clie
 type capTarget struct {
 	pool, fingerprint string
 	maximum           uint64
+	skipReason        string
 }
 
 func policyCapTargets(state admission.BrokerGrantState, pools []garmapi.ManagedPool, source, controller string) ([]capTarget, error) {
@@ -182,7 +204,7 @@ func policyCapTargets(state admission.BrokerGrantState, pools []garmapi.ManagedP
 			return nil, ErrPolicyCaps
 		}
 		seen[p.ID] = true
-		t := capTarget{pool: p.ID, fingerprint: p.Fingerprint}
+		t := capTarget{pool: p.ID, fingerprint: p.Fingerprint, skipReason: capSkipReason(cap.MaxRunners, p.MaxRunners, p.MinIdleRunners)}
 		if cap.MaxRunners > 0 && cap.MaxRunners <= 1000000 && uint64(cap.MaxRunners) < p.MaxRunners && uint64(cap.MaxRunners) >= p.MinIdleRunners {
 			t.maximum = uint64(cap.MaxRunners)
 		}
@@ -200,4 +222,20 @@ func capRequestID() (string, error) {
 	b[8] = (b[8] & 63) | 128
 	s := hex.EncodeToString(b[:])
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:], nil
+}
+
+func capSkipReason(cap int64, current, idle uint64) string {
+	if cap == 0 {
+		return "zero_cap_unsupported"
+	}
+	if cap < 0 || cap > 1000000 {
+		return "unsupported_cap"
+	}
+	if uint64(cap) >= current {
+		return "no_downward_change"
+	}
+	if uint64(cap) < idle {
+		return "below_idle_minimum"
+	}
+	return "not_examined"
 }
