@@ -1,6 +1,7 @@
 import {validateDemandObserverStatus} from "./demand-observer-status.js";
 import { mixHost, validateMixView } from "./runner-mix-client.js";
 import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
+import {validateNativeRetirementStatus} from "./native-retirement-status.js";
 import {validateAllocatorPlan} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
@@ -99,6 +100,8 @@ export class ReadSession {
  #collectionGeneration=0;
   #planRequest;
  #planGeneration=0;
+  #retirementRequest;
+  #retirementGeneration=0;
   #allocatorRequest;
   #allocatorGeneration=0;
   #token = "";
@@ -130,6 +133,7 @@ export class ReadSession {
  this.#demandObserverGeneration++;this.#demandObserverRequest?.abort();this.#demandObserverRequest=undefined;
  this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
  this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
+    this.#retirementGeneration++;this.#retirementRequest?.abort();this.#retirementRequest=undefined;
  this.#planGeneration++;this.#planRequest?.abort();this.#planRequest=undefined;
     this.#allocatorGeneration++; this.#allocatorRequest?.abort(); this.#allocatorRequest=undefined;
     this.#entityGeneration++;
@@ -289,6 +293,22 @@ export class ReadSession {
       if(!response.ok)throw new Error('Allocator status unavailable.');
       const result=validateAllocatorStatus(await response.json());
       if(generation!==this.#allocatorGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async nativeRetirementStatusSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#retirementRequest?.abort(); const generation=++this.#retirementGeneration;
+    const controller=new AbortController();this.#retirementRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/native-retirement-status',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#retirementGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Native retirement status unavailable.');
+      const result=validateNativeRetirementStatus(await response.json());
+      if(generation!==this.#retirementGeneration||controller.signal.aborted)throw new SessionEnded();
       return result;
     } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
   }
