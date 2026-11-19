@@ -73,8 +73,8 @@ func TestSampleStockScalingEnrolledSourceRespectsWeights(t *testing.T) {
 		healthy bool
 		want    []StockMaximumProposal
 	}{
-		{"equal", 1, true, []StockMaximumProposal{{pool, repo, 1, 2}}},
-		{"weighted", 3, true, []StockMaximumProposal{{poolB, repoB, 1, 2}}},
+		{"equal", 1, true, []StockMaximumProposal{{pool, repo, 1, 2, new(int64)}}},
+		{"weighted", 3, true, []StockMaximumProposal{{poolB, repoB, 1, 2, new(int64)}}},
 		{"host_not_accepting", 3, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

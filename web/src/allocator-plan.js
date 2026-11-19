@@ -69,22 +69,26 @@ export function stockMaximumPreviewView(plan, comparison, now=Date.now()){
  const preview=plan?.stock_maximum_preview;
  if(preview===undefined)return null;
  const unavailable={state:"unavailable",proposals:[]};
- if(!(exactKeys(preview,["state","expires_at","proposals"])||exactKeys(preview,["state","expires_at","proposals","reason"]))||!previewStates.has(preview.state)||
+ const keys=["state","expires_at","proposals"];
+ if(preview&&Object.hasOwn(preview,"reason"))keys.push("reason");
+ if(preview&&Object.hasOwn(preview,"host_evidence"))keys.push("host_evidence");
+ if(!exactKeys(preview,keys)||(Object.hasOwn(preview,"host_evidence")&&(preview.host_evidence!=="configured_only"||preview.state==="unavailable"))||!previewStates.has(preview.state)||
   !Array.isArray(plan.pools)||!Array.isArray(preview.proposals)||preview.proposals.length>plan.pools.length||
   (preview.state==="proposed")!==(preview.proposals.length>0))return unavailable;
  const expires=wireTimestamp(preview.expires_at),captured=Date.parse(plan.captured_at),planExpiry=Date.parse(plan.expires_at);
  if(![expires,captured,planExpiry,now].every(Number.isFinite)||expires<=captured||expires>planExpiry)return unavailable;
  const repositories=new Map(plan.pools.map(({pool,repository})=>[pool,repository])),seen=new Set();
  for(const row of preview.proposals){
-  if(!exactKeys(row,["pool_id","repository_id","observed","suggested"])||!id(row.pool_id)||!id(row.repository_id)||
+  if(!(exactKeys(row,["pool_id","repository_id","observed","suggested"])||exactKeys(row,["pool_id","repository_id","observed","suggested","observed_min_idle"]))||!id(row.pool_id)||!id(row.repository_id)||
    repositories.get(row.pool_id)!==row.repository_id||seen.has(row.pool_id)||!count(row.observed)||!count(row.suggested)||
-   row.observed===0||row.suggested===0||Math.abs(row.observed-row.suggested)!==1)return unavailable;
+   row.observed===0||row.suggested===0||Math.abs(row.observed-row.suggested)!==1||
+   (Object.hasOwn(row,"observed_min_idle")&&(!Number.isSafeInteger(row.observed_min_idle)||row.observed_min_idle<0||row.observed_min_idle>1000000||row.observed_min_idle>row.observed||row.observed_min_idle>row.suggested)))return unavailable;
   seen.add(row.pool_id);
  }
  if(expires<=now||captured>now+1000)return {state:"expired",proposals:[]};
  if(comparison!=="linked_at_capture")return {state:"comparison_unavailable",proposals:[]};
  const reason=typeof preview.reason==="string"&&Object.hasOwn(previewReasonMessages,preview.reason)&&previewReasonMessages[preview.reason][0]===preview.state?preview.reason:null;
- return {state:preview.state,expiresAt:expires,proposals:preview.proposals,...(reason?{reason}:{})};
+ return {state:preview.state,expiresAt:expires,proposals:preview.proposals,...(reason?{reason}:{}),...(preview.host_evidence==="configured_only"?{hostEvidence:"configured_only"}:{})};
 }
 
 export function stockMaximumPreviewMessage(state,reason){

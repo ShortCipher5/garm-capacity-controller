@@ -206,6 +206,12 @@ func cloneReadPlan(v ReadPlan) ReadPlan {
 	if v.StockMaximumPreview != nil {
 		copy := *v.StockMaximumPreview
 		copy.Proposals = append([]StockMaximumProposal{}, copy.Proposals...)
+		for i := range copy.Proposals {
+			if copy.Proposals[i].ObservedMinIdle != nil {
+				idle := *copy.Proposals[i].ObservedMinIdle
+				copy.Proposals[i].ObservedMinIdle = &idle
+			}
+		}
 		v.StockMaximumPreview = &copy
 	}
 	v.Pressure = append([]PressureStatus(nil), v.Pressure...)

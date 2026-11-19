@@ -35,6 +35,7 @@ func (h *Handler) serveNativeRetirementStatus(w http.ResponseWriter, r *http.Req
 		Freshness         string                            `json:"freshness"`
 		Scope             string                            `json:"scope"`
 		Status            nativecontroller.RetirementStatus `json:"status"`
+		CapacityReuse     *retirementReuseExplanation       `json:"capacity_reuse,omitempty"`
 		ReleaseAuthorized bool                              `json:"release_authorized"`
-	}{state, freshness, "canonical_retirement_operations_only", status, false})
+	}{state, freshness, "canonical_retirement_operations_only", status, explainRetirementReuse(status, freshness), false})
 }

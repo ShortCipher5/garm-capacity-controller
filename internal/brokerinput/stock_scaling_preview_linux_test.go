@@ -47,15 +47,15 @@ func TestStockMaximumPreviewHistoryFailsClosed(t *testing.T) {
 		current := sample(now.Add(offset), scope)
 		return history.accept(current, err, current.finish, current.finish.Add(time.Minute))
 	}
-	if first := collect(0, 1, nil); first.State != "no_confirmed_proposals" || first.Reason != "awaiting_matching_sample" || len(first.Proposals) != 0 {
+	if first := collect(0, 1, nil); first.HostEvidence != "configured_only" || first.State != "no_confirmed_proposals" || first.Reason != "awaiting_matching_sample" || len(first.Proposals) != 0 {
 		t.Fatal(first)
 	}
 	out := collect(20*time.Second, 1, nil)
-	if out.State != "proposed" || !out.ExpiresAt.Equal(now.Add(45*time.Second)) || !reflect.DeepEqual(out.Proposals, []StockMaximumProposal{{"p", "r", 1, 2}}) {
+	if out.HostEvidence != "configured_only" || out.State != "proposed" || !out.ExpiresAt.Equal(now.Add(45*time.Second)) || !reflect.DeepEqual(out.Proposals, []StockMaximumProposal{{"p", "r", 1, 2, new(int64)}}) {
 		t.Fatal(out)
 	}
 	failed := collect(25*time.Second, 1, errors.New("private input detail"))
-	if failed.State != "unavailable" || failed.Reason != "evidence_unavailable" || len(failed.Proposals) != 0 || history.prior.source != "" {
+	if failed.HostEvidence != "" || failed.State != "unavailable" || failed.Reason != "evidence_unavailable" || len(failed.Proposals) != 0 || history.prior.source != "" {
 		t.Fatal(failed)
 	}
 	if afterFailure := collect(40*time.Second, 1, nil); len(afterFailure.Proposals) != 0 {
@@ -71,7 +71,7 @@ func TestStockMaximumPreviewHistoryFailsClosed(t *testing.T) {
 		t.Fatal("used expired history")
 	}
 	raw, err := json.Marshal(out)
-	if err != nil || string(raw) != `{"state":"proposed","expires_at":"2023-11-14T22:14:05Z","proposals":[{"pool_id":"p","repository_id":"r","observed":1,"suggested":2}]}` {
+	if err != nil || string(raw) != `{"host_evidence":"configured_only","state":"proposed","expires_at":"2023-11-14T22:14:05Z","proposals":[{"pool_id":"p","repository_id":"r","observed":1,"suggested":2,"observed_min_idle":0}]}` {
 		t.Fatal(string(raw), err)
 	}
 }
@@ -103,7 +103,7 @@ func TestStockMaximumPreviewPressureOnlyVetoesAndExpires(t *testing.T) {
 func TestStockMaximumPreviewCacheDoesNotExposeStaleOrSharedRows(t *testing.T) {
 	now := time.Now()
 	p := &ReadPlan{ExpiresAt: now.Add(time.Minute), StockMaximumPreview: &StockMaximumPreview{
-		State: "proposed", ExpiresAt: now.Add(30 * time.Second), Proposals: []StockMaximumProposal{{"p", "r", 1, 2}},
+		State: "proposed", ExpiresAt: now.Add(30 * time.Second), Proposals: []StockMaximumProposal{{"p", "r", 1, 2, new(int64)}},
 	}}
 	s := &AdvisoryLoop{plan: p}
 	fresh, err := s.ReadPlan(context.Background())
@@ -167,5 +167,21 @@ func TestStockMaximumPreviewBoundedReasons(t *testing.T) {
 	}
 	if !errors.Is(errStockPreviewPressure, capacitybroker.ErrSnapshot) {
 		t.Fatal("lost snapshot classification")
+	}
+}
+
+func TestStockMaximumPreviewUnavailableOmitsHostEvidence(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	for _, sample := range []scalingPreviewSample{
+		{},
+		{StockScalingSample: StockScalingSample{source: "source", incomplete: true, expires: now.Add(time.Minute)}},
+		{StockScalingSample: StockScalingSample{source: "source", expires: now}},
+	} {
+		var history scalingPreviewHistory
+		out := history.accept(sample, nil, now, now.Add(time.Minute))
+		raw, err := json.Marshal(out)
+		if err != nil || out.State != "unavailable" || strings.Contains(string(raw), "host_evidence") {
+			t.Fatal("unavailable sample claimed host evidence", string(raw), err)
+		}
 	}
 }

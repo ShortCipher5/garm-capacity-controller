@@ -33,6 +33,7 @@ export function StockMaximumSuggestions({plan,comparison,now}){
  if(!maximums)return null;
  return <section aria-label="Stock pool maximum suggestions"><h4>Stock pool maximum suggestions</h4>
  <p>{stockMaximumPreviewMessage(maximums.state,maximums.reason)}</p>
- {maximums.state==='proposed'&&<><p>Evidence expires {new Date(maximums.expiresAt).toLocaleString()}.</p><div className="table-wrap"><table><thead><tr><th>Repository / pool</th><th>Observed maximum</th><th>Suggested maximum</th></tr></thead><tbody>{maximums.proposals.map(p=><tr key={p.pool_id}><td>{p.repository_id}<p>{p.pool_id}</p></td><td>{p.observed}</td><td>{p.suggested}</td></tr>)}</tbody></table></div></>}
+ {maximums.hostEvidence==="configured_only"&&<p>Configured host only; the provider destination is not verified by this preview.</p>}
+ {maximums.state==='proposed'&&<><p>Evidence expires {new Date(maximums.expiresAt).toLocaleString()}.</p><div className="table-wrap"><table><thead><tr><th>Repository / pool</th><th>Observed maximum</th><th>Suggested maximum</th></tr></thead><tbody>{maximums.proposals.map(p=><tr key={p.pool_id}><td>{p.repository_id}<p>{p.pool_id}</p>{Object.hasOwn(p,"observed_min_idle")&&<p>Minimum idle: {p.observed_min_idle} (unchanged)</p>}</td><td>{p.observed}</td><td>{p.suggested}</td></tr>)}</tbody></table></div></>}
  <p>Advisory only. No settings changes, runner starts, drains or capacity releases are authorized by this preview.</p></section>;
 }

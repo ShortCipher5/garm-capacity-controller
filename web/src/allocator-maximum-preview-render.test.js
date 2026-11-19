@@ -22,6 +22,12 @@ test('optional maximum advice renders in the existing panel with no apply contro
   const fresh=render();
   assert.match(fresh,/Observed maximum/);assert.match(fresh,/Suggested maximum/);assert.match(fresh,/<td>2<\/td><td>3<\/td>/);
   assert.doesNotMatch(fresh,/<button|<form/);assert.match(fresh,/No settings changes/);
+  assert.doesNotMatch(fresh,/Minimum idle:/);
+  const withIdle={...plan,stock_maximum_preview:{...plan.stock_maximum_preview,proposals:plan.stock_maximum_preview.proposals.map(p=>({...p,observed_min_idle:0}))}};
+  withIdle.stock_maximum_preview.host_evidence="configured_only";
+  const idleHTML=render({plan:withIdle});assert.match(idleHTML,/provider destination is not verified/);assert.match(idleHTML,/Minimum idle: 0 \(unchanged\)/);assert.doesNotMatch(idleHTML,/<button|<form/);
+  assert.doesNotMatch(render({plan:withIdle,now:now+10000}),/Minimum idle:|provider destination/);
+  assert.doesNotMatch(render({plan:withIdle,comparison:'preview_superseded'}),/Minimum idle:/);
   const blocked={...plan,stock_maximum_preview:{...plan.stock_maximum_preview,state:'unavailable',reason:'pressure_evidence_unavailable',proposals:[]}};
   assert.match(render({plan:blocked}),/Required pressure evidence/);
   for(const reason of ['private error', ['pressure_evidence_unavailable'], 'awaiting_matching_sample', null]){

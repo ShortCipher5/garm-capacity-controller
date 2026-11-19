@@ -15,10 +15,12 @@ import (
 // StockMaximumPreview is an optional authenticated advisory comparison. It
 // exposes no job identities, setting write fingerprints, or runner authority.
 type StockMaximumPreview struct {
-	State     string                 `json:"state"`
-	Reason    string                 `json:"reason,omitempty"`
-	ExpiresAt time.Time              `json:"expires_at"`
-	Proposals []StockMaximumProposal `json:"proposals"`
+	// HostEvidence describes configured placement inputs, not an observed provider route.
+	HostEvidence string                 `json:"host_evidence,omitempty"`
+	State        string                 `json:"state"`
+	Reason       string                 `json:"reason,omitempty"`
+	ExpiresAt    time.Time              `json:"expires_at"`
+	Proposals    []StockMaximumProposal `json:"proposals"`
 }
 
 // Preserve snapshot error classification without exposing raw diagnostics.
@@ -120,6 +122,9 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 		h.reset()
 		return out
 	}
+	// This runtime path uses configured host allowlists. No independent stock
+	// provider-route observer participates in sampleStockMaximumPreview.
+	out.HostEvidence = "configured_only"
 	out.State = "no_confirmed_proposals"
 	out.Reason = "awaiting_matching_sample"
 	var changes []StockMaximumProposal

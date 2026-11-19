@@ -37,7 +37,7 @@ func TestStockScalingProposesOnlyCanonicalHeadroom(t *testing.T) {
 	}
 	prior, current := build(0), build(20*time.Second)
 	got := ProposeStockMaximums(prior, current, current.finish)
-	if want := []StockMaximumProposal{{pool, repo, 1, 2}}; !reflect.DeepEqual(got, want) {
+	if want := []StockMaximumProposal{{pool, repo, 1, 2, new(int64)}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
@@ -61,8 +61,8 @@ func TestStockScalingWeightedOrderAndNoBorrowingProposedSavings(t *testing.T) {
 		budget int64
 		want   []StockMaximumProposal
 	}{
-		{5, []StockMaximumProposal{{"empty", "repo-a", 3, 2}}},
-		{6, []StockMaximumProposal{{"empty", "repo-a", 3, 2}, {"z", "repo-z", 1, 2}}},
+		{5, []StockMaximumProposal{{"empty", "repo-a", 3, 2, new(int64)}}},
+		{6, []StockMaximumProposal{{"empty", "repo-a", 3, 2, new(int64)}, {"z", "repo-z", 1, 2, new(int64)}}},
 	} {
 		prior, current := sample(now, tc.budget), sample(now.Add(20*time.Second), tc.budget)
 		got := ProposeStockMaximums(prior, current, current.finish)

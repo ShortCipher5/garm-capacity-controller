@@ -108,3 +108,31 @@ test("malformed stock preview fails closed independently of ordinary advice",()=
   assert.deepEqual(stockMaximumPreviewView(plan,"linked_at_capture",n),{state:"unavailable",proposals:[]});
  }
 });
+
+test("optional observed minimum idle preserves zero and rejects malformed or contradictory values",()=>{
+ for(const value of [0,1,2]){
+  const plan=withMaximumPreview();plan.stock_maximum_preview.proposals[0].observed_min_idle=value;
+  assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",n).proposals[0].observed_min_idle,value);
+  assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",n+10000).proposals.length,0);
+  assert.equal(stockMaximumPreviewView(plan,"preview_superseded",n).proposals.length,0);
+ }
+ for(const value of [null,undefined,"0",false,-1,0.5,3,1000001,[],{}]){
+  const plan=withMaximumPreview();plan.stock_maximum_preview.proposals[0].observed_min_idle=value;
+  assert.deepEqual(stockMaximumPreviewView(plan,"linked_at_capture",n),{state:"unavailable",proposals:[]});
+ }
+ const lower=withMaximumPreview();Object.assign(lower.stock_maximum_preview.proposals[0],{observed_min_idle:2,suggested:1});
+ assert.equal(stockMaximumPreviewView(lower,"linked_at_capture",n).state,"unavailable");
+});
+
+test("optional host evidence is exact, advisory and hidden when stale",()=>{
+ const plan=withMaximumPreview();plan.stock_maximum_preview.host_evidence="configured_only";
+ assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",n).hostEvidence,"configured_only");
+ for(const state of ["unavailable","proposed"]){
+  for(const value of ["verified",true,["configured_only"],null]){
+   const invalid=withMaximumPreview(state);invalid.stock_maximum_preview.host_evidence=value;
+   assert.equal(stockMaximumPreviewView(invalid,"linked_at_capture",n).state,"unavailable");
+  }
+ }
+ assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",n+10000).hostEvidence,undefined);
+ assert.equal(stockMaximumPreviewView(plan,"preview_superseded",n).hostEvidence,undefined);
+});

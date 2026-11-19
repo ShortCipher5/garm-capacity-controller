@@ -37,6 +37,9 @@ type StockMaximumProposal struct {
 	RepositoryID string `json:"repository_id"`
 	Observed     int64  `json:"observed"`
 	Suggested    int64  `json:"suggested"`
+	// ObservedMinIdle is the unchanged stock setting, not a recommendation to
+	// adjust idle runners. A pointer preserves a verified zero versus absence.
+	ObservedMinIdle *int64 `json:"observed_min_idle,omitempty"`
 }
 
 // SampleStockScaling reuses the ledger- and ownership-checked weighted broker
@@ -186,7 +189,8 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 		repo[p.repo] += baseline
 	}
 	appendProposal := func(id string, p scalingPool, target int64) {
-		out = append(out, StockMaximumProposal{id, p.repo, p.current, target})
+		idle := p.idle
+		out = append(out, StockMaximumProposal{PoolID: id, RepositoryID: p.repo, Observed: p.current, Suggested: target, ObservedMinIdle: &idle})
 	}
 	ids := make([]string, 0, len(current.pools))
 	for id := range current.pools {
