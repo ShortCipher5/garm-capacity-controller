@@ -17,6 +17,15 @@ test("profile estimates render fit counts per enabled host, including honest zer
     assert.match(view, /Runner-size profiles/);
     assert.match(view, /Immutable pool mappings are shown in Pools/);
     assert.match(view, /Refresh profiles/);
+    assert.match(view, /Profile management is disabled/);
+    assert.doesNotMatch(view, /New profile<|Profile management write token/);
+    for (const managementEnabled of [false, undefined, null, "true", 1]) {
+      const readonly = renderToStaticMarkup(React.createElement(Profiles, {managementEnabled}));
+      assert.doesNotMatch(readonly, /New profile<|Profile management write token/);
+    }
+    const writable = renderToStaticMarkup(React.createElement(Profiles, {managementEnabled:true}));
+    assert.match(writable, /New profile</);
+    assert.doesNotMatch(writable, /Profile management is disabled/);
   } finally {
     await server.close();
   }

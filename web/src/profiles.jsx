@@ -18,17 +18,35 @@ export function ProfileEstimates({ estimates }) {
     </ul>
   );
 }
-export function Profiles({ readProfiles, readMix, hosts }) {
+export function Profiles({ readProfiles, readMix, hosts, managementEnabled }) {
   const [view, setView] = useState(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(null); // null | {name, cpu_millis, ram_mib, disk_mib} (name "" = create)
   const [confirming, setConfirming] = useState("");
+  const canManage = managementEnabled === true;
+  const capability = useRef(canManage), activeWrite = useRef(null), capabilityEpoch = useRef(0);
+  if (capability.current !== canManage) capabilityEpoch.current++;
+  capability.current = canManage;
   const mounted = useRef(true), generation = useRef(0), active = useRef(null), writeToken = useRef(null), deleteToken = useRef(null);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; generation.current++; active.current?.abort(); if (writeToken.current) writeToken.current.value = ""; if (deleteToken.current) deleteToken.current.value = ""; };
   }, []);
+  useEffect(() => {
+    if (canManage) return;
+    if (activeWrite.current) {
+      generation.current++;
+      activeWrite.current.abort();
+      if (active.current === activeWrite.current) active.current = null;
+      activeWrite.current = null;
+      setBusy(false);
+      setMessage("Management became unavailable while a profile operation was pending. Its outcome may be unknown; refresh profiles before considering another change. No automatic retry was made.");
+    }
+    setEditing(null); setConfirming("");
+    if (writeToken.current) writeToken.current.value = "";
+    if (deleteToken.current) deleteToken.current.value = "";
+  }, [canManage]);
   async function load() {
     if (active.current) return;
     const controller = new AbortController(); active.current = controller;
@@ -48,8 +66,9 @@ export function Profiles({ readProfiles, readMix, hosts }) {
   useEffect(() => { void load(); }, []);
   async function save(event) {
     event.preventDefault();
-    if (active.current) return;
+    if (active.current || !capability.current) return;
     const form = new FormData(event.currentTarget);
+    const writeEpoch = capabilityEpoch.current;
     const credential = writeToken.current?.value || "";
     let profile;
     try {
@@ -57,59 +76,64 @@ export function Profiles({ readProfiles, readMix, hosts }) {
       // the reviewed edit target is the editing identity itself.
       profile = validateProfileInput({ name: form.get("name") ?? editing?.name, cpuVcpus: form.get("cpu"), ramMiB: form.get("ram"), diskMiB: form.get("disk") });
     } catch (error) { setMessage(error.message); return; }
-    const controller = new AbortController(); active.current = controller;
+    const controller = new AbortController(); active.current = controller; activeWrite.current = controller;
     const current = ++generation.current;
     const timeout = setTimeout(() => controller.abort(), 15000);
     setBusy(true); setMessage("");
     try {
       await upsertProfile(credential, profile, { signal: controller.signal });
-      if (mounted.current && current === generation.current) {
+      if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current && current === generation.current) {
         active.current = null;
+        activeWrite.current = null;
         clearTimeout(timeout);
         if (writeToken.current) writeToken.current.value = "";
         setEditing(null);
         await load();
         // load() clears status lines and bumps the generation guard at start,
         // so the confirmation renders unconditionally afterwards.
-        if (mounted.current) setMessage(`Runner-size profile ${profile.name} saved. Existing immutable pool mappings keep their captured size; register a new mapping revision to adopt this change.`);
+        if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current) setMessage(`Runner-size profile ${profile.name} saved. Existing immutable pool mappings keep their captured size; register a new mapping revision to adopt this change.`);
       }
     } catch (error) {
-      if (mounted.current && current === generation.current) setMessage(error.message);
+      if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current && current === generation.current) setMessage(error.message);
     } finally {
       clearTimeout(timeout);
       if (active.current === controller) active.current = null;
-      if (writeToken.current) writeToken.current.value = "";
-      if (mounted.current && current === generation.current) setBusy(false);
+      if (activeWrite.current === controller) activeWrite.current = null;
+      if (writeEpoch === capabilityEpoch.current && writeToken.current) writeToken.current.value = "";
+      if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current && current === generation.current) setBusy(false);
     }
   }
   async function remove(event) {
     event.preventDefault();
-    if (active.current || !confirming) return;
+    if (active.current || !confirming || !capability.current) return;
+    const writeEpoch = capabilityEpoch.current;
     const credential = deleteToken.current?.value || "";
-    const controller = new AbortController(); active.current = controller;
+    const controller = new AbortController(); active.current = controller; activeWrite.current = controller;
     const current = ++generation.current;
     const timeout = setTimeout(() => controller.abort(), 15000);
     setBusy(true); setMessage("");
     try {
       await deleteProfile(credential, confirming, { signal: controller.signal });
-      if (mounted.current && current === generation.current) {
+      if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current && current === generation.current) {
         const removed = confirming;
         active.current = null;
+        activeWrite.current = null;
         clearTimeout(timeout);
         if (deleteToken.current) deleteToken.current.value = "";
         setConfirming("");
         await load();
         // load() clears status lines and bumps the generation guard at start,
         // so the confirmation renders unconditionally afterwards.
-        if (mounted.current) setMessage(`Runner-size profile ${removed} deleted. Existing immutable pool mappings keep their captured size. Legacy name-based policies may fail closed.`);
+        if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current) setMessage(`Runner-size profile ${removed} deleted. Existing immutable pool mappings keep their captured size. Legacy name-based policies may fail closed.`);
       }
     } catch (error) {
-      if (mounted.current && current === generation.current) setMessage(error.message);
+      if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current && current === generation.current) setMessage(error.message);
     } finally {
       clearTimeout(timeout);
       if (active.current === controller) active.current = null;
-      if (deleteToken.current) deleteToken.current.value = "";
-      if (mounted.current && current === generation.current) setBusy(false);
+      if (activeWrite.current === controller) activeWrite.current = null;
+      if (writeEpoch === capabilityEpoch.current && deleteToken.current) deleteToken.current.value = "";
+      if (mounted.current && writeEpoch === capabilityEpoch.current && capability.current && current === generation.current) setBusy(false);
     }
   }
   return (
@@ -123,9 +147,10 @@ export function Profiles({ readProfiles, readMix, hosts }) {
         <h2>Runner-size profile management</h2>
         <p>Saved sizes estimate how many runners fit each enabled host's remaining budget. Estimates use the same dimension math as pool admission; a zero disk size ignores the disk dimension.</p>
         <p className="muted">Immutable pool mappings are shown in Pools. They capture sizes at registration, so editing or deleting a size does not change their resources. Legacy name-based gateway policies remain separate and may fail closed after deletion.</p>
+        {!canManage && <p>Profile management is disabled on this server; saved sizes remain available for read-only planning.</p>}
         <div className="profile-toolbar">
           <button className="quiet" type="button" disabled={busy} onClick={load}>{busy ? "Working…" : "Refresh profiles"}</button>
-          <button className="quiet" type="button" disabled={busy} onClick={() => { setEditing({ name: "", cpu_millis: 0, ram_mib: 0, disk_mib: 0 }); setConfirming(""); setMessage(""); }}>New profile</button>
+          {canManage && <button className="quiet" type="button" disabled={busy||!canManage} onClick={() => { if(!capability.current)return; setEditing({ name: "", cpu_millis: 0, ram_mib: 0, disk_mib: 0 }); setConfirming(""); setMessage(""); }}>New profile</button>}
         </div>
         {view && (
           view.profiles.length === 0 ? (
@@ -134,7 +159,7 @@ export function Profiles({ readProfiles, readMix, hosts }) {
             <div className="table-wrap">
               <table>
                 <thead>
-                  <tr><th>Profile</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Fits on enabled hosts</th><th>Updated</th><th>Actions</th></tr>
+                  <tr><th>Profile</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Fits on enabled hosts</th><th>Updated</th>{canManage && <th>Actions</th>}</tr>
                 </thead>
                 <tbody>
                   {view.profiles.map((profile) => (
@@ -145,8 +170,8 @@ export function Profiles({ readProfiles, readMix, hosts }) {
                       <td>{profile.disk_mib === 0 ? "ignored" : `${fmt(profile.disk_mib)} MiB`}</td>
                       <td><ProfileEstimates estimates={profile.estimates} /></td>
                       <td className="muted">{date(profile.updated_at)}</td>
-                      <td>
-                        <button className="quiet" type="button" disabled={busy} onClick={() => { setEditing(profile); setConfirming(""); setMessage(""); }}>Edit</button>{" "}
+                      {canManage && <td>
+                        <button className="quiet" type="button" disabled={busy} onClick={() => { if(!capability.current)return; setEditing(profile); setConfirming(""); setMessage(""); }}>Edit</button>{" "}
                         {confirming === profile.name ? (
                           <form className="inline-confirm" onSubmit={remove}>
                             <label>Deletion management token<input aria-label="Deletion management token" ref={deleteToken} type="password" autoComplete="off" spellCheck={false} required disabled={busy} /></label>
@@ -154,9 +179,9 @@ export function Profiles({ readProfiles, readMix, hosts }) {
                             <button className="quiet" type="button" disabled={busy} onClick={() => { setConfirming(""); if (deleteToken.current) deleteToken.current.value = ""; }}>Cancel</button>
                           </form>
                         ) : (
-                          <button className="quiet" type="button" disabled={busy} onClick={() => { setConfirming(profile.name); setEditing(null); setMessage(""); }}>Delete</button>
+                          <button className="quiet" type="button" disabled={busy} onClick={() => { if(!capability.current)return; setConfirming(profile.name); setEditing(null); setMessage(""); }}>Delete</button>
                         )}
-                      </td>
+                      </td>}
                     </tr>
                   ))}
                 </tbody>
@@ -164,7 +189,7 @@ export function Profiles({ readProfiles, readMix, hosts }) {
             </div>
           )
         )}
-        {editing && (
+        {canManage && editing && (
           <form className="profile-form" onSubmit={save}>
             <h3>{editing.name ? `Edit profile ${editing.name}` : "New runner-size profile"}</h3>
             <label>Profile name
