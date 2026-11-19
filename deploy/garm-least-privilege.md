@@ -116,3 +116,18 @@ This checklist is a plan, not authorization or a startup/deployment command.
    durable state identity/history and conservative fresh reconciliation. Stop on
    uncertainty. External writer fencing, complete physical scope, monotonic
    recovery authority and job-safe retirement/drain remain independent gates.
+
+## Disposable native-executable discovery
+
+The hosted lab validates the pinned stock image's direct native entrypoint and
+resolves its platform image ID. It reuses that explicit canonical executable
+path for version, startup and exact runtime command-line checks. Shell/relative
+entrypoints, implicit commands and mount declarations are refused; no runtime
+PATH search, binary copying, wrapper image or provider addition is performed.
+Bounded hashing checks regular executable bytes before startup and compares the
+running process's executable path, inode and hash afterward. The original
+isolation, empty-state and recreation assertions remain in place.
+
+The public discovery record is disposable-lab evidence only. No production
+Specification, inspector, authentication, provider or admission code consumes
+it. It does not authorize deployment, adoption, allocation or activation.

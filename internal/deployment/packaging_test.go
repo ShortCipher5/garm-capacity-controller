@@ -259,3 +259,23 @@ func TestPairedArtifactsAreReadOnlyDisposableAndContentVersioned(t *testing.T) {
 		}
 	}
 }
+
+func TestStockNativeExecutableDiscoveryStaysDisposable(t *testing.T) {
+	script := repositoryFile(t, "deploy/runtime/garm-least-privilege.sh")
+	for _, want := range []string{"garm-native-executable.py", "--entrypoint \"$garm_executable\"", "exec \"$1\" -config", "readlink /proc/1/exe", "stat -Lc %d:%i /proc/1/exe", "sha256sum /proc/1/exe", "134217728", "runtime_executable_identity_verified", "production_binding"} {
+		if want == "production_binding" {
+			if !strings.Contains(repositoryFile(t, "deploy/runtime/garm-native-executable.py"), want) {
+				t.Fatal(want)
+			}
+			continue
+		}
+		if !strings.Contains(script, want) {
+			t.Fatal("missing native executable check", want)
+		}
+	}
+	for _, forbidden := range []string{"command -v", "docker build", "docker push", "exec /bin/garm", "--entrypoint /bin/garm"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatal("fixed path or extra image operation", forbidden)
+		}
+	}
+}
