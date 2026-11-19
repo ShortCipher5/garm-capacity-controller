@@ -43,6 +43,19 @@ type jobQueue struct {
 // including creating, unknown and outstanding grants. This does NOT issue grants.
 // Pool.Waiting/OldestWaiting are derived here and must be empty in the input.
 func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error) {
+	return buildForJobs(s, opt, jobs, nil)
+}
+
+// BuildForJobsWithIdleOnly adds advisory existing-idle edges for stopped pools.
+// These edges never enter grant/inflight matching or new/warm placement.
+func BuildForJobsWithIdleOnly(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
+	return buildForJobs(s, opt, jobs, idleOnly)
+}
+
+func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
+	if len(idleOnly) > 1000 {
+		return JobPlan{}, ErrSnapshot
+	}
 	if len(jobs) > 1000 || len(s.Pools) > 1000 || len(s.Charges) > 100000 {
 		return JobPlan{}, ErrSnapshot
 	}
@@ -55,6 +68,36 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 		p.Hosts = append([]string(nil), p.Hosts...)
 		copyPools[id] = p
 		idle[id] = int(p.AvailableIdle + p.OutstandingGrants + p.Inflight)
+	}
+	// Idle-only pools must be globally disjoint from creation candidates, not
+	// merely disjoint for one job. Otherwise pooled grant slots could leak through.
+	if len(idleOnly) > 0 {
+		normal := map[string]bool{}
+		knownJobs := map[string]bool{}
+		checkedEdges := 0
+		for _, j := range jobs {
+			if len(j.Candidates) > 1000 || checkedEdges > 100000-len(j.Candidates) {
+				return JobPlan{}, ErrSnapshot
+			}
+			checkedEdges += len(j.Candidates)
+			knownJobs[j.ID] = true
+			for _, p := range j.Candidates {
+				normal[p] = true
+			}
+		}
+		for id, candidates := range idleOnly {
+			if !knownJobs[id] || len(candidates) > 1000 || checkedEdges > 100000-len(candidates) {
+				return JobPlan{}, ErrSnapshot
+			}
+			checkedEdges += len(candidates)
+			for _, id := range candidates {
+				p, exists := s.Pools[id]
+				if !exists || normal[id] || p.MaxRunners != 0 || p.WarmIdle != 0 {
+					return JobPlan{}, ErrSnapshot
+				}
+				idle[id] = int(p.AvailableIdle)
+			}
+		}
 	}
 	// Validate idle against original charges before matching reduces spare supply.
 	charged := map[string]int64{}
@@ -77,14 +120,16 @@ func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error)
 		if j.CreatedAt.IsZero() || j.CreatedAt.After(opt.Now) {
 			return JobPlan{}, ErrSnapshot
 		}
-		edges += len(j.Candidates)
+		edges += len(j.Candidates) + len(idleOnly[j.ID])
 		if edges > 100000 {
 			return JobPlan{}, ErrSnapshot
 		}
 		j.Candidates = append([]string(nil), j.Candidates...)
 		sort.Strings(j.Candidates)
 		q.rows = append(q.rows, j)
-		matchJobs = append(matchJobs, DemandJob{ID: j.ID, Candidates: j.Candidates})
+		existingCandidates := append([]string(nil), j.Candidates...)
+		existingCandidates = append(existingCandidates, idleOnly[j.ID]...)
+		matchJobs = append(matchJobs, DemandJob{ID: j.ID, Candidates: existingCandidates})
 	}
 	sort.Slice(q.rows, func(i, j int) bool {
 		if q.rows[i].CreatedAt.Equal(q.rows[j].CreatedAt) {
