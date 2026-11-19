@@ -148,3 +148,26 @@ with empty stdout and `State.Error`, exited status, matching start/container exi
 a generic ENOENT, or an arbitrary nonzero exit is not success. Another engine
 outcome fails closed for separate diagnosis; this is not a production launcher
 or a general Docker/runc error parser.
+
+### Public harness provenance
+
+Completed `disposable-historical-image-profile/v1` results additionally contain
+`harness_sha256`, an exact map for `run.py`, `fixture.py`, and `prepare.py`.
+These public files decide orchestration, fixture construction and PASS checks;
+they are separate from the exported probe/build input hashes. Hashes are captured
+before context preparation and checked again before cleanup/success publication.
+They identify checkout bytes, not signed provenance or in-memory execution proof.
+No generated credential, state, arbitrary directory entry or private path is hashed.
+
+This is an additive v1 field: every existing field and meaning remains unchanged.
+There is no in-repository strict result consumer; the workflow uploads the JSON
+without parsing it. External exact-key validators must allow this new field.
+Older v1 artifacts without this map do not establish harness identity.
+
+Namespace recreation briefly overlaps the two synthetic TLS anchors, each in its
+own `network=none` namespace and sharing only read-only generated key/witness
+files. The old anchor is stopped and removed only after the new namespace is
+observed and differs from the still-retained old namespace. This prevents inode
+reuse after destruction from masquerading as a failed recreation. No stock Garm
+daemons overlap; unchanged client, Garm, shutdown and state-continuity checks then
+run against the new namespace. Equality still fails, with no retry or exception.
