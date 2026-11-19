@@ -116,3 +116,29 @@ test("runner-size profile CRUD, validation and per-host fit estimates including 
   await expect(profiles.getByText("Runner-size profile e2e-large deleted.")).toBeVisible();
   await expect(profiles.locator("tr", { hasText: "e2e-large" })).toHaveCount(0);
 });
+
+test('profile controls follow admin capability and discard a draft on downgrade', async ({page}) => {
+ let enabled=false, writes=0;
+ await page.route('**/admin/api/v1/overview',async route=>{
+  const response=await route.fetch();const body=await response.json();
+  return route.fulfill({response,json:{...body,management_enabled:enabled}});
+ });
+ await page.route('**/admin/api/v1/profiles**',route=>{
+  if(route.request().method()!=='GET'){writes++;return route.abort();}
+  return route.continue();
+ });
+ await connect(page);
+ const panel=page.locator('#profile-management');
+ await expect(panel.getByRole('button',{name:'New profile',exact:true})).toHaveCount(0);
+ await expect(panel.getByText('Profile management is disabled',{exact:false})).toBeVisible();
+ enabled=true;await page.getByRole('button',{name:'Refresh snapshot',exact:true}).click();
+ await panel.getByRole('button',{name:'New profile',exact:true}).click();
+ await panel.getByLabel('Profile management write token').fill(write);
+ enabled=false;await page.getByRole('button',{name:'Refresh snapshot',exact:true}).click();
+ await expect(panel.getByLabel('Profile management write token')).toHaveCount(0);
+ await expect(panel.getByRole('button',{name:'Save profile',exact:true})).toHaveCount(0);
+ enabled=true;await page.getByRole('button',{name:'Refresh snapshot',exact:true}).click();
+ await panel.getByRole('button',{name:'New profile',exact:true}).click();
+ await expect(panel.getByLabel('Profile management write token')).toHaveValue('');
+ expect(writes).toBe(0);
+});
