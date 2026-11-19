@@ -35,7 +35,7 @@ func TestMatchedPrerequisitesCannotQualify(t *testing.T) {
 		}
 	}
 }
-func TestMissingPrivilegeAndVersion(t *testing.T) {
+func TestMissingPrivilege(t *testing.T) {
 	in := fixture()
 	in.uid = 1000
 	in.kernel = "6.9.0"
@@ -45,7 +45,7 @@ func TestMissingPrivilegeAndVersion(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, c := range r.Checks {
-		if strings.HasPrefix(c.Name, "cap_") || c.Name == "effective_uid" || c.Name == "kernel_release" {
+		if strings.HasPrefix(c.Name, "cap_") || c.Name == "effective_uid" {
 			if c.State != "missing_or_unsupported" {
 				t.Fatal(c)
 			}
@@ -86,5 +86,80 @@ func TestLibraryMatchIsNotABIOrRuntimeQualification(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("missing ABI report")
+	}
+}
+
+func TestHostVersionsAreObservationsNotCompatibilityGates(t *testing.T) {
+	for _, kernel := range []string{"6.8.0", "6.12.57+deb13", "6.18.57", "7.0.0"} {
+		for _, zfs := range []string{"2.2.6-1", "2.3.4", "future-vendor"} {
+			in := fixture()
+			in.kernel = kernel
+			read := in.read
+			in.read = func(path string) (string, error) {
+				if path == "/sys/module/zfs/version" {
+					return zfs, nil
+				}
+				return read(path)
+			}
+			r, err := collect(context.Background(), in)
+			if err != nil || r.State != "unqualified_no_activation" {
+				t.Fatal(r, err)
+			}
+			seen := 0
+			for _, c := range r.Checks {
+				switch c.Name {
+				case "kernel_release", "zfs_module_version":
+					seen++
+					want := kernel
+					if c.Name == "zfs_module_version" {
+						want = zfs
+					}
+					if c.State != "informational" || c.Observed != want {
+						t.Fatal(c)
+					}
+				case "zfs_module_presence":
+					seen++
+					if c.State != "informational" || c.Observed != "present" {
+						t.Fatal(c)
+					}
+				case "incus_version":
+					seen++
+					if c.State != "not_exercised" || c.Observed != "" {
+						t.Fatal(c)
+					}
+				}
+			}
+			if seen != 4 {
+				t.Fatal("missing version observations", r)
+			}
+		}
+	}
+}
+
+func TestUnavailableVersionsDoNotImplyCompatibility(t *testing.T) {
+	in := fixture()
+	in.kernel = ""
+	in.read = func(string) (string, error) { return "partial", fmt.Errorf("unavailable") }
+	r, err := collect(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, c := range r.Checks {
+		if c.Name == "zfs_module_presence" {
+			seen++
+			if c.State != "unavailable" || c.Observed != "" {
+				t.Fatal(c)
+			}
+		}
+		if c.Name == "kernel_release" || c.Name == "zfs_module_version" {
+			seen++
+			if c.State != "unavailable" || c.Observed != "" {
+				t.Fatal(c)
+			}
+		}
+	}
+	if seen != 3 {
+		t.Fatal("missing unavailable checks", r)
 	}
 }
