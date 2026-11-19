@@ -112,3 +112,29 @@ Other provider/organization pools may compete for a job, so this provider-scoped
 view is not a complete eligible-provider graph. Historical missed webhooks are
 not repaired, and `missed_webhook_coverage` remains false. The durable broker must
 supply supported demand repair and cross-pool matching before runtime grant use.
+
+
+### Demand-aware host tie-break
+
+Repository/pool selection still uses the same weighted dominant-resource share,
+queue age and deterministic pool ordering. After selecting a pool, the pure
+planner prefers an already-fitting host that is the sole current fit for fewer
+other demanded pools. For example, an older flexible pool eligible on hosts A/B
+can use B, leaving A for a later pool that can only fit A. This avoids that concrete
+first-fit fragmentation without reordering the selected repository or deleting,
+reclassifying or moving any existing charge.
+
+Only currently feasible demand in the same queued/warm phase contributes. Caps,
+all resource dimensions, host AcceptNew, existing unknown charges and the existing
+job matcher remain authoritative inputs. Two fitting hosts are sufficient to
+classify a pool as flexible; the selected pool's final host comparison remains
+bounded by its configured host list. This is a deterministic local heuristic,
+not a maximum-packing algorithm or starvation guarantee. Counts are of feasible
+demand-bearing pool candidates, not distinct waiting jobs: several candidate
+pools (including another candidate for the selected job itself) may influence
+the same host preference. This may preserve a host unnecessarily; it does not
+reserve that host, duplicate a job, or create extra demand. The job matcher still
+deduplicates actual assignments. Duplicate host entries are rejected by snapshot
+validation before either pool or job planning. It produces advisory
+assignments only: no GARM settings writes, reservations, dispatch authority,
+runtime activation or release are added.
