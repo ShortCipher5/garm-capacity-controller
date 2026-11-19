@@ -244,6 +244,7 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 			selected, host := "", ""
 			var best *big.Rat
 			var bestOldest time.Time
+			soleHostDemand := map[string]int{}
 			for _, id := range keys {
 				p := s.Pools[id]
 				r := s.Repositories[p.Repository]
@@ -253,10 +254,16 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				eligible := append([]string(nil), p.Hosts...)
 				sort.Strings(eligible)
 				placement := ""
+				fitCount := 0
 				for _, h := range eligible {
 					if s.Hosts[h].AcceptNew && fits(hosts[h], p.Size, s.Hosts[h].Budget) {
-						placement = h
-						break
+						if placement == "" {
+							placement = h
+						}
+						fitCount++
+						if fitCount == 2 {
+							break
+						} // Only unique versus multiple fits matters.
 					}
 				}
 				if placement == "" {
@@ -277,6 +284,9 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				if !hasDemand {
 					continue
 				}
+				if fitCount == 1 {
+					soleHostDemand[placement]++
+				}
 				score := share(repos[p.Repository], s.Global, weight(r))
 				earlier := selected != "" && phase == 0 && oldest.Before(bestOldest)
 				if selected == "" || score.Cmp(best) < 0 || (score.Cmp(best) == 0 && earlier) {
@@ -290,6 +300,19 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				break
 			}
 			p := s.Pools[selected]
+			// Pool/repository selection above is unchanged. Among fitting hosts
+			// for that selected pool, avoid hosts that are the sole current fit
+			// for demand-bearing pool candidates. These are not distinct job counts;
+			// candidate pools may overlap. Never move or discount existing charges.
+			// This bounded tie-break is not a maximum-packing guarantee.
+			for _, candidate := range p.Hosts {
+				if !s.Hosts[candidate].AcceptNew || !fits(hosts[candidate], p.Size, s.Hosts[candidate].Budget) {
+					continue
+				}
+				if soleHostDemand[candidate] < soleHostDemand[host] || (soleHostDemand[candidate] == soleHostDemand[host] && candidate < host) {
+					host = candidate
+				}
+			}
 			global, _ = add(global, p.Size)
 			hosts[host], _ = add(hosts[host], p.Size)
 			repos[p.Repository], _ = add(repos[p.Repository], p.Size)
