@@ -24,6 +24,7 @@ import (
 )
 
 type configuration struct {
+	ReadOnly                       bool                      `json:"read_only"`
 	SourceInspectorLeaf            string                    `json:"source_inspector_leaf,omitempty"`
 	SourceInspectorCertificateFile string                    `json:"source_inspector_certificate_file,omitempty"`
 	ClientCertificateFile          string                    `json:"client_certificate_file"`
@@ -98,7 +99,7 @@ func run(ctx context.Context, args []string) error {
 		return e
 	}
 	defer journal.Close()
-	service, e := managedwriter.NewService(ctx, c.Boundary, journal, trust, c.ClientLeaf, c.SourceInspectorLeaf, c.Providers, c.Pools, c.Repositories)
+	service, e := managedwriter.NewServiceWithOptions(ctx, c.Boundary, journal, trust, c.ClientLeaf, c.SourceInspectorLeaf, c.Providers, c.Pools, c.Repositories, managedwriter.Options{ReadOnly: c.ReadOnly})
 	if e != nil {
 		return e
 	}

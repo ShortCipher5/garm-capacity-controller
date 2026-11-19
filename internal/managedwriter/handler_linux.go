@@ -18,7 +18,12 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedgarm"
 )
 
+// Options is immutable for a handler/service lifetime. ReadOnly removes mutation
+// routes; it never expands the existing authenticated read allowlist.
+type Options struct{ ReadOnly bool }
+
 type Handler struct {
+	readOnly     bool
 	inspector    *[32]byte
 	providers    map[string]bool
 	repositories map[string]bool
@@ -29,6 +34,10 @@ type Handler struct {
 }
 
 func New(session *managedgarm.Session, journal *garmmanagement.Journal, clientLeaf string, providers, pools, repositories []string) (*Handler, error) {
+	return NewWithOptions(session, journal, clientLeaf, providers, pools, repositories, Options{})
+}
+
+func NewWithOptions(session *managedgarm.Session, journal *garmmanagement.Journal, clientLeaf string, providers, pools, repositories []string, options Options) (*Handler, error) {
 	raw, e := hex.DecodeString(clientLeaf)
 	if e != nil || len(raw) != 32 || hex.EncodeToString(raw) != clientLeaf {
 		return nil, managedgarm.ErrBoundary
@@ -42,7 +51,7 @@ func New(session *managedgarm.Session, journal *garmmanagement.Journal, clientLe
 		remote.Close()
 		return nil, e
 	}
-	h := &Handler{session: session, manager: manager, providers: map[string]bool{}, repositories: map[string]bool{}, pools: map[string]bool{}}
+	h := &Handler{readOnly: options.ReadOnly, session: session, manager: manager, providers: map[string]bool{}, repositories: map[string]bool{}, pools: map[string]bool{}}
 	for _, p := range providers {
 		h.providers[p] = true
 	}
@@ -76,6 +85,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(403)
 		return
 	}
+	// Advisory/review mode needs only GETs, never credential retrieval POSTs.
+	// Deny before parsing bodies or touching the session/settings manager.
+	if h.readOnly && r.Method != http.MethodGet {
+		fail(http.StatusForbidden)
+		return
+	}
 	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/managed/metadata/") {
 		h.serveMetadata(w, r)
 		return
@@ -107,6 +122,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			fail(503)
 			return
+		}
+		if h.readOnly {
+			v.WritesEnabled = false
 		}
 		h.sourceHeaders(w)
 		json.NewEncoder(w).Encode(v)

@@ -62,3 +62,24 @@ Protocol tests use disposable fakes for lost first-run responses and persisted
 markers. They do not establish that Docker, network namespaces or a real deployed
 GARM process have been qualified. Actual root topology and namespace switching
 must pass on the supported host before this can be described as deployable.
+
+## Read-only supervisor opt-in
+
+The private `capacity-managed-writer` configuration accepts `"read_only": true`.
+Omitting it or setting it to false preserves the existing behavior. This is an
+immutable service option, retained when the listener/session is suspended and
+resumed. Changing it requires an explicitly reviewed configuration change and
+restart; there is no HTTP switch.
+
+After the existing mTLS/role checks, read-only mode refuses pause, maximum
+reduction and every other non-GET route before parsing its body or reaching the
+settings manager. Credential metadata POST retrieval is also refused: advisory
+and review require only GETs. Existing GET scope, source-inspector role separation and topology checks
+remain unchanged. Settings responses advertise `writes_enabled: false`; history
+and unresolved intents are not erased or resolved.
+
+This option does not make startup filesystem-read-only: the same protected
+journal, session authentication and startup validation remain required. It does
+not adopt an existing installation, create credentials, qualify the managed
+Docker boundary, or enable advisory planning without its enrolled inputs. No
+Compose or live configuration is changed by this option.
