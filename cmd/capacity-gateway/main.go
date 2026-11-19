@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 	"log"
 	"net"
 	"net/http"
@@ -39,8 +40,14 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	DemandObserverConfigFile      string                                   `json:"demand_observer_config_file,omitempty"`
+	NativeRetirement              *nativeRetirementConfiguration           `json:"native_retirement,omitempty"`
+	EnableNativeRetirement        bool                                     `json:"-"`
+	NativeClaims                  *nativeClaimConfiguration                `json:"native_claims,omitempty"`
+	JobObserver                   *jobObserverConfiguration                `json:"job_observer,omitempty"`
+	EnableJobObserver             bool                                     `json:"-"`
 	NativeStock                   map[string]nativeStockPoolConfiguration  `json:"native_stock,omitempty"`
-	ProviderInspectionFingerprint string                                   `json:"provider_inspection_fingerprint,omitempty"`
+	AllocatorLoop                 *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
 	StockProviderScopes           []gatewayrpc.StockScope                  `json:"stock_provider_scopes,omitempty"`
 	EnableStockProvider           bool                                     `json:"-"`
 	PreparationPools              map[string]gateway.PreparationPoolPolicy `json:"preparation_pools,omitempty"`
@@ -57,7 +64,7 @@ type configuration struct {
 	Garm                          garmConfiguration                        `json:"garm"`
 	ServerTLS                     securefiles.TLSFiles                     `json:"server_tls"`
 	ProviderFingerprints          []string                                 `json:"provider_fingerprints"`
-	AllocatorLoop                 *allocatorLoopConfiguration              `json:"allocator_loop,omitempty"`
+	ProviderInspectionFingerprint string                                   `json:"provider_inspection_fingerprint,omitempty"`
 }
 
 type redactedConnectionLog struct{}
@@ -68,6 +75,9 @@ func (redactedConnectionLog) Write(message []byte) (int, error) {
 }
 
 func serve(ctx context.Context, config configuration, provision, monitoring bool) error {
+	if config.NativeClaims != nil || config.NativeRetirement != nil {
+		return errNativeClaimsRuntime
+	} // Refuse before any listener or key read.
 	// Initial listener is deliberately local-only even though it also requires
 	// verified mTLS and a leaf allowlist. Use a private reverse tunnel if needed;
 	// never terminate client verification in an unauthenticated proxy.
@@ -103,6 +113,25 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		return err
 	}
 	defer store.Close()
+	claims, err := buildNativeClaims(ctx, config, store)
+	if err != nil {
+		return err
+	}
+	retirement, err := buildNativeRetirement(ctx, config, store)
+	if err != nil {
+		return err
+	}
+	if config.Admin != nil {
+		config.Admin.nativeRetirementRuntime = retirement
+	}
+	observer, closeObserver, err := buildJobObserver(config, store)
+	if err != nil {
+		return err
+	}
+	defer closeObserver()
+	if config.Admin != nil {
+		config.Admin.jobObserverRuntime = observer
+	}
 	allocator, closeAllocator, err := startConfiguredAllocatorLoop(ctx, config, store)
 	if err != nil {
 		return err
@@ -112,6 +141,21 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		config.Admin.allocatorRuntime = allocator
 	}
 
+	var demand *demandobserver.Service
+	if config.DemandObserverConfigFile != "" {
+		if config.Admin == nil {
+			return demandobserver.ErrObserver
+		}
+		dc, e := demandobserver.Load(config.DemandObserverConfigFile)
+		if e != nil {
+			return e
+		}
+		demand, e = demandobserver.NewService(dc)
+		if e != nil {
+			return e
+		}
+		config.Admin.demandObserverRuntime = demand
+	}
 	backends := map[string]gateway.Backend{}
 	monitors := map[string]hostmetrics.Source{}
 	for id, host := range config.Hosts {
@@ -241,6 +285,14 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if err := runctx.Err(); err != nil {
 		return err
 	}
+	// Start only after all local handlers/listeners are validated and the
+	// initial inventory reconciliation has completed. The service still reads
+	// canonical readiness itself; a failed inventory pass cannot authorize it.
+	closePolicyCaps, err := startPolicyCapReconciler(runctx, config, store, remoteManager)
+	if err != nil {
+		return err
+	}
+	defer closePolicyCaps()
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
@@ -264,7 +316,37 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	} else {
 		close(monitorDone)
 	}
-	defer func() { cancel(); <-loopDone; <-monitorDone }()
+	retirementDone := make(chan struct{})
+	if retirement != nil {
+		go func() { defer close(retirementDone); _ = retirement.Run(runctx) }()
+	} else {
+		close(retirementDone)
+	}
+	observerDone := make(chan struct{})
+	if observer != nil {
+		go func() { defer close(observerDone); _ = observer.Run(runctx) }()
+	} else {
+		close(observerDone)
+	}
+	demandDone := make(chan struct{})
+	if demand != nil {
+		go func() { defer close(demandDone); _ = demand.Run(runctx) }()
+	} else {
+		close(demandDone)
+	}
+	defer func() {
+		cancel()
+		<-loopDone
+		<-monitorDone
+		<-observerDone
+		<-retirementDone
+		<-demandDone
+	}()
+	var claimsDone chan error
+	if claims != nil {
+		claimsDone = make(chan error, 1)
+		go func() { e := claims.Run(runctx); claimsDone <- e; cancel() }()
+	}
 	var adminDone chan error
 	if adminServer != nil {
 		adminDone = make(chan error, 1)
@@ -296,6 +378,12 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	err = server.ServeTLS(listener, "", "")
 	cancel()
 	<-shutdownDone
+	if claimsDone != nil {
+		claimErr := <-claimsDone
+		if !errors.Is(claimErr, context.Canceled) {
+			return claimErr
+		}
+	}
 	if adminDone != nil {
 		adminErr := <-adminDone
 		if !errors.Is(adminErr, http.ErrServerClosed) {
@@ -310,6 +398,8 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
+	retirement := flag.Bool("allow-experimental-native-retirement", false, "configure canonical STOP/DELETE orchestration; active runtime still refused, no release")
+	jobObserver := flag.Bool("allow-job-observer", false, "enable positive authenticated job/root journal correlation only; no retirement or release")
 	stockProvider := flag.Bool("allow-experimental-stock-provider", false, "enable distinct post-JIT stock-provider admission; no original-preparation guarantee or physical release")
 	provision := flag.Bool("allow-experimental-provisioning", false, "allow one-shot creates after successful reconciliation; requires qualified exclusive scopes and fenced old writers")
 	management := flag.Bool("allow-experimental-management", false, "allow separately authorized ledger-policy edits; not Garm pool registration or runner drain")
@@ -317,6 +407,11 @@ func main() {
 	onboardingProbes := flag.Bool("allow-experimental-onboarding-probes", false, "allow audited read-only probes of allowlisted Incus transport profiles; never enrolls or qualifies a backend")
 	sshTargetManagement := flag.Bool("allow-ssh-target-management", false, "allow separately authorized durable SSH target registration within deployment scopes; no installation or activation")
 	rotation := flag.Bool("allow-inventory-key-rotation", false, "allow separately approved remote inventory key/session revocation and atomic local target replacement")
+	nativeRegistration := flag.Bool("allow-native-target-registration", false, "allow scoped new-target configuration, discovery, bundle assembly and separately approved disabled preparation; never activation")
+	nativeAssembly := flag.Bool("allow-native-bundle-assembly", false, "allow explicit fixed-recipe local assembly and reviewed preparation registry reload; no SSH or activation")
+	nativePlanning := flag.Bool("allow-native-discovery-planning", false, "allow separately approved SSH discovery and saved native resource configuration; no activation")
+	nativeAssets := flag.Bool("allow-native-asset-staging", false, "allow separately approved runtime asset transfer for exact existing native preparation targets; never activation")
+	nativePreparation := flag.Bool("allow-native-owner-preparation", false, "allow separately approved private configuration transfer and disabled owner preparation; never activation")
 	firstboot := flag.Bool("allow-isolated-inventory-firstboot", false, "allow separately approved full-admin first-time isolated listener installation; changes host account, service and owned firewall")
 	bootstrap := flag.Bool("allow-prepared-host-bootstrap", false, "allow separately authorized installation on deployment-approved prepared hosts; no account creation or sshd changes")
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
@@ -374,6 +469,41 @@ func main() {
 		}
 		config.Admin.EnableRotation = true
 	}
+	if *nativeRegistration {
+		if config.Admin == nil || !*sshInventory || *nativeAssembly || *nativePlanning || *nativePreparation {
+			fmt.Fprintln(os.Stderr, "native target registration requires SSH inventory and separate dynamic configuration, without static native workflow flags")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativeRegistration = true
+	}
+	if *nativeAssembly {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "native assembly requires admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativeAssembly = true
+	}
+	if *nativePlanning {
+		if config.Admin == nil || !*sshInventory {
+			fmt.Fprintln(os.Stderr, "native planning requires SSH inventory and separate admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativePlanning = true
+	}
+	if *nativePreparation {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "native preparation requires separate admin configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativePreparation = true
+	}
+	if *nativeAssets {
+		if config.Admin == nil || (!*nativePreparation && !*nativeRegistration) {
+			fmt.Fprintln(os.Stderr, "native asset staging requires existing native preparation or registration configuration")
+			os.Exit(1)
+		}
+		config.Admin.EnableNativeAssets = true
+	}
 	if *firstboot {
 		if config.Admin == nil {
 			fmt.Fprintln(os.Stderr, "firstboot requires separate admin configuration")
@@ -382,6 +512,8 @@ func main() {
 		config.Admin.EnableFirstboot = true
 	}
 	config.EnableStockProvider = *stockProvider
+	config.EnableJobObserver = *jobObserver
+	config.EnableNativeRetirement = *retirement
 	if *bootstrap {
 		if config.Admin == nil {
 			fmt.Fprintln(os.Stderr, "bootstrap requires separate admin configuration")

@@ -1,3 +1,5 @@
+import {DemandObserverStatus} from "./demand-observer-status.jsx";
+import {MixPrefillProvider} from "./mix-prefill-context.jsx";
 import { PoolMappings } from "./broker-profiles.jsx";
 import { AllocatorStatus } from "./allocator-status.jsx";
 import { Lifecycle } from "./lifecycle.jsx";
@@ -16,7 +18,7 @@ import { AuditEvents } from "./audit-events.jsx";
 import { Management } from "./management.jsx";
 import { Servers } from "./servers.jsx";
 import { Profiles } from "./profiles.jsx";
-import { Usage, dimensions } from "./usage-bars.jsx";
+import { Usage, dimensions, allocationText } from "./usage-bars.jsx";
 import { validateProfilesList } from "./profiles-client.js";
 import { validateUsageHistory } from "./usage-client.js";
 
@@ -68,12 +70,12 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readMix, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readDemandObserverStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
   return (
-    <>
+    <MixPrefillProvider>
       <aside className="sidebar">
         <Brand />
         <div className="nav-label">LEDGER MANAGEMENT</div>
@@ -226,6 +228,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
                   <th>CPU · millicores</th>
                   <th>Memory · MiB</th>
                   <th>Runners</th>
+                  <th>Disk · MiB</th>
                 </tr>
               </thead>
               <tbody>
@@ -237,7 +240,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
                     <td>{p.hosts?.join(", ") || "None"}<p className="muted">{poolPlacementSummary(p, data.hosts)}</p></td>
                     {dimensions.map(([k]) => (
                       <td key={k}>
-                        {fmt(p.allocated[k])} / {fmt(p.budget[k])}
+                        {allocationText(p,k)}
                       </td>
                     ))}
                   </tr>
@@ -255,9 +258,10 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </div>
           <PoolMappings readMappings={readPoolMappings} readProfiles={readProfiles} />
         </section>
-        <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} />
-        <Profiles readProfiles={readProfiles} />
-        <BrokerPolicy readPolicy={readBrokerPolicy} />
+        <Servers data={data} readOnboarding={readOnboarding} readUsage={readUsage} refresh={refresh} readOverheadRefresh={readOverheadRefresh} readNativeEnrollment={readNativeEnrollment} />
+        <Profiles readProfiles={readProfiles} readMix={readMix} hosts={data.hosts} />
+        <DemandObserverStatus read={readDemandObserverStatus} />
+        <BrokerPolicy readPolicy={readBrokerPolicy} readPlan={readAllocatorPlan} />
         <div className="bottom-grid">
           <CapacityStates read={readCapacityStates} />
           <AuditEvents events={data.events} />
@@ -266,7 +270,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           Usage history is measured monitoring data, not allocated capacity. No Garm registration, dynamic placement, provisioning, drain, retirement or resource release is available here.
         </footer>
       </main>
-    </>
+    </MixPrefillProvider>
   );
 }
 export function App() {
@@ -288,6 +292,7 @@ export function App() {
     try { return await session.current.entityInventorySnapshot(options); }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
+  const readDemandObserverStatus=useCallback(async(options)=>{try{return await session.current.demandObserverStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   const readAllocatorStatus=useCallback(async(options)=>{try{return await session.current.allocatorStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   // Refresh measured history once per committed overview snapshot, not on busy
   // transitions. Stable identity also prevents unrelated renders aborting reads.
@@ -325,6 +330,7 @@ export function App() {
       <Dashboard
         data={data}
         readAllocatorStatus={readAllocatorStatus}
+        readDemandObserverStatus={readDemandObserverStatus}
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}
@@ -341,8 +347,17 @@ export function App() {
           try { return await session.current.poolMappingsSnapshot(); }
           catch(error) { if(error instanceof SessionEnded && error.message) {disconnect();setError(error.message);} throw error; }
         }}
+        readNativeEnrollment={async options=>{try{return await session.current.nativeEnrollmentSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}}}
+        readOverheadRefresh={async options=>{try{return await session.current.overheadRefreshSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}}}
+        readAllocatorPlan={async (options) => {
+ try{return await session.current.allocatorPlanSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}
+ }}
         readBrokerPolicy={async () => {
           try { return await session.current.brokerPolicySnapshot(); }
+          catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+        }}
+        readMix={async (host) => {
+          try { return await session.current.runnerMixSnapshot(host); }
           catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
         }}
         readProfiles={async () => {

@@ -14,7 +14,7 @@ test('local validation preserves editable policy draft; dispatched unknown block
  await panel.getByRole('button',{name:'Add repository',exact:true}).click();
  await panel.getByLabel('GARM repository UUID').fill(id);
  await panel.getByLabel('Repository runner cap').fill('8');
- await panel.getByRole('button',{name:'Save advisory policy',exact:true}).click();
+ await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
  await expect(panel.getByRole('status')).toContainText('management token');
  await expect(panel.getByLabel('GARM repository UUID')).toBeEnabled();
  await expect(panel.getByLabel('Repository runner cap')).toHaveValue('8');
@@ -22,13 +22,13 @@ test('local validation preserves editable policy draft; dispatched unknown block
  await panel.getByRole('button',{name:'Add repository',exact:true}).click();
  await panel.getByLabel('GARM repository UUID').nth(1).fill(id);
  await panel.getByLabel('Separate management token').fill('c'.repeat(64));
- await panel.getByRole('button',{name:'Save advisory policy',exact:true}).click();
+ await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
  await expect(panel.getByRole('status')).toContainText('Invalid repository policy');
  await expect(panel.getByLabel('GARM repository UUID').nth(1)).toBeEnabled();
  expect(calls).toBe(0);
  await panel.getByLabel('GARM repository UUID').nth(1).fill('22222222-2222-4222-8222-222222222222');
  await panel.getByLabel('Separate management token').fill('c'.repeat(64));
- await panel.getByRole('button',{name:'Save advisory policy',exact:true}).click();
+ await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
  await expect(panel.getByRole('status')).toContainText('not confirmed');
  await expect(panel.getByLabel('GARM repository UUID').first()).toBeDisabled();
  await expect(panel.getByLabel('Separate management token')).toHaveValue('');

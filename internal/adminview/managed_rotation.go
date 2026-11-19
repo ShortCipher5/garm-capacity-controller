@@ -20,7 +20,7 @@ func (h *Handler) SetManagedRotation(s *firstboot.ManagedRotationService, token 
 	if s == nil || e != nil || len(b) != 32 || token != strings.ToLower(token) {
 		return ErrConfiguration
 	}
-	for _, other := range [][32]byte{h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash} {
+	for _, other := range [][32]byte{h.nativeAssetsHash, h.nativePlanningHash, h.nativePreparationHash, h.tokenHash, h.writeHash, h.onboardingHash, h.sshHash, h.sshTargetsHash, h.bootstrapHash, h.firstbootHash} {
 		if subtle.ConstantTimeCompare(hash[:], other[:]) == 1 {
 			return ErrConfiguration
 		}

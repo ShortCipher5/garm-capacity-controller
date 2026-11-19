@@ -1,0 +1,13 @@
+# Optional saved-cap reduction service
+
+This is not automatic cross-repository allocation. The grant loop and capacity-increase path retain their existing refusal. The new opt-in only lowers **positive maximum pool settings** to the canonical saved pool cap, leaving minimum idle, priorities, tags, enabled state, running jobs, inventory and all ledger charges unchanged. A zero policy cap or a cap below the existing minimum idle is skipped, not converted into a stop/delete operation.
+
+Stock GARM v0.2.1 semantics and the scoped supervisor journal path are described in `managed-maximum-reduction.md`: updating a positive maximum changes future provisioning limits; it does not invoke the runner deletion path. The supervisor still performs the guarded fresh GET/compare/PUT inside its single-writer session and journals before dispatch. This service neither bypasses that boundary nor creates another journal.
+
+Private gateway configuration `admin.garm_management.policy_cap_interval_seconds` (60–3600; absent/zero disables) additionally requires managed-supervisor routing, both existing explicit management write opt-ins, and the runtime-bound canonical store. Only exact authenticated source/controller and registered pool/repository/provider matches are eligible. Startup constructs the concrete pinned-mTLS settings client, starts one serial worker and joins it during shutdown. It is never enabled by a policy edit alone.
+
+Every pass reads saved policy and a fresh scoped settings snapshot, then rechecks the canonical sequence and policy revision before each attempted reduction. It performs at most ten reductions with a two-minute pass deadline. It stops on the first error/uncertainty and never auto-restarts or replays an original request. The root supervisor remains the sole durable settings journal; after a process restart, confirmed lower settings are skipped and unresolved journal entries still refuse writes. Historical confirmation is not a reset capability.
+
+The overview exposes actual process state and the last pass's policy revision/counts/request ID. The saved policy and GARM are separate systems, not an atomic transaction: an overlapping policy update after the final read can leave an already-dispatched older **lower** cap. Its journal reason identifies the applied policy revision. Raising a policy cap cannot undo that reduction automatically while capacity-increase authority remains unavailable. Operators must understand this one-way mode before enabling it. No capacity is reclaimed or reassigned by lowering the maximum.
+
+No live installation, job interruption experiment, native activation or host/network credential change is performed by this implementation or its local tests.

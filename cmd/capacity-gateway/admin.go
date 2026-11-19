@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"log"
 	"net"
 	"net/http"
@@ -14,12 +16,29 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/jobobserver"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type adminConfiguration struct {
-	BrokerProfileRecipesFile           string `json:"broker_profile_recipes_file,omitempty"`
+	NativeAssets                *nativeAssetsConfiguration `json:"native_assets,omitempty"`
+	EnableNativeAssets          bool                       `json:"-"`
+	demandObserverRuntime       *demandobserver.Service
+	nativeRetirementRuntime     *nativecontroller.RetirementService
+	jobObserverRuntime          *jobobserver.Service
+	NativeRegistration          *nativeRegistrationConfiguration `json:"native_registration,omitempty"`
+	EnableNativeRegistration    bool                             `json:"-"`
+	NativeEnrollmentRecipesFile string                           `json:"native_enrollment_recipes_file,omitempty"`
+	OverheadRefresh             *overheadRefreshConfiguration    `json:"owner_overhead_refresh,omitempty"`
+	EnableNativeAssembly        bool                             `json:"-"`
+	NativePlanning              *nativePlanningConfiguration     `json:"native_planning,omitempty"`
+	EnableNativePlanning        bool                             `json:"-"`
+	NativePreparation           *nativePreparationConfiguration  `json:"native_preparation,omitempty"`
+	EnableNativePreparation     bool                             `json:"-"`
+	BrokerProfileRecipesFile    string                           `json:"broker_profile_recipes_file,omitempty"`
+
 	allocatorRuntime                   *brokerinput.Service
 	Rotation                           *rotationConfiguration     `json:"inventory_key_rotation,omitempty"`
 	EnableRotation                     bool                       `json:"-"`
@@ -49,6 +68,9 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	if config == nil {
 		return nil, noop, nil
 	}
+	if !nativeRegistrationModeAllowed(config) {
+		return nil, noop, adminview.ErrConfiguration
+	}
 	host, _, err := net.SplitHostPort(config.Listen)
 	ip := net.ParseIP(host)
 	if err != nil || ip == nil || !ip.IsLoopback() {
@@ -77,6 +99,9 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		return nil, noop, err
 	}
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
+	handler.SetDemandObserver(config.demandObserverRuntime)
+	handler.SetJobObserver(config.jobObserverRuntime)
+	handler.SetNativeRetirement(config.nativeRetirementRuntime)
 	needsCredential := config.EnableExperimentalManagement || config.EnableExperimentalOnboardingProbes
 	if needsCredential != (config.ManagementTokenFile != "") {
 		cleanup()
@@ -96,6 +121,36 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 			cleanup()
 			return nil, noop, err
 		}
+	}
+	if config.NativeEnrollmentRecipesFile != "" {
+		recipes, e := loadNativeEnrollmentRecipes(config.NativeEnrollmentRecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativeEnrollmentRecipes(recipes); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+	}
+	if config.OverheadRefresh != nil {
+		recipes, e := loadOverheadRecipes(config.OverheadRefresh.RecipesFile)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		service, e := overheadrefresh.NewService(context.Background(), store, config.OverheadRefresh.JournalDirectory, recipes)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetOverheadRefresh(service); e != nil {
+			service.Close()
+			cleanup()
+			return nil, noop, e
+		}
+		previousCleanup := cleanup
+		cleanup = func() { service.Close(); previousCleanup() }
 	}
 	if config.BrokerProfileRecipesFile != "" {
 		recipes, e := loadBrokerProfileRecipes(config.BrokerProfileRecipesFile)
@@ -256,6 +311,91 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 		}
 		old := cleanup
 		cleanup = func() { service.Close(); old() }
+	}
+	if config.EnableNativePreparation {
+		targets, token, closePreparation, e := loadNativePreparation(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativePreparation(targets, token); e != nil {
+			closePreparation()
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { closePreparation(); old() }
+	}
+	if config.EnableNativePlanning {
+		token, e := loadNativePlanning(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.ConfigureNativePlanning(config.NativePlanning.Bindings, config.NativePlanning.SelectionDirectory, token); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+	}
+	if config.EnableNativeAssembly {
+		if !config.EnableNativePreparation || !config.EnableNativePlanning || config.NativePreparation == nil {
+			cleanup()
+			return nil, noop, adminview.ErrConfiguration
+		}
+		if e := handler.ConfigureNativeAssembly(config.NativePreparation.AssemblyRecipes); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { handler.CloseNativePreparation(); old() }
+	}
+	if config.EnableNativeRegistration {
+		planningToken, preparationToken, resolvers, e := loadNativeRegistration(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		c := config.NativeRegistration
+		if e = handler.ConfigureNativeRegistration(c.Catalog, c.Directory, c.SelectionDirectory, planningToken, preparationToken, resolvers); e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { handler.CloseNativePreparation(); old() }
+	}
+	if config.EnableNativeAssets {
+		targets, token, closeAssets, e := loadNativeAssets(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if e = handler.SetNativeAssets(targets, token); e != nil {
+			closeAssets()
+			cleanup()
+			return nil, noop, e
+		}
+		registry, e := loadNativeAssetRegistry(config.NativeAssets)
+		if e != nil {
+			closeAssets()
+			cleanup()
+			return nil, noop, e
+		}
+		if registry != nil {
+			if e = handler.SetNativeAssetRegistry(registry); e != nil {
+				registry.Close()
+				closeAssets()
+				cleanup()
+				return nil, noop, e
+			}
+		}
+		old := cleanup
+		cleanup = func() {
+			if registry != nil {
+				registry.Close()
+			}
+			closeAssets()
+			old()
+		}
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

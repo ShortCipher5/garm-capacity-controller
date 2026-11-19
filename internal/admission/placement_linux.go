@@ -244,7 +244,7 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 			return ErrExecutionPlan
 		}
 		sum := sha256.Sum256(raw)
-		if _, err := tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,? ,?,18)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, "creating", result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.Exec("INSERT INTO reservations(request_key,pool,host,cpu,ram,disk,runners,state,created_at,accounting_version) VALUES(?,?,?,?,?,?,?,? ,?,27)", req.Key, req.Pool, req.Host, req.Resources.CPU, req.Resources.RAM, req.Resources.Disk, req.Resources.Runners, "creating", result.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 		if _, err := tx.Exec("INSERT INTO execution_plans(request_key,payload,payload_hash,host_binding_sequence,created_at) VALUES(?,?,?,?,?)", req.Key, string(raw), hex.EncodeToString(sum[:]), result.HostBindingSequence, result.CreatedAt.Format(time.RFC3339Nano)); err != nil {

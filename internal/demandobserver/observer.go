@@ -40,6 +40,8 @@ type Config struct {
 }
 
 type Counts struct {
+	ReaderOnly        int   `json:"reader_only"`
+	RetainedHistory   int   `json:"retained_history"`
 	StockQueued       int   `json:"stock_queued"`
 	ObservedDemand    int   `json:"observed_demand"`
 	Conflicted        int   `json:"conflicted"`
@@ -193,6 +195,12 @@ func ObserveSnapshot(ctx context.Context, c Config) (Event, *Snapshot) {
 	}
 	counts := &Counts{StockQueued: len(stock.Jobs), ObservedDemand: len(repaired.Items), Pools: len(stock.Pools)}
 	for _, item := range repaired.Items {
+		if item.Source == "reader" {
+			counts.ReaderOnly++
+		}
+		if item.Source == "history" {
+			counts.RetainedHistory++
+		}
 		if item.Conflict {
 			counts.Conflicted++
 		}

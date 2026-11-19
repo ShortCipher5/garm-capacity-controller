@@ -1,3 +1,7 @@
+import {validateDemandObserverStatus} from "./demand-observer-status.js";
+import { mixHost, validateMixView } from "./runner-mix-client.js";
+import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
+import {validateAllocatorPlan} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
 import { validateCapacityStates } from "./capacity-states.js";
@@ -87,6 +91,14 @@ export function validateOverview(value) {
   return value;
 }
 export class ReadSession {
+ #demandObserverRequest;
+ #demandObserverGeneration=0;
+ #enrollmentRequest;
+ #enrollmentGeneration=0;
+ #collectionRequest;
+ #collectionGeneration=0;
+  #planRequest;
+ #planGeneration=0;
   #allocatorRequest;
   #allocatorGeneration=0;
   #token = "";
@@ -104,6 +116,8 @@ export class ReadSession {
   #mappingGeneration=0;
   #brokerRequest;
   #brokerGeneration = 0;
+  #mixRequest;
+  #mixGeneration = 0;
   #profilesRequest;
   #profilesGeneration = 0;
   #usageInFlight = new Set();
@@ -113,6 +127,10 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+ this.#demandObserverGeneration++;this.#demandObserverRequest?.abort();this.#demandObserverRequest=undefined;
+ this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
+ this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
+ this.#planGeneration++;this.#planRequest?.abort();this.#planRequest=undefined;
     this.#allocatorGeneration++; this.#allocatorRequest?.abort(); this.#allocatorRequest=undefined;
     this.#entityGeneration++;
     this.#entityRequest?.abort();
@@ -131,6 +149,9 @@ export class ReadSession {
     this.#brokerGeneration++;
     this.#brokerRequest?.abort();
     this.#brokerRequest = undefined;
+    this.#mixGeneration++;
+    this.#mixRequest?.abort();
+    this.#mixRequest = undefined;
     this.#profilesGeneration++;
     this.#profilesRequest?.abort();
     this.#profilesRequest = undefined;
@@ -191,6 +212,70 @@ export class ReadSession {
       throw new Error("Existing Garm scope observation unavailable.");
     } finally {clearTimeout(timeout);signal?.removeEventListener("abort",abort);}
   }
+  async allocatorPlanSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#planRequest?.abort(); const generation=++this.#planGeneration;
+    const controller=new AbortController();this.#planRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/allocator-plan',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Allocation plan unavailable.');
+      const result=validateAllocatorPlan(await response.json());
+      if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async nativeEnrollmentSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#enrollmentRequest?.abort(); const generation=++this.#enrollmentGeneration;
+    const controller=new AbortController();this.#enrollmentRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/native-enrollment',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#enrollmentGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Native enrollment status unavailable.');
+      const result=validateEnrollmentView(await response.json());
+      if(generation!==this.#enrollmentGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async overheadRefreshSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#collectionRequest?.abort(); const generation=++this.#collectionGeneration;
+    const controller=new AbortController();this.#collectionRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/overhead-refresh',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#collectionGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Collection status unavailable.');
+      const result=validateCollectionView(await response.json());
+      if(generation!==this.#collectionGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async demandObserverStatusSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#demandObserverRequest?.abort(); const generation=++this.#demandObserverGeneration;
+    const controller=new AbortController();this.#demandObserverRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/demand-observer-status',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#demandObserverGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Demand observer status unavailable.');
+      const result=validateDemandObserverStatus(await response.json());
+      if(generation!==this.#demandObserverGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
   async allocatorStatusSnapshot({signal}={}) {
     if(!this.#token) throw new SessionEnded();
     this.#allocatorRequest?.abort(); const generation=++this.#allocatorGeneration;
@@ -227,6 +312,29 @@ export class ReadSession {
       if (generation !== this.#remoteGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
       if (error instanceof SessionEnded || error.message?.includes("Garm")) throw error;
       throw new Error("Garm settings could not be read. Refresh before editing.");
+    } finally { clearTimeout(timeout); }
+  }
+  async runnerMixSnapshot(host) {
+    mixHost(host);
+    if (!this.#token) throw new SessionEnded();
+    this.#mixRequest?.abort();
+    const generation = ++this.#mixGeneration;
+    const controller = new AbortController(); this.#mixRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await this.fetcher(`/admin/api/v1/runner-mix/${encodeURIComponent(host)}`, { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (generation !== this.#mixGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
+      if (!response.ok) throw new Error("Saved runner mix are unavailable. No saved configuration was rendered.");
+      const result = validateMixView(await response.json(), host);
+      if (generation !== this.#mixGeneration) throw new SessionEnded();
+      if (controller.signal.aborted) throw new Error("Read observation expired.");
+      return result;
+    } catch (error) {
+      if (generation !== this.#mixGeneration && !(error instanceof SessionEnded)) throw new SessionEnded();
+      if (error instanceof SessionEnded) throw error;
+      throw new Error("Saved runner mix could not be read. Refresh before reviewing desired sizes.");
     } finally { clearTimeout(timeout); }
   }
   async profilesSnapshot() {

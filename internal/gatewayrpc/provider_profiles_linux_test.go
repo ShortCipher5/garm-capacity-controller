@@ -68,6 +68,9 @@ func TestProfileSnapshotActualMTLSRoleNonceAndNoMutation(t *testing.T) {
 	if err != nil || snap.Lineage != store.RuntimeLineageFingerprint() || snap.Sequence != before.Sequence {
 		t.Fatal("actual snapshot", err)
 	}
+	if snap.Accounting.Sequence != before.Sequence || snap.Accounting.Policy.Revision != before.Policy.Revision || snap.Accounting.Budgets.Global != budget || snap.Accounting.Budgets.Pools["pool"] != budget || snap.Accounting.Allocated.Global != before.Allocated.Global || snap.Accounting.UnusedGrantCounts["pool"] != 0 {
+		t.Fatal("accounting not from actual coherent ledger")
+	}
 	if _, err := profilesnapshot.Decode(body, controller, strings.Repeat("b", 64), time.Now()); err == nil {
 		t.Fatal("replayed nonce")
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,19 @@ var errStaticConfig = errors.New("static configuration check failed")
 // It cannot establish persisted policy, reachability, fencing or readiness.
 func checkStaticConfig(c configuration, provision bool) error {
 	fail := func() error { return errStaticConfig }
+	adminAddress := ""
+	if c.Admin != nil {
+		adminAddress = c.Admin.Listen
+	}
+	if validateNativeClaimConfiguration(c.NativeClaims, c.Listen, adminAddress) != nil {
+		return fail()
+	}
+	if validateNativeRetirement(c) != nil {
+		return nativecontroller.ErrConfiguration
+	}
+	if validateJobObserver(c) != nil {
+		return fail()
+	}
 	if validateAllocatorLoop(c.AllocatorLoop) != nil {
 		return fail()
 	}
@@ -160,6 +174,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		return nil
 	}
 	a := c.Admin
+	if a.OverheadRefresh != nil {
+		if !a.EnableExperimentalManagement || a.OverheadRefresh.JournalDirectory == "" {
+			return fail()
+		}
+		if _, e := loadOverheadRecipes(a.OverheadRefresh.RecipesFile); e != nil {
+			return fail()
+		}
+	}
 	if a.BrokerProfileRecipesFile != "" {
 		if !a.EnableExperimentalManagement {
 			return fail()
@@ -202,6 +224,54 @@ func checkStaticConfig(c configuration, provision bool) error {
 	}
 	if a.EnableRotation {
 		_, _, _, token, e := loadManagedRotation(a)
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
+	if a.EnableNativeRegistration {
+		if _, _, _, e := loadNativeRegistration(a); e != nil {
+			return fail()
+		}
+	}
+	if a.EnableNativeAssembly && (!a.EnableNativePlanning || !a.EnableNativePreparation || a.NativePreparation == nil || len(a.NativePreparation.AssemblyRecipes) < 1 || len(a.NativePreparation.AssemblyRecipes) > 8) {
+		return fail()
+	}
+	if a.EnableNativePlanning {
+		token, e := loadNativePlanning(a)
+		if e != nil || !validToken([]byte(token)) {
+			return fail()
+		}
+	}
+	if a.EnableNativeAssets {
+		assetTargets, _, closeAssets, e := loadNativeAssets(a)
+		defer closeAssets()
+		if e != nil {
+			return fail()
+		}
+		registry, e := loadNativeAssetRegistry(a.NativeAssets)
+		if e != nil {
+			return fail()
+		}
+		if registry != nil {
+			defer registry.Close()
+			ids := map[string]bool{}
+			for id, t := range assetTargets {
+				v, e := t.Service.View(id)
+				if e != nil {
+					return fail()
+				}
+				ids[v.AssetID] = true
+			}
+			for _, id := range registry.AssetIDs() {
+				if ids[id] {
+					return fail()
+				}
+			}
+		}
+	}
+	if a.EnableNativePreparation {
+		_, token, closePreparation, e := loadNativePreparation(a)
+		closePreparation()
 		if e != nil || !validToken([]byte(token)) {
 			return fail()
 		}
@@ -250,8 +320,18 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if a.EnableExperimentalGarmManagement && (!a.EnableExperimentalManagement || a.GarmManagement == nil) {
 		return fail()
 	}
-	if a.GarmManagement != nil {
+	if a.GarmManagement != nil && a.GarmManagement.ManagedSupervisor {
+		client, e := managedSettingsClient(a)
+		if e != nil {
+			return fail()
+		}
+		client.Close()
+	}
+	if a.GarmManagement != nil && !a.GarmManagement.ManagedSupervisor {
 		m := a.GarmManagement
+		if m.ProxyServerKeyPin != "" || m.ControllerID != "" {
+			return fail()
+		}
 		if a.EnableExperimentalGarmManagement && (!m.ExclusiveSettingsWriter || !m.QualifiedAdmissionRouting) {
 			return fail()
 		}

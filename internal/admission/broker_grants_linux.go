@@ -38,19 +38,22 @@ type BrokerGrantBatch struct {
 	Grants           []BrokerGrantSpec `json:"grants"`
 }
 type BrokerGrantState struct {
-	PoolProfiles   map[string]BrokerPoolProfile
-	Allocated      Allocations
-	HostBindings   map[string]HostBinding
-	ExecutionPlans map[string]ExecutionPlan
-	Sequence       int64
-	Policy         BrokerPolicy
-	Config         Config
-	Ready          bool
-	Epoch          int64
-	Reservations   map[string]Reservation
-	Inventory      []InventoryResource
-	Released       map[string]bool
-	Grants         []BrokerGrant
+	ArtifactOverheads []NativeArtifactOverhead
+	DomainOverheads   []NativeDomainOverhead
+	NativeDomains     map[int64]NativeDomainBinding
+	PoolProfiles      map[string]BrokerPoolProfile
+	Allocated         Allocations
+	HostBindings      map[string]HostBinding
+	ExecutionPlans    map[string]ExecutionPlan
+	Sequence          int64
+	Policy            BrokerPolicy
+	Config            Config
+	Ready             bool
+	Epoch             int64
+	Reservations      map[string]Reservation
+	Inventory         []InventoryResource
+	Released          map[string]bool
+	Grants            []BrokerGrant
 }
 
 const sqliteBrokerGrantSchema = `
@@ -206,6 +209,20 @@ func sqliteAllocationsWithGrants(tx *sql.Tx, c Config, r map[string]Reservation,
 		}
 		out.Hosts[g.Spec.Host], out.Pools[g.Spec.Authority.PoolID] = h, p
 	}
+	records, e := sqliteNativeDomainOverheads(tx)
+	if e != nil {
+		return Allocations{}, e
+	}
+	if e = addDomainOverheads(&out, c, records); e != nil {
+		return Allocations{}, e
+	}
+	artifacts, e := sqliteNativeArtifactOverheads(tx)
+	if e != nil {
+		return Allocations{}, e
+	}
+	if e = addArtifactOverheads(&out, c, artifacts); e != nil {
+		return Allocations{}, e
+	}
 	return out, nil
 }
 func sqliteBrokerPolicy(tx *sql.Tx) (BrokerPolicy, error) {
@@ -235,6 +252,24 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		if v.PoolProfiles, e = sqliteBrokerPoolProfiles(tx); e != nil {
 			return e
 		}
+		// Resolve the exact immutable enrollment referenced by each saved profile
+		// inside this transaction, never via a later independently timed read.
+		v.NativeDomains = map[int64]NativeDomainBinding{}
+		for _, profile := range v.PoolProfiles {
+			for _, ref := range profile.Domains {
+				if _, exists := v.NativeDomains[ref.Sequence]; exists {
+					continue
+				}
+				if len(v.NativeDomains) >= 1000 {
+					return ErrBrokerGrant
+				}
+				domain, err := nativeDomainRecord(tx, ref.Sequence)
+				if err != nil {
+					return err
+				}
+				v.NativeDomains[ref.Sequence] = domain
+			}
+		}
 		if v.Policy, e = sqliteBrokerPolicy(tx); e != nil {
 			return e
 		}
@@ -248,6 +283,12 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 			return e
 		}
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
+			return e
+		}
+		if v.ArtifactOverheads, e = sqliteNativeArtifactOverheads(tx); e != nil {
+			return e
+		}
+		if v.DomainOverheads, e = sqliteNativeDomainOverheads(tx); e != nil {
 			return e
 		}
 		if v.Allocated, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {

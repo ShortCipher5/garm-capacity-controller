@@ -39,9 +39,55 @@ func TestDiscoveryCancellationDoesNotWaitForWriterMutex(t *testing.T) {
 	}
 }
 
-func TestDiscoveryDeadlineWhileWriterMutexHeld(t *testing.T) {
+// Prove dispatch independently of a short TLS-handshake budget. Cancellation
+// starts only after the real server observes the request while m.mu is held.
+func TestDiscoveryCancellationAfterDispatchWhileWriterMutexHeld(t *testing.T) {
 	started := make(chan struct{}, 1)
 	server, trust := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { started <- struct{}{}; <-r.Context().Done() }))
+	m, err := NewManagement(ManagementConfig{Endpoint: server.URL, Token: "token", Trust: trust, Providers: []string{"capacity"}, PoolIDs: []string{managedPoolID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	m.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			m.mu.Unlock()
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { _, err := m.DiscoverPools(ctx); result <- err }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		cancel()
+		m.mu.Unlock()
+		locked = false
+		<-result
+		t.Fatal("discovery did not dispatch while writer mutex was held")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled discovery succeeded")
+		}
+	case <-time.After(500 * time.Millisecond):
+		m.mu.Unlock()
+		locked = false
+		<-result
+		t.Fatal("cancelled discovery waited for writer mutex")
+	}
+	if len(m.pools) != 1 || !m.pools[managedPoolID] {
+		t.Fatal("discovery mutated scope")
+	}
+}
+
+func TestDiscoveryDeadlineWhileWriterMutexHeld(t *testing.T) {
+	server, trust := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	m, err := NewManagement(ManagementConfig{Endpoint: server.URL, Token: "token", Trust: trust, Providers: []string{"capacity"}, PoolIDs: []string{managedPoolID}})
 	if err != nil {
 		t.Fatal(err)
@@ -63,10 +109,8 @@ func TestDiscoveryDeadlineWhileWriterMutexHeld(t *testing.T) {
 		<-result
 		t.Fatal("read deadline waited for writer mutex")
 	}
-	select {
-	case <-started:
-	default:
-		t.Fatal("read was serialized behind writer")
+	if ctx.Err() != context.DeadlineExceeded {
+		t.Fatal("discovery returned before its actual deadline")
 	}
 	if len(m.pools) != 1 || !m.pools[managedPoolID] {
 		t.Fatal("discovery mutated scope")

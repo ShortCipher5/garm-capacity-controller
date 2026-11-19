@@ -5,7 +5,7 @@ test('unknown stock write offers redacted diagnostic download without replay or 
  let mutations=0;
  await page.route('**/admin/api/v1/garm**',route=>{
   if(route.request().method()!=='GET'){mutations++;return route.abort();}
-  return route.fulfill({json:{settings_available:true,writes_enabled:true,write_blocked:true,history:[],pending:{request_id:'11111111-1111-4111-8111-111111111111',kind:'pool',target:'pool',resolution_available:false},settings:{pools:[],repositories:[],writes_enabled:true}}});
+  return route.fulfill({json:{settings_available:true,writes_enabled:true,write_blocked:true,history:[],history_truncated:false,pending:{request_id:'11111111-1111-4111-8111-111111111111',kind:'pool',target:'pool',started_at:'2026-11-18T00:00:00Z',resolution_available:false},settings:{pools:[],repositories:[],writes_enabled:true}}});
  });
  await page.goto('/');await page.getByLabel('Admin read token').fill('a'.repeat(64));await page.getByRole('button',{name:'Connect read-only'}).click();await page.getByRole('button',{name:'Load Garm settings'}).click();
  const panel=page.getByRole('complementary',{name:'Garm writer recovery'});

@@ -13,16 +13,21 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecapsule"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativedomain"
 )
 
 type Client struct {
-	domain   *nativedomain.Domain
-	policy   Policy
-	http     *http.Client
-	identity Identity
+	capsule      *nativecapsule.Running
+	boundary     *enforcedBoundary
+	ownerClaimed atomic.Bool
+	domain       *nativedomain.Domain
+	policy       Policy
+	http         *http.Client
+	identity     Identity
 }
 
 // Identity is minted by an actual private Unix root read, authenticated by the
@@ -49,6 +54,15 @@ func (c *Client) PolicyDigest() string {
 	}
 	return c.policy.Digest()
 }
+
+// ClaimOwner prevents accidental reconstruction of surviving-owner memory.
+// No reset exists; this is not a substitute for canonical ledger authorization.
+func (c *Client) ClaimOwner() error {
+	if c == nil || (c.domain == nil && c.capsule == nil) || !c.ownerClaimed.CompareAndSwap(false, true) {
+		return ErrNative
+	}
+	return nil
+}
 func New(ctx context.Context, domain *nativedomain.Domain, policy Policy) (*Client, error) {
 	if domain == nil || !hash(policy.Digest()) {
 		return nil, ErrPolicy
@@ -56,6 +70,9 @@ func New(ctx context.Context, domain *nativedomain.Domain, policy Policy) (*Clie
 	birth := domain.Birth()
 	if birth.ID != policy.spec.DomainID || birth.BinarySHA256 != policy.spec.NativeSHA256 || birth.LauncherSHA256 != policy.spec.LauncherSHA256 {
 		return nil, ErrPolicy
+	}
+	if domain.ClaimClient() != nil {
+		return nil, ErrNative
 	}
 	c := &Client{domain: domain, policy: policy, http: &http.Client{Transport: domain, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	identity, err := c.Identity(ctx)
@@ -66,14 +83,21 @@ func New(ctx context.Context, domain *nativedomain.Domain, policy Policy) (*Clie
 	return c, nil
 }
 func (c *Client) Identity(ctx context.Context) (Identity, error) {
-	if c == nil || c.domain == nil || c.http == nil {
+	if c == nil || (c.domain == nil && c.capsule == nil) || c.http == nil {
 		return Identity{}, ErrNative
 	}
 	raw, err := c.read(ctx, "/1.0")
 	if err != nil {
 		return Identity{}, err
 	}
-	identity, err := parseIdentity(raw, c.domain.Birth().ID, time.Now().UTC())
+	expectedDriver := "7.0.1"
+	if c.capsule != nil {
+		expectedDriver, err = c.capsule.LXCVersion(ctx)
+		if err != nil {
+			return Identity{}, ErrNative
+		}
+	}
+	identity, err := parseIdentityDriver(raw, c.domainID(), time.Now().UTC(), expectedDriver)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -137,6 +161,12 @@ func field[T any](m map[string]json.RawMessage, k string) (T, error) {
 	return out, nil
 }
 func parseIdentity(raw []byte, domain string, now time.Time) (Identity, error) {
+	return parseIdentityDriver(raw, domain, now, "7.0.1")
+}
+func parseIdentityDriver(raw []byte, domain string, now time.Time, expectedDriver string) (Identity, error) {
+	if expectedDriver != "7.0.1" && expectedDriver != "7.0.0" {
+		return Identity{}, ErrNative
+	}
 	if !hash(domain) || now.IsZero() {
 		return Identity{}, ErrNative
 	}
@@ -195,6 +225,15 @@ func parseIdentity(raw []byte, domain string, now time.Time) (Identity, error) {
 	}
 	version, err := field[string](env, "server_version")
 	if err != nil || version != NativeVersion {
+		return Identity{}, ErrNative
+	}
+	// Container-only runtime: never accept an unpinned or additional driver.
+	driver, err := field[string](env, "driver")
+	if err != nil || driver != "lxc" {
+		return Identity{}, ErrNative
+	}
+	driverVersion, err := field[string](env, "driver_version")
+	if err != nil || driverVersion != expectedDriver {
 		return Identity{}, ErrNative
 	}
 	text, err := field[string](env, "certificate")

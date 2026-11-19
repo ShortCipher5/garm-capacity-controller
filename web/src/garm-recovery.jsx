@@ -12,7 +12,7 @@ export function GarmRecoveryPanel({ snapshot, conflict, unavailable, uncertain }
       url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
       const anchor = document.createElement("a"); anchor.href = url; anchor.download = "garm-writer-recovery.json";
       document.body.appendChild(anchor); anchor.click(); anchor.remove();
-      setMessage("Diagnostic summary downloaded. Keep the authoritative journal separately; this summary is not a backup or permission to retry.");
+      setMessage("Diagnostic download requested. Keep the authoritative journal separately; this summary is not a backup or permission to retry.");
     } catch { setMessage("Diagnostic download unavailable. Preserve the request ID and authoritative journal; do not retry or clear an unknown write."); }
     finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 1000); }
   }

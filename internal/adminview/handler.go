@@ -8,6 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassembly"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeassettransfer"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"io"
 	"mime"
 	"net/http"
@@ -15,15 +19,21 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/firstboot"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostbootstrap"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativebundle"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeplanning"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeregistration"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/onboarding"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/overheadrefresh"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/retirement"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/sshinventory"
+	"golang.org/x/crypto/ssh"
 )
 
 var ErrConfiguration = errors.New("invalid admin configuration")
@@ -80,32 +90,51 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
-	brokerProfiles  map[string]BrokerProfileRecipe
-	allocatorStatus AllocatorStatusSource
-	rotation        *firstboot.ManagedRotationService
-	rotationHash    [32]byte
-	firstboot       *firstboot.Service
-	firstbootHash   [32]byte
-	bootstrap       *hostbootstrap.Service
-	bootstrapHash   [32]byte
-	sshTargets      *sshinventory.Registry
-	sshTargetsHash  [32]byte
-	sshInventory    *sshinventory.Service
-	sshHash         [32]byte
-	onboarding      *onboarding.Manager
-	onboardingProbe bool
-	onboardingHash  [32]byte
-	store           *admission.SQLiteStore
-	tokenHash       [32]byte
-	writeHash       [32]byte
-	management      bool
-	garm            GarmManager
-	garmWrites      bool
-	remoteFlight    chan struct{}
-	assets          *os.Root
-	provision       bool
-	inFlight        chan struct{}
-	Audit           func(string)
+	nativeAssets                map[string]NativeAssetsTarget
+	nativeAssetsHash            [32]byte
+	nativeAssetRegistry         *nativeassettransfer.Registry
+	nativeAssetSlots            map[string]string
+	nativeRetirement            *nativecontroller.RetirementService
+	demandObserver              *demandobserver.Service
+	jobObserver                 JobObserverStatusSource
+	nativeRegistration          *nativeregistration.Service
+	nativeRegistrationResolvers map[string]func() (ssh.Signer, error)
+	nativeConfigured            map[string]nativebundle.RegistrationMetadata
+	nativePlanning              *nativeplanning.Service
+	nativePlanningHash          [32]byte
+	nativePreparationMu         sync.Mutex
+	nativeAssembly              *nativeassembly.Service
+	nativeAssemblyTargets       map[string]bool
+	nativePreparation           map[string]NativePreparationTarget
+	nativePreparationHash       [32]byte
+	nativeEnrollments           map[string]frozenNativeRecipe
+	overheadRefresh             *overheadrefresh.Service
+	brokerProfiles              map[string]BrokerProfileRecipe
+	allocatorStatus             AllocatorStatusSource
+	rotation                    *firstboot.ManagedRotationService
+	rotationHash                [32]byte
+	firstboot                   *firstboot.Service
+	firstbootHash               [32]byte
+	bootstrap                   *hostbootstrap.Service
+	bootstrapHash               [32]byte
+	sshTargets                  *sshinventory.Registry
+	sshTargetsHash              [32]byte
+	sshInventory                *sshinventory.Service
+	sshHash                     [32]byte
+	onboarding                  *onboarding.Manager
+	onboardingProbe             bool
+	onboardingHash              [32]byte
+	store                       *admission.SQLiteStore
+	tokenHash                   [32]byte
+	writeHash                   [32]byte
+	management                  bool
+	garm                        GarmManager
+	garmWrites                  bool
+	remoteFlight                chan struct{}
+	assets                      *os.Root
+	provision                   bool
+	inFlight                    chan struct{}
+	Audit                       func(string)
 }
 
 // Token is 32 random bytes encoded as 64 lowercase hexadecimal characters and
@@ -153,6 +182,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/demand-observer-status" {
+		h.serveDemandObserver(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/allocator-plan" {
+		h.serveAllocatorPlan(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-retirement-status" {
+		h.serveNativeRetirementStatus(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/job-observer-status" {
+		h.serveJobObserverStatus(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/allocator-status" {
 		h.serveAllocatorStatus(w, r)
 		return
@@ -163,6 +208,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/inventory-key-rotation" {
 		h.serveManagedRotation(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/firstboot/preflight" {
+		h.serveFirstbootPreflight(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-planning" {
+		h.serveNativePlanning(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-registration" {
+		h.serveNativeRegistration(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-assembly" {
+		h.serveNativeAssembly(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-asset-plans" {
+		h.serveNativeAssetPlans(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-assets" {
+		h.serveNativeAssets(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-preparation/diagnostic" {
+		h.serveNativePreparationDiagnostic(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-preparation" {
+		h.serveNativePreparation(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/firstboot" {
@@ -187,6 +264,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/garm" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/garm/") {
 		h.serveGarm(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/runner-mix" || strings.HasPrefix(r.URL.Path, "/admin/api/v1/runner-mix/") {
+		h.serveRunnerMix(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/native-enrollment" {
+		h.serveNativeEnrollment(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/overhead-refresh" {
+		h.serveOverheadRefresh(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/broker-profiles" {
