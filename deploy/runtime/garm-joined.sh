@@ -102,7 +102,17 @@ for role in gateway ingress; do
   joined_check "$role" stop
   docker stop --time 60 "$child" >/dev/null
   joined_check "$role" exit-contract
-  [[ $(docker inspect --format '{{.State.ExitCode}}' "$child") = 0 ]] || [[ $child = "$joined_ingress" && $(docker inspect --format '{{.State.ExitCode}}' "$child") = 143 ]]
+  docker inspect "$child" | python3 -c '
+import json,sys
+items=json.load(sys.stdin)
+assert len(items)==1
+state=items[0]["State"]
+code,status,oom=state["ExitCode"],state["Status"],state["OOMKilled"]
+assert type(code) is int and type(oom) is bool
+status=status if status in ("created","running","paused","restarting","removing","exited","dead") else "unknown"
+if code!=0 or status!="exited" or oom or state["Running"]:
+ print(json.dumps({"exit_code":code,"status":status,"oom":oom}),file=sys.stderr)
+ raise SystemExit(1)'
   joined_check "$role" remove
   docker rm "$child" >/dev/null
 done
@@ -111,7 +121,7 @@ python3 - "$results/garm-three-service-preboot.json" "$image" "$gateway_image" "
 import json,pathlib,sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({'schema':'disposable-three-service-preboot/v1',
  'stock_image':sys.argv[2], 'gateway_image':sys.argv[3], 'ingress_image':sys.argv[4],
- 'actual_three_binaries_started':True,'shared_isolated_network':True,'host_ports_published':False,
+ 'actual_three_binaries_started':True,'exact_four_ipv4_loopback_listeners_verified':True,'shared_isolated_network':True,'host_ports_published':False,
  'stock_uninitialized':True,'supervisor_present':False,'admission_ready':False,
  'upstream_inventory_integrated':False,'managed_topology_qualified':False,
  'startup_authority':False,'deployment_authorized':False},indent=2))

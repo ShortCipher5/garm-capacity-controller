@@ -2,6 +2,7 @@
 import hashlib
 import http.client
 import json
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -59,7 +60,7 @@ def prepare(root, stock):
     fixture.write(ingress / 'stock.pem', (stock / 'server.pem').read_text())
     stock_pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert((stock / 'server.pem').read_text())).hexdigest()
     fixture.write(ingress / 'ingress.json', json.dumps({
-        'Listen': '0.0.0.0:8443', 'Upstream': 'https://127.0.0.1:9998', 'Controller': '',
+        'Listen': '127.0.0.1:8443', 'Upstream': 'https://127.0.0.1:9998', 'Controller': '',
         'TLSCertificate': '/run/joined-ingress/server.pem', 'TLSKey': '/run/joined-ingress/server.key',
         'StockCertificate': '/run/joined-ingress/stock.pem', 'StockFingerprint': stock_pin}))
     stage = 'joined-prepare-role-config'
@@ -104,6 +105,46 @@ def request(port, path, stock=False, authenticated=False):
         conn.close()
 
 
+
+def validate_listener_tables(tcp, tcp6):
+    """Exact disposable namespace profile; never emits kernel rows or identities."""
+    listeners = []
+    for table, ipv6 in ((tcp, False), (tcp6, True)):
+        if not isinstance(table, str) or len(table.encode('utf-8')) > 4 * 1024 * 1024:
+            raise ValueError('listener table unavailable')
+        lines = table.splitlines()
+        if not lines or 'local_address' not in lines[0] or len(lines) > 4097:
+            raise ValueError('listener table unavailable')
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(line) > 1024 or len(fields) < 4 or not re.fullmatch(r'[0-9A-F]{2}', fields[3]):
+                raise ValueError('malformed listener table')
+            width = 32 if ipv6 else 8
+            if not re.fullmatch(r'[0-9A-F]{' + str(width) + r'}:[0-9A-F]{4}', fields[1]):
+                raise ValueError('malformed listener address')
+            if fields[3] != '0A':
+                continue
+            address, port = fields[1].split(':')
+            if ipv6 or address != '0100007F':
+                raise ValueError('non-profile listener')
+            listeners.append(int(port, 16))
+    if sorted(listeners) != [8443, 9443, 9444, 9998]:
+        raise ValueError('listener set mismatch')
+
+
+def verify_listener_tables():
+    tables = []
+    for name in ('tcp', 'tcp6'):
+        with Path('/proc/self/net', name).open('rb') as stream:
+            raw = stream.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError('listener table too large')
+        tables.append(raw.decode('ascii'))
+    validate_listener_tables(*tables)
+
+
 def probe():
     for _ in range(90):
         try:
@@ -135,7 +176,8 @@ def probe():
             raise AssertionError('unexpected supervisor')
     except ConnectionRefusedError:
         pass
-    print('PASS actual three-service preboot; supervisor absent, admission unready')
+    verify_listener_tables()
+    print('PASS actual three-service preboot; exact loopback listeners, supervisor absent, admission unready')
 
 
 def outside():

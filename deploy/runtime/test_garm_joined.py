@@ -75,8 +75,9 @@ class Joined(unittest.TestCase):
             if path=='/api/v1/controller':
                 return (409,b'init_required') if port==9998 else (404,b'')
             return 409,b'init_required'
-        with patch.object(joined,'request',side_effect=request), patch.object(joined.socket,'create_connection',side_effect=ConnectionRefusedError):
+        with patch.object(joined,'request',side_effect=request), patch.object(joined.socket,'create_connection',side_effect=ConnectionRefusedError), patch.object(joined, 'verify_listener_tables') as listeners:
             joined.probe()
+            listeners.assert_called_once_with()
             view['admission_ready']=True
             with self.assertRaises(AssertionError): joined.probe()
 
@@ -111,6 +112,22 @@ class Joined(unittest.TestCase):
             self.assertEqual(result.returncode, 1 if touch_status == 0 else 0)
             self.assertEqual(result.stdout, '' if touch_status == 0 else 'reached')
 
+    def test_stop_requires_clean_non_oom_exit_and_redacts_status(self):
+        shell = (HERE / 'garm-joined.sh').read_text()
+        code = re.search(r'docker inspect "\$child" \| python3 -c \'(.*?)\'', shell, re.S).group(1)
+        for exit_code, status, oom, running, ok in ((0,'exited',False,False,True),(143,'exited',False,False,False),(0,'exited',True,False,False),(0,'private-name',False,False,False),(0,'running',False,True,False)):
+            payload = [{'Name':'secret-container','Config':{'Env':['SECRET=hidden']},'State':{'ExitCode':exit_code,'Status':status,'OOMKilled':oom,'Running':running}}]
+            result = subprocess.run(['python3','-c',code],input=json.dumps(payload),capture_output=True,text=True)
+            self.assertEqual(result.returncode == 0, ok)
+            self.assertEqual(result.stdout, '')
+            if ok:
+                self.assertEqual(result.stderr, '')
+            else:
+                value = json.loads(result.stderr)
+                self.assertEqual(set(value), {'exit_code','status','oom'})
+                self.assertNotIn('secret',result.stderr)
+                self.assertNotIn('private-name',result.stderr)
+
     def test_closed_joined_selector_and_shell_python(self):
         source=(HERE/'garm-least-privilege.sh').read_text()
         selector=source[source.index('lab_uid='):source.index('image=ghcr.io/')]
@@ -126,3 +143,30 @@ class Joined(unittest.TestCase):
         self.assertNotIn('--privileged',shell)
 
 if __name__=='__main__': unittest.main()
+
+class ExactListeners(unittest.TestCase):
+    header = ' sl local_address rem_address st'
+
+    def rows(self, ports=(8443, 9443, 9444, 9998), address='0100007F'):
+        return self.header + '\n' + '\n'.join(f'{i}: {address}:{p:04X} 00000000:0000 0A' for i, p in enumerate(ports))
+
+    def test_exact_loopback_only(self):
+        joined.validate_listener_tables(self.rows(), self.header + '\n')
+
+    def test_wildcard_ipv6_extra_missing_duplicate_rejected(self):
+        for tcp, tcp6 in [
+            (self.rows(address='00000000'), self.header),
+            (self.rows(), self.rows((8443,), '00000000000000000000000001000000')),
+            (self.rows((8443, 9443, 9444, 9998, 9445)), self.header),
+            (self.rows((8443, 9443, 9998)), self.header),
+            (self.rows((8443, 9443, 9444, 9998, 9998)), self.header),
+            (self.rows(address='0200007F'), self.header),
+            ('', self.header), (self.header + '\nmalformed', self.header),
+            ('x' * (4 * 1024 * 1024 + 1), self.header),
+        ]:
+            with self.subTest(tcp=tcp[:100], tcp6=tcp6[:100]):
+                with self.assertRaises(ValueError):
+                    joined.validate_listener_tables(tcp, tcp6)
+
+if __name__ == '__main__':
+    unittest.main()

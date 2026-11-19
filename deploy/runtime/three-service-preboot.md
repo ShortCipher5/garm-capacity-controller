@@ -25,8 +25,8 @@ to reach their listeners from a separate networkless probe namespace. It never
 contacts an external address.
 
 Children are stopped/removed before the original stock recreation checks.
-Ingress currently uses the existing default SIGTERM exit (143); the gateway
-must exit cleanly (0). Neither a killed/OOM process nor a readiness timeout is
+Both ingress and gateway must exit cleanly (0), stopped and non-OOM.
+Ingress has a bounded graceful HTTP shutdown; failed drain is an error. Neither a killed/OOM process nor a readiness timeout is
 accepted as a pass. Failure cleanup only removes this invocation's names and
 generated fixture directory. Public results contain image identities and bounded
 booleans, not credentials, config contents, raw process IDs or namespace IDs.
