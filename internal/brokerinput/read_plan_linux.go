@@ -167,6 +167,19 @@ func projectReadPlan(state admission.BrokerGrantState, observed garmapi.DemandOb
 			rows[p.ID] = row
 		}
 	}
+	// Unused grants are provisional queued/warm supply, not permanent runners.
+	// Conservatively expire advice at any still-unused grant deadline in a
+	// participating pool, even if that particular grant was not matched. Use the
+	// observation START, not completion: expiry during planning must reject the
+	// response rather than extend stale coverage. Already-expired grants remain
+	// charged, but cannot constrain a new projection indefinitely.
+	for _, grant := range state.Grants {
+		if _, participating := rows[grant.Spec.Authority.PoolID]; participating &&
+			grant.State == "unused" && grant.Spec.ExpiresAt.After(observed.StartedAt) &&
+			grant.Spec.ExpiresAt.Before(out.ExpiresAt) {
+			out.ExpiresAt = grant.Spec.ExpiresAt
+		}
+	}
 	for _, a := range plan.Assignments {
 		if p := rows[a.Pool]; p != nil {
 			p.Additional++
