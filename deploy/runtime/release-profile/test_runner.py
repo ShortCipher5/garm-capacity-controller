@@ -1,9 +1,40 @@
-import copy,json,os,subprocess,tempfile,unittest
+import copy,hashlib,json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 import prepare,run,fixture
 
 class RunnerTest(unittest.TestCase):
+ def test_harness_provenance_fixed_files_and_assertion_change(self):
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp)
+   for name in ('run.py','fixture.py','prepare.py'):
+    (root/name).write_bytes(b'assert True\n')
+   (root/'private.key').write_bytes(b'never included')
+   with patch.object(run,'HERE',root),patch.object(run,'command',side_effect=AssertionError('no execution')) as commands:
+    before=run.harness_hashes()
+    self.assertEqual(set(before),{'run.py','fixture.py','prepare.py'})
+    self.assertEqual(set(before.values()),{hashlib.sha256(b'assert True\n').hexdigest()})
+    (root/'run.py').write_bytes(b'assert False\n')
+    after=run.harness_hashes()
+    self.assertNotEqual(before['run.py'],after['run.py'])
+    self.assertEqual(after['run.py'],hashlib.sha256(b'assert False\n').hexdigest())
+    self.assertEqual(before['fixture.py'],after['fixture.py'])
+    self.assertEqual(before['prepare.py'],after['prepare.py'])
+    (root/'private.key').write_bytes(b'changed, still not included')
+    self.assertEqual(after,run.harness_hashes())
+    commands.assert_not_called()
+ def test_harness_provenance_refuses_missing_linked_or_oversized_file(self):
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp)
+   for name in run.HARNESS_FILES:(root/name).write_bytes(b'public')
+   with patch.object(run,'HERE',root):
+    (root/'fixture.py').unlink()
+    with self.assertRaises(run.Failed):run.harness_hashes()
+    (root/'fixture.py').symlink_to(root/'run.py')
+    with self.assertRaises(run.Failed):run.harness_hashes()
+    (root/'fixture.py').unlink()
+    (root/'fixture.py').write_bytes(b'x'*(1024*1024+1))
+    with self.assertRaises(run.Failed):run.harness_hashes()
  def test_actual_rendered_recipe_uses_retained_pins_and_known_graph(self):
   text,lock=prepare.render();self.assertNotIn('{{',text);self.assertNotIn('latest',text)
   self.assertEqual(sum(l.startswith('FROM ') for l in text.splitlines()),6)

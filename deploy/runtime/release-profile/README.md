@@ -148,3 +148,18 @@ with empty stdout and `State.Error`, exited status, matching start/container exi
 a generic ENOENT, or an arbitrary nonzero exit is not success. Another engine
 outcome fails closed for separate diagnosis; this is not a production launcher
 or a general Docker/runc error parser.
+
+### Public harness provenance
+
+Completed `disposable-historical-image-profile/v1` results additionally contain
+`harness_sha256`, an exact map for `run.py`, `fixture.py`, and `prepare.py`.
+These public files decide orchestration, fixture construction and PASS checks;
+they are separate from the exported probe/build input hashes. Hashes are captured
+before context preparation and checked again before cleanup/success publication.
+They identify checkout bytes, not signed provenance or in-memory execution proof.
+No generated credential, state, arbitrary directory entry or private path is hashed.
+
+This is an additive v1 field: every existing field and meaning remains unchanged.
+There is no in-repository strict result consumer; the workflow uploads the JSON
+without parsing it. External exact-key validators must allow this new field.
+Older v1 artifacts without this map do not establish harness identity.
