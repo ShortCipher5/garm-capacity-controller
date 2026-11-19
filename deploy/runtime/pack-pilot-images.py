@@ -84,7 +84,8 @@ def inspect_archive(path, ids):
         require(observed == set(ids.values()))
 
 
-def save_images(destination, ids):
+def save_images(destination, ids, max_bytes=MAX_ARCHIVE):
+    require(type(max_bytes) is int and 0 < max_bytes <= MAX_ARCHIVE)
     # Fixed local endpoint; never inherit a remote Docker context or credentials.
     with destination.open('xb') as output:
         os.chmod(destination, 0o600)
@@ -98,7 +99,7 @@ def save_images(destination, ids):
                 if not block:
                     break
                 total += len(block)
-                require(total <= MAX_ARCHIVE)
+                require(total <= max_bytes)
                 output.write(block)
             require(proc.wait(timeout=30) == 0)
             output.flush()

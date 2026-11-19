@@ -73,3 +73,29 @@ authorization is always false. Ordinary errors clean this invocation's files;
 hard runner termination relies on disposal of the hosted runner, and cannot
 produce a completed result. A future parser change requires reviewed measured
 evidence and exact descriptor-closure/hash checks, not accepting all extra files.
+
+### Structural diagnostics before modern format acceptance
+
+A measured `docker-and-oci` marker alone does not identify the descriptor graph.
+The format probe's v2 diagnostic result therefore includes only fixed field-set
+flags, root/config coverage counts and allowlisted layer media-type counters.
+It reads bounded JSON metadata, rejects duplicate JSON keys, verifies root
+manifest descriptor size/hash before inspecting it, and never reads configuration
+contents or emits names, annotations, URLs or arbitrary media types. These counts
+are explicitly diagnostic, not graph-closure or layer qualification.
+
+If the combined index does not reference all four role configs, the same opted-in
+phase may sample each exact role ID separately, deleting each temporary archive
+before the next. The initial save plus all role samples share an 8-GiB aggregate
+byte budget and the existing six-minute outer timeout. Role summaries expose only
+the fixed role name and closed structure/layout counts, with no additional
+uploads. Existing archive acceptance is unchanged.
+
+Why measurement is necessary: [Moby's exporter](https://github.com/moby/moby/blob/master/daemon/internal/image/tarexport/save.go)
+writes Docker `LayerSources`/optional parent metadata and OCI descriptors; its
+untagged index-root behavior must be observed for the actual runner version.
+The [OCI layout](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-layout.md)
+and [descriptor](https://github.com/opencontainers/image-spec/blob/v1.1.1/descriptor.md)
+specifications allow extensibility, but this pilot must use a deliberately
+narrower, complete, locally verified closure. Unsupported formats remain refused
+until a separately reviewed exact parser is qualified.
