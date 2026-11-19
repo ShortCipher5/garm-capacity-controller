@@ -33,3 +33,16 @@ func TestStockMaximumPreviewConfigIsExplicitAndRequiresAdvisory(t *testing.T) {
 		t.Fatal("preview bypassed managed read-only advisory configuration")
 	}
 }
+
+func TestStockIdlePreviewConfigurationDefaultOff(t *testing.T) {
+	var c allocatorAdvisoryConfiguration
+	if err := json.Unmarshal([]byte(`{"interval_seconds":30}`), &c); err != nil || c.StockIdlePreview {
+		t.Fatal(c, err)
+	}
+	if err := json.Unmarshal([]byte(`{"stock_idle_preview":true}`), &c); err != nil || !c.StockIdlePreview {
+		t.Fatal(c, err)
+	}
+	if source, err := allocatorAdvisorySource(configuration{AllocatorAdvisory: &c}); err == nil || source != nil {
+		t.Fatal("idle bypassed existing managed scope")
+	}
+}

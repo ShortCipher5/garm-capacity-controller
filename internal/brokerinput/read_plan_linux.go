@@ -14,6 +14,7 @@ import (
 // Stock reads are non-atomic; exact source, ownership and ledger revision are
 // checked, and the capture interval is explicit rather than called a live total.
 type ReadPlan struct {
+	StockIdlePreview    *StockIdlePreview    `json:"stock_idle_preview,omitempty"`
 	Source              string               `json:"source"`
 	SourceIdentity      string               `json:"source_identity"`
 	DemandDigest        string               `json:"demand_digest"`
@@ -49,6 +50,8 @@ type planReader struct {
 	source              *garmapi.DemandClient
 	opt                 capacitybroker.Options
 	pressure            bool
+	stockIdlePreview    bool
+	idleHistory         stockIdleHistory
 	stockMaximumPreview bool
 	scalingHistory      scalingPreviewHistory
 }
@@ -66,10 +69,15 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	defer func() {
 		if resultErr != nil {
 			p.scalingHistory.reset()
+			p.idleHistory.reset()
 		}
 		p.mu.Unlock()
 	}()
-	observed, err := p.source.Observe(ctx)
+	observe := p.source.Observe
+	if p.stockIdlePreview {
+		observe = p.source.ObserveWithRepositoryIdleScope
+	}
+	observed, err := observe(ctx)
 	if err != nil {
 		return ReadPlan{}, unavailable("observation_unavailable", err)
 	}
@@ -126,6 +134,11 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	if p.stockMaximumPreview {
 		scale, scaleErr = sampleStockMaximumPreview(state, snapshot, observed, identity, opt, pressure)
 	}
+	var idleSamples map[string]stockIdleSample
+	var idleErr error
+	if p.stockIdlePreview {
+		idleSamples, idleErr = sampleStockIdlePreview(state, charges, observed, identity, opt)
+	}
 	// Reject a ledger revision changed during the read/plan window. This is not
 	// a cross-system transaction and does not stop future changes after response.
 	current, err := p.store.ReadBrokerGrantState(ctx)
@@ -152,6 +165,9 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	}
 	if p.stockMaximumPreview {
 		result.StockMaximumPreview = p.scalingHistory.accept(scale, scaleErr, now, result.ExpiresAt)
+	}
+	if p.stockIdlePreview {
+		result.StockIdlePreview = p.idleHistory.accept(idleSamples, idleErr, now, result.ExpiresAt)
 	}
 	return result, nil
 }

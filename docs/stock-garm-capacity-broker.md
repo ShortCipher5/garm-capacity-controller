@@ -199,3 +199,26 @@ optional maximum preview (including decreases); it cannot create a suggestion.
 Partial low samples do not establish physical headroom. Both participating
 samples must still be fresh, and a cached suggestion disappears when either
 sample's evidence expires.
+
+### Optional normal-pool minimum-idle preview
+
+Separately from the maximum preview, `allocator_advisory.stock_idle_preview`
+is off by default. When explicitly enabled, it uses the same authenticated
+read-only allocator observation and response, not another endpoint, poller or
+credential. The preview is bounded to eight repositories and eight pools, at
+the existing advisory interval of 15–45 seconds.
+
+A suggestion lowers observed minimum idle by just one, never below configured
+`WarmIdle`, and leaves the maximum unchanged. It requires two fresh captures
+at least 15 seconds apart for the same enabled, enrolled pool and unchanged
+scope and settings. Both captures must show visible idle in that pool with
+no creating or unknown supply. Scoped ambiguous or locked demand suppresses
+advice, as does any demand belonging or eligible to the target pool. Identified
+demand eligible only to another repository's pool does not by itself veto
+the suggestion.
+
+This is a comparison of classified, observed repository demand. It does not
+cover webhooks GARM missed, verify the provider's physical destination, change
+settings, retire a runner or establish that physical capacity can be reused.
+The existing dashboard hides the suggestion when its evidence expires or the
+saved comparison cannot be matched.

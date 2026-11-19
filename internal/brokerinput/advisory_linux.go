@@ -23,6 +23,15 @@ func NewAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClien
 func NewAdvisoryReaderWithStockMaximumPreview(store *admission.SQLiteStore, source *garmapi.DemandClient) (*AdvisoryReader, error) {
 	return newAdvisoryReader(store, source, true)
 }
+
+// NewAdvisoryReaderWithStockPreviews explicitly opts into independent read-only comparisons.
+func NewAdvisoryReaderWithStockPreviews(store *admission.SQLiteStore, source *garmapi.DemandClient, maximum, idle bool) (*AdvisoryReader, error) {
+	r, err := newAdvisoryReader(store, source, maximum)
+	if err == nil {
+		r.reader.stockIdlePreview = idle
+	}
+	return r, err
+}
 func newAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClient, preview bool) (*AdvisoryReader, error) {
 	if store == nil || source == nil {
 		return nil, capacitybroker.ErrSnapshot
@@ -200,9 +209,17 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	if result.StockMaximumPreview != nil && !result.StockMaximumPreview.ExpiresAt.After(now) {
 		result.StockMaximumPreview = nil
 	}
+	if result.StockIdlePreview != nil && !result.StockIdlePreview.ExpiresAt.After(now) {
+		result.StockIdlePreview = nil
+	}
 	return result, nil
 }
 func cloneReadPlan(v ReadPlan) ReadPlan {
+	if v.StockIdlePreview != nil {
+		copy := *v.StockIdlePreview
+		copy.Proposals = append([]StockIdleProposal{}, copy.Proposals...)
+		v.StockIdlePreview = &copy
+	}
 	if v.StockMaximumPreview != nil {
 		copy := *v.StockMaximumPreview
 		copy.Proposals = append([]StockMaximumProposal{}, copy.Proposals...)
