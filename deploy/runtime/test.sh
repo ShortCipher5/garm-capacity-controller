@@ -10,6 +10,9 @@ work=$(mktemp -d "$RUNNER_TEMP/capacity-packaging.XXXXXXXX")
 results="$repo/qualification-results"
 mkdir -p "$results"
 project="capacity-packaging-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+# Unique to this disposable invocation; never remove shared image tags.
+ingress_tag="capacity-stock-ingress:${project}-${work##*.}"
+ingress_container="${project}-ingress-${work##*.}"
 export CAPACITY_GATEWAY_IMAGE=capacity-gateway:qualification
 export CAPACITY_PRIVATE_DIR="$work/fixtures/gateway-private"
 export CAPACITY_STATE_DIR="$work/fixtures/state"
@@ -28,6 +31,8 @@ cleanup() {
   fi
   # Only our generated project. No existing stack/volumes and no global prune.
   "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  docker rm -f "$ingress_container" >/dev/null 2>&1 || true
+  docker image rm "$ingress_tag" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
   return "$outcome"
 }
@@ -67,6 +72,7 @@ for target in gateway ledger-tool; do
   if [[ $target = ledger-tool ]]; then tag=capacity-ledger:qualification; fi
   docker build -f "$work/locked.Dockerfile" --target "$target" -t "$tag" .
 done
+docker build -f "$work/locked.Dockerfile" --target stock-ingress -t "$ingress_tag" .
 docker build -f "$work/locked.Dockerfile" --target provider-artifact --output "type=local,dest=$work/provider" .
 
 restricted=(--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --cpus 1 --memory 512m --user 65532:65532)
@@ -80,6 +86,20 @@ expect_exit() {
 expect_exit 2 docker run "${restricted[@]}" capacity-ledger:qualification restore --source /absent/source.db --destination /absent/restore.db
 expect_exit 2 docker run "${restricted[@]}" capacity-ledger:qualification invalid
 expect_exit 1 docker run "${restricted[@]}" capacity-gateway:qualification
+# Actual ingress image contract; inspect only public image metadata, print no ENV.
+docker image inspect "$ingress_tag" | python3 -c '
+import json,sys
+info=json.load(sys.stdin)
+assert len(info)==1
+c=info[0]["Config"]
+assert c["User"]=="65531:65531" and c["WorkingDir"]=="/"
+assert c.get("Entrypoint") in (None,[]) and c.get("Cmd") in (None,[])
+assert c.get("Env")==["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
+assert not c.get("Volumes") and not c.get("ExposedPorts")
+'
+# No mounts, configuration or credentials. The explicit binary must fail before
+# serving, under the same networkless immutable non-root disposable sandbox.
+expect_exit 1 timeout --kill-after=5s 30s docker run "${restricted[@]}" --name "$ingress_container" --user 65531:65531 "$ingress_tag" /usr/local/bin/capacity-stock-ingress
 # Verify image user, capabilities, NNP and rootfs behavior rather than just YAML.
 docker run "${restricted[@]}" --entrypoint /bin/sh capacity-gateway:qualification -ec '
   test "$(id -u)" = 65532
@@ -250,7 +270,7 @@ interpreter=match.group(1)
 loader=subprocess.run(run+['--entrypoint','/bin/sh',image,'-c','test -e "$1"','sh',interpreter],capture_output=True,timeout=30)
 record={'image':image,'os':info['Os'],'architecture':info['Architecture'],'image_default_uid':int(uid.stdout.strip()),'provider_interpreter':interpreter,'provider_interpreter_present':loader.returncode==0,'provider_interface_executable':compatible,'provider_exit_status':probe.returncode,'installed_stack_qualified':False,'reason':'Synthetic checks cannot qualify existing UID/capability isolation, exclusive physical scope, writer fencing, lineage or recovery.'}
 (results/'garm-compatibility.json').write_text(json.dumps(record,indent=2))
-(results/'generic-runtime.json').write_text(json.dumps({'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'gateway_image_id':json.loads(subprocess.check_output(['docker','image','inspect','capacity-gateway:qualification']))[0]['Id'],'ledger_tool_image_id':json.loads(subprocess.check_output(['docker','image','inspect','capacity-ledger:qualification']))[0]['Id'],'provider_sha256':hashlib.sha256(provider.read_bytes()).hexdigest(),'synthetic_gateway_checks_passed':True,'live_stack_changed':False,'deployment_authorized':False},indent=2))
+(results/'generic-runtime.json').write_text(json.dumps({'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'gateway_image_id':json.loads(subprocess.check_output(['docker','image','inspect','capacity-gateway:qualification']))[0]['Id'],'ledger_tool_image_id':json.loads(subprocess.check_output(['docker','image','inspect','capacity-ledger:qualification']))[0]['Id'],'provider_sha256':hashlib.sha256(provider.read_bytes()).hexdigest(),'synthetic_gateway_checks_passed':True,'stock_ingress_image_checks_passed':True,'live_stack_changed':False,'deployment_authorized':False},indent=2))
 print('Exact-image provider executable:',compatible,'; image default UID:',record['image_default_uid'])
 print('Installed-stack qualification: BLOCKED; no provider or runtime change attempted')
 PY
