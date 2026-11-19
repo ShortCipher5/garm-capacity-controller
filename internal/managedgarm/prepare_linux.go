@@ -11,8 +11,12 @@ import (
 	"time"
 )
 
-type Preparation struct{ Directory, GarmImage, ControllerImage, IngressImage string }
+type Preparation struct {
+	Directory, GarmImage, ControllerImage, IngressImage string
+	OmitIngressPublication                              bool `json:"omit_ingress_publication,omitempty"`
+}
 type prepared struct {
+	OmitIngressPublication                   bool `json:"omit_ingress_publication,omitempty"`
 	GarmServerFingerprint                    string
 	Version, Deployment, State               string
 	GarmImage, ControllerImage, IngressImage string
@@ -128,7 +132,7 @@ func Prepare(p Preparation) error {
 	if e != nil || exclusiveFile(filepath.Join(p.Directory, "compose.json"), compose, 0) != nil {
 		return ErrBoundary
 	}
-	manifest, _ := json.Marshal(prepared{GarmServerFingerprint: serverPin, Version: "managed-garm/v1", Deployment: id, State: "prepared_not_initialized", GarmImage: p.GarmImage, ControllerImage: p.ControllerImage, IngressImage: p.IngressImage})
+	manifest, _ := json.Marshal(preparationMetadata(p, id, serverPin))
 	if exclusiveFile(filepath.Join(p.Directory, "preparation.json"), manifest, 0) != nil {
 		return ErrBoundary
 	}
@@ -139,6 +143,12 @@ func Prepare(p Preparation) error {
 	defer dir.Close()
 	return dir.Sync()
 }
+
+// preparationMetadata records intent only; no runtime verifier consumes this field.
+func preparationMetadata(p Preparation, id, serverPin string) prepared {
+	return prepared{OmitIngressPublication: p.OmitIngressPublication, GarmServerFingerprint: serverPin, Version: "managed-garm/v1", Deployment: id, State: "prepared_not_initialized", GarmImage: p.GarmImage, ControllerImage: p.ControllerImage, IngressImage: p.IngressImage}
+}
+
 func composeDocument(p Preparation, id string) map[string]any {
 	mount := func(src, dst string, ro bool) map[string]any {
 		return map[string]any{"type": "bind", "source": filepath.Join(p.Directory, src), "target": dst, "read_only": ro, "bind": map[string]any{"create_host_path": false}}
@@ -148,7 +158,9 @@ func composeDocument(p Preparation, id string) map[string]any {
 	}
 	garm := base(p.GarmImage, "65530:65530", "garm")
 	garm["command"] = []string{"/usr/bin/garm", "-config", "/etc/garm/garm.toml"}
-	garm["ports"] = []string{"8443:8443"}
+	if !p.OmitIngressPublication {
+		garm["ports"] = []string{"8443:8443"}
+	}
 	garm["volumes"] = []any{mount("garm-config", "/etc/garm", true), mount("garm-state", "/var/lib/garm", false)}
 	controller := base(p.ControllerImage, "65532:65532", "controller")
 	controller["network_mode"] = "service:garm"

@@ -163,3 +163,11 @@ This is an additive v1 field: every existing field and meaning remains unchanged
 There is no in-repository strict result consumer; the workflow uploads the JSON
 without parsing it. External exact-key validators must allow this new field.
 Older v1 artifacts without this map do not establish harness identity.
+
+Namespace recreation briefly overlaps the two synthetic TLS anchors, each in its
+own `network=none` namespace and sharing only read-only generated key/witness
+files. The old anchor is stopped and removed only after the new namespace is
+observed and differs from the still-retained old namespace. This prevents inode
+reuse after destruction from masquerading as a failed recreation. No stock Garm
+daemons overlap; unchanged client, Garm, shutdown and state-continuity checks then
+run against the new namespace. Equality still fails, with no retry or exception.

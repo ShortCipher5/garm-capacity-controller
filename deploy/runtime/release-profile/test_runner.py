@@ -40,9 +40,9 @@ class RunnerTest(unittest.TestCase):
   tree=ast.parse(Path(run.__file__).read_text())
   function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
   block=next(n for n in function.body if isinstance(n,ast.Try))
-  expected=['recreate-stop-old-anchor','recreate-start-anchor','recreate-inspect-anchor',
+  expected=['recreate-start-anchor','recreate-inspect-anchor',
    'recreate-anchor-health','recreate-read-namespace','recreate-namespace-different',
-   'recreate-client-network','recreate-start-garm','recreate-garm-ui',
+   'recreate-stop-old-anchor','recreate-client-network','recreate-start-garm','recreate-garm-ui',
    'recreate-garm-identity','recreate-stop-garm','recreate-state-continuity','recreate-stop-new-anchor']
   labels=[]
   for statement in block.body:
@@ -66,6 +66,46 @@ class RunnerTest(unittest.TestCase):
    with contextlib.redirect_stderr(output),patch.object(run,'command',side_effect=AssertionError('no execution')):
     with self.assertRaises(run.Failed):exec(code,{**vars(run),'phase':label})
    self.assertEqual(output.getvalue(),'Disposable image/profile test failed at '+label+'\n')
+ def test_recreate_keeps_only_old_anchor_until_distinct_namespace_observed(self):
+  tree=ast.parse(Path(run.__file__).read_text())
+  function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+  block=next(n for n in function.body if isinstance(n,ast.Try))
+  begin=next(i for i,n in enumerate(block.body) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='old_anchor' for t in n.targets))
+  end=next(i for i,n in enumerate(block.body[begin:],begin) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value=='recreate-start-garm')
+  code=compile(ast.fix_missing_locations(ast.Module(body=block.body[begin:end],type_ignores=[])),'synthetic-recreate-sequence','exec')
+  for distinct in (True,False):
+   events=[];live={'old-anchor'};owner=self
+   class FakeLab:
+    def start(self,image,uid,network,entry,mounts):
+     owner.assertEqual(live,{'old-anchor'})
+     owner.assertEqual((image,uid,network,entry),('daemon',65530,'none','/probe/tls-anchor'))
+     owner.assertTrue(all(not rw for _,_,rw in mounts))
+     events.append('start-new');live.add('new-anchor');return 'new-anchor'
+    def inspect(self,name):
+     owner.assertEqual(name,'new-anchor');return {'id':'synthetic-new-id'}
+    def stop(self,name):
+     owner.assertEqual(name,'old-anchor');owner.assertEqual(events[-1],'read-namespace')
+     events.append('stop-old');live.remove(name)
+   def health(*args):
+    owner.assertEqual(live,{'old-anchor','new-anchor'});events.append('health')
+   def read_namespace(args):
+    owner.assertEqual(live,{'old-anchor','new-anchor'})
+    owner.assertEqual(args,['docker','exec','new-anchor','/usr/bin/readlink','/proc/self/ns/net'])
+    events.append('read-namespace');return b'net:[2]\n' if distinct else b'net:[1]\n'
+   def check(image,uid,action,args):
+    owner.assertEqual(live,{'new-anchor'});owner.assertEqual(action,'network')
+    owner.assertEqual(args,['-netns','net:[2]']);events.append('check-'+image)
+   scope={**vars(run),'lab':FakeLab(),'anchor':'old-anchor','daemon':'daemon','tools':'tools',
+    'artifacts':Path('/synthetic/artifacts'),'root':Path('/synthetic/generated'),
+    'nonce':'synthetic','old_netns':'net:[1]','wait_expected':health,'data':read_namespace,'check':check}
+   with patch.object(run,'command',side_effect=AssertionError('no engine execution')):
+    if distinct:
+     exec(code,scope)
+     self.assertEqual(events,['start-new','health','read-namespace','stop-old','check-daemon','check-tools'])
+    else:
+     with self.assertRaises(run.Failed):exec(code,scope)
+     self.assertEqual(events,['start-new','health','read-namespace'])
+     self.assertEqual(live,{'old-anchor','new-anchor'}) # Existing finally owns cleanup on failure.
  def test_actual_rendered_recipe_uses_retained_pins_and_known_graph(self):
   text,lock=prepare.render();self.assertNotIn('{{',text);self.assertNotIn('latest',text)
   self.assertEqual(sum(l.startswith('FROM ') for l in text.splitlines()),6)

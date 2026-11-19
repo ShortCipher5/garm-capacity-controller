@@ -15,7 +15,8 @@ Fresh high-entropy JWT/database/admin secrets never appear in output or Compose
 environment variables. Existing GARM databases/users/tokens are not adopted.
 
 The generated Compose document is disabled behind `managed-control-plane`, has
-no restart policy or host networking and publishes **only ingress port8443**.
+no restart policy or host networking and, by default, publishes **only ingress
+port8443** (the explicit omission option is described below).
 Stock GARM binds TLS admin API127.0.0.1:9998; controller and ingress share that owned
 namespace under separate non-root identities, read-only filesystems, no added
 capabilities and no-new-privileges. No Docker socket is mounted in those services.
@@ -85,3 +86,20 @@ Every authorized-provider row remains visible, including unknown pools.
 This first controller integration is **inventory only**. Managed demand discovery,
 enrolled source identity and capacity-increase dispatch remain separate work;
 the existing grant cycle is not activated by this mode.
+
+## Preparation without host-port publication
+
+Preparation input may explicitly set `"omit_ingress_publication": true`.
+The default remains unchanged. When selected, the generated GARM service omits
+only the Docker Compose `ports` field; all services, namespace sharing, ingress
+listener and other settings remain unchanged. Preparation metadata records the
+true option as an additive field; the default v1 metadata remains unchanged.
+There is no repository runtime reader treating this metadata as authority.
+
+This is only launch intent: **no Docker host-port publication requested**. It is
+not network isolation, immutable runtime enforcement or a read-only guarantee.
+Container-IP/bridge reachability and future topology changes remain separate.
+The existing verifier accepts absent publication but does not enforce that it
+stays absent. No actual host-port availability, collision, reachability or
+successful startup is established by rendering this configuration. Public
+callbacks/webhooks cannot rely on the omitted published port.

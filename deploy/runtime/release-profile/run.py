@@ -253,8 +253,10 @@ def run():
   wait_expected(missing,65531,'assets',['-port','9998'],'asset-mismatch',45)
   lab.stop(bad)
   running=start_garm(daemon,root/'state');ui_ready(daemon);lab.stop(running);need(state_stat()==initial_state)
-  phase='recreate-stop-old-anchor'
-  lab.stop(anchor)
+  # Keep the old disposable namespace alive until its distinct replacement is
+  # observed. Destroying it first permits legitimate namespace inode reuse.
+  # Only read-only synthetic anchors overlap; stock Garm is already stopped.
+  old_anchor=anchor
   phase='recreate-start-anchor'
   anchor=lab.start(daemon,65530,'none','/probe/tls-anchor',mounts=[(artifacts/'tls-anchor','/probe/tls-anchor',False),(root/'anchor','/run/anchor-private',False)])
   phase='recreate-inspect-anchor'
@@ -265,6 +267,8 @@ def run():
   new_netns=data(['docker','exec',anchor,'/usr/bin/readlink','/proc/self/ns/net']).decode().strip()
   phase='recreate-namespace-different'
   need(new_netns!=old_netns)
+  phase='recreate-stop-old-anchor'
+  lab.stop(old_anchor)
   phase='recreate-client-network'
   for image,uid in ((daemon,65531),(tools,65533)):check(image,uid,'network',['-netns',new_netns])
   phase='recreate-start-garm'
