@@ -1,0 +1,7 @@
+# Native retirement process status
+
+The existing Lifecycle section has a read-only status disclosure backed by the actual authenticated `/admin/api/v1/native-retirement-status` route. It reports the last process cycle, separately from the coherent ledger snapshot and physical host observations.
+
+The backend's `processing` label means a completed cycle reported no unresolved outcome; it does not identify currently in-flight work. The UI explicitly says this and shows the last cycle timestamp separately from browser receipt time. Zero time means no completed cycle. Counts are per-cycle process results and reset after restart; `OperationsCompleted` means STOP/DELETE protocol outcomes, never physical release or refunded capacity.
+
+No enable, retry, reset, release or configuration action exists here. Failed reads remove prior results; closing/disconnecting aborts and fences late responses. The UI requires both release-authorized fields to remain false. Production runtime refusal and durable recovery are enforced by the actual backend, not inferred from this display.
