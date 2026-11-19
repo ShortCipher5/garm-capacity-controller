@@ -20,9 +20,9 @@ metadata_spec.loader.exec_module(metadata)
 ancillary_spec = importlib.util.spec_from_file_location('ancillary', Path(__file__).with_name('image-save-ancillary.py'))
 ancillary = importlib.util.module_from_spec(ancillary_spec)
 ancillary_spec.loader.exec_module(ancillary)
-proof_spec = importlib.util.spec_from_file_location('proof', Path(__file__).with_name('ancillary-proof.py'))
-proof = importlib.util.module_from_spec(proof_spec)
-proof_spec.loader.exec_module(proof)
+modern_spec = importlib.util.spec_from_file_location('modern', Path(__file__).with_name('verify-single-role-archive.py'))
+modern = importlib.util.module_from_spec(modern_spec)
+modern_spec.loader.exec_module(modern)
 
 
 def layout(path):
@@ -103,9 +103,9 @@ def probe(raw, parent, expected_commit, run_id, run_attempt, save=pack.save_imag
                     summary['ancillary'] = ancillary.describe(archive, {role: identity})
                     if proof_binary is not None:
                         try:
-                            summary['ancillary_proof'] = proof.prove(archive, {role: identity}, exporter, proof_binary)
-                        except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
-                            summary['ancillary_proof'] = {'status':'unavailable', 'archive_accepted':False, 'deployment_authorized':False}
+                            summary['modern_closure'] = modern.verify_modern_single_role_archive(archive, identity, exporter, proof_binary)
+                        except (ValueError, KeyError, TypeError, OSError, tarfile.TarError, subprocess.SubprocessError):
+                            summary['modern_closure'] = {'status':'unavailable', 'archive_accepted':False, 'deployment_authorized':False}
             samples[role] = summary
         result['per_role_structure'] = samples
     # No result is returned/printed unless private temporary archive removal succeeds.

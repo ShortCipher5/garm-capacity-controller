@@ -40,6 +40,7 @@ jobs:
           python3 deploy/runtime/test_docker_exporter_metadata.py
           python3 deploy/runtime/test_image_save_ancillary.py
           python3 deploy/runtime/test_ancillary_proof.py
+          python3 deploy/runtime/test_verify_single_role_archive.py
       - name: Build digest-locked artifacts and exercise isolated Compose topology
         env:
           GARM_ARCHIVE_FORMAT_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.archive_format_probe == true && 'true' || 'false' }}
