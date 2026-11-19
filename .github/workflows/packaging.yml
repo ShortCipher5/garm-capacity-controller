@@ -55,6 +55,8 @@ jobs:
           persist-credentials: false
       - name: Exercise exact public Garm image without root or capabilities
         run: deploy/runtime/garm-least-privilege.sh
+      - name: Exercise independent prospective service UID and working directory
+        run: deploy/runtime/garm-least-privilege.sh --prospective-service
       - name: Summarize disposable-only boundary
         if: always()
         shell: bash
@@ -72,6 +74,7 @@ jobs:
           name: garm-nonroot-lab-public-status
           path: |
             qualification-results/garm-nonroot-lab.json
+            qualification-results/garm-prospective-service-lab.json
             qualification-results/garm-native-executable.json
           if-no-files-found: ignore
           retention-days: 7
