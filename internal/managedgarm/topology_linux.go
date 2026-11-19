@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -163,14 +161,11 @@ func Observe(ctx context.Context, s Specification) (Observation, error) {
 	if ctx == nil || ctx.Err() != nil || os.Geteuid() != 0 || !validSpec(s) {
 		return Observation{}, ErrBoundary
 	}
-	info, e := os.Lstat(s.DockerSocket)
-	if e != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm()&0002 != 0 {
+	docker, e := newDockerInspectionReader(s.DockerSocket)
+	if e != nil {
 		return Observation{}, ErrBoundary
 	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != 0 {
-		return Observation{}, ErrBoundary
-	}
+	defer docker.close()
 	if rootControlledAncestors(s.AdminSecretDirectory) != nil {
 		return Observation{}, ErrBoundary
 	}
@@ -188,56 +183,11 @@ func Observe(ctx context.Context, s Specification) (Observation, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		conn, e := (&net.Dialer{}).DialContext(ctx, "unix", s.DockerSocket)
-		if e != nil {
-			return nil, e
-		}
-		u, ok := conn.(*net.UnixConn)
-		if !ok {
-			conn.Close()
-			return nil, ErrBoundary
-		}
-		raw, e := u.SyscallConn()
-		if e != nil {
-			conn.Close()
-			return nil, e
-		}
-		trusted := false
-		err := raw.Control(func(fd uintptr) {
-			cred, e := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-			trusted = e == nil && cred.Uid == 0
-		})
-		if err != nil || !trusted {
-			conn.Close()
-			return nil, ErrBoundary
-		}
-		return conn, nil
-	}, DisableKeepAlives: true}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrBoundary }}
-	get := func(path string, out any) error {
-		r, e := http.NewRequestWithContext(ctx, "GET", "http://docker"+path, nil)
-		if e != nil {
-			return e
-		}
-		res, e := client.Do(r)
-		if e != nil {
-			return e
-		}
-		defer res.Body.Close()
-		if res.StatusCode != 200 {
-			return ErrBoundary
-		}
-		raw, e := io.ReadAll(io.LimitReader(res.Body, (4<<20)+1))
-		if e != nil || len(raw) > 4<<20 {
-			return ErrBoundary
-		}
-		return json.Unmarshal(raw, out)
-	}
 	var c [3]container
 	for i, id := range []string{s.GarmID, s.ControllerID, s.IngressID} {
-		if get("/containers/"+id+"/json", &c[i]) != nil {
+		var err error
+		c[i], err = docker.inspect(ctx, id)
+		if err != nil {
 			return Observation{}, ErrBoundary
 		}
 	}
@@ -274,8 +224,8 @@ func Observe(ctx context.Context, s Specification) (Observation, error) {
 	}
 	// Enumerate all running containers, not just the expected three, so joining
 	// this namespace cannot silently expand the administration surface.
-	var all []struct{ Id string }
-	if get("/containers/json", &all) != nil || len(all) > 1000 {
+	all, err := docker.running(ctx)
+	if err != nil {
 		return Observation{}, ErrBoundary
 	}
 	for _, row := range all {
@@ -285,8 +235,8 @@ func Observe(ctx context.Context, s Specification) (Observation, error) {
 		if !digest.MatchString(row.Id) {
 			return Observation{}, ErrBoundary
 		}
-		var v container
-		if get("/containers/"+row.Id+"/json", &v) != nil {
+		v, err := docker.inspect(ctx, row.Id)
+		if err != nil {
 			return Observation{}, ErrBoundary
 		}
 		if v.State.Running && v.State.Pid > 1 {
