@@ -11,8 +11,12 @@ capabilities, cgroup-v2 filesystem/controllers, OpenZFS module version and
 available lockdown status. Missing permissions appear as missing/unsupported,
 not as zero resource capacity. Kernel and loaded OpenZFS module versions are
 `informational` observations, or `unavailable` when unreadable/empty. A separate
-`zfs_module_presence` prerequisite records whether a loaded module exposes a
-nonempty kernel version attribute; it is not proof of working storage. No host
+`zfs_module_presence` optional backend diagnostic records whether a loaded module
+exposes a nonempty kernel version attribute (`informational`, observed `present`)
+or is unavailable (`unavailable`, no observed value). It is not a global
+prerequisite or proof of working storage. **Stock GARM/Incus with the `dir`
+storage backend does not require ZFS.** The separately guarded native ZFS backend
+still requires qualified ZFS; this diagnostic does not change that requirement. No host
 minor-version allowlist decides compatibility. The verification candidate is
 **Debian 13 / Linux 6.12**, not a version pin or an assertion of qualification.
 Matching version text alone does not establish kernel/module provenance or ABI.

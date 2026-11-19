@@ -99,7 +99,11 @@ func collect(ctx context.Context, in inputs) (Report, error) {
 	}
 	version, e := in.read("/sys/module/zfs/version")
 	version = strings.TrimSpace(version)
-	add("zfs_module_presence", "", "loaded ZFS module exposes a nonempty kernel version attribute; not storage capability proof", e == nil && version != "")
+	presence := ""
+	if e == nil && version != "" {
+		presence = "present"
+	}
+	observe("zfs_module_presence", presence, "optional backend diagnostic: stock GARM/Incus dir does not require ZFS; native ZFS backend requires separately qualified ZFS", e == nil)
 	observe("zfs_module_version", version, "loaded module version observation only; kernel ABI and actual storage capabilities require qualification", e == nil)
 	r.Checks = append(r.Checks, Check{"incus_version", "not_exercised", "", "no daemon contact or binary execution; actual daemon version must be observed during separately authorized verification"})
 	lockdown, e := in.read("/sys/kernel/security/lockdown")

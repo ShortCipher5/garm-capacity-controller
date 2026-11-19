@@ -119,7 +119,7 @@ func TestHostVersionsAreObservationsNotCompatibilityGates(t *testing.T) {
 					}
 				case "zfs_module_presence":
 					seen++
-					if c.State != "observed_prerequisite_only" {
+					if c.State != "informational" || c.Observed != "present" {
 						t.Fatal(c)
 					}
 				case "incus_version":
@@ -148,7 +148,7 @@ func TestUnavailableVersionsDoNotImplyCompatibility(t *testing.T) {
 	for _, c := range r.Checks {
 		if c.Name == "zfs_module_presence" {
 			seen++
-			if c.State != "missing_or_unsupported" {
+			if c.State != "unavailable" || c.Observed != "" {
 				t.Fatal(c)
 			}
 		}
