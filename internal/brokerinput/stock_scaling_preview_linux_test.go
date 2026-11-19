@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 )
 
@@ -46,7 +47,7 @@ func TestStockMaximumPreviewHistoryFailsClosed(t *testing.T) {
 		current := sample(now.Add(offset), scope)
 		return history.accept(current, err, current.finish, current.finish.Add(time.Minute))
 	}
-	if first := collect(0, 1, nil); first.State != "no_confirmed_proposals" || len(first.Proposals) != 0 {
+	if first := collect(0, 1, nil); first.State != "no_confirmed_proposals" || first.Reason != "awaiting_matching_sample" || len(first.Proposals) != 0 {
 		t.Fatal(first)
 	}
 	out := collect(20*time.Second, 1, nil)
@@ -54,16 +55,16 @@ func TestStockMaximumPreviewHistoryFailsClosed(t *testing.T) {
 		t.Fatal(out)
 	}
 	failed := collect(25*time.Second, 1, errors.New("private input detail"))
-	if failed.State != "unavailable" || len(failed.Proposals) != 0 || history.prior.source != "" {
+	if failed.State != "unavailable" || failed.Reason != "evidence_unavailable" || len(failed.Proposals) != 0 || history.prior.source != "" {
 		t.Fatal(failed)
 	}
 	if afterFailure := collect(40*time.Second, 1, nil); len(afterFailure.Proposals) != 0 {
 		t.Fatal("retained history across failure")
 	}
-	if changed := collect(60*time.Second, 2, nil); len(changed.Proposals) != 0 {
+	if changed := collect(60*time.Second, 2, nil); len(changed.Proposals) != 0 || changed.Reason != "awaiting_matching_sample" {
 		t.Fatal("retained history across scope change")
 	}
-	if repeated := collect(60*time.Second, 2, nil); len(repeated.Proposals) != 0 {
+	if repeated := collect(60*time.Second, 2, nil); len(repeated.Proposals) != 0 || repeated.Reason != "no_confirmed_change" {
 		t.Fatal("reused same sample")
 	}
 	if stale := collect(120*time.Second, 2, nil); len(stale.Proposals) != 0 {
@@ -140,5 +141,31 @@ func TestStockMaximumPreviewScopeDetectsEffectiveConfigurationChanges(t *testing
 	drift, err := scalePreviewScope(state, snapshot)
 	if drift == base || err != nil {
 		t.Fatal("ignored host eligibility change", err)
+	}
+}
+
+func TestStockMaximumPreviewBoundedReasons(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		err        error
+		incomplete bool
+		want       string
+	}{
+		{errStockPreviewPressure, false, "pressure_evidence_unavailable"},
+		{errors.New("private detail"), false, "evidence_unavailable"},
+		{nil, true, "incomplete_evidence"},
+	} {
+		var history scalingPreviewHistory
+		result := history.accept(scalingPreviewSample{StockScalingSample: StockScalingSample{source: "scoped", expires: now.Add(time.Minute), incomplete: tc.incomplete}}, tc.err, now, now.Add(time.Minute))
+		if result.Reason != tc.want || result.State != "unavailable" || len(result.Proposals) != 0 {
+			t.Fatal(result)
+		}
+		raw, _ := json.Marshal(result)
+		if strings.Contains(string(raw), "private detail") {
+			t.Fatal(string(raw))
+		}
+	}
+	if !errors.Is(errStockPreviewPressure, capacitybroker.ErrSnapshot) {
+		t.Fatal("lost snapshot classification")
 	}
 }

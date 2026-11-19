@@ -3,6 +3,8 @@ package brokerinput
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
@@ -14,9 +16,13 @@ import (
 // exposes no job identities, setting write fingerprints, or runner authority.
 type StockMaximumPreview struct {
 	State     string                 `json:"state"`
+	Reason    string                 `json:"reason,omitempty"`
 	ExpiresAt time.Time              `json:"expires_at"`
 	Proposals []StockMaximumProposal `json:"proposals"`
 }
+
+// Preserve snapshot error classification without exposing raw diagnostics.
+var errStockPreviewPressure = fmt.Errorf("stock preview pressure evidence unavailable: %w", capacitybroker.ErrSnapshot)
 
 type scalingPreviewSample struct {
 	StockScalingSample
@@ -33,7 +39,7 @@ func sampleStockMaximumPreview(state admission.BrokerGrantState, snapshot capaci
 	// separate advisory result or treat partial low pressure as headroom.
 	pressureExpiry := stockMaximumPressureExpiry(snapshot, pressure, opt.Now)
 	if pressureExpiry.IsZero() {
-		return scalingPreviewSample{}, capacitybroker.ErrSnapshot
+		return scalingPreviewSample{}, errStockPreviewPressure
 	}
 	plan, err := stockPlan(snapshot, state.Policy, observation, opt, true, true)
 	if err != nil {
@@ -104,18 +110,28 @@ func (h *scalingPreviewHistory) reset() {
 // The reader holds its existing observation mutex and has already reread the
 // exact ledger revision and source after collecting the current comparison.
 func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, now, ordinaryExpiry time.Time) *StockMaximumPreview {
-	out := &StockMaximumPreview{State: "unavailable", ExpiresAt: ordinaryExpiry, Proposals: []StockMaximumProposal{}}
+	out := &StockMaximumPreview{State: "unavailable", Reason: "evidence_unavailable", ExpiresAt: ordinaryExpiry, Proposals: []StockMaximumProposal{}}
 	if err != nil || current.source == "" || current.incomplete || !current.expires.After(now) {
+		if errors.Is(err, errStockPreviewPressure) {
+			out.Reason = "pressure_evidence_unavailable"
+		} else if err == nil && current.incomplete {
+			out.Reason = "incomplete_evidence"
+		}
 		h.reset()
 		return out
 	}
 	out.State = "no_confirmed_proposals"
+	out.Reason = "awaiting_matching_sample"
 	var changes []StockMaximumProposal
 	if h.prior.scope == current.scope {
+		if h.prior.source != "" {
+			out.Reason = "no_confirmed_change"
+		}
 		changes = ProposeStockMaximums(h.prior.StockScalingSample, current.StockScalingSample, now)
 	}
 	if len(changes) != 0 {
 		out.State = "proposed"
+		out.Reason = ""
 		out.Proposals = changes
 		if h.prior.expires.Before(out.ExpiresAt) {
 			out.ExpiresAt = h.prior.expires

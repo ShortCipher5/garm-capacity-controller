@@ -49,6 +49,13 @@ const comparisonMessages = Object.freeze({
 export const allocatorComparisonMessage = state => Object.hasOwn(comparisonMessages,state) ? comparisonMessages[state] : comparisonMessages.unavailable;
 
 
+const previewReasonMessages = Object.freeze({
+ pressure_evidence_unavailable: ['unavailable', 'Required pressure evidence is unavailable or unsuitable for this preview. This does not identify a particular host fault or prove spare capacity.'],
+ incomplete_evidence: ['unavailable', 'The captured stock scaling evidence is incomplete. No maximum suggestions are shown.'],
+ evidence_unavailable: ['unavailable', 'Required stock scaling evidence is unavailable. No maximum suggestions are shown.'],
+ awaiting_matching_sample: ['no_confirmed_proposals', 'Waiting for another observation with the same effective configuration before comparing maximum suggestions.'],
+ no_confirmed_change: ['no_confirmed_proposals', 'The captured comparison confirmed no maximum change. This does not prove that no change is needed or that every comparison prerequisite was satisfied.'],
+});
 const previewStates = new Set(["unavailable", "no_confirmed_proposals", "proposed"]);
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) &&
  Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -62,7 +69,7 @@ export function stockMaximumPreviewView(plan, comparison, now=Date.now()){
  const preview=plan?.stock_maximum_preview;
  if(preview===undefined)return null;
  const unavailable={state:"unavailable",proposals:[]};
- if(!exactKeys(preview,["state","expires_at","proposals"])||!previewStates.has(preview.state)||
+ if(!(exactKeys(preview,["state","expires_at","proposals"])||exactKeys(preview,["state","expires_at","proposals","reason"]))||!previewStates.has(preview.state)||
   !Array.isArray(plan.pools)||!Array.isArray(preview.proposals)||preview.proposals.length>plan.pools.length||
   (preview.state==="proposed")!==(preview.proposals.length>0))return unavailable;
  const expires=wireTimestamp(preview.expires_at),captured=Date.parse(plan.captured_at),planExpiry=Date.parse(plan.expires_at);
@@ -76,10 +83,12 @@ export function stockMaximumPreviewView(plan, comparison, now=Date.now()){
  }
  if(expires<=now||captured>now+1000)return {state:"expired",proposals:[]};
  if(comparison!=="linked_at_capture")return {state:"comparison_unavailable",proposals:[]};
- return {state:preview.state,expiresAt:expires,proposals:preview.proposals};
+ const reason=typeof preview.reason==="string"&&Object.hasOwn(previewReasonMessages,preview.reason)&&previewReasonMessages[preview.reason][0]===preview.state?preview.reason:null;
+ return {state:preview.state,expiresAt:expires,proposals:preview.proposals,...(reason?{reason}:{})};
 }
 
-export function stockMaximumPreviewMessage(state){
+export function stockMaximumPreviewMessage(state,reason){
+ if(typeof reason==="string"&&Object.hasOwn(previewReasonMessages,reason)&&previewReasonMessages[reason][0]===state)return previewReasonMessages[reason][1];
  switch(state){
  case "proposed": return "Two captured stock observations support these suggested maximums.";
  case "no_confirmed_proposals": return "No maximum changes were confirmed by the current advisory comparison. This does not prove none are needed.";

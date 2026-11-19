@@ -22,6 +22,14 @@ test('optional maximum advice renders in the existing panel with no apply contro
   const fresh=render();
   assert.match(fresh,/Observed maximum/);assert.match(fresh,/Suggested maximum/);assert.match(fresh,/<td>2<\/td><td>3<\/td>/);
   assert.doesNotMatch(fresh,/<button|<form/);assert.match(fresh,/No settings changes/);
+  const blocked={...plan,stock_maximum_preview:{...plan.stock_maximum_preview,state:'unavailable',reason:'pressure_evidence_unavailable',proposals:[]}};
+  assert.match(render({plan:blocked}),/Required pressure evidence/);
+  for(const reason of ['private error', ['pressure_evidence_unavailable'], 'awaiting_matching_sample', null]){
+   const html=render({plan:{...blocked,stock_maximum_preview:{...blocked.stock_maximum_preview,reason}}});
+   assert.match(html,/optional stock maximum preview is unavailable/);assert.doesNotMatch(html,/private error|Required pressure evidence/);
+  }
+  assert.doesNotMatch(render({plan:blocked,now:now+10000}),/Required pressure evidence/);
+  assert.doesNotMatch(render({plan:blocked,comparison:'preview_superseded'}),/Required pressure evidence/);
   const stale=render({now:now+10000});
   assert.match(stale,/preview expired/);assert.doesNotMatch(stale,/<table|<button/);
   const changed=render({comparison:'preview_superseded'});
