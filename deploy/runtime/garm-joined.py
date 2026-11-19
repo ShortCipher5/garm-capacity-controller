@@ -12,7 +12,39 @@ import time
 
 
 
+STAGES = frozenset(('joined-action', 'joined-snapshot-stock-public',
+    'joined-prepare-generated-roles', 'joined-prepare-stock-public',
+    'joined-prepare-role-config', 'joined-prepare-key-separation',
+    'joined-prepare-prune-seed', 'joined-probe', 'joined-outside'))
+stage = 'joined-action'
+
+
+def failure_message():
+    # Whitelist only: never exception text, paths, command output or secrets.
+    return 'Joined preboot fixture unavailable at ' + (stage if stage in STAGES else 'joined-action')
+
+
+def snapshot_public(stock, output):
+    global stage
+    stage = 'joined-snapshot-stock-public'
+    output.mkdir(mode=0o700, exist_ok=False)
+    for name in ('server.pem', 'ca.pem'):
+        raw = (stock / name).read_text()
+        ssl.PEM_cert_to_DER_cert(raw)
+        path = output / name
+        with path.open('x') as stream:
+            stream.write(raw)
+        path.chmod(0o600)
+
+
+def certificate_spki(path):
+    public_key = subprocess.check_output(['openssl', 'x509', '-in', str(path), '-pubkey', '-noout'], stderr=subprocess.DEVNULL)
+    return subprocess.check_output(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public_key, stderr=subprocess.DEVNULL)
+
+
 def prepare(root, stock):
+    global stage
+    stage = 'joined-prepare-generated-roles'
     import fixture
     fixture.prepare(root)
     gateway = root / 'gateway-private'
@@ -23,17 +55,18 @@ def prepare(root, stock):
     probe.mkdir(mode=0o700)
     for source, dest in [('ca.pem', 'ca.pem'), ('api.pem', 'server.pem'), ('api.key', 'server.key')]:
         fixture.write(ingress / dest, (seed / source).read_text())
+    stage = 'joined-prepare-stock-public'
     fixture.write(ingress / 'stock.pem', (stock / 'server.pem').read_text())
     stock_pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert((stock / 'server.pem').read_text())).hexdigest()
     fixture.write(ingress / 'ingress.json', json.dumps({
         'Listen': '0.0.0.0:8443', 'Upstream': 'https://127.0.0.1:9998', 'Controller': '',
         'TLSCertificate': '/run/joined-ingress/server.pem', 'TLSKey': '/run/joined-ingress/server.key',
         'StockCertificate': '/run/joined-ingress/stock.pem', 'StockFingerprint': stock_pin}))
+    stage = 'joined-prepare-role-config'
     config = json.loads((gateway / 'gateway.local.json').read_text())
     # No process owns this supervisor endpoint. A successful stock read is NOT
     # simulated: real reconciliation must fail and keep the ledger unready.
-    public_key = subprocess.check_output(['openssl', 'x509', '-in', str(seed / 'api.pem'), '-pubkey', '-noout'])
-    spki = subprocess.check_output(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public_key)
+    spki = certificate_spki(seed / 'api.pem')
     config['garm'] = {'managed_proxy': True, 'endpoint': 'https://127.0.0.1:9445',
         'proxy_server_key_pin': hashlib.sha256(spki).hexdigest(),
         'providers': ['capacity'], 'tls': config['hosts']['testhost']['tls']}
@@ -42,11 +75,14 @@ def prepare(root, stock):
     for name in ('ca.pem', 'admin.token'):
         fixture.write(probe / name, (gateway / name).read_text())
     fixture.write(probe / 'stock-ca.pem', (stock / 'ca.pem').read_text())
+    stage = 'joined-prepare-key-separation'
+    # Public SPKI comparison proves distinct role keys without reading the
+    # stock private key, whose ownership has already moved to UID65530.
+    assert len({certificate_spki(stock / 'server.pem'), certificate_spki(gateway / 'server.pem'), certificate_spki(ingress / 'server.pem')}) == 3
+    stage = 'joined-prepare-prune-seed'
     # Keep only independently owned role material, initialization input and state.
     for name in ('fixture-private', 'bad-private', 'backups', 'empty-state', 'other-state', 'archive-state', 'restored-state'):
         shutil.rmtree(root / name)
-    assert (gateway / 'server.key').read_bytes() != (ingress / 'server.key').read_bytes()
-    assert (stock / 'server.key').read_bytes() not in ((gateway / 'server.key').read_bytes(), (ingress / 'server.key').read_bytes())
 
 
 def request(port, path, stock=False, authenticated=False):
@@ -115,11 +151,16 @@ def outside():
 
 
 def main(args):
+    global stage
     if args and args[0] == 'prepare' and len(args) == 3:
         prepare(Path(args[1]), Path(args[2]))
+    elif args and args[0] == 'snapshot-public' and len(args) == 3:
+        snapshot_public(Path(args[1]), Path(args[2]))
     elif args == ['probe']:
+        stage = 'joined-probe'
         probe()
     elif args == ['outside']:
+        stage = 'joined-outside'
         outside()
     else:
         raise ValueError('invalid joined fixture action')
@@ -129,5 +170,5 @@ if __name__ == '__main__':
     try:
         main(sys.argv[1:])
     except Exception:
-        print('Joined preboot fixture unavailable', file=sys.stderr)
+        print(failure_message(), file=sys.stderr)
         raise SystemExit(1)

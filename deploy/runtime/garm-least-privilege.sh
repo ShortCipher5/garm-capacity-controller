@@ -68,6 +68,11 @@ python3 deploy/runtime/garm-native-executable.py "$work/stock-image.json" "$imag
 garm_executable=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["executable"])' "$results/garm-native-executable.json")
 image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["image_id"])' "$results/garm-native-executable.json")
 python3 deploy/runtime/garm-identity.py prepare "$work/fixture"
+# Snapshot ONLY public certificates while still runner-owned. Never read the
+# role-owned private directory again when preparing joined roles.
+if [[ $joined = true ]]; then
+  python3 deploy/runtime/garm-joined.py snapshot-public "$work/fixture/private" "$work/stock-public"
+fi
 sudo chown -R "$lab_uid:$lab_uid" "$work/fixture/private" "$work/fixture/state"
 sudo chown -R 65532:65532 "$work/fixture/gateway-canary"
 base=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 1 --memory 512m)

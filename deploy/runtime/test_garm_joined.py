@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,15 @@ class Joined(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stock.prepare(root / 'stock')
-            joined.prepare(root / 'joined', root / 'stock/private')
+            joined.snapshot_public(root / 'stock/private', root / 'stock-public')
+            public = root / 'stock-public'
+            self.assertEqual(set(p.name for p in public.iterdir()), {'server.pem', 'ca.pem'})
+            self.assertEqual(public.stat().st_mode & 0o777, 0o700)
+            self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in public.iterdir()))
+            # Remove the entire source: prepare must work with ONLY public
+            # certificate inputs, with no stock key/config/state accessible.
+            shutil.rmtree(root / 'stock')
+            joined.prepare(root / 'joined', public)
             base = root / 'joined'
             config = json.loads((base / 'gateway-private/gateway.local.json').read_text())
             self.assertTrue(config['garm']['managed_proxy'])
@@ -40,8 +49,23 @@ class Joined(unittest.TestCase):
             for role in ('gateway-private','ingress-private','probe-private'):
                 for file in (base / role).iterdir():
                     self.assertEqual(file.stat().st_mode & 0o777, 0o600)
-            keys = [(root / 'stock/private/server.key').read_bytes(), (base / 'gateway-private/server.key').read_bytes(), (base / 'ingress-private/server.key').read_bytes()]
+            keys = [joined.certificate_spki(public / 'server.pem'), joined.certificate_spki(base / 'gateway-private/server.pem'), joined.certificate_spki(base / 'ingress-private/server.pem')]
             self.assertEqual(len(set(keys)), 3)
+
+    def test_public_snapshot_precedes_ownership_transfer_and_labels_are_fixed(self):
+        source = (HERE / 'garm-least-privilege.sh').read_text()
+        self.assertLess(source.index('garm-joined.py snapshot-public'), source.index('sudo chown -R "$lab_uid:$lab_uid"'))
+        self.assertIn('prepare "$work/joined" "$work/stock-public"', (HERE / 'garm-joined.sh').read_text())
+        for name in joined.STAGES:
+            with patch.object(joined, 'stage', name):
+                self.assertEqual(joined.failure_message(), 'Joined preboot fixture unavailable at ' + name)
+        with patch.object(joined, 'stage', '/private/path secret'):
+            self.assertEqual(joined.failure_message(), 'Joined preboot fixture unavailable at joined-action')
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(['python3',str(HERE / 'garm-joined.py'), 'snapshot-public', directory+'/secret-missing', directory+'/public'], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, 'Joined preboot fixture unavailable at joined-snapshot-stock-public\n')
+            self.assertNotIn(directory, result.stderr)
 
     def test_probe_demands_unready_and_real_forward_result(self):
         view = {'admission_ready':False, 'experimental_provisioning_enabled':False, 'management_enabled':False, 'garm_management_available':False}

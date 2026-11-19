@@ -6,7 +6,7 @@
 [[ $garm_sha = 1fd77ef68b67f7afb45208473bcbb984ceb3d25e50721ed5104fcb20c930b95d ]]
 joined_gateway="${name}-gateway"
 joined_ingress="${name}-ingress"
-python3 deploy/runtime/garm-joined.py prepare "$work/joined" "$work/fixture/private"
+python3 deploy/runtime/garm-joined.py prepare "$work/joined" "$work/stock-public"
 sudo chown -R 65532:65532 "$work/joined/gateway-private" "$work/joined/state" "$work/joined/init-private" "$work/joined/probe-private"
 sudo chown -R 65531:65531 "$work/joined/ingress-private"
 # Existing explicit disposable ledger initializer; no TLS keys in this process.
