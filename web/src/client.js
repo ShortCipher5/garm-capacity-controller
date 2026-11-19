@@ -3,7 +3,7 @@ import {validateDemandObserverStatus} from "./demand-observer-status.js";
 import { mixHost, validateMixView } from "./runner-mix-client.js";
 import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
 import {validateNativeRetirementStatus} from "./native-retirement-status.js";
-import {validateAllocatorPlan} from "./allocator-plan.js";
+import {validateAllocatorPlan,AllocatorReadinessError} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
 import { validateCapacityStates } from "./capacity-states.js";
@@ -228,7 +228,14 @@ export class ReadSession {
       const response=await this.fetcher('/admin/api/v1/allocator-plan',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
       if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
       if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
-      if(!response.ok)throw new Error('Allocation plan unavailable.');
+      if(!response.ok){
+        if(response.status===503){
+          let body=null;try{body=await response.json();}catch{}
+          if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
+          throw new AllocatorReadinessError(body);
+        }
+        throw new Error('Allocation plan unavailable.');
+      }
       const result=validateAllocatorPlan(await response.json());
       if(generation!==this.#planGeneration||controller.signal.aborted)throw new SessionEnded();
       return result;

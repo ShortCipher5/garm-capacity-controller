@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {validateAllocatorPlan,allocatorPlanStale} from './allocator-plan.js';
+import {validateAllocatorPlan,allocatorPlanStale,AllocatorReadinessError,allocatorFailureMessage} from './allocator-plan.js';
 const n=Date.parse('2026-11-18T10:00:00Z'),pool='11111111-1111-1111-1111-111111111111';
 const view=()=>({source:'scoped-stock-and-coherent-ledger',source_identity:'a'.repeat(64),demand_digest:'b'.repeat(64),ledger_sequence:3,policy_revision:2,started_at:new Date(n-1000).toISOString(),finished_at:new Date(n-500).toISOString(),captured_at:new Date(n).toISOString(),expires_at:new Date(n+59000).toISOString(),atomic:false,remaining_jobs:1,pools:[{pool,repository:pool,supply:null,charged:{cpu_millis:1,ram_mib:1,disk_mib:1,runners:1},cap:2,warm_idle:0,additional:1,additional_warm:0,covered_by_idle:0,covered_by_grant:0,deferred_by_inflight:1}]});
 test('plan preserves unknown supply and explicit non-atomic provenance',()=>{const v=validateAllocatorPlan(view(),n);assert.equal(v.pools[0].supply,null);assert.equal(allocatorPlanStale(v,n),false);assert.equal(allocatorPlanStale(v,n+60000),true);});
@@ -16,4 +16,24 @@ test('monitoring veto remains distinct from capacity and rejects malformed field
  assert.equal(validateAllocatorPlan(v,n).pools[0].charged.runners,1);
  v.pressure[0].state='free_capacity';assert.throws(()=>validateAllocatorPlan(v,n));
  v.pressure[0].state='partial_sample_not_headroom';v.pools[0].suppressed_by_pressure=-1;assert.throws(()=>validateAllocatorPlan(v,n));
+});
+
+test('fixed readiness reasons never display raw response errors or identifiers',()=>{
+ for(const reason of ['source_not_configured','preview_unavailable','observation_unavailable','ledger_unavailable','pool_mapping_missing','host_binding_unavailable','enrollment_or_evidence_unavailable','planning_unavailable','snapshot_changed_or_expired','awaiting_observation','preview_stopped']) {
+  const message=allocatorFailureMessage(new AllocatorReadinessError({state:'unavailable',reason,error:'PRIVATE'}));
+  assert.match(message,/Current observation and plan are unknown/);assert.match(message,/advisory readiness/);assert.doesNotMatch(message,/PRIVATE/);
+ }
+ for(const body of [null,{},[],{state:'ready',reason:'ledger_unavailable'},{state:'unavailable',reason:'PRIVATE'},{state:'unavailable',reason:['ledger_unavailable']},{state:'unavailable',reason:'constructor'}]) {
+  assert.equal(allocatorFailureMessage(new AllocatorReadinessError(body)),allocatorFailureMessage(new Error('PRIVATE')));
+ }
+});
+test('503 fixed readiness survives only within the current read session',async()=>{
+ let finish;const session=new ReadSession(async url=>url.endsWith('/overview')?{ok:true,json:async()=>overview}:{ok:false,status:503,json:()=>new Promise(resolve=>finish=resolve)});
+ await session.connect('a'.repeat(64));const pending=session.allocatorPlanSnapshot();await new Promise(resolve=>setImmediate(resolve));session.disconnect();finish({state:'unavailable',reason:'ledger_unavailable'});await assert.rejects(pending,SessionEnded);
+});
+test('503 readiness parses only fixed reasons and malformed payload stays generic',async()=>{
+ for(const body of [{state:'unavailable',reason:'pool_mapping_missing'},null]) {
+  const session=new ReadSession(async url=>url.endsWith('/overview')?{ok:true,json:async()=>overview}:{ok:false,status:503,json:async()=>{if(body===null)throw new Error('PRIVATE');return body;}});
+  await session.connect('a'.repeat(64));await assert.rejects(session.allocatorPlanSnapshot(),error=>error instanceof AllocatorReadinessError && error.reason===(body?.reason??null));session.disconnect();
+ }
 });

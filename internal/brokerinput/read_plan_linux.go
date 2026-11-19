@@ -63,7 +63,7 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	defer p.mu.Unlock()
 	observed, err := p.source.Observe(ctx)
 	if err != nil {
-		return ReadPlan{}, err
+		return ReadPlan{}, unavailable("observation_unavailable", err)
 	}
 	identity := p.source.SourceIdentity()
 	if identity == "" || observed.SourceIdentity() != identity {
@@ -71,13 +71,33 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 	}
 	state, charges, err := p.store.ReadBrokerPlanningState(ctx)
 	if err != nil {
-		return ReadPlan{}, err
+		return ReadPlan{}, unavailable("ledger_unavailable", err)
 	}
 	opt := p.opt
 	opt.Now = time.Now().UTC()
+	// These diagnostic checks only explain already-required joins. They confer
+	// no authority and do not replace the canonical snapshot validation below.
+	for id, pool := range state.Config.Pools {
+		profile, ok := state.PoolProfiles[id]
+		if !ok {
+			return ReadPlan{}, unavailable("pool_mapping_missing", capacitybroker.ErrSnapshot)
+		}
+		for _, host := range pool.Hosts {
+			binding, exists := state.HostBindings[host]
+			matched := false
+			for _, domain := range profile.Domains {
+				if domain.Host == host && exists && domain.HostBindingSequence == binding.Sequence {
+					matched = true
+				}
+			}
+			if !matched {
+				return ReadPlan{}, unavailable("host_binding_unavailable", capacitybroker.ErrSnapshot)
+			}
+		}
+	}
 	snapshot, _, err := enrolledPlanningSnapshot(state, charges, observed, identity, opt)
 	if err != nil {
-		return ReadPlan{}, err
+		return ReadPlan{}, unavailable("enrollment_or_evidence_unavailable", err)
 	}
 	plan, err := Stock(snapshot, state.Policy, observed, opt)
 	baseline := plan
@@ -90,14 +110,14 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 		}
 	}
 	if err != nil {
-		return ReadPlan{}, err
+		return ReadPlan{}, unavailable("planning_unavailable", err)
 	}
 	// Reject a ledger revision changed during the read/plan window. This is not
 	// a cross-system transaction and does not stop future changes after response.
 	current, err := p.store.ReadBrokerGrantState(ctx)
 	now := time.Now().UTC()
 	if err != nil || ctx.Err() != nil || !current.Ready || current.Sequence != state.Sequence || current.Policy.Revision != state.Policy.Revision || p.source.SourceIdentity() != identity || now.Sub(observed.StartedAt) > opt.MaxAge {
-		return ReadPlan{}, capacitybroker.ErrSnapshot
+		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
 	result := projectReadPlan(state, observed, plan, now, opt.MaxAge)
 	result.Pressure = pressure
@@ -114,7 +134,7 @@ func (p *planReader) read(ctx context.Context) (ReadPlan, error) {
 		}
 	}
 	if !result.ExpiresAt.After(now) {
-		return ReadPlan{}, capacitybroker.ErrSnapshot
+		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
 	return result, nil
 }
