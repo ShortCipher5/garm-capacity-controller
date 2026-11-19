@@ -34,6 +34,9 @@ func TestRetirementServiceRuntimeRefusesBeforeOwnerContact(t *testing.T) {
 	if _, e = NewRetirementService(t.Context(), RetirementConfiguration{Store: s}); !errors.Is(e, ErrUnqualified) {
 		t.Fatal(e)
 	}
+	if _, e := (&Coordinator{store: s}).ObserveRetirementDiagnostics(t.Context(), "absent"); !errors.Is(e, ErrUnqualified) {
+		t.Fatal(e)
+	}
 	dormant := &RetirementService{store: s}
 	if _, e = dormant.Cycle(t.Context()); !errors.Is(e, ErrUnqualified) {
 		t.Fatal(e)
@@ -85,5 +88,35 @@ func TestRetirementServiceEmptyScanCancellationAndScopeValidation(t *testing.T) 
 	snap, e := f.s.Snapshot(t.Context())
 	if e != nil || snap.Allocated.Global.Runners != 1 {
 		t.Fatal("empty/cancelled scan changed charge", e, snap.Allocated)
+	}
+}
+
+func TestRetainedDiagnosticsRequireCanonicalDeleteBeforeOwnerReads(t *testing.T) {
+	f := setup(t, "")
+	c, e := New(t.Context(), f.config)
+	if e != nil {
+		t.Fatal(e)
+	}
+	before, e := f.s.Snapshot(t.Context())
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Even a live authenticated owner cannot replace the missing canonical receipt.
+	f.owner.mu.Lock()
+	calls := f.owner.totalCalls
+	f.owner.mu.Unlock()
+	observation, e := c.ObserveRetirementDiagnostics(t.Context(), "00000000000000000000000000000000")
+	if !errors.Is(e, ErrUnknown) || observation.Valid() {
+		t.Fatal(e)
+	}
+	f.owner.mu.Lock()
+	afterCalls := f.owner.totalCalls
+	f.owner.mu.Unlock()
+	if afterCalls != calls {
+		t.Fatal("owner contacted without canonical DELETE", calls, afterCalls)
+	}
+	after, e := f.s.Snapshot(t.Context())
+	if e != nil || after.Allocated.Global != before.Allocated.Global || len(after.Audit) != len(before.Audit) {
+		t.Fatal("diagnostic changed canonical state", e)
 	}
 }

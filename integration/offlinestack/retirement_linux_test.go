@@ -15,6 +15,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativecontroller"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeidentity"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/nativeretained"
 )
 
 // This owner is a protocol double, not evidence of actual STOP/DELETE or absence.
@@ -69,7 +70,9 @@ func (o *nativeBridgeOwner) serveRetirement(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	id := strings.TrimPrefix(r.URL.Path, prefix)
-	terminal := strings.HasSuffix(id, "/terminal")
+	evidence := strings.HasSuffix(id, "/evidence")
+	id = strings.TrimSuffix(id, "/evidence")
+	terminal := strings.HasSuffix(id, "/terminal") || evidence
 	id = strings.TrimSuffix(id, "/terminal")
 	var claim admission.NativeRetirementClaim
 	for _, v := range o.retirementClaims {
@@ -98,7 +101,17 @@ func (o *nativeBridgeOwner) serveRetirement(w http.ResponseWriter, r *http.Reque
 	if claim.Step == admission.NativeRetireDelete {
 		op = "55555555-5555-4555-8555-555555555555"
 	}
-	json.NewEncoder(w).Encode(nativeidentity.RetirementOperationRecord{PermitID: claim.PermitID, IntentDigest: claim.IntentDigest, ClaimID: claim.ID, RequestDigest: claim.RequestDigest, DomainID: intent.DomainID, PolicyDigest: intent.PolicyDigest, NativeName: intent.NativeName, ResourceID: intent.ResourceID, Dataset: intent.Dataset, DatasetGUID: intent.DatasetGUID, Step: claim.Step, OperationID: op, Outcome: outcome})
+	record := nativeidentity.RetirementOperationRecord{PermitID: claim.PermitID, IntentDigest: claim.IntentDigest, ClaimID: claim.ID, RequestDigest: claim.RequestDigest, DomainID: intent.DomainID, PolicyDigest: intent.PolicyDigest, NativeName: intent.NativeName, ResourceID: intent.ResourceID, Dataset: intent.Dataset, DatasetGUID: intent.DatasetGUID, Step: claim.Step, OperationID: op, Outcome: outcome}
+	if evidence {
+		now := time.Now().UTC()
+		d := nativeretained.Descriptor{Version: nativeretained.Version, Nonce: r.URL.Query().Get("nonce"), IssuedAt: now, Owner: o.descriptor, Delete: record, Qualification: "retained_observations_only", NamespaceInode: 42, NamespaceTerminated: true, NamespaceObservedAt: now, InstanceAbsent: true, InstanceObservedAt: now, StorageObservedAt: now, RootGUID: "101", RootQuotaBytes: 4096, RootUsedBytes: 1024, RootAvailableBytes: 3072, PoolGUID: "102", PoolLoadGUID: "103", PoolAllocatedBytes: 1024, PoolFreeBytes: 3072, PoolSizeBytes: 4096}
+		if o.mode == "retire-evidence-mismatch" {
+			d.Delete.ResourceID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		}
+		json.NewEncoder(w).Encode(d)
+	} else {
+		json.NewEncoder(w).Encode(record)
+	}
 	return true
 }
 
@@ -188,6 +201,17 @@ func exerciseRetirement(t *testing.T, f *nativeBridgeFixture, permit string, reo
 			}
 			t.Fatal("completed automation", cycle)
 		}
+		if cycle.OperationsCompleted == 1 {
+			wantAvailable, wantUnavailable := 1, 0
+			if f.owner.mode == "retire-evidence-mismatch" {
+				wantAvailable, wantUnavailable = 0, 1
+			}
+			if cycle.RetainedDiagnosticsAvailable != wantAvailable || cycle.RetainedDiagnosticsUnavailable != wantUnavailable {
+				t.Fatal("diagnostics must not change completed operation accounting", cycle)
+			}
+		} else if cycle.RetainedDiagnosticsAvailable != 0 || cycle.RetainedDiagnosticsUnavailable != 0 {
+			t.Fatal("diagnostics before canonical DELETE success", cycle)
+		}
 		// Existing direct coordinator assertions below must now recover only durable
 		// history, not issue a second STOP/DELETE after the real service cycle.
 		c, e := nativecontroller.New(context.Background(), f.config)
@@ -207,6 +231,13 @@ func exerciseRetirement(t *testing.T, f *nativeBridgeFixture, permit string, reo
 		}
 		if f.owner.mode == "retire-delete-unknown" && (result.StopState != "succeeded" || result.DeleteState != "unknown") {
 			t.Fatal(result)
+		}
+		if !unknown {
+			diagnostic, de := c.ObserveRetirementDiagnostics(context.Background(), permit)
+			want := f.owner.mode != "retire-evidence-mismatch"
+			if (de == nil && diagnostic.Valid()) != want {
+				t.Fatal("retained diagnostic binding", de)
+			}
 		}
 		if !unknown && (result.StopState != "succeeded" || result.DeleteState != "succeeded") {
 			t.Fatal(result)
