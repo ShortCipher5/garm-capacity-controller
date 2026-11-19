@@ -86,7 +86,7 @@ func OpenSession(ctx context.Context, spec Specification) (*Session, error) {
 		return nil, ErrBoundary
 	}
 	s := &Session{spec: spec, namespace: observed.Namespace(), trust: trust}
-	record, token, e := bootstrapProtocol(ctx, files, spec.GarmID, s.exchange)
+	record, token, e := authenticateExistingProtocol(ctx, files, spec.GarmID, before, s.exchange)
 	if e != nil || record != before {
 		return nil, ErrBoundary
 	}

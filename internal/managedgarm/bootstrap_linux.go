@@ -159,6 +159,24 @@ func bootstrapProtocol(ctx context.Context, files *bootstrapFiles, garmID string
 	} else if e != nil || attempted != wanted {
 		return bootstrapRecord{}, "", ErrBoundary
 	}
+	record, token, e := authenticateBootstrapCredential(ctx, c, wanted, exchange)
+	if e != nil {
+		return bootstrapRecord{}, "", e
+	}
+	var previous bootstrapRecord
+	if e = files.read("bootstrap-record.json", &previous); errors.Is(e, os.ErrNotExist) {
+		if files.create("bootstrap-record.json", record) != nil {
+			return bootstrapRecord{}, "", ErrBoundary
+		}
+	} else if e != nil || previous != record {
+		return bootstrapRecord{}, "", ErrBoundary
+	}
+	return record, token, nil
+}
+
+// authenticateBootstrapCredential performs only the existing fixed login and
+// controller read. Durable setup and record creation remain bootstrap-only.
+func authenticateBootstrapCredential(ctx context.Context, c credential, wanted bootstrapAttempt, exchange bootstrapExchange) (bootstrapRecord, string, error) {
 	raw, e := exchange(ctx, http.MethodPost, "/api/v1/auth/login", "", struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -186,13 +204,31 @@ func bootstrapProtocol(ctx context.Context, files *bootstrapFiles, garmID string
 	// UserID is intentionally not inferred from unsigned JWT claims. Stock has no
 	// authenticated current-user read; successful generated-password login and
 	// fresh owned deployment are the custody assumptions, not external attestation.
-	var previous bootstrapRecord
-	if e = files.read("bootstrap-record.json", &previous); errors.Is(e, os.ErrNotExist) {
-		if files.create("bootstrap-record.json", record) != nil {
-			return bootstrapRecord{}, "", ErrBoundary
-		}
-	} else if e != nil || previous != record {
+	return record, auth.Token, nil
+}
+
+// authenticateExistingProtocol cannot initialize or repair bootstrap state. Its
+// expected record was read by OpenSession before checking actual topology/TLS.
+// The concrete Session exchange retains every existing fail-closed check.
+func authenticateExistingProtocol(ctx context.Context, files *bootstrapFiles, garmID string, expected bootstrapRecord, exchange bootstrapExchange) (bootstrapRecord, string, error) {
+	var c credential
+	if files.read("bootstrap-user.json", &c) != nil || !validBootstrapCredential(c) || !digest.MatchString(garmID) {
 		return bootstrapRecord{}, "", ErrBoundary
 	}
-	return record, auth.Token, nil
+	wanted := bootstrapAttempt{"managed-garm-bootstrap/v1", garmID, credentialHash(c)}
+	var attempt bootstrapAttempt
+	if files.read("bootstrap-attempt.json", &attempt) != nil || attempt != wanted || expected.bootstrapAttempt != wanted || !stockUUID(expected.ControllerID) {
+		return bootstrapRecord{}, "", ErrBoundary
+	}
+	record, token, err := authenticateBootstrapCredential(ctx, c, wanted, exchange)
+	if err != nil || record != expected {
+		return bootstrapRecord{}, "", ErrBoundary
+	}
+	// Preserve the original post-authentication protected record reread, without
+	// the bootstrap-only missing-record creation branch.
+	var after bootstrapRecord
+	if files.read("bootstrap-record.json", &after) != nil || after != record {
+		return bootstrapRecord{}, "", ErrBoundary
+	}
+	return record, token, nil
 }
