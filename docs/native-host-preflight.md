@@ -8,10 +8,21 @@ state is always `unqualified_no_activation`.
 
 The report reads actual uname, effective UID and UID mapping, effective process
 capabilities, cgroup-v2 filesystem/controllers, OpenZFS module version and
-available lockdown status. Missing permissions or unsupported versions appear
-as missing/unsupported, not as zero resource capacity. The current source profile
-is Linux 6.8, OpenZFS 2.2.6 and the separately pinned amd64 Debian LXC candidate.
+available lockdown status. Missing permissions appear as missing/unsupported,
+not as zero resource capacity. Kernel and loaded OpenZFS module versions are
+`informational` observations, or `unavailable` when unreadable/empty. A separate
+`zfs_module_presence` prerequisite records whether a loaded module exposes a
+nonempty kernel version attribute; it is not proof of working storage. No host
+minor-version allowlist decides compatibility. The verification candidate is
+**Debian 13 / Linux 6.12**, not a version pin or an assertion of qualification.
 Matching version text alone does not establish kernel/module provenance or ABI.
+
+Incus is explicitly `not_exercised`: this command does not contact its daemon or
+execute a binary merely to discover a version. Its actual running version and
+capabilities must be observed in separately authorized verification. The exact
+hash/version pins for supplied runtime artifacts remain unchanged, as do all
+native backend and activation refusals. A different observed host ZFS version
+therefore does not authorize mixing it with an incompatible pinned image.
 
 The fixed host-side LXC library path is inspected without execution. Its actual
 bytes must match the shared reviewed vendor SHA256 and size before imported

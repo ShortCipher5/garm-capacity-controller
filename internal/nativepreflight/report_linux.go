@@ -63,7 +63,19 @@ func collect(ctx context.Context, in inputs) (Report, error) {
 		}
 		r.Checks = append(r.Checks, Check{name, state, observed, required})
 	}
-	add("kernel_release", in.kernel, "Linux 6.8.x supported-source profile; vendor/kernel qualification still required", strings.HasPrefix(in.kernel, "6.8."))
+	// Host version observations are evidence, not a compatibility allowlist.
+	// Exact supplied-artifact pins and all activation guards remain separate.
+	observe := func(name, value, required string, available bool) {
+		state := "unavailable"
+		if !available {
+			value = ""
+		}
+		if available && strings.TrimSpace(value) != "" {
+			state = "informational"
+		}
+		r.Checks = append(r.Checks, Check{name, state, strings.TrimSpace(value), required})
+	}
+	observe("kernel_release", in.kernel, "Debian 13 / Linux 6.12 verification candidate, not a pin; observed release is not qualification or a minor-version gate", true)
 	add("architecture", in.arch, "x86_64 for selected pinned LXC image profile", in.arch == "x86_64")
 	add("effective_uid", strconv.Itoa(in.uid), "0 in initial host user namespace", in.uid == 0)
 	uidMap, e := in.read("/proc/self/uid_map")
@@ -87,7 +99,9 @@ func collect(ctx context.Context, in inputs) (Report, error) {
 	}
 	version, e := in.read("/sys/module/zfs/version")
 	version = strings.TrimSpace(version)
-	add("zfs_module_version", version, "2.2.6 or 2.2.6 vendor suffix; hash/kernel ABI still require qualification", e == nil && (version == "2.2.6" || strings.HasPrefix(version, "2.2.6-")))
+	add("zfs_module_presence", "", "loaded ZFS module exposes a nonempty kernel version attribute; not storage capability proof", e == nil && version != "")
+	observe("zfs_module_version", version, "loaded module version observation only; kernel ABI and actual storage capabilities require qualification", e == nil)
+	r.Checks = append(r.Checks, Check{"incus_version", "not_exercised", "", "no daemon contact or binary execution; actual daemon version must be observed during separately authorized verification"})
 	lockdown, e := in.read("/sys/kernel/security/lockdown")
 	if e == nil {
 		r.Checks = append(r.Checks, Check{"kernel_lockdown", "informational", strings.TrimSpace(lockdown), "must permit qualified BPF/device/namespace operations; not exercised"})
