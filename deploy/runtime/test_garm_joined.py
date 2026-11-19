@@ -88,6 +88,29 @@ class Joined(unittest.TestCase):
                 self.assertEqual(requests.call_count, 2)
                 sleep.assert_not_called()
 
+    def test_fixed_process_labels_and_readonly_failure_are_enforced(self):
+        shell = (HERE / 'garm-joined.sh').read_text()
+        function = re.search(r'joined_check\(\) \{.*?\n\}', shell, re.S).group(0)
+        for role in ('stock', 'ingress', 'gateway'):
+            result = subprocess.run(['bash', '-ec', function + '\njoined_check "$1" "$2"', 'test', role, 'pid-read'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, 'Joined check: ' + role + ' pid-read\n')
+            self.assertEqual(result.stdout, '')
+        for role, phase in [('private-container-name','pid-read'),('stock','raw-namespace-123')]:
+            result = subprocess.run(['bash', '-ec', function + '\njoined_check "$1" "$2"', 'test', role, phase], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout + result.stderr, '')
+        statement = 'if touch /must-not-be-writable 2>/dev/null; then exit 1; fi'
+        self.assertIn(statement, shell)
+        self.assertNotIn('! touch /must-not-be-writable', shell)
+        # Run the exact assertion with a harmless shell function, not touch or
+        # Docker. A successful write must abort even under sh -e exemptions.
+        for touch_status in (0, 1):
+            program = 'touch() { return ' + str(touch_status) + '; };\n' + statement + '\nprintf reached'
+            result = subprocess.run(['sh', '-ec', program], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1 if touch_status == 0 else 0)
+            self.assertEqual(result.stdout, '' if touch_status == 0 else 'reached')
+
     def test_closed_joined_selector_and_shell_python(self):
         source=(HERE/'garm-least-privilege.sh').read_text()
         selector=source[source.index('lab_uid='):source.index('image=ghcr.io/')]

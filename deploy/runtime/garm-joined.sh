@@ -45,34 +45,65 @@ for i,x in enumerate(xs):
   mounts={m["Destination"]:m["RW"] for m in x["Mounts"] if m["Type"]=="bind"}
   assert mounts==({"/run/joined-ingress":False} if i==1 else {"/run/capacity-private":False,"/var/lib/capacity-gateway":True})
 print("PASS actual distinct three-role containers share only isolated network")'
+# Closed diagnostic vocabulary only. Never print sampled identities or names.
+joined_check() {
+  case "$1" in stock|ingress|gateway) ;; *) return 1 ;; esac
+  case "$2" in network-read|network-equality|pid-read|pid-private|process-checks|stop|exit-contract|remove) ;; *) return 1 ;; esac
+  printf 'Joined check: %s %s\n' "$1" "$2" >&2
+}
 # Inspect actual PID1 namespace/credentials, not only Docker configuration.
+joined_check stock network-read
 stock_net=$(docker exec --user 65530:65530 "$name" readlink /proc/1/ns/net)
+joined_check stock pid-read
 stock_pid=$(docker exec --user 65530:65530 "$name" readlink /proc/1/ns/pid)
 previous_pid=$stock_pid
 for role in ingress gateway; do
   child=$joined_ingress; uid=65531; exe=/usr/local/bin/capacity-stock-ingress
   if [[ $role = gateway ]]; then child=$joined_gateway; uid=65532; exe=/usr/local/bin/capacity-gateway; fi
+  joined_check "$role" network-equality
   [[ $(docker exec --user "$uid:$uid" "$child" readlink /proc/1/ns/net) = "$stock_net" ]]
+  joined_check "$role" pid-read
   child_pid=$(docker exec --user "$uid:$uid" "$child" readlink /proc/1/ns/pid)
+  joined_check "$role" pid-private
   [[ $child_pid != "$stock_pid" && $child_pid != "$previous_pid" ]]
   previous_pid=$child_pid
+  joined_check "$role" process-checks
   docker exec --user "$uid:$uid" "$child" /bin/sh -ec '
+    case "$2" in ingress|gateway) ;; *) exit 1 ;; esac
+    check() {
+      case "$1" in executable|cwd|readonly-root|no-docker-socket|status-read) ;; *) exit 1 ;; esac
+      printf "Joined process check: %s %s\n" "$2" "$1" >&2
+    }
+    check executable "$2"
     test "$(readlink /proc/1/exe)" = "$1"
+    check cwd "$2"
     test "$(readlink /proc/1/cwd)" = /
-    ! touch /must-not-be-writable 2>/dev/null
+    check readonly-root "$2"
+    if touch /must-not-be-writable 2>/dev/null; then exit 1; fi
+    check no-docker-socket "$2"
     test ! -e /var/run/docker.sock
-    cat /proc/1/status' probe "$exe" | python3 -c '
+    check status-read "$2"
+    cat /proc/1/status' probe "$exe" "$role" | python3 -c '
 import sys
 fields=dict(line.split(":",1) for line in sys.stdin.read().splitlines() if ":" in line)
-uid=sys.argv[1]
+uid,role=sys.argv[1:]
+assert role in ("ingress","gateway")
+print("Joined process check:",role,"uid-gid",file=sys.stderr)
 assert fields["Uid"].split()==[uid]*4 and fields["Gid"].split()==[uid]*4
+print("Joined process check:",role,"capabilities",file=sys.stderr)
 assert all(int(fields[k].strip(),16)==0 for k in ("CapInh","CapPrm","CapEff","CapBnd","CapAmb"))
-assert fields["NoNewPrivs"].strip()=="1"' "$uid"
+print("Joined process check:",role,"no-new-privileges",file=sys.stderr)
+assert fields["NoNewPrivs"].strip()=="1"' "$uid" "$role"
 done
 # Retire the children before stock recreation; never retain stale namespace users.
-for child in "$joined_gateway" "$joined_ingress"; do
+for role in gateway ingress; do
+  child=$joined_gateway
+  if [[ $role = ingress ]]; then child=$joined_ingress; fi
+  joined_check "$role" stop
   docker stop --time 60 "$child" >/dev/null
+  joined_check "$role" exit-contract
   [[ $(docker inspect --format '{{.State.ExitCode}}' "$child") = 0 ]] || [[ $child = "$joined_ingress" && $(docker inspect --format '{{.State.ExitCode}}' "$child") = 143 ]]
+  joined_check "$role" remove
   docker rm "$child" >/dev/null
 done
 joined_gateway=; joined_ingress=
