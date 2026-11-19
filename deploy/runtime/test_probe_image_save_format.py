@@ -86,8 +86,9 @@ class FormatProbe(unittest.TestCase):
                     for name, data in [('manifest.json',b'[]'), ('index.json',b'{"manifests":[]}'),
                                        ('oci-layout',b'{"imageLayoutVersion":"1.0.0"}')]:
                         info=tarfile.TarInfo(name);info.size=len(data);out.addfile(info,io.BytesIO(data))
-            result=probe.probe(json.dumps(self.record).encode(), parent, 'a'*40, '123', '1',
-                               lambda p,i:self.save(p,i,True), sample_roles=True, role_save=one)
+            with patch.object(probe.ancillary, 'describe', return_value={'diagnostic_only':True}):
+                result=probe.probe(json.dumps(self.record).encode(), parent, 'a'*40, '123', '1',
+                                   lambda p,i:self.save(p,i,True), sample_roles=True, role_save=one)
             self.assertEqual([r for r,_ in samples],list(probe.pack.ROLES))
             self.assertTrue(all(samples[i][1] > samples[i+1][1] for i in range(3)))
             self.assertLess(samples[0][1],probe.pack.MAX_ARCHIVE)

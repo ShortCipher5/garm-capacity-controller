@@ -14,6 +14,12 @@ spec.loader.exec_module(pack)
 structure_spec = importlib.util.spec_from_file_location('structure', Path(__file__).with_name('image-save-structure.py'))
 structure = importlib.util.module_from_spec(structure_spec)
 structure_spec.loader.exec_module(structure)
+metadata_spec = importlib.util.spec_from_file_location('metadata', Path(__file__).with_name('docker-exporter-metadata.py'))
+metadata = importlib.util.module_from_spec(metadata_spec)
+metadata_spec.loader.exec_module(metadata)
+ancillary_spec = importlib.util.spec_from_file_location('ancillary', Path(__file__).with_name('image-save-ancillary.py'))
+ancillary = importlib.util.module_from_spec(ancillary_spec)
+ancillary_spec.loader.exec_module(ancillary)
 
 
 def layout(path):
@@ -91,6 +97,7 @@ def probe(raw, parent, expected_commit, run_id, run_attempt, save=pack.save_imag
                            'files': sample_files, 'directories': sample_dirs}
                 if sample_kind == 'docker-and-oci':
                     summary['structure'] = structure.describe(archive, {role: identity})
+                    summary['ancillary'] = ancillary.describe(archive, {role: identity})
             samples[role] = summary
         result['per_role_structure'] = samples
     # No result is returned/printed unless private temporary archive removal succeeds.
@@ -107,6 +114,7 @@ def main():
         raw = stream.read(16385)
     result = probe(raw, os.environ['RUNNER_TEMP'], commit,
                    os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'], sample_roles=True)
+    result['exporter_metadata'] = metadata.collect()
     # Closed metadata only; never write into uploaded qualification-results.
     print(json.dumps(result, sort_keys=True, separators=(',', ':')))
 
