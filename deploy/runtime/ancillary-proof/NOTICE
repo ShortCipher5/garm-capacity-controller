@@ -1,0 +1,9 @@
+This source-study checker adapts selected type declarations and legacy ID
+derivation semantics from Moby / Docker, licensed under Apache License 2.0.
+Source: https://github.com/moby/moby/tree/6430e49a55babd9b8f4d08e70ecb2b68900770fe
+Tag: v28.0.4.
+Relevant files: image/tarexport/save.go, image/v1/imagev1.go,
+image/image.go, api/types/container/config.go, api/types/strslice/strslice.go.
+Modifications: reduced supported schema, omitted external dependencies/logging,
+explicit refusal of Healthcheck, bounded stdin, exact hash-set comparison,
+closed output and no archive acceptance or runtime interfaces.

@@ -3,7 +3,7 @@ import {test} from './fixtures.js';
 test('fresh observed plan is read-only and unavailable refresh clears current counts',async({page})=>{
  const repository='11111111-1111-4111-8111-111111111111',pool='22222222-2222-4222-8222-222222222222';let unavailable=false,mutations=0;
  const policy={revision:2,repositories:[{id:repository,weight:1,max_runners:5,pools:[{id:pool,max_runners:4,warm_idle:1}]}]};
- await page.route('**/admin/api/v1/broker-policy',route=>route.fulfill({status:200,json:{policy,advisory_only:true,writes_enabled:true}}));
+ await page.route('**/admin/api/v1/broker-policy',route=>route.fulfill({status:200,json:{policy,advisory_only:true,writes_enabled:true,status:{source:'saved-policy-and-charged-ledger',sequence:9,policy_revision:2,observed_at:new Date().toISOString(),ledger_ready:true,pools:[{pool,repository,desired:policy.repositories[0].pools[0],mapping:'recorded'}]}}}));
  await page.route('**/admin/api/v1/allocator-plan',route=>{
   if(route.request().method()!=='GET'){mutations++;return route.abort();}
   if(unavailable)return route.fulfill({status:503,json:{state:'unavailable',reason:'pool_mapping_missing'}});
@@ -13,10 +13,12 @@ test('fresh observed plan is read-only and unavailable refresh clears current co
  await page.goto('/');await page.getByLabel('Admin read token').fill('a'.repeat(64));await page.getByRole('button',{name:'Connect read-only'}).click();
  const panel=page.getByRole('region',{name:'Observed runners and fresh allocation plan'});
  await expect(panel).toContainText('unknown until a successful fresh read');
+ await expect(page.getByLabel('Pool runner cap',{exact:true})).toBeVisible();
  await panel.getByRole('button',{name:'Read fresh allocation plan'}).click();
  await expect(panel.getByRole('cell',{name:'1 / 2 / 0 / 1',exact:true})).toBeVisible();
- await expect(panel).toContainText('Fresh captured comparison');
+ await expect(panel).toContainText('The preview and saved comparison report the same policy revision and ledger sequence.');
  await page.getByLabel('Pool runner cap',{exact:true}).fill('3');
+ await expect(panel).toContainText('The preview and saved comparison report the same policy revision and ledger sequence.');
  await expect(panel).toContainText('saved policy revision 2');
  unavailable=true;await panel.getByRole('button',{name:'Read fresh allocation plan'}).click();
  await expect(panel).toContainText('Current observation and plan are unknown');await expect(panel).toContainText('A required enrolled pool mapping is missing.');
