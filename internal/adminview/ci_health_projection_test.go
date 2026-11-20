@@ -15,11 +15,11 @@ func TestCIHealthTimingProjectionPreservesPrecisionAndUnknown(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 2, 0, time.UTC)
 	attempt := cihealth.AttemptKey{Source: "github", RepositoryID: 3, WorkflowID: 8, RunID: math.MaxInt64, Attempt: 2}
 	job := cihealth.JobKey{Attempt: attempt, JobID: math.MaxInt64 - 1}
-	a := cihealth.AttemptFacts{Key: attempt, AsOf: now, Clock: cihealth.Clock{Phase: cihealth.Completed}, Jobs: []cihealth.JobFacts{{
+	a := cihealth.AttemptFacts{Key: attempt, AsOf: now, Clock: cihealth.Clock{Phase: cihealth.Completed, Conclusion: cihealth.ConclusionFailure}, Jobs: []cihealth.JobFacts{{
 		Key: job, FirstQueuedObservedAt: now.Add(-2 * time.Second),
-		Clock: cihealth.Clock{Phase: cihealth.Completed, StartedAt: now.Add(-time.Second), CompletedAt: now},
+		Clock: cihealth.Clock{Phase: cihealth.Completed, Conclusion: cihealth.ConclusionTimedOut, StartedAt: now.Add(-time.Second), CompletedAt: now},
 		Steps: []cihealth.StepFacts{
-			{Key: cihealth.StepKey{Job: job, Number: 1}, Clock: cihealth.Clock{Phase: cihealth.Skipped}},
+			{Key: cihealth.StepKey{Job: job, Number: 1}, Clock: cihealth.Clock{Phase: cihealth.Skipped, Conclusion: cihealth.ConclusionOtherTerminal}},
 			{Key: cihealth.StepKey{Job: job, Number: 2}, Clock: cihealth.Clock{Phase: cihealth.Completed, StartedAt: now, CompletedAt: now}},
 		},
 	}}}
@@ -34,7 +34,8 @@ func TestCIHealthTimingProjectionPreservesPrecisionAndUnknown(t *testing.T) {
 	for _, needle := range []string{
 		`"run_id":"9223372036854775807"`, `"attempt":"2"`, `"id":"9223372036854775806"`,
 		`"queue":{"basis":"observed_lower_bound","nanoseconds":"1000000000"}`,
-		`{"number":"1","status":"skipped"}`, `{"number":"2","status":"completed","execution":{"basis":"observed_endpoints","nanoseconds":"0"}}`,
+		`"status":"completed","conclusion":"failure"`, `"status":"completed","conclusion":"timed_out"`,
+		`{"number":"1","status":"skipped","conclusion":"other_terminal"}`, `{"number":"2","status":"completed","execution":{"basis":"observed_endpoints","nanoseconds":"0"}}`,
 	} {
 		if !strings.Contains(string(got), needle) {
 			t.Errorf("missing %s in %s", needle, got)

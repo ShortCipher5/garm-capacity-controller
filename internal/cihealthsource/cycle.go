@@ -38,6 +38,7 @@ const (
 type Cycle struct {
 	state      CycleState
 	observedAt time.Time
+	sealedAt   time.Time // local monotonic clock for proof expiry, never history time
 	facts      []cihealth.AttemptFacts
 	source     cycleSourceInstance
 }
@@ -167,6 +168,7 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 		return Cycle{}, ErrCycleObservation
 	}
 	out.observedAt = r.latest
+	out.sealedAt = time.Now()
 	if r.partial {
 		out.state = CyclePartial
 	}

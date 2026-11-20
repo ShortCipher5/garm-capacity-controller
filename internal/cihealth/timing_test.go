@@ -196,3 +196,36 @@ func TestMeasureEnforcesExactBounds(t *testing.T) {
 		t.Fatal("oversized source accepted")
 	}
 }
+
+func TestMeasureConclusionsRemainExplicitAndPhaseBound(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	attempt := AttemptKey{Source: "fixture", RepositoryID: 1, WorkflowID: 2, RunID: 3, Attempt: 4}
+	job := JobKey{Attempt: attempt, JobID: 5}
+	facts := AttemptFacts{Key: attempt, AsOf: now, Clock: Clock{Phase: Completed, Conclusion: ConclusionSuccess}, Jobs: []JobFacts{{
+		Key: job, Clock: Clock{Phase: Completed, Conclusion: ConclusionFailure},
+		Steps: []StepFacts{
+			{Key: StepKey{job, 1}, Clock: Clock{Phase: Skipped, Conclusion: ConclusionOtherTerminal}},
+			{Key: StepKey{job, 2}, Clock: Clock{Phase: Completed, StartedAt: now, CompletedAt: now}},
+		},
+	}}}
+	got, err := Measure(facts)
+	if err != nil || got.Conclusion != ConclusionSuccess || got.Wall != (Span{}) ||
+		got.Jobs[0].Conclusion != ConclusionFailure || got.Jobs[0].Execution != (Span{}) ||
+		got.Jobs[0].Steps[0].Conclusion != ConclusionOtherTerminal ||
+		got.Jobs[0].Steps[1].Conclusion != ConclusionUnknown ||
+		got.Jobs[0].Steps[1].Duration != (Span{Basis: ObservedEndpoints}) {
+		t.Fatalf("result changed timing or vanished: %+v / %v", got, err)
+	}
+	for _, invalid := range []Clock{
+		{Phase: Completed, Conclusion: "dynamic-source-payload"},
+		{Phase: Running, Conclusion: ConclusionSuccess},
+		{Phase: Queued, Conclusion: ConclusionFailure},
+		{Phase: Skipped, Conclusion: ConclusionCancelled},
+		{Phase: Unknown, Conclusion: ConclusionOtherTerminal},
+	} {
+		facts.Jobs[0].Steps[1].Clock = invalid
+		if got, err := Measure(facts); err != ErrTimingFacts || len(got.Jobs) != 0 {
+			t.Fatalf("invalid result returned timing: %+v / %v", got, err)
+		}
+	}
+}

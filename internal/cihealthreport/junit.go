@@ -5,8 +5,10 @@ package cihealthreport
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"slices"
@@ -78,17 +80,24 @@ type Summary struct {
 	P95   time.Duration
 }
 
-// Report owns the projected values only. The input bytes, XML bodies and
-// unused attributes are never retained.
+// Report owns only projected values and a private exact-entry digest for
+// comparisons. Input bytes, XML bodies and unused attributes are never
+// retained. The digest has no accessor or wire representation.
 type Report struct {
 	binding ArtifactBinding
 	cases   []Case
 	summary Summary
+	digest  [sha256.Size]byte
 }
 
 func (r Report) Binding() ArtifactBinding { return cloneBinding(r.binding) }
 func (r Report) Cases() []Case            { return append([]Case(nil), r.cases...) }
 func (r Report) Summary() Summary         { return r.summary }
+
+// Format deliberately does not reveal artifact proof, including the digest.
+func (r Report) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, "JUnit report: "+strconv.Itoa(len(r.cases))+" cases")
+}
 
 // ParseJUnit parses a deliberately narrow JUnit subset: a testsuite or a
 // testsuites group, optionally nested suites, and testcase elements. An
@@ -101,7 +110,14 @@ func ParseJUnit(raw []byte, binding ArtifactBinding) (Report, error) {
 	// Check and return the same defensive copy of all reviewed facts. Like
 	// raw, pointer fields must not be concurrently mutated by the caller.
 	binding = cloneBinding(binding)
-	if len(raw) == 0 || len(raw) > MaxReportBytes || !utf8.Valid(raw) || !validBinding(binding) {
+	if len(raw) == 0 || len(raw) > MaxReportBytes || !validBinding(binding) {
+		return fail()
+	}
+	// Parse and hash one bounded snapshot of the exact extracted entry,
+	// including insignificant XML bytes. Never hash the archive or normalized
+	// output as a substitute for these exact report bytes.
+	raw = bytes.Clone(raw)
+	if !utf8.Valid(raw) {
 		return fail()
 	}
 	d := xml.NewDecoder(bytes.NewReader(raw))
@@ -115,7 +131,7 @@ func ParseJUnit(raw []byte, binding ArtifactBinding) (Report, error) {
 			if !p.closed || len(p.stack) != 0 {
 				return fail()
 			}
-			return Report{binding: binding, cases: p.cases, summary: summarize(p.cases, p.totals)}, nil
+			return Report{binding: binding, cases: p.cases, summary: summarize(p.cases, p.totals), digest: sha256.Sum256(raw)}, nil
 		}
 		if err != nil || !p.consume(token) {
 			return fail()

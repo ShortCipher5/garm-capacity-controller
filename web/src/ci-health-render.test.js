@@ -67,6 +67,20 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(render({state: "unavailable", timing: {attempts: []}}), "");
     assert.match(render({...snapshot, timing: {attempts: []}}), /No attempts were included/);
     assert.equal(render({...snapshot, timing: {attempts: [{...first, run_id: 123}]}}), "");
+    const conclusions = structuredClone(snapshot);
+    conclusions.timing.attempts[0].jobs[1].conclusion = "success";
+    conclusions.timing.attempts[0].jobs[1].steps[0].conclusion = "timed_out";
+    conclusions.timing.attempts[0].jobs[1].steps[1].conclusion = "other_terminal";
+    conclusions.timing.attempts[1].conclusion = "cancelled";
+    const withResults = render(conclusions);
+    assert.match(withResults, /<dt>Result<\/dt><dd><span>Success<\/span>/);
+    assert.match(withResults, /<th scope="col">Status<\/th><th scope="col">Result<\/th>/);
+    assert.match(withResults, /<span class="pill">Completed<\/span><\/td><td><span>Timed out<\/span>/);
+    assert.match(withResults, /<span class="pill">Skipped<\/span><\/td><td><span>Other terminal result<\/span>/);
+    assert.match(withResults, /<dt>Result<\/dt><dd><span>Cancelled<\/span>/);
+    assert.match(withResults, /<dt>Result<\/dt><dd><span class="muted">Unknown<\/span>/);
+    conclusions.timing.attempts[1].conclusion = "not-an-allowed-result";
+    assert.equal(render(conclusions), "");
   } finally {
     try { await server?.close(); } finally { await rm(cacheDir, {recursive: true, force: true}); }
   }

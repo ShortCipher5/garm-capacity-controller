@@ -45,6 +45,31 @@ const (
 	Skipped
 )
 
+// Conclusion is an explicit, normalized source result, independent of timing.
+type Conclusion string
+
+const (
+	ConclusionUnknown       Conclusion = ""
+	ConclusionSuccess       Conclusion = "success"
+	ConclusionFailure       Conclusion = "failure"
+	ConclusionCancelled     Conclusion = "cancelled"
+	ConclusionTimedOut      Conclusion = "timed_out"
+	ConclusionOtherTerminal Conclusion = "other_terminal"
+)
+
+func (c Conclusion) validFor(p Phase) bool {
+	switch c {
+	case ConclusionUnknown:
+		return true
+	case ConclusionOtherTerminal:
+		return p == Completed || p == Skipped
+	case ConclusionSuccess, ConclusionFailure, ConclusionCancelled, ConclusionTimedOut:
+		return p == Completed
+	default:
+		return false
+	}
+}
+
 // Clock uses the zero Time for an unavailable value. A completed record can
 // lack one or both boundaries. A clock cannot be constructed from a run's
 // creation or last-update time just because another timestamp is missing.
@@ -54,6 +79,7 @@ type Clock struct {
 	// ObservedAt belongs to this entity's status sighting, not the overall
 	// batch or page render. Without it no active elapsed interval is reported.
 	ObservedAt time.Time
+	Conclusion Conclusion `json:",omitempty"`
 }
 
 type AttemptFacts struct {
@@ -94,17 +120,19 @@ type Span struct {
 }
 
 type Timing struct {
-	Key    AttemptKey
-	AsOf   time.Time
-	Phase  Phase
-	Wall   Span
-	Active Span
-	Jobs   []JobTiming
+	Key        AttemptKey
+	AsOf       time.Time
+	Phase      Phase
+	Conclusion Conclusion
+	Wall       Span
+	Active     Span
+	Jobs       []JobTiming
 }
 
 type JobTiming struct {
 	Key         JobKey
 	Phase       Phase
+	Conclusion  Conclusion
 	Queue       Span
 	ActiveQueue Span
 	Execution   Span
@@ -113,10 +141,11 @@ type JobTiming struct {
 }
 
 type StepTiming struct {
-	Key      StepKey
-	Phase    Phase
-	Duration Span
-	Active   Span
+	Key        StepKey
+	Phase      Phase
+	Conclusion Conclusion
+	Duration   Span
+	Active     Span
 }
 
 // Measure validates and projects one attempt's observations. Jobs and steps
@@ -138,7 +167,7 @@ func Measure(in AttemptFacts) (Timing, error) {
 	if !ok {
 		return Timing{}, ErrTimingFacts
 	}
-	out := Timing{Key: in.Key, AsOf: in.AsOf, Phase: in.Clock.Phase, Wall: wall, Active: active, Jobs: make([]JobTiming, 0, len(in.Jobs))}
+	out := Timing{Key: in.Key, AsOf: in.AsOf, Phase: in.Clock.Phase, Conclusion: in.Clock.Conclusion, Wall: wall, Active: active, Jobs: make([]JobTiming, 0, len(in.Jobs))}
 	seen := make(map[int64]bool, len(in.Jobs))
 	for _, job := range in.Jobs {
 		if job.Key.Attempt != in.Key || job.Key.JobID <= 0 || seen[job.Key.JobID] || !contains(in.Clock, job.Clock) {
@@ -163,7 +192,7 @@ func measureJob(job JobFacts, attempt Clock, asOf time.Time) (JobTiming, bool) {
 		!ordered(job.QueuedAt, job.Clock.ObservedAt) || !ordered(job.FirstQueuedObservedAt, job.Clock.ObservedAt) {
 		return JobTiming{}, false
 	}
-	out := JobTiming{Key: job.Key, Phase: job.Clock.Phase, Execution: execution, Active: active, Steps: make([]StepTiming, 0, len(job.Steps))}
+	out := JobTiming{Key: job.Key, Phase: job.Clock.Phase, Conclusion: job.Clock.Conclusion, Execution: execution, Active: active, Steps: make([]StepTiming, 0, len(job.Steps))}
 	queued := job.QueuedAt
 	basis := ObservedEndpoints
 	if queued.IsZero() {
@@ -189,13 +218,13 @@ func measureJob(job JobFacts, attempt Clock, asOf time.Time) (JobTiming, bool) {
 		if !ok {
 			return JobTiming{}, false
 		}
-		out.Steps = append(out.Steps, StepTiming{Key: step.Key, Phase: step.Clock.Phase, Duration: finished, Active: elapsed})
+		out.Steps = append(out.Steps, StepTiming{Key: step.Key, Phase: step.Clock.Phase, Conclusion: step.Clock.Conclusion, Duration: finished, Active: elapsed})
 	}
 	return out, true
 }
 
 func measureClock(c Clock, asOf time.Time) (finished, active Span, ok bool) {
-	if c.Phase > Skipped || !validOptional(c.StartedAt, asOf) || !validOptional(c.CompletedAt, asOf) ||
+	if c.Phase > Skipped || !c.Conclusion.validFor(c.Phase) || !validOptional(c.StartedAt, asOf) || !validOptional(c.CompletedAt, asOf) ||
 		!validOptional(c.ObservedAt, asOf) || !ordered(c.StartedAt, c.CompletedAt) ||
 		!ordered(c.StartedAt, c.ObservedAt) || !ordered(c.CompletedAt, c.ObservedAt) ||
 		(c.Phase == Queued && (!c.StartedAt.IsZero() || !c.CompletedAt.IsZero())) ||

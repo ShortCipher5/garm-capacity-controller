@@ -28,15 +28,27 @@ type CycleHistory struct {
 }
 
 func NewCycleHistory(history *cihealth.History, source Source, approved []cihealth.HistoryScope) (*CycleHistory, error) {
+	if history == nil {
+		return nil, ErrCycleHistory
+	}
+	h, err := bindCycleHistoryScope(source, approved)
+	if err != nil {
+		return nil, err
+	}
+	h.history = history
+	return h, nil
+}
+
+func bindCycleHistoryScope(source Source, approved []cihealth.HistoryScope) (*CycleHistory, error) {
 	owner := captureCycleSource(source)
-	if history == nil || owner == (cycleSourceInstance{}) || source.SourceID() == "" || len(approved) == 0 || len(approved) > maxHistoryCycleScopes {
+	if owner == (cycleSourceInstance{}) || source.SourceID() == "" || len(approved) == 0 || len(approved) > maxHistoryCycleScopes {
 		return nil, ErrCycleHistory
 	}
 	repos := make(map[int64]bool)
 	for _, r := range source.Repositories() {
 		repos[r.GitHubID] = true
 	}
-	h := &CycleHistory{history: history, source: source.SourceID(), owner: owner, scopes: make(map[cihealth.HistoryScope]bool, len(approved))}
+	h := &CycleHistory{source: source.SourceID(), owner: owner, scopes: make(map[cihealth.HistoryScope]bool, len(approved))}
 	for _, s := range approved {
 		if s.Source != h.source || !repos[s.RepositoryID] || s.WorkflowID <= 0 || h.scopes[s] {
 			return nil, ErrCycleHistory
@@ -144,10 +156,7 @@ func (h *CycleHistory) Persist(ctx context.Context, cycle Cycle, expected []Hist
 	for s := range groups {
 		order = append(order, s)
 	}
-	sort.Slice(order, func(i, j int) bool {
-		a, b := order[i], order[j]
-		return a.RepositoryID < b.RepositoryID || a.RepositoryID == b.RepositoryID && a.WorkflowID < b.WorkflowID
-	})
+	sortHistoryScopes(order)
 	ctx, cancel := context.WithDeadline(ctx, cutoff)
 	defer cancel()
 	for _, s := range order {
@@ -166,6 +175,13 @@ func (h *CycleHistory) Persist(ctx context.Context, cycle Cycle, expected []Hist
 		out.Commits = append(out.Commits, HistoryCycleCommit{Scope: s, Cursor: next})
 	}
 	return out, nil
+}
+
+func sortHistoryScopes(scopes []cihealth.HistoryScope) {
+	sort.Slice(scopes, func(i, j int) bool {
+		a, b := scopes[i], scopes[j]
+		return a.RepositoryID < b.RepositoryID || a.RepositoryID == b.RepositoryID && a.WorkflowID < b.WorkflowID
+	})
 }
 
 func freshHistoryCycleFact(at, now time.Time) bool {

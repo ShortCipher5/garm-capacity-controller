@@ -1,6 +1,8 @@
 package cihealth
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -294,5 +296,157 @@ func TestSnapshotHistoryUnresolvedIntentBlocksCanonicalReopen(t *testing.T) {
 	}
 	if _, err := os.Stat(pending); err != nil {
 		t.Fatal("startup removed intent", err)
+	}
+}
+
+func TestSnapshotHistoryOptionalConclusionsAreCanonical(t *testing.T) {
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	a := snapAttempt(s, 20, 1, now)
+	state := historyState{
+		Format:      historyFormat,
+		Checkpoints: []historyCheckpoint{{Scope: s, Cursor: HistoryCursor{1, 20}, Digest: [32]byte{1}}},
+		Attempts:    []AttemptFacts{a},
+	}
+	legacy, err := json.Marshal(state)
+	if err != nil || bytes.Contains(legacy, []byte(`"Conclusion"`)) {
+		t.Fatalf("missing data changed existing encoding: %v", err)
+	}
+	read, err := decodeHistory(legacy)
+	if err != nil || read.Attempts[0].Clock.Conclusion != ConclusionUnknown {
+		t.Fatalf("legacy record refused or filled: %v", err)
+	}
+	state.Attempts[0].Clock.Conclusion = ConclusionCancelled
+	state.Attempts[0].Jobs[0].Clock.Conclusion = ConclusionTimedOut
+	state.Attempts[0].Jobs[0].Steps[0].Clock.Conclusion = ConclusionFailure
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err = decodeHistory(payload)
+	if err != nil || read.Attempts[0].Clock.Conclusion != ConclusionCancelled ||
+		read.Attempts[0].Jobs[0].Clock.Conclusion != ConclusionTimedOut ||
+		read.Attempts[0].Jobs[0].Steps[0].Clock.Conclusion != ConclusionFailure {
+		t.Fatalf("explicit results did not round-trip: %v", err)
+	}
+	for _, changed := range [][]byte{
+		bytes.Replace(payload, []byte(`"Conclusion":"cancelled"`), []byte(`"Conclusion":"dynamic-data"`), 1),
+		bytes.Replace(payload, []byte(`"Conclusion":"cancelled"`), []byte(`"Conclusion":null`), 1),
+		bytes.Replace(payload, []byte(`"Conclusion":"cancelled"`), []byte(`"Conclusion":"cancelled","Conclusion":"cancelled"`), 1),
+	} {
+		if _, err := decodeHistory(changed); !errors.Is(err, ErrHistory) {
+			t.Fatalf("unsafe conclusion accepted in history: %v", err)
+		}
+	}
+}
+
+func TestSnapshotHistoryRejectsAPageThatWouldLoseKnownConclusions(t *testing.T) {
+	for label, change := range map[string]func(*AttemptFacts){
+		"attempt contradiction": func(a *AttemptFacts) { a.Clock.Conclusion = ConclusionCancelled },
+		"attempt omission":      func(a *AttemptFacts) { a.Clock.Conclusion = ConclusionUnknown },
+		"job contradiction":     func(a *AttemptFacts) { a.Jobs[0].Clock.Conclusion = ConclusionTimedOut },
+		"job omission":          func(a *AttemptFacts) { a.Jobs[0].Clock.Conclusion = ConclusionUnknown },
+		"job disappeared":       func(a *AttemptFacts) { a.Jobs = nil },
+		"job replaced by another ID": func(a *AttemptFacts) {
+			a.Jobs[0].Key.JobID++
+			a.Jobs[0].Steps[0].Key.Job = a.Jobs[0].Key
+		},
+		"step contradiction":              func(a *AttemptFacts) { a.Jobs[0].Steps[0].Clock.Conclusion = ConclusionSuccess },
+		"step omission":                   func(a *AttemptFacts) { a.Jobs[0].Steps[0].Clock.Conclusion = ConclusionUnknown },
+		"step disappeared":                func(a *AttemptFacts) { a.Jobs[0].Steps = nil },
+		"step replaced by another number": func(a *AttemptFacts) { a.Jobs[0].Steps[0].Key.Number++ },
+		"step observation missing":        func(a *AttemptFacts) { a.Jobs[0].Steps[0].Clock.ObservedAt = time.Time{} },
+		"step observation older": func(a *AttemptFacts) {
+			c := &a.Jobs[0].Steps[0].Clock
+			c.ObservedAt = c.ObservedAt.Add(-2 * time.Minute)
+			c.StartedAt, c.CompletedAt = time.Time{}, time.Time{}
+		},
+	} {
+		t.Run(label, func(t *testing.T) {
+			path, root := snapshotRoot(t)
+			h := snapshotOpen(t, root, true)
+			now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+			s := HistoryScope{"fixture", 9007199254740993, 44}
+			known := func(at time.Time) AttemptFacts {
+				a := snapAttempt(s, 20, 1, at)
+				a.Clock.Conclusion = ConclusionFailure
+				a.Jobs[0].Clock.Conclusion = ConclusionFailure
+				a.Jobs[0].Steps[0].Clock.Conclusion = ConclusionFailure
+				return a
+			}
+			prior, next := HistoryCursor{1, 20}, HistoryCursor{2, 21}
+			if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{known(now)}, now); err != nil {
+				t.Fatal(err)
+			}
+			sealed, err := os.ReadFile(filepath.Join(path, historyFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			later := now.Add(time.Minute)
+			incoming := known(later)
+			change(&incoming)
+			if _, err = Measure(incoming); err != nil {
+				t.Fatalf("fixture failed basic validation, not replacement guard: %v", err)
+			}
+			retry := snapAttempt(s, 20, 2, later)
+			if err = h.Apply(t.Context(), s, prior, next, []AttemptFacts{retry, incoming}, later); !errors.Is(err, ErrHistoryConflict) {
+				t.Fatalf("uncertain page not refused: %v", err)
+			}
+			preserved, err := os.ReadFile(filepath.Join(path, historyFile))
+			if err != nil || !bytes.Equal(sealed, preserved) || !h.noPending() {
+				t.Fatal("rejected page touched durable state", err)
+			}
+			if err = h.Close(); err != nil {
+				t.Fatal(err)
+			}
+			h = snapshotOpen(t, root, false)
+			cursor, err := h.Cursor(t.Context(), s)
+			rows, readErr := h.Recent(t.Context(), s, 2, later)
+			if err != nil || readErr != nil || cursor != prior || len(rows) != 1 || !rows[0].AsOf.Equal(now) ||
+				rows[0].Clock.Conclusion != ConclusionFailure || rows[0].Jobs[0].Clock.Conclusion != ConclusionFailure ||
+				rows[0].Jobs[0].Steps[0].Clock.Conclusion != ConclusionFailure {
+				t.Fatalf("rejected page refreshed or replaced historical facts: %v %v", err, readErr)
+			}
+		})
+	}
+}
+
+func TestSnapshotHistoryCompatibleResultsDoNotFillMissingIdentity(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	before := snapAttempt(s, 20, 1, now)
+	before.Clock.Conclusion = ConclusionFailure
+	before.Jobs[0].Steps[0].Clock.Conclusion = ConclusionFailure
+	unknownStep := before.Jobs[0].Steps[0]
+	unknownStep.Key.Number++
+	unknownStep.Clock.Conclusion = ConclusionUnknown
+	before.Jobs[0].Steps = append(before.Jobs[0].Steps, unknownStep)
+	prior, next := HistoryCursor{1, 20}, HistoryCursor{2, 21}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{before}, now); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(time.Minute)
+	missingOnlyParent := snapAttempt(s, 20, 1, later)
+	missingOnlyParent.Clock.Conclusion = ConclusionFailure
+	missingOnlyParent.Jobs = nil // Its job had no result, but did contain a known step.
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{missingOnlyParent}, later); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("a missing job hid a known step result", err)
+	}
+	after := snapAttempt(s, 20, 1, later)
+	after.Clock.Conclusion = ConclusionFailure
+	after.Jobs[0].Clock.Conclusion = ConclusionFailure // Positive evidence may fill previous unknown.
+	after.Jobs[0].Steps[0].Clock.Conclusion = ConclusionFailure
+	retry := snapAttempt(s, 20, 2, later)
+	retry.Clock.Conclusion = ConclusionSuccess // A rerun is not the original identity.
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{after, retry}, later); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := h.Recent(t.Context(), s, 2, later)
+	if err != nil || len(rows) != 2 || rows[0].Key != retry.Key || rows[0].Clock.Conclusion != ConclusionSuccess ||
+		!rows[1].AsOf.Equal(later) || rows[1].Key != after.Key || rows[1].Jobs[0].Clock.Conclusion != ConclusionFailure ||
+		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Key.Number != after.Jobs[0].Steps[0].Key.Number {
+		t.Fatalf("known result moved scope or missing child was filled: %+v / %v", rows, err)
 	}
 }

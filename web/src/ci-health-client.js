@@ -1,6 +1,7 @@
 const maxInt64 = "9223372036854775807";
 const maxSize = 1 << 20;
 const phases = ["queued", "running", "completed", "skipped", "unknown"];
+const terminalConclusions = ["success", "failure", "cancelled", "timed_out", "other_terminal"];
 export const ciHealthEndpoint = "/admin/api/v1/ci-health";
 const lifetime = 120_000; // Same display lifetime as the owner API.
 
@@ -35,6 +36,12 @@ function validSpan(row, key, permitted, lowerBound = false) {
     decimal(span.nanoseconds, true);
 }
 
+function validConclusion(row) {
+  if (!Object.hasOwn(row, "conclusion")) return true;
+  return (row.status === "completed" && terminalConclusions.includes(row.conclusion)) ||
+    (row.status === "skipped" && row.conclusion === "other_terminal");
+}
+
 export function validateCIHealthSnapshot(value) {
   const fail = () => { throw new Error("CI Health response unavailable."); };
   if (!exactKeys(value, ["state", "timing"], ["observed_at", "coverage"]) ||
@@ -52,10 +59,10 @@ export function validateCIHealthSnapshot(value) {
   let jobCount = 0;
   let stepCount = 0;
   for (const a of value.timing.attempts) {
-    if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed"]) ||
+    if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed", "conclusion"]) ||
         typeof a.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(a.source) || a.source.trim() !== a.source ||
         ![a.repository_id, a.workflow_id, a.run_id, a.attempt].every((id) => decimal(id)) ||
-        !phases.includes(a.status) || !validSpan(a, "wall", a.status === "completed") ||
+        !phases.includes(a.status) || !validConclusion(a) || !validSpan(a, "wall", a.status === "completed") ||
         !validSpan(a, "elapsed", a.status === "running") || !Array.isArray(a.jobs) ||
         a.jobs.length > 250 - jobCount) fail();
     const at = timestamp(a.observed_at);
@@ -65,8 +72,8 @@ export function validateCIHealthSnapshot(value) {
     jobCount += a.jobs.length;
     const jobs = new Set();
     for (const j of a.jobs) {
-      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "execution", "elapsed"]) ||
-          !decimal(j.id) || jobs.has(j.id) || !phases.includes(j.status) ||
+      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "execution", "elapsed", "conclusion"]) ||
+          !decimal(j.id) || jobs.has(j.id) || !phases.includes(j.status) || !validConclusion(j) ||
           !validSpan(j, "queue", ["running", "completed"].includes(j.status), true) ||
           !validSpan(j, "waiting", j.status === "queued", true) ||
           !validSpan(j, "execution", j.status === "completed") ||
@@ -76,8 +83,8 @@ export function validateCIHealthSnapshot(value) {
       stepCount += j.steps.length;
       const steps = new Set();
       for (const s of j.steps) {
-        if (!exactKeys(s, ["number", "status"], ["execution", "elapsed"]) ||
-            !decimal(s.number) || steps.has(s.number) || !phases.includes(s.status) ||
+        if (!exactKeys(s, ["number", "status"], ["execution", "elapsed", "conclusion"]) ||
+            !decimal(s.number) || steps.has(s.number) || !phases.includes(s.status) || !validConclusion(s) ||
             !validSpan(s, "execution", s.status === "completed") ||
             !validSpan(s, "elapsed", s.status === "running")) fail();
         steps.add(s.number);

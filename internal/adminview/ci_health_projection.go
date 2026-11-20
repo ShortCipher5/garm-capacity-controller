@@ -29,33 +29,36 @@ type ciTimingView struct {
 }
 
 type ciAttemptView struct {
-	Source   string      `json:"source"`
-	RepoID   string      `json:"repository_id"`
-	Workflow string      `json:"workflow_id"`
-	Run      string      `json:"run_id"`
-	Attempt  string      `json:"attempt"`
-	AsOf     string      `json:"observed_at"`
-	Status   string      `json:"status"`
-	Wall     *ciSpanView `json:"wall,omitempty"`
-	Elapsed  *ciSpanView `json:"elapsed,omitempty"`
-	Jobs     []ciJobView `json:"jobs"`
+	Source     string              `json:"source"`
+	RepoID     string              `json:"repository_id"`
+	Workflow   string              `json:"workflow_id"`
+	Run        string              `json:"run_id"`
+	Attempt    string              `json:"attempt"`
+	AsOf       string              `json:"observed_at"`
+	Status     string              `json:"status"`
+	Conclusion cihealth.Conclusion `json:"conclusion,omitempty"`
+	Wall       *ciSpanView         `json:"wall,omitempty"`
+	Elapsed    *ciSpanView         `json:"elapsed,omitempty"`
+	Jobs       []ciJobView         `json:"jobs"`
 }
 
 type ciJobView struct {
-	ID          string       `json:"id"`
-	Status      string       `json:"status"`
-	Queue       *ciSpanView  `json:"queue,omitempty"`
-	ActiveQueue *ciSpanView  `json:"waiting,omitempty"`
-	Execution   *ciSpanView  `json:"execution,omitempty"`
-	Elapsed     *ciSpanView  `json:"elapsed,omitempty"`
-	Steps       []ciStepView `json:"steps"`
+	ID          string              `json:"id"`
+	Status      string              `json:"status"`
+	Conclusion  cihealth.Conclusion `json:"conclusion,omitempty"`
+	Queue       *ciSpanView         `json:"queue,omitempty"`
+	ActiveQueue *ciSpanView         `json:"waiting,omitempty"`
+	Execution   *ciSpanView         `json:"execution,omitempty"`
+	Elapsed     *ciSpanView         `json:"elapsed,omitempty"`
+	Steps       []ciStepView        `json:"steps"`
 }
 
 type ciStepView struct {
-	Number    string      `json:"number"`
-	Status    string      `json:"status"`
-	Execution *ciSpanView `json:"execution,omitempty"`
-	Elapsed   *ciSpanView `json:"elapsed,omitempty"`
+	Number     string              `json:"number"`
+	Status     string              `json:"status"`
+	Conclusion cihealth.Conclusion `json:"conclusion,omitempty"`
+	Execution  *ciSpanView         `json:"execution,omitempty"`
+	Elapsed    *ciSpanView         `json:"elapsed,omitempty"`
 }
 
 type ciSpanView struct {
@@ -101,16 +104,16 @@ func projectCIHealthTiming(scopes []ciViewScope, facts []cihealth.AttemptFacts) 
 		}
 		row := ciAttemptView{
 			Source: k.Source, RepoID: ciInt(k.RepositoryID), Workflow: ciInt(k.WorkflowID), Run: ciInt(k.RunID), Attempt: ciInt(k.Attempt),
-			AsOf: timing.AsOf.UTC().Format(time.RFC3339Nano), Status: ciPhase(timing.Phase), Wall: ciSpan(timing.Wall), Elapsed: ciSpan(timing.Active),
+			AsOf: timing.AsOf.UTC().Format(time.RFC3339Nano), Status: ciPhase(timing.Phase), Conclusion: timing.Conclusion, Wall: ciSpan(timing.Wall), Elapsed: ciSpan(timing.Active),
 			Jobs: make([]ciJobView, 0, len(timing.Jobs)),
 		}
 		for _, j := range timing.Jobs {
 			job := ciJobView{
-				ID: ciInt(j.Key.JobID), Status: ciPhase(j.Phase), Queue: ciSpan(j.Queue), ActiveQueue: ciSpan(j.ActiveQueue),
+				ID: ciInt(j.Key.JobID), Status: ciPhase(j.Phase), Conclusion: j.Conclusion, Queue: ciSpan(j.Queue), ActiveQueue: ciSpan(j.ActiveQueue),
 				Execution: ciSpan(j.Execution), Elapsed: ciSpan(j.Active), Steps: make([]ciStepView, 0, len(j.Steps)),
 			}
 			for _, s := range j.Steps {
-				job.Steps = append(job.Steps, ciStepView{Number: ciInt(s.Key.Number), Status: ciPhase(s.Phase), Execution: ciSpan(s.Duration), Elapsed: ciSpan(s.Active)})
+				job.Steps = append(job.Steps, ciStepView{Number: ciInt(s.Key.Number), Status: ciPhase(s.Phase), Conclusion: s.Conclusion, Execution: ciSpan(s.Duration), Elapsed: ciSpan(s.Active)})
 			}
 			row.Jobs = append(row.Jobs, job)
 		}
