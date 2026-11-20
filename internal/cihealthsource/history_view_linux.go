@@ -84,7 +84,7 @@ func (s *OwnedCycleHistory) ReadObservedWorkflowHistory(ctx context.Context, pro
 	k := proof.key
 	scope := cihealth.HistoryScope{Source: k.Source, RepositoryID: k.RepositoryID, WorkflowID: k.WorkflowID}
 	h := s.cell.history
-	if proof.owner != h.owner || !h.allows(scope) || s.cell.uncertain || s.cell.closing.Load() || ctx.Err() != nil || !proof.current(time.Now()) {
+	if proof.owner != h.owner || !h.allows(scope) || s.cell.background || s.cell.uncertain || s.cell.closing.Load() || ctx.Err() != nil || !proof.current(time.Now()) {
 		return none, ErrCycleHistory
 	}
 	ctx, cancel := context.WithDeadline(ctx, proof.deadline)

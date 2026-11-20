@@ -74,7 +74,7 @@ func NewCIHealthSource(c Config, in CIHealthInput) (*CIHealthSource, error) {
 	}()
 	const ref = "ci-health-existing-demand-observer"
 	path := c.GitHubTokenFile // Frozen, not a caller-supplied per-query operand.
-	client, err := demandrepair.NewGitHub(c.GitHubEndpoint, c.GitHubAuthority, ref, func(ctx context.Context, received string) (string, error) {
+	client, err := demandrepair.NewCIHealthGitHub(c.GitHubEndpoint, c.GitHubAuthority, ref, func(ctx context.Context, received string) (string, error) {
 		if received != ref || ctx == nil || ctx.Err() != nil || life.Err() != nil {
 			return "", ErrObserver
 		}
@@ -127,13 +127,14 @@ func (s *CIHealthSource) Repositories() []demandrepair.CIRepository {
 	return s.source.Repositories()
 }
 
-func ciHealthRead[T any](s *CIHealthSource, caller context.Context, read func(context.Context, *demandrepair.CIHealthSource) (T, error)) (T, error) {
-	var empty T
-	if s == nil || s.source == nil || s.life.Err() != nil || caller == nil || caller.Err() != nil {
-		return empty, ErrObserver
+// BindLocalLifetime derives a cancellable context for an operation already
+// scoped to this exact reader. Closing the reader synchronously cancels the
+// derived context. It confers neither source authorization nor access to the
+// transport. The caller must release the returned context.
+func (s *CIHealthSource) BindLocalLifetime(caller context.Context) (context.Context, context.CancelFunc, error) {
+	if !s.LifetimeActive() || caller == nil || caller.Err() != nil {
+		return nil, nil, ErrObserver
 	}
-	// Parent these requests to the transport lifetime so Close synchronously
-	// cancels outstanding request contexts before releasing idle connections.
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if deadline, ok := caller.Deadline(); ok {
@@ -141,9 +142,25 @@ func ciHealthRead[T any](s *CIHealthSource, caller context.Context, read func(co
 	} else {
 		ctx, cancel = context.WithCancel(s.life)
 	}
-	defer cancel()
 	detach := context.AfterFunc(caller, cancel)
-	defer detach()
+	release := func() {
+		detach()
+		cancel()
+	}
+	if caller.Err() != nil || ctx.Err() != nil {
+		release()
+		return nil, nil, ErrObserver
+	}
+	return ctx, release, nil
+}
+
+func ciHealthRead[T any](s *CIHealthSource, caller context.Context, read func(context.Context, *demandrepair.CIHealthSource) (T, error)) (T, error) {
+	var empty T
+	ctx, release, err := s.BindLocalLifetime(caller)
+	if err != nil {
+		return empty, err
+	}
+	defer release()
 	if caller.Err() != nil || ctx.Err() != nil {
 		return empty, ErrObserver
 	}
@@ -169,5 +186,22 @@ func (s *CIHealthSource) ReadCIAttempt(ctx context.Context, garmID string, runID
 func (s *CIHealthSource) ListCIAttemptJobs(ctx context.Context, attempt demandrepair.CIAttempt, page int) (demandrepair.CIJobPage, error) {
 	return ciHealthRead(s, ctx, func(ctx context.Context, source *demandrepair.CIHealthSource) (demandrepair.CIJobPage, error) {
 		return source.ListCIAttemptJobs(ctx, attempt, page)
+	})
+}
+
+// PrepareObservedWorkflowRunLink is local-only. It requires an exact attempt
+// from this live reader, never caller-supplied IDs or response URL fields.
+// The returned locator refuses extraction after the reader stops.
+func (s *CIHealthSource) PrepareObservedWorkflowRunLink(ctx context.Context, attempt demandrepair.CIAttempt) (demandrepair.WorkflowRunLink, error) {
+	return ciHealthRead(s, ctx, func(ctx context.Context, source *demandrepair.CIHealthSource) (demandrepair.WorkflowRunLink, error) {
+		link, err := source.PrepareObservedWorkflowRunLink(ctx, attempt)
+		if err != nil {
+			return demandrepair.WorkflowRunLink{}, err
+		}
+		link = link.WithLocalLifetime(s.life)
+		if !link.Available() {
+			return demandrepair.WorkflowRunLink{}, ErrObserver
+		}
+		return link, nil
 	})
 }

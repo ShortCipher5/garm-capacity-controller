@@ -41,6 +41,7 @@ type Cycle struct {
 	sealedAt   time.Time // local monotonic clock for proof expiry, never history time
 	facts      []cihealth.AttemptFacts
 	source     cycleSourceInstance
+	runLinks   map[cihealth.AttemptKey]demandrepair.WorkflowRunLink
 }
 
 func (c Cycle) State() CycleState     { return c.state }
@@ -138,7 +139,7 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 				}
 				used.attempted++
 				candidate := candidates[i]
-				got, err := readAttempt(ctx, source, scan.repo.GarmID, candidate.runID, candidate.attempt, &used.budget,
+				got, err := readAttempt(ctx, source, out.source, scan.repo.GarmID, candidate.runID, candidate.attempt, &used.budget,
 					maxCycleJobs/len(scans)-used.jobs, maxCycleSteps/len(scans)-used.steps)
 				if errors.Is(err, errReadLimit) {
 					// Never publish a partial attempt. Retain only independently
@@ -154,6 +155,12 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 				}
 				r.latest = got.facts.AsOf
 				out.facts = append(out.facts, got.facts)
+				if got.runLink.Available() {
+					if out.runLinks == nil {
+						out.runLinks = make(map[cihealth.AttemptKey]demandrepair.WorkflowRunLink)
+					}
+					out.runLinks[key] = got.runLink
+				}
 				used.jobs += len(got.facts.Jobs)
 				for _, j := range got.facts.Jobs {
 					used.steps += len(j.Steps)

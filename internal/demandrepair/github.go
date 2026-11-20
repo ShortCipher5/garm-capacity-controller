@@ -22,6 +22,7 @@ type GitHubClient struct {
 	resolve   CredentialResolver
 	scope     map[string]Repository
 	http      *http.Client
+	ciRate    *ciRateGate // nil for the ordinary demand observer
 }
 
 var segment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
@@ -60,12 +61,34 @@ func NewGitHub(endpoint, authority, ref string, resolve CredentialResolver, trus
 	}
 	return c, nil
 }
+
+// NewCIHealthGitHub constructs a dedicated CI-only reader over the same
+// authenticated GET transport. Its local rate-limit gate is not shared with
+// the ordinary demand observer or with other transports using the credential.
+func NewCIHealthGitHub(endpoint, authority, ref string, resolve CredentialResolver, trust *tls.Config, repos []Repository) (*GitHubClient, error) {
+	c, err := NewGitHub(endpoint, authority, ref, resolve, trust, repos)
+	if err != nil {
+		return nil, err
+	}
+	c.ciRate = &ciRateGate{clock: time.Now}
+	return c, nil
+}
+
 func (c *GitHubClient) Close() {
 	if c != nil {
 		c.http.CloseIdleConnections()
 	}
 }
 func (c *GitHubClient) get(ctx context.Context, path string, q url.Values, out any) error {
+	if gate := c.ciRate; gate != nil {
+		// Only one dedicated request can be in flight. In particular a
+		// concurrent call cannot resolve credentials before the first
+		// response has had a chance to record its rate-limit directives.
+		if ctx == nil || ctx.Err() != nil || !gate.begin() {
+			return ErrObservation
+		}
+		defer gate.mu.Unlock()
+	}
 	token, e := c.resolve(ctx, c.ref)
 	if e != nil || token == "" || len(token) > 16384 || strings.ContainsAny(token, "\r\n") {
 		return ErrObservation
@@ -77,13 +100,18 @@ func (c *GitHubClient) get(ctx context.Context, path string, q url.Values, out a
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+	if c.ciRate != nil && (ctx.Err() != nil || !c.ciRate.permitted()) {
+		return ErrObservation
+	}
 	res, e := c.http.Do(req)
 	if e != nil {
 		return ErrObservation
 	}
 	defer res.Body.Close()
-	// No automatic retry: 403/429, exhausted quota or Retry-After all abort the
-	// observation. Scheduling/backoff belongs to a durable outer reconciler.
+	if c.ciRate != nil && c.ciRate.observe(res.StatusCode, res.Header) {
+		return ErrObservation
+	}
+	// Ordinary demand-reader behavior is unchanged, including no retry.
 	if res.StatusCode != 200 || res.Header.Get("Retry-After") != "" || res.Header.Get("X-RateLimit-Remaining") == "0" {
 		return ErrObservation
 	}

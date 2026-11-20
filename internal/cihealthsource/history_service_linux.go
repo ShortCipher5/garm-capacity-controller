@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
 )
@@ -28,12 +29,17 @@ type OwnedCycleHistoryInput struct {
 type OwnedCycleHistory struct{ cell *ownedCycleHistoryCell }
 
 type ownedCycleHistoryCell struct {
-	mu        sync.Mutex
-	closing   atomic.Bool
-	closed    bool
-	closeErr  error
-	uncertain bool
-	history   *CycleHistory
+	mu                        sync.Mutex
+	closing                   atomic.Bool
+	closed                    bool
+	closeErr                  error
+	uncertain                 bool
+	history                   *CycleHistory
+	startup                   []HistoryExpectation
+	background                bool
+	lastBackgroundObservation time.Time
+	lifetime                  context.Context
+	cancel                    context.CancelFunc
 }
 
 // OpenOwnedCycleHistory validates the full scope before opening any history
@@ -78,7 +84,8 @@ func OpenOwnedCycleHistory(ctx context.Context, source Source, in OwnedCycleHist
 		return nil, nil, ErrCycleHistory
 	}
 	success = true
-	return &OwnedCycleHistory{cell: &ownedCycleHistoryCell{history: adapter}}, expected, nil
+	lifetime, cancel := context.WithCancel(context.Background())
+	return &OwnedCycleHistory{cell: &ownedCycleHistoryCell{history: adapter, startup: append([]HistoryExpectation(nil), expected...), lifetime: lifetime, cancel: cancel}}, expected, nil
 }
 
 // PersistObservedCycle is one explicit attempt with caller-held expectations.
@@ -90,9 +97,10 @@ func (s *OwnedCycleHistory) PersistObservedCycle(ctx context.Context, cycle Cycl
 		return HistoryCycleReceipt{}, ErrCycleHistory
 	}
 	defer s.cell.mu.Unlock()
-	if s.cell.closing.Load() || ctx.Err() != nil {
+	if s.cell.closing.Load() || s.cell.background || ctx.Err() != nil {
 		return HistoryCycleReceipt{}, ErrCycleHistory
 	}
+	s.cell.startup = nil // An independent attempt consumes the startup cursor review.
 	if s.cell.uncertain {
 		return HistoryCycleReceipt{}, cihealth.ErrHistoryUncertain
 	}
@@ -110,11 +118,18 @@ func (s *OwnedCycleHistory) Close() error {
 		return nil
 	}
 	s.cell.closing.Store(true)
+	s.cell.cancel()
 	s.cell.mu.Lock()
 	defer s.cell.mu.Unlock()
-	if !s.cell.closed {
-		s.cell.closeErr = s.cell.history.history.Close()
-		s.cell.closed = true
+	return s.cell.closeLocked()
+}
+
+func (s *ownedCycleHistoryCell) closeLocked() error {
+	if !s.closed {
+		s.closing.Store(true)
+		s.cancel()
+		s.closeErr = s.history.history.Close()
+		s.closed = true
 	}
-	return s.cell.closeErr
+	return s.closeErr
 }
