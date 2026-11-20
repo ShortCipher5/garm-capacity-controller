@@ -2,6 +2,7 @@ package garmapi
 
 import (
 	"crypto/tls"
+
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 )
 
@@ -20,5 +21,6 @@ func NewManagedDemand(endpoint, serverKeyPin, expectedControllerID string, trust
 	m := c.discovery.management
 	m.client.http.Transport = source
 	m.managedSource = source
+	c.registrationOwner = &runningRegistrationOwner{}
 	return c, nil
 }

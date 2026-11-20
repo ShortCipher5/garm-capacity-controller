@@ -111,11 +111,12 @@ type CIRun struct {
 // CIAttempt is source-minted and short-lived. A caller may copy or inspect
 // an attempt but cannot change its request scope or mint a different attempt.
 type CIAttempt struct {
-	source     *CIHealthSource
-	repository CIRepository
-	run        CIRun
-	at         time.Time
-	minted     time.Time // monotonic counterpart of the public UTC observation
+	source               *CIHealthSource
+	repository           CIRepository
+	run                  CIRun
+	at                   time.Time
+	minted               time.Time // monotonic counterpart of the public UTC observation
+	runnerAssignmentSeal *ciRunnerAssignmentSeal
 }
 
 func (a CIAttempt) Run() CIRun {
@@ -134,7 +135,8 @@ type CIJobPage struct {
 	ObservedAt time.Time
 	NextPage   int
 	// TotalCount is reported for this page's query, not a stable snapshot.
-	TotalCount int
+	TotalCount        int
+	runnerAssignments []CIRunnerAssignmentReceipt
 }
 
 type CIJob struct {
@@ -244,7 +246,7 @@ func (s *CIHealthSource) ReadCIAttempt(ctx context.Context, garmID string, runID
 	if !valid || run.RunID != runID || run.Attempt != attempt {
 		return CIAttempt{}, ErrObservation
 	}
-	return CIAttempt{source: s, repository: r, run: run, at: now, minted: minted}, nil
+	return CIAttempt{source: s, repository: r, run: run, at: now, minted: minted, runnerAssignmentSeal: &ciRunnerAssignmentSeal{1}}, nil
 }
 
 // ListCIAttemptJobs reads only the exact action-run attempt. Missing queue
@@ -263,7 +265,8 @@ func (s *CIHealthSource) ListCIAttemptJobs(ctx context.Context, a CIAttempt, pag
 	if !valid {
 		return CIJobPage{}, ErrObservation
 	}
-	out := CIJobPage{Jobs: make([]CIJob, 0, len(wire.Jobs)), NextPage: next, ObservedAt: time.Now().UTC(), TotalCount: *wire.Total}
+	observed := time.Now()
+	out := CIJobPage{Jobs: make([]CIJob, 0, len(wire.Jobs)), NextPage: next, ObservedAt: observed.UTC(), TotalCount: *wire.Total}
 	seen := make(map[int64]bool, len(wire.Jobs))
 	for _, w := range wire.Jobs {
 		job, valid := w.validate(r, a.run, out.ObservedAt)
@@ -272,6 +275,12 @@ func (s *CIHealthSource) ListCIAttemptJobs(ctx context.Context, a CIAttempt, pag
 		}
 		seen[job.ID] = true
 		out.Jobs = append(out.Jobs, job)
+		if receipt, ok := mintCIRunnerAssignment(a, w, observed); ok {
+			out.runnerAssignments = append(out.runnerAssignments, receipt)
+		}
+	}
+	if ctx.Err() != nil {
+		out.runnerAssignments = nil
 	}
 	return out, nil
 }
