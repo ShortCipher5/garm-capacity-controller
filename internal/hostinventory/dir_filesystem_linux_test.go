@@ -8,12 +8,14 @@ import (
 )
 
 func dirFilesystemFixture() (DirFilesystemScope, DirFilesystemCounters, time.Time) {
-	return DirFilesystemScope{
-			HostFingerprint: strings.Repeat("1", 64), StoragePool: "fixture-pool", BootID: "11111111-1111-4111-8111-111111111111",
-			MountNamespace: 12, MountID: 17, DeviceMajor: 8, DeviceMinor: 0,
-		}, DirFilesystemCounters{
-			FragmentBytes: 4096, TotalBlocks: 10000, FreeBlocks: 4400, AvailableBlocks: 3300, TotalInodes: 5000, FreeInodes: 2200,
-		}, time.Unix(100, 0).UTC()
+	scope := DirFilesystemScope{
+		HostFingerprint: strings.Repeat("1", 64), StoragePool: "fixture-pool", BootID: "11111111-1111-4111-8111-111111111111",
+		MountNamespace: 12, MountID: 17, DeviceMajor: 8, DeviceMinor: 0,
+	}
+	counters := DirFilesystemCounters{
+		FragmentBytes: 4096, TotalBlocks: 10000, FreeBlocks: 4400, AvailableBlocks: 3300, TotalInodes: 5000, FreeInodes: 2200,
+	}
+	return scope, counters, time.Unix(100, 0).UTC()
 }
 
 func TestNormalizeDirFilesystemUsesAvailableNotAllFree(t *testing.T) {
