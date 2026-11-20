@@ -55,7 +55,8 @@ type Host struct {
 	// Detected is the last discovered physical capacity for this host, when
 	// onboarding discovery recorded it. Absent means not discovered; it is
 	// display data and never an admission input.
-	Detected *admission.Resources `json:"detected,omitempty"`
+	Detected         *admission.Resources   `json:"detected,omitempty"`
+	RunnerDiskHealth []runnerDiskHealthView `json:"runner_disk_health,omitempty"`
 	Allocation
 }
 type Pool struct {
@@ -126,6 +127,7 @@ type Handler struct {
 	onboarding                  *onboarding.Manager
 	onboardingProbe             bool
 	onboardingHash              [32]byte
+	runnerDiskHealth            RunnerDiskHealthSource
 	store                       *admission.SQLiteStore
 	tokenHash                   [32]byte
 	writeHash                   [32]byte
@@ -338,6 +340,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		view.ManagementEnabled = h.management
 		view.GarmManagementAvailable = h.garm != nil
 		view.OnboardingPreflightAvailable = h.onboarding != nil
+		h.attachRunnerDiskHealth(&view)
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {
 			fail(http.StatusServiceUnavailable)

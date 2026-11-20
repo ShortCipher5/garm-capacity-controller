@@ -7,6 +7,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
 import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS, plannedRunnerLimit, runnerPlanningReviewWindow } from "./host-budget.js";
 import { Usage } from "./usage-bars.jsx";
+import { RunnerDiskHealth } from "./runner-disk-health.jsx";
 import { UsageChart, USAGE_DIMENSIONS, formatSampleAge } from "./usage-chart.jsx";
 
 const fmt = (n) => n.toLocaleString();
@@ -85,6 +86,7 @@ export function ServerCard({ host, readUsage }) {
       ) : null}
       {!host.observation_fresh && <p className="drain-warning">Stale or unavailable observation. Health here is the last recorded observation, not live state.</p>}
       <UsagePanel host={host.id} readUsage={readUsage} />
+      <RunnerDiskHealth readings={host.runner_disk_health} />
     </article>
   );
 }

@@ -29,6 +29,9 @@ var errStockPreviewPressure = fmt.Errorf("stock preview pressure evidence unavai
 type scalingPreviewSample struct {
 	StockScalingSample
 	scope [sha256.Size]byte
+	// Opt-in is independent of evidence presence; nil while required vetoes growth.
+	diskRequired bool
+	disk         *stockMaximumPreviewDisk
 }
 
 type scalingPreviewHistory struct {
@@ -134,6 +137,15 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 			out.Reason = "no_confirmed_change"
 		}
 		changes, fit = compareStockMaximums(h.prior.StockScalingSample, current.StockScalingSample, now)
+		disk := filterStockMaximumPreviewDisk(changes, h.prior, current, now)
+		if disk.invalidBatch {
+			h.reset()
+			return &StockMaximumPreview{State: "unavailable", Reason: "evidence_unavailable", ExpiresAt: ordinaryExpiry, Proposals: []StockMaximumProposal{}}
+		}
+		changes = disk.proposals
+		if !disk.growthExpiry.IsZero() && disk.growthExpiry.Before(out.ExpiresAt) {
+			out.ExpiresAt = disk.growthExpiry
+		}
 	}
 	if len(changes) != 0 {
 		out.State = "proposed"
@@ -153,6 +165,7 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 	if current.expires.Before(out.ExpiresAt) {
 		out.ExpiresAt = current.expires
 	}
+	current.disk = ownStockMaximumPreviewDisk(current.disk)
 	h.prior = current
 	return out
 }

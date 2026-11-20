@@ -41,6 +41,7 @@ func (h *stockMaximumBatchHistory) accept(sample scalingPreviewSample, evidenceE
 		h.samples[len(h.samples)-1] = scalingPreviewSample{}
 		h.samples = h.samples[:len(h.samples)-1]
 	}
+	sample.disk = ownStockMaximumPreviewDisk(sample.disk)
 	h.samples = append(h.samples, sample)
 	out.HostEvidence = "configured_only"
 	out.State, out.Reason = "no_confirmed_proposals", "awaiting_cadence_window"
