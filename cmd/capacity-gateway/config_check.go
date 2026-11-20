@@ -48,6 +48,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if validateAllocatorLoop(c.AllocatorLoop) != nil {
 		return fail()
 	}
+	if validatePolicyCapConfiguration(c) != nil {
+		return fail()
+	}
 	allocatorSource, sourceErr := managedAllocatorSource(c)
 	if sourceErr != nil {
 		return fail()

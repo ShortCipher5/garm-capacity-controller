@@ -2,11 +2,27 @@ package main
 
 import (
 	"context"
+	"time"
+
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/brokerinput"
-	"time"
 )
+
+// Static checks and actual startup agree on the configured shape; neither
+// passing the check nor setting the interval establishes live write authority.
+func validatePolicyCapConfiguration(c configuration) error {
+	if c.Admin == nil || c.Admin.GarmManagement == nil || c.Admin.GarmManagement.PolicyCapIntervalSeconds == 0 {
+		return nil
+	}
+	a := c.Admin
+	n := a.GarmManagement.PolicyCapIntervalSeconds
+	if n < 60 || n > 3600 || !a.EnableExperimentalManagement || !a.EnableExperimentalGarmManagement || !a.GarmManagement.ManagedSupervisor ||
+		validateManagedSettingsRouting(c) != nil {
+		return adminview.ErrConfiguration
+	}
+	return nil
+}
 
 // Explicit opt-in only. This is not grant-loop activation or upward scaling.
 func startPolicyCapReconciler(ctx context.Context, c configuration, store *admission.SQLiteStore, view adminview.GarmManager) (func(), error) {
@@ -16,7 +32,7 @@ func startPolicyCapReconciler(ctx context.Context, c configuration, store *admis
 	}
 	a := c.Admin
 	n := a.GarmManagement.PolicyCapIntervalSeconds
-	if ctx == nil || n < 60 || n > 3600 || !a.EnableExperimentalManagement || !a.EnableExperimentalGarmManagement || !a.GarmManagement.ManagedSupervisor || validateManagedSettingsRouting(c) != nil {
+	if ctx == nil || validatePolicyCapConfiguration(c) != nil {
 		return noop, adminview.ErrConfiguration
 	}
 	consumer, ok := view.(interface{ SetPolicyCapService(*brokerinput.CapService) })
