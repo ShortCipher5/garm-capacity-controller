@@ -33,6 +33,12 @@ func fixture(t *testing.T, h http.HandlerFunc) *demandrepair.CIHealthSource {
 
 func fixtureRepos(t *testing.T, repos []demandrepair.CIRepository, h http.HandlerFunc) *demandrepair.CIHealthSource {
 	t.Helper()
+	s, _ := fixtureReposWithClient(t, repos, h)
+	return s
+}
+
+func fixtureReposWithClient(t *testing.T, repos []demandrepair.CIRepository, h http.HandlerFunc) (*demandrepair.CIHealthSource, *demandrepair.GitHubClient) {
+	t.Helper()
 	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer synthetic-token" {
 			t.Errorf("unexpected method or credential scope")
@@ -59,7 +65,7 @@ func fixtureRepos(t *testing.T, repos []demandrepair.CIRepository, h http.Handle
 	if err != nil {
 		t.Fatal(err)
 	}
-	return source
+	return source, client
 }
 
 func runResponse(w http.ResponseWriter, observedRepo int64, status, conclusion string) {

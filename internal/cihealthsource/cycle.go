@@ -39,6 +39,7 @@ type Cycle struct {
 	state      CycleState
 	observedAt time.Time
 	facts      []cihealth.AttemptFacts
+	source     cycleSourceInstance
 }
 
 func (c Cycle) State() CycleState     { return c.state }
@@ -108,7 +109,7 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 
 	// Prefer active observations before recent history, interleaving the
 	// sorted repository scopes so the first repo cannot fill the view alone.
-	out := Cycle{state: CycleObserved}
+	out := Cycle{state: CycleObserved, source: captureCycleSource(source)}
 	type usage struct {
 		jobs, steps, attempted int
 		budget                 readBudget
