@@ -8,20 +8,34 @@ import (
 	"testing"
 )
 
-// The existing joined inspect order is stock/ingress/gateway. Never copy it
-// positionally into the observer's stock/gateway/ingress arrays.
+// Keep the immutable pins obtained from a separately reviewed build/run
+// distinct from current full IDs returned by the launch of owned containers.
+// Neither input may come from the observation being compared. This function
+// checks equality, not provenance, custody, deployed behavior or authority.
+type stockPilotJoinedAssetPin struct{ Role, Image, ExecutableSHA256 string }
+type stockPilotJoinedLaunchID struct{ Role, ContainerID string }
 type stockPilotFixtureIdentity struct{ Role, ContainerID, Image, ExecutableSHA256 string }
 
-func stockPilotFixtureProfileFromJoined(joined [3]stockPilotFixtureIdentity) (stockReadProfile, error) {
+// Launch/evidence/inspect order is stock/ingress/gateway. Never copy it
+// positionally into the observer's stock/gateway/ingress arrays.
+func stockPilotFixtureProfileFromJoined(
+	pins [3]stockPilotJoinedAssetPin,
+	launched [3]stockPilotJoinedLaunchID,
+	observed [3]stockPilotFixtureIdentity,
+) (stockReadProfile, error) {
 	p := stockReadProfile{Version: "stock-readonly-profile/v1", Reference: stockReadReference, Platform: "linux/amd64", Directory: stockPilotHarnessDirectory}
 	for i, role := range []string{"stock", "ingress", "gateway"} {
-		if joined[i].Role != role {
+		pin, launch, actual := pins[i], launched[i], observed[i]
+		if pin.Role != role || launch.Role != role || actual.Role != role ||
+			actual.ContainerID != launch.ContainerID || actual.Image != pin.Image ||
+			actual.ExecutableSHA256 != pin.ExecutableSHA256 {
 			return stockReadProfile{}, ErrBoundary
 		}
-		destination := []int{0, 2, 1}[i]
-		p.IDs[destination] = joined[i].ContainerID
-		p.Images[destination] = joined[i].Image
-		p.ExecutableSHA256[destination] = joined[i].ExecutableSHA256
+		destination := [...]int{0, 2, 1}[i]
+		// Populate only from the two independently supplied expected sources.
+		p.IDs[destination] = launch.ContainerID
+		p.Images[destination] = pin.Image
+		p.ExecutableSHA256[destination] = pin.ExecutableSHA256
 	}
 	if !validStockReadProfile(p) {
 		return stockReadProfile{}, ErrBoundary
@@ -160,26 +174,68 @@ func TestStockPilotLaunchDescriptionsRefuseUnpinnedJoins(t *testing.T) {
 	}
 }
 
-func TestStockPilotJoinedRoleOrderIsMappedExplicitly(t *testing.T) {
+func TestStockPilotJoinedIdentityRequiresIndependentInputs(t *testing.T) {
 	p, _ := stockReadFixture()
 	p.Directory = stockPilotHarnessDirectory
-	joined := [3]stockPilotFixtureIdentity{
+	pins := [3]stockPilotJoinedAssetPin{
+		{"stock", p.Images[0], p.ExecutableSHA256[0]},
+		{"ingress", p.Images[2], p.ExecutableSHA256[2]},
+		{"gateway", p.Images[1], p.ExecutableSHA256[1]},
+	}
+	launched := [3]stockPilotJoinedLaunchID{
+		{"stock", p.IDs[0]},
+		{"ingress", p.IDs[2]},
+		{"gateway", p.IDs[1]},
+	}
+	observed := [3]stockPilotFixtureIdentity{
 		{"stock", p.IDs[0], p.Images[0], p.ExecutableSHA256[0]},
 		{"ingress", p.IDs[2], p.Images[2], p.ExecutableSHA256[2]},
 		{"gateway", p.IDs[1], p.Images[1], p.ExecutableSHA256[1]},
 	}
-	got, err := stockPilotFixtureProfileFromJoined(joined)
+	got, err := stockPilotFixtureProfileFromJoined(pins, launched, observed)
 	if err != nil || got != p {
 		t.Fatal("joined role mapping changed identity")
 	}
-	swapped := joined
-	swapped[1], swapped[2] = swapped[2], swapped[1]
-	if _, err := stockPilotFixtureProfileFromJoined(swapped); err == nil {
-		t.Fatal("unlabelled positional role swap accepted")
+	type testInput struct {
+		pins     [3]stockPilotJoinedAssetPin
+		launched [3]stockPilotJoinedLaunchID
+		observed [3]stockPilotFixtureIdentity
 	}
-	duplicate := joined
-	duplicate[1].ContainerID = duplicate[0].ContainerID
-	if _, err := stockPilotFixtureProfileFromJoined(duplicate); err == nil {
-		t.Fatal("duplicate container accepted")
+	for _, tt := range []struct {
+		name  string
+		alter func(*testInput)
+	}{
+		{"observed role order", func(in *testInput) { in.observed[1], in.observed[2] = in.observed[2], in.observed[1] }},
+		{"reviewed role order", func(in *testInput) { in.pins[1], in.pins[2] = in.pins[2], in.pins[1] }},
+		{"launch role order", func(in *testInput) { in.launched[1], in.launched[2] = in.launched[2], in.launched[1] }},
+		{"missing role", func(in *testInput) { in.observed[1] = stockPilotFixtureIdentity{} }},
+		{"prior run container", func(in *testInput) { in.observed[1].ContainerID = strings.Repeat("2", 64) }},
+		{"different image", func(in *testInput) { in.observed[1].Image = "sha256:" + strings.Repeat("2", 64) }},
+		{"different executable", func(in *testInput) { in.observed[2].ExecutableSHA256 = strings.Repeat("2", 64) }},
+		{"matching but short ID", func(in *testInput) {
+			in.launched[1].ContainerID = in.launched[1].ContainerID[:12]
+			in.observed[1].ContainerID = in.launched[1].ContainerID
+		}},
+		{"matching but duplicate ID", func(in *testInput) {
+			in.launched[1].ContainerID = in.launched[0].ContainerID
+			in.observed[1].ContainerID = in.launched[0].ContainerID
+		}},
+		{"matching but wrong stock image", func(in *testInput) {
+			in.pins[0].Image = "sha256:" + strings.Repeat("2", 64)
+			in.observed[0].Image = in.pins[0].Image
+		}},
+		{"matching but wrong stock executable", func(in *testInput) {
+			in.pins[0].ExecutableSHA256 = strings.Repeat("2", 64)
+			in.observed[0].ExecutableSHA256 = in.pins[0].ExecutableSHA256
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			in := testInput{pins, launched, observed}
+			tt.alter(&in)
+			got, err := stockPilotFixtureProfileFromJoined(in.pins, in.launched, in.observed)
+			if err != ErrBoundary || got != (stockReadProfile{}) {
+				t.Fatal("unsafe or incomplete joined evidence produced a profile")
+			}
+		})
 	}
 }
