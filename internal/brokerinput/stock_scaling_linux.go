@@ -21,6 +21,7 @@ type StockScalingSample struct {
 	order                      []string
 	outside                    int64
 	incomplete                 bool
+	configuredMaximumFit       *stockConfiguredMaximumFit
 }
 
 type scalingPool struct {
@@ -147,6 +148,7 @@ func stockScalingSample(state admission.BrokerGrantState, snapshot capacitybroke
 			seen[a.Pool] = true
 		}
 	}
+	out.configuredMaximumFit = captureStockConfiguredMaximumFit(snapshot, out.pools)
 	return out, nil
 }
 
@@ -166,15 +168,14 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 		return nil
 	}
 	var out []StockMaximumProposal
-	global := current.outside
-	repo := map[string]int64{}
-	for _, p := range current.pools {
-		baseline := p.used
-		if p.enabled {
-			baseline = max(baseline, p.current)
-		}
-		global += min(baseline, max(0, current.budget-global))
-		repo[p.repo] += baseline
+	// A recommendation must fit both captures, not only their matching demand
+	// directions. Do not widen advice when charged occupancy dipped in just
+	// the latest capture; neither snapshot proves physical capacity release.
+	priorGlobal, priorRepo := stockMaximumBaseline(previous)
+	global, repo := stockMaximumBaseline(current)
+	global = max(priorGlobal, global)
+	for id, used := range priorRepo {
+		repo[id] = max(repo[id], used)
 	}
 	appendProposal := func(id string, p scalingPool, target int64) {
 		idle := p.idle
@@ -193,6 +194,7 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 	}
 	// Reuse the weighted broker's deterministic allocation order for scarce
 	// scoped cap headroom rather than prefer lexicographic repositories.
+	fit := compareStockMaximumFit(previous.configuredMaximumFit, current.configuredMaximumFit)
 	considered := map[string]bool{}
 	for _, id := range current.order {
 		if considered[id] {
@@ -203,11 +205,30 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 		if p.target <= p.current || previous.pools[id].target <= p.current || global >= current.budget || repo[p.repo] >= current.repoCaps[p.repo] {
 			continue
 		}
+		if !fit.tryGrowth(id) {
+			continue
+		}
 		appendProposal(id, p, p.current+1)
 		global++
 		repo[p.repo]++
 	}
 	return out
+}
+
+// A configured enabled maximum can still be consumed by stock, and charges
+// above that maximum (or on disabled pools) continue counting.
+func stockMaximumBaseline(sample StockScalingSample) (int64, map[string]int64) {
+	global := sample.outside
+	repo := make(map[string]int64, len(sample.repoCaps))
+	for _, p := range sample.pools {
+		baseline := p.used
+		if p.enabled {
+			baseline = max(baseline, p.current)
+		}
+		global += min(baseline, max(0, sample.budget-global))
+		repo[p.repo] += baseline
+	}
+	return global, repo
 }
 
 // sameStockMaximumSettings compares only settings and caps, not demand or

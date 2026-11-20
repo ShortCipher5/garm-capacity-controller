@@ -53,8 +53,9 @@ func TestStockScalingWeightedOrderAndNoBorrowingProposedSavings(t *testing.T) {
 				"z":     {repo: "repo-z", enabled: true, current: 1, target: 2},
 				"empty": {repo: "repo-a", enabled: true, current: 3, target: 1},
 			},
-			repoCaps: map[string]int64{"repo-a": 5, "repo-z": 4},
-			order:    []string{"z", "a", "z"},
+			repoCaps:             map[string]int64{"repo-a": 5, "repo-z": 4},
+			order:                []string{"z", "a", "z"},
+			configuredMaximumFit: roomyMaximumFit("empty", "a", "z"),
 		}
 	}
 	for _, tc := range []struct {
@@ -80,6 +81,7 @@ func TestStockScalingBlocksStaleDriftAndOscillation(t *testing.T) {
 			start: start, finish: start.Add(time.Second), expires: start.Add(time.Minute),
 			pools:    map[string]scalingPool{"p": {repo: "r", enabled: true, current: 2, target: 3}},
 			repoCaps: map[string]int64{"r": 4}, order: []string{"p"},
+			configuredMaximumFit: roomyMaximumFit("p"),
 		}
 	}
 	for name, change := range map[string]func(*StockScalingSample, *StockScalingSample){
@@ -160,5 +162,44 @@ func TestStockScalingRejectsDetachedAccountingAndUnverifiedSource(t *testing.T) 
 	state.Allocated.Global.Runners = 1
 	if _, err := stockScalingSample(state, snapshot, observed, capacitybroker.JobPlan{}, "checked-source", opt); err == nil {
 		t.Fatal("accepted detached charge list inconsistent with ledger")
+	}
+}
+
+func TestStockMaximumGrowthNeedsHeadroomInBothSamples(t *testing.T) {
+	start := time.Unix(1700000000, 0)
+	sample := func(at time.Time) StockScalingSample {
+		return StockScalingSample{
+			source: "pinned", revision: 2, sequence: 3, budget: 6,
+			start: at, finish: at.Add(time.Second), expires: at.Add(time.Minute),
+			pools: map[string]scalingPool{
+				"growing":  {repo: "repo", enabled: true, current: 1, target: 2},
+				"disabled": {repo: "repo", current: 3, target: 3},
+			},
+			repoCaps:             map[string]int64{"repo": 4},
+			order:                []string{"growing"},
+			configuredMaximumFit: roomyMaximumFit("growing"),
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		edit       func(*StockScalingSample)
+		wantGrowth bool
+	}{
+		{"stable room", func(s *StockScalingSample) { s.outside = 4 }, true},
+		{"prior global occupied", func(s *StockScalingSample) { s.outside = 5 }, false},
+		{"prior repository occupied", func(s *StockScalingSample) { p := s.pools["disabled"]; p.used = 3; s.pools["disabled"] = p }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prior, current := sample(start), sample(start.Add(20*time.Second))
+			current.outside = 4
+			tc.edit(&prior)
+			wantCount := 0
+			if tc.wantGrowth {
+				wantCount = 1
+			}
+			if got := ProposeStockMaximums(prior, current, current.finish); len(got) != wantCount || (len(got) > 0 && (got[0].PoolID != "growing" || got[0].Suggested != 2)) {
+				t.Fatalf("matching growth direction is insufficient without headroom in both captures: %+v", got)
+			}
+		})
 	}
 }
