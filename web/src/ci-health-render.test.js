@@ -58,6 +58,13 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(html, /Not applicable \(skipped\)/);
     assert.match(html, /not the full GitHub queue or history/);
     assert.match(html, /Coverage is unknown/);
+    assert.match(html, /Observed attempt results by workflow/);
+    assert.match(html, /Observed subset only:.*not workflow totals or outcome rates/);
+    assert.match(html, /Workflow <code>17<\/code>/);
+    assert.match(html, /Repository <code>9007199254740993<\/code>/);
+    assert.match(html, /Source <code>fixture_source<\/code>/);
+    assert.match(html, /<th scope="row">Initial<\/th><td>1<\/td><td>0<\/td><td>0<\/td><td>0<\/td><td>0<\/td><td>1<\/td>/);
+    assert.match(html, /<th scope="row">Retries<\/th><td>1<\/td><td>1<\/td><td>0<\/td><td>0<\/td><td>0<\/td><td>0<\/td>/);
     assert.match(render({...snapshot, coverage: "observed_subset"}), /Only selected observations/);
     assert.match(render({...snapshot, coverage: "bounded_partial"}), /Partial coverage/);
     assert.equal(render({...snapshot, coverage: "complete"}), "");
@@ -66,6 +73,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(render(snapshot, Date.parse(observed) - 1), "");
     assert.equal(render({state: "unavailable", timing: {attempts: []}}), "");
     assert.match(render({...snapshot, timing: {attempts: []}}), /No attempts were included/);
+    assert.doesNotMatch(render({...snapshot, timing: {attempts: []}}), /Observed attempt results by workflow/);
     assert.equal(render({...snapshot, timing: {attempts: [{...first, run_id: 123}]}}), "");
     const conclusions = structuredClone(snapshot);
     conclusions.timing.attempts[0].jobs[1].conclusion = "success";

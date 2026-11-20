@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -100,9 +101,45 @@ function AttemptRow({attempt: a}) {
   );
 }
 
+function WorkflowCountCells({counts}) {
+  return <>
+    <td>{counts.shown}</td><td>{counts.active}</td><td>{counts.success}</td>
+    <td>{counts.failure}</td><td>{counts.other}</td><td>{counts.unknown}</td>
+  </>;
+}
+
+function WorkflowCounts({groups}) {
+  return <section aria-labelledby="ci-workflow-counts">
+    <h3 id="ci-workflow-counts">Observed attempt results by workflow</h3>
+    <p><strong>Observed subset only:</strong> these counts cover the attempts shown below, not workflow totals or outcome rates.</p>
+    <p className="muted" id="ci-workflow-counts-key">Active includes queued or running attempts. Other covers cancelled, timed out or another recorded terminal result. Unknown covers non-active attempts without a recorded result.</p>
+    <div className="table-wrap">
+      <table aria-labelledby="ci-workflow-counts" aria-describedby="ci-workflow-counts-key">
+        <thead><tr>
+          <th scope="col">Workflow identity</th><th scope="col">Attempt type</th><th scope="col">Shown</th>
+          <th scope="col">Active</th><th scope="col">Success</th><th scope="col">Failure</th>
+          <th scope="col">Other result</th><th scope="col">Unknown result</th>
+        </tr></thead>
+        {groups.map((row) => <tbody key={ciWorkflowKey(row)}>
+          <tr>
+            <th scope="rowgroup" rowSpan={2} className="ci-health-workflow-key">
+              <span>Workflow <code>{row.workflow_id}</code></span>
+              <span>Repository <code>{row.repository_id}</code></span>
+              <span>Source <code>{row.source}</code></span>
+            </th>
+            <th scope="row">Initial</th>
+            <WorkflowCountCells counts={row.initial} />
+          </tr>
+          <tr><th scope="row">Retries</th><WorkflowCountCells counts={row.retries} /></tr>
+        </tbody>)}
+      </table>
+    </div>
+  </section>;
+}
+
 export function CIHealthTiming({snapshot, now = Date.now()}) {
-  try { validateCIHealthSnapshot(snapshot); } catch { return null; }
-  if (!ciHealthFresh(snapshot, now)) return null;
+  const groups = ciHealthWorkflowCounts(snapshot, now);
+  if (groups === null) return null;
   const attempts = snapshot.timing.attempts;
   const active = attempts.filter(activeAttempt);
   const other = attempts.filter((a) => !activeAttempt(a));
@@ -117,6 +154,7 @@ export function CIHealthTiming({snapshot, now = Date.now()}) {
       </p>
       {attempts.length === 0 && <p>No attempts were included in this snapshot.</p>}
       {attempts.length > 0 && <>
+        <WorkflowCounts groups={groups} />
         <h3>Active at observation</h3>
         {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
