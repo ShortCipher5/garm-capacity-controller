@@ -45,6 +45,7 @@ type GarmOverview struct {
 	Settings                garmapi.ManagementSnapshot `json:"settings"`
 	WritesEnabled           bool                       `json:"writes_enabled"`
 	WriteBlocked            bool                       `json:"write_blocked"`
+	ManagedClientWriteHold  bool                       `json:"managed_client_write_hold,omitempty"`
 	Pending                 *GarmPending               `json:"pending,omitempty"`
 }
 type GarmPending struct {

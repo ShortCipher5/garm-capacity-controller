@@ -64,11 +64,14 @@ func (m *Manager) enter(ctx context.Context) error {
 }
 func (m *Manager) leave() { <-m.gate }
 
-// Status persists across process restarts. Pending includes a possibly live,
-// crashed-before-PUT or crashed-after-PUT writer; no automatic replay is allowed.
+// Status includes durable supervisor journal state. Pending includes a possibly
+// live, crashed-before-PUT or crashed-after-PUT writer; no automatic replay is
+// allowed.
 type Status struct {
 	WriteBlocked bool     `json:"write_blocked"`
 	Pending      []Intent `json:"pending"`
+	// ManagedClientWriteHold marks a process-local overlay, not supervisor wire state.
+	ManagedClientWriteHold bool `json:"-"`
 }
 type Snapshot struct {
 	garmapi.ManagementSnapshot

@@ -9,15 +9,19 @@ export function writerRecoveryState({ conflict = false, unavailable = false, unc
 
 const pendingState = value => value === "pending" || value === "unknown" ? value : "";
 
+const managedClientWriteHold = snapshot => snapshot?.managed_client_write_hold === true && snapshot.pending === undefined;
+
 // Report the evidence basis separately from the existing write-block state.
 // Local uncertainty can describe a different operation than the recorded row.
 export function writerRecoveryEvidence({ unavailable = false, uncertain = false, snapshot = null } = {}) {
   if (snapshot?.write_blocked === true && !unavailable) {
+    if (managedClientWriteHold(snapshot)) return "managed-client-hold";
     const state = pendingState(snapshot.pending?.state);
     return state ? `durable-${state}` : "durable-unclassified";
   }
   if (uncertain) return "browser-uncertain";
   if (snapshot?.write_blocked === true) {
+    if (managedClientWriteHold(snapshot)) return "historical-managed-client-hold";
     const state = pendingState(snapshot.pending?.state);
     return state ? `historical-${state}` : "historical-unclassified";
   }
@@ -28,11 +32,13 @@ export function writerRecoveryEvidenceGuidance(evidence) {
   switch (evidence) {
   case "durable-pending": return "The latest journal read recorded a pending intent. This does not prove a request was sent or a worker is still active.";
   case "durable-unknown": return "The latest journal read explicitly recorded an unknown outcome. The external effect remains unresolved.";
-  case "durable-unclassified": return "The latest journal read recorded a write block but did not classify the intent.";
+  case "durable-unclassified": return "The latest status showed writes blocked but did not identify the source of the hold.";
+  case "managed-client-hold": return "The gateway process blocked writes after an uncertain outcome. The latest supervisor status did not report a pending intent. Neither that read nor a restart proves the original outcome.";
+  case "historical-managed-client-hold": return "An earlier status showed a gateway-process write hold. The latest check failed; this is historical evidence and does not settle the original outcome.";
   case "browser-uncertain": return "This browser session has an uncertain outcome without a current durable classification. An earlier read cannot settle it.";
   case "historical-pending": return "An earlier journal read recorded a pending intent. The latest check failed; this is historical, not current evidence.";
   case "historical-unknown": return "An earlier journal read recorded an unknown outcome. The latest check failed; do not infer any change.";
-  case "historical-unclassified": return "An earlier journal read recorded a write block. The latest check failed, so its current classification is unavailable.";
+  case "historical-unclassified": return "An earlier status showed writes blocked. The latest check failed, so the current status is unavailable.";
   default: return "";
   }
 }

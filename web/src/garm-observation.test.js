@@ -63,3 +63,15 @@ test('failed refresh withdraws inventories without mutating draft or last journa
  assert.equal(recovered.settings,previous.settings);assert.equal(recovered.pool_inventory,fresh.pool_inventory);assert.equal(recovered.scaleset_inventory,fresh.scaleset_inventory);
  assert.equal(invalidateGarmInventories(null),null);
 });
+
+test('keep-draft refresh takes the write-hold source from the matching status observation',()=>{
+ const previous=snapshot(), latest=snapshot();
+ latest.write_blocked=true;latest.managed_client_write_hold=true;
+ const localHold=preserveDraftWithLatestInventory(previous,latest);
+ assert.equal(localHold.write_blocked,true);assert.equal(localHold.managed_client_write_hold,true);
+ assert.equal(invalidateGarmInventories(localHold).managed_client_write_hold,true);
+ const journal=snapshot();journal.write_blocked=true;journal.pending={request_id:'new',state:'unknown'};
+ const durable=preserveDraftWithLatestInventory(localHold,journal);
+ assert.equal(durable.managed_client_write_hold,undefined);assert.equal(durable.pending,journal.pending);
+ assert.equal(durable.settings,previous.settings);assert.equal(localHold.managed_client_write_hold,true);
+});

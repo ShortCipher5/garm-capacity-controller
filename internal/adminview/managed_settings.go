@@ -41,6 +41,7 @@ func (v *managedSettingsView) Snapshot(ctx context.Context) (GarmOverview, error
 	apply := func(s garmmanagement.Status) error {
 		out.Pending = nil
 		out.WriteBlocked = s.WriteBlocked
+		out.ManagedClientWriteHold = s.ManagedClientWriteHold
 		if len(s.Pending) > 0 {
 			p := s.Pending[0]
 			at, e := time.Parse(time.RFC3339Nano, p.CreatedAt)
