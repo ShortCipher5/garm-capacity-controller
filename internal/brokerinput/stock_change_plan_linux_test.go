@@ -143,3 +143,59 @@ func TestStockChangePlanMinimumIdleBusyAndNoBorrowedReductionHeadroom(t *testing
 		t.Fatal("global maximum headroom invented")
 	}
 }
+
+func TestStockChangePlanUsesFullOrderedDiskVetoAndEarliestExpiry(t *testing.T) {
+	h := diskPreviewFixture(t)
+	prior, current := h[2], h[3]
+	now := current.finish
+	opt := stockChangePlanOptions{EnableValidation: true, MaxStep: 1, Minimum: 1, Maximum: 4}
+	request := func(id string, delta int64) stockChangePlanRequest {
+		p := current.pools[id]
+		return stockChangePlanRequest{PoolID: id, RepositoryID: p.repo, Source: current.source, Fingerprint: p.fingerprint,
+			Sequence: current.sequence, Revision: current.revision, Observed: p.current, Delta: delta, Scope: current.scope}
+	}
+	assertPlan := func(id string, delta int64, want time.Time) {
+		t.Helper()
+		plan, err := validateStockChangePlan(prior, current, request(id, delta), opt, now)
+		if err != nil || plan.Actionable || !plan.ExpiresAt.Equal(want) || plan.Delta != delta {
+			t.Fatalf("%q diagnostic = %+v, %v; want non-actionable and expiry %s", id, plan, err, want)
+		}
+	}
+	assertRefused := func(id string) {
+		t.Helper()
+		if plan, err := validateStockChangePlan(prior, current, request(id, 1), opt, now); err != errStockChangePlan || plan != (StockChangePlan{}) {
+			t.Fatalf("%q diagnostic survived a disk veto: %+v, %v", id, plan, err)
+		}
+	}
+
+	diskExpiry := prior.disk.pending.expiresAt
+	assertPlan("z", 1, diskExpiry)
+	assertPlan("a", 1, diskExpiry)
+	assertPlan("empty", -1, prior.expires)
+
+	// A alone could fit. Z is first in weighted order and consumes the only
+	// usable growth slot. Neither choosing A directly nor the pending cut can
+	// supply more headroom.
+	prior.disk.filesystem.AvailableInodes = 6
+	bindEmptyDiskPreviewPending(t, prior.disk, diskExpiry)
+	assertPlan("z", 1, diskExpiry)
+	assertRefused("a")
+
+	prior.disk.filesystem.AvailableInodes = 1
+	bindEmptyDiskPreviewPending(t, prior.disk, diskExpiry)
+	assertRefused("z")
+	assertRefused("a")
+	assertPlan("empty", -1, prior.expires)
+
+	prior.disk.filesystem.AvailableInodes = 12
+	bindEmptyDiskPreviewPending(t, prior.disk, diskExpiry)
+	now = diskExpiry
+	assertRefused("z") // Strict evidence expiry, not the later stock expiry.
+	assertPlan("empty", -1, prior.expires)
+
+	now = current.finish
+	prior.diskRequired = false
+	assertRefused("z") // Requiring the brake in only one capture fails closed.
+	current.diskRequired = false
+	assertPlan("z", 1, prior.expires) // Base diagnostic remains unchanged.
+}

@@ -43,6 +43,7 @@ type dirFilesystemCollectorCell struct {
 	cancel       context.CancelFunc
 	stopLifetime func() bool
 	inFlight     bool
+	claimed      bool
 	closed       bool
 	closeDone    chan struct{}
 	closeErr     error
@@ -69,6 +70,26 @@ func NewDirFilesystemCollector(startup context.Context, in DirFilesystemCollecto
 	cell.stopLifetime = context.AfterFunc(lifetime, func() { _ = c.Close() })
 	cell.mu.Unlock()
 	return c, nil
+}
+
+// ClaimReviewedLifetime matches the immutable startup scope, inode and review
+// cutoff against an independent consumer review, transferring ownership once. The returned read-only
+// lifetime closes on owner cancellation, expiry or Close. This does not
+// establish the external route or expose a descriptor.
+func (c *DirFilesystemCollector) ClaimReviewedLifetime(scope DirFilesystemScope, inode uint64, expiry time.Time) (context.Context, bool) {
+	if c == nil || c.cell == nil {
+		return nil, false
+	}
+	cell := c.cell
+	cell.mu.Lock()
+	defer cell.mu.Unlock()
+	if cell.closed || cell.claimed || cell.inFlight || cell.scope != scope || cell.binding.DirectoryInode != inode ||
+		!cell.binding.ReviewExpiresAt.UTC().Equal(expiry.UTC()) ||
+		!dirFilesystemReadCurrent(cell.lifetime, cell.binding, time.Now()) {
+		return nil, false
+	}
+	cell.claimed = true
+	return cell.lifetime, true
 }
 
 // Collect performs one read without opening anything. A concurrent cycle,

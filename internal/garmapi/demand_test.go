@@ -297,3 +297,60 @@ func TestDemandPreservesScopedRunnerIdentityAndDigest(t *testing.T) {
 		t.Fatal("stock row identity not bound to digest")
 	}
 }
+
+func TestDemandMinimumIdleEvidenceRequiresBothCanonicalReads(t *testing.T) {
+	type idleField struct {
+		key   string
+		value any
+	}
+	explicit := idleField{"min_idle_runners", 0}
+	omitted := idleField{}
+	for _, tt := range []struct {
+		name           string
+		first, second  idleField
+		explicit, fail bool
+	}{
+		{"explicit zero", explicit, explicit, true, false},
+		{"omitted zero", omitted, omitted, false, false},
+		{"first omitted", omitted, explicit, false, false},
+		{"second omitted", explicit, omitted, false, false},
+		{"null", explicit, idleField{"min_idle_runners", nil}, false, true},
+		{"alias", explicit, idleField{"MIN_IDLE_RUNNERS", 0}, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := demandFixture(t, "[]", func(path string, n int) any {
+				if path != "/api/v1/pools" {
+					return nil
+				}
+				p := demandPool(managedPoolID)
+				field := tt.first
+				if n == 2 {
+					field = tt.second
+				}
+				if field.key != "" {
+					p[field.key] = field.value
+				}
+				return []any{p}
+			})
+			got, err := c.Observe(t.Context())
+			if tt.fail {
+				if err == nil || got.Pools != nil {
+					t.Fatal("malformed wire evidence was accepted")
+				}
+				return
+			}
+			if err != nil || len(got.Pools) != 1 || got.Pools[0].MinIdleRunners != 0 || got.Pools[0].HasExplicitMinimumIdle() != tt.explicit {
+				t.Fatalf("unexpected evidence: %+v %v", got.Pools, err)
+			}
+			modified := got.Pools[0]
+			modified.MinIdleRunners++
+			if modified.HasExplicitMinimumIdle() {
+				t.Fatal("received wire value was rebound to edited value")
+			}
+			raw, err := json.Marshal(got.Pools[0])
+			if err != nil || strings.Contains(string(raw), "explicit") || !strings.Contains(string(raw), `"min_idle_runners":0`) {
+				t.Fatalf("pool discovery wire changed: %s %v", raw, err)
+			}
+		})
+	}
+}

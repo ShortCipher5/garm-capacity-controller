@@ -78,3 +78,51 @@ func TestStockMaximumBatchHistoryAndCacheAreBounded(t *testing.T) {
 		t.Fatal("mutated batch cache evidence")
 	}
 }
+
+func TestStockMaximumPreviewsDoNotPresentOmittedMinimumAsObservedZero(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		omit int
+	}{
+		{"explicit in both", -1},
+		{"omitted in previous", 2},
+		{"omitted in current", 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			samples := maximumCycleHistory(4, 7)
+			if tt.omit >= 0 {
+				p := samples[tt.omit].pools["z"]
+				p.idleExplicit = false
+				samples[tt.omit].pools["z"] = p
+			}
+			var ordinary scalingPreviewHistory
+			var batch stockMaximumBatchHistory
+			for i, s := range samples {
+				one := ordinary.accept(s, nil, s.finish, s.expires)
+				many := batch.accept(s, nil, s.finish, s.expires)
+				if i != 3 {
+					continue
+				}
+				for _, preview := range []*StockMaximumPreview{one, many} {
+					if preview.State != "proposed" {
+						t.Fatalf("minimum metadata changed recommendation eligibility: %+v", preview)
+					}
+					found := false
+					for _, row := range preview.Proposals {
+						if row.PoolID == "z" {
+							found = true
+							if row.Observed != 1 || row.Suggested != 2 ||
+								(row.ObservedMinIdle != nil) != (tt.omit < 0) ||
+								(row.ObservedMinIdle != nil && *row.ObservedMinIdle != 0) {
+								t.Fatalf("unexpected preview row: %+v", row)
+							}
+						}
+					}
+					if !found {
+						t.Fatal("explicit presence changed proposal selection")
+					}
+				}
+			}
+		})
+	}
+}

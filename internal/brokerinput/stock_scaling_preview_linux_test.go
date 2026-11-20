@@ -37,7 +37,7 @@ func TestStockMaximumPreviewHistoryFailsClosed(t *testing.T) {
 			StockScalingSample: StockScalingSample{
 				source: "scoped", revision: 1, sequence: 4, budget: 2,
 				start: start, finish: start, expires: start.Add(45 * time.Second),
-				pools:    map[string]scalingPool{"p": {repo: "r", enabled: true, current: 1, target: 2}},
+				pools:    map[string]scalingPool{"p": {repo: "r", enabled: true, idleExplicit: true, current: 1, target: 2}},
 				repoCaps: map[string]int64{"r": 2}, order: []string{"p"},
 				configuredMaximumFit: roomyMaximumFit("p"),
 			},

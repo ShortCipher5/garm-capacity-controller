@@ -268,7 +268,13 @@ func (c *DemandClient) observe(ctx context.Context, assessIdle bool) (DemandObse
 	}
 	supplies := map[string]*RunnerSupply{}
 	poolTags := map[string]map[string]bool{}
-	for _, p := range after {
+	for i, p := range after {
+		// The normalized settings above can match when one stock read omitted
+		// zero and the other explicitly returned it. Preserve eligibility,
+		// but only report explicit evidence when both reads supplied it.
+		if !before[i].HasExplicitMinimumIdle() {
+			after[i].explicitMinIdle = nil
+		}
 		supplies[p.ID] = &RunnerSupply{PoolID: p.ID}
 		poolTags[p.ID] = map[string]bool{}
 		for _, tag := range p.Tags {
