@@ -19,8 +19,9 @@ import (
 // DemandClient is a read-only, repository-scoped stock-GARM observation adapter.
 // It has no settings writer, grant API or provider admission capability.
 type DemandClient struct {
-	discovery    *PoolDiscoveryClient
-	repositories map[string]bool
+	discovery         *PoolDiscoveryClient
+	repositories      map[string]bool
+	registrationOwner *runningRegistrationOwner // managed-report lifetime only
 }
 type QueuedJob struct {
 	WorkflowJobID int64     `json:"workflow_job_id"`
@@ -84,7 +85,13 @@ func NewDemand(endpoint, token string, trust *tls.Config, providers, repositoryI
 	return &DemandClient{discovery: discovery, repositories: repos}, nil
 }
 func (c *DemandClient) Close() {
-	if c != nil && c.discovery != nil {
+	if c == nil {
+		return
+	}
+	if c.registrationOwner != nil {
+		c.registrationOwner.closed.Store(true)
+	}
+	if c.discovery != nil {
 		c.discovery.Close()
 	}
 }
@@ -227,14 +234,19 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 }
 
 func (c *DemandClient) observe(ctx context.Context, assessIdle bool) (DemandObservation, error) {
+	return c.observeScoped(ctx, assessIdle, nil)
+}
+
+func (c *DemandClient) observeScoped(ctx context.Context, assessIdle bool, registration *runningRegistrationCapture) (DemandObservation, error) {
 	if c == nil || c.discovery == nil || ctx == nil || ctx.Err() != nil {
 		return DemandObservation{}, ErrManagement
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	start := time.Now().UTC()
+	started := time.Now()
+	start := started.UTC()
 	first, e := c.discovery.DiscoverPools(ctx)
-	if e != nil {
+	if e != nil || registration != nil && !registration.matches(first) {
 		return DemandObservation{}, ErrManagement
 	}
 	var idleBlocked map[string]bool
@@ -249,6 +261,10 @@ func (c *DemandClient) observe(ctx context.Context, assessIdle bool) (DemandObse
 		return DemandObservation{}, ErrManagement
 	}
 	runners, e := c.discovery.management.client.Instances(ctx)
+	var inventoryAt time.Time
+	if registration != nil {
+		inventoryAt = time.Now()
+	}
 	if e != nil {
 		return DemandObservation{}, ErrManagement
 	}
@@ -356,6 +372,9 @@ func (c *DemandClient) observe(ctx context.Context, assessIdle bool) (DemandObse
 	out.Digest = hex.EncodeToString(digest[:])
 	if assessIdle {
 		out.idleScope = assessRepositoryIdleScope(out, idleBlocked)
+	}
+	if registration != nil && !registration.retain(ctx, first, last, runners, c.repositories, started, inventoryAt) {
+		return DemandObservation{}, ErrManagement
 	}
 	return out, nil
 }
