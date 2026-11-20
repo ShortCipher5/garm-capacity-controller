@@ -37,7 +37,8 @@ func TestStockScalingProposesOnlyCanonicalHeadroom(t *testing.T) {
 	}
 	prior, current := build(0), build(20*time.Second)
 	got := ProposeStockMaximums(prior, current, current.finish)
-	if want := []StockMaximumProposal{{pool, repo, 1, 2, new(int64)}}; !reflect.DeepEqual(got, want) {
+	// This synthetic demand snapshot does not carry wire evidence for idle.
+	if want := []StockMaximumProposal{{pool, repo, 1, 2, nil}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
@@ -58,12 +59,13 @@ func TestStockScalingWeightedOrderAndNoBorrowingProposedSavings(t *testing.T) {
 			configuredMaximumFit: roomyMaximumFit("empty", "a", "z"),
 		}
 	}
+	// These pure accounting samples omit explicit minimum-idle evidence.
 	for _, tc := range []struct {
 		budget int64
 		want   []StockMaximumProposal
 	}{
-		{5, []StockMaximumProposal{{"empty", "repo-a", 3, 2, new(int64)}}},
-		{6, []StockMaximumProposal{{"empty", "repo-a", 3, 2, new(int64)}, {"z", "repo-z", 1, 2, new(int64)}}},
+		{5, []StockMaximumProposal{{"empty", "repo-a", 3, 2, nil}}},
+		{6, []StockMaximumProposal{{"empty", "repo-a", 3, 2, nil}, {"z", "repo-z", 1, 2, nil}}},
 	} {
 		prior, current := sample(now, tc.budget), sample(now.Add(20*time.Second), tc.budget)
 		got := ProposeStockMaximums(prior, current, current.finish)

@@ -26,7 +26,7 @@ type StockScalingSample struct {
 
 type scalingPool struct {
 	repo, fingerprint        string
-	enabled                  bool
+	enabled, idleExplicit    bool
 	current, idle, cap, used int64
 	target                   int64
 }
@@ -39,7 +39,7 @@ type StockMaximumProposal struct {
 	Observed     int64  `json:"observed"`
 	Suggested    int64  `json:"suggested"`
 	// ObservedMinIdle is the unchanged stock setting, not a recommendation to
-	// adjust idle runners. A pointer preserves a verified zero versus absence.
+	// adjust idle runners. Omit when either capture lacked an explicit value.
 	ObservedMinIdle *int64 `json:"observed_min_idle,omitempty"`
 }
 
@@ -103,7 +103,7 @@ func stockScalingSample(state admission.BrokerGrantState, snapshot capacitybroke
 				return fail()
 			}
 			p := scalingPool{
-				repo: repo.ID, fingerprint: remote.DiscoveryFingerprint, enabled: remote.Enabled,
+				repo: repo.ID, fingerprint: remote.DiscoveryFingerprint, enabled: remote.Enabled, idleExplicit: remote.HasExplicitMinimumIdle(),
 				current: int64(remote.MaxRunners), idle: int64(remote.MinIdleRunners),
 				cap: min(desired.MaxRunners, poolBudget[3]), used: row.Charged.Runners,
 			}
@@ -186,8 +186,12 @@ func compareStockMaximums(previous, current StockScalingSample, now time.Time) (
 		repo[id] = max(repo[id], used)
 	}
 	appendProposal := func(id string, p scalingPool, target int64) {
-		idle := p.idle
-		out = append(out, StockMaximumProposal{PoolID: id, RepositoryID: p.repo, Observed: p.current, Suggested: target, ObservedMinIdle: &idle})
+		var idle *int64
+		if p.idleExplicit && previous.pools[id].idleExplicit {
+			value := p.idle
+			idle = &value
+		}
+		out = append(out, StockMaximumProposal{PoolID: id, RepositoryID: p.repo, Observed: p.current, Suggested: target, ObservedMinIdle: idle})
 	}
 	ids := make([]string, 0, len(current.pools))
 	for id := range current.pools {

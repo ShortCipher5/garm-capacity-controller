@@ -67,8 +67,25 @@ func validateStockChangePlan(previous, current scalingPreviewSample, request sto
 	if target < floor || target > min(options.Maximum, p.cap) || target <= 0 {
 		return fail()
 	}
+	expiry := current.expires
+	if previous.expires.Before(expiry) {
+		expiry = previous.expires
+	}
+	proposals := ProposeStockMaximums(previous.StockScalingSample, current.StockScalingSample, now)
+	if request.Delta > 0 && (previous.diskRequired || current.diskRequired) {
+		// Use the whole weighted order: isolating the requested pool could spend
+		// the same filesystem budget already consumed by an earlier proposal.
+		disk := filterStockMaximumPreviewDisk(proposals, previous, current, now)
+		if disk.invalidBatch || !disk.growthExpiry.After(now) {
+			return fail()
+		}
+		proposals = disk.proposals
+		if disk.growthExpiry.Before(expiry) {
+			expiry = disk.growthExpiry
+		}
+	}
 	confirmed := false
-	for _, proposal := range ProposeStockMaximums(previous.StockScalingSample, current.StockScalingSample, now) {
+	for _, proposal := range proposals {
 		if proposal.PoolID == request.PoolID && proposal.RepositoryID == request.RepositoryID && proposal.Observed == request.Observed && proposal.Suggested == target {
 			confirmed = true
 			break
@@ -76,10 +93,6 @@ func validateStockChangePlan(previous, current scalingPreviewSample, request sto
 	}
 	if !confirmed {
 		return fail()
-	}
-	expiry := current.expires
-	if previous.expires.Before(expiry) {
-		expiry = previous.expires
 	}
 	direction := "increase"
 	if request.Delta < 0 {
