@@ -46,6 +46,21 @@ bounds timing traffic even if the data set is busy. Other consumers of the
 same credential must still have enough independent rate budget. Confirm that
 budget before enabling on a shared credential.
 
+The dedicated timing reader also honors GitHub's applicable quota deadlines.
+It does not resolve credentials or send another timing request while its
+local backoff is active. The worker's existing schedule is unchanged: it
+may check whether the local gate has opened, but it does not immediately
+retry a throttled request. The browser never triggers an upstream refresh.
+
+There is no shared or restart-persistent quota coordination. An explicit
+deadline that cannot be interpreted safely closes the affected timing
+reader for its lifetime; do not restart it merely to clear this safeguard.
+The owner view may remain unavailable. Investigate the reader and its
+configured release before re-enabling it. This safeguard does not limit
+other consumers of the same credential and does not guarantee that a
+proposed observation cadence fits their traffic. See
+[GitHub's rate-limit guidance](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit).
+
 A snapshot is only shown while its two-minute display lease is valid. It may
 be unavailable between collections, after withdrawals, or after a read failure.
 A page ending does not prove complete or atomic history. When local bounds are

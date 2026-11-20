@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 )
 
 const (
@@ -99,10 +100,26 @@ type HistoryCycleReceipt struct {
 // There is no transaction across scopes. Empty or absent approved groups
 // leave those cursors untouched; scans do not establish an upstream checkpoint.
 func (h *CycleHistory) Persist(ctx context.Context, cycle Cycle, expected []HistoryExpectation) (HistoryCycleReceipt, error) {
+	return h.persist(ctx, cycle, expected, nil)
+}
+
+// backgroundHistoryCall is a synchronous owner/caller fence in addition to the
+// reader-parented context that reaches the actual store's commit checks.
+type backgroundHistoryCall struct {
+	caller context.Context
+	cell   *ownedCycleHistoryCell
+	source *demandobserver.CIHealthSource
+}
+
+func (g *backgroundHistoryCall) active(ctx context.Context) bool {
+	return (g == nil || (g.caller.Err() == nil && !g.cell.closing.Load() && g.cell.lifetime.Err() == nil && g.source.LifetimeActive())) && ctx.Err() == nil
+}
+
+func (h *CycleHistory) persist(ctx context.Context, cycle Cycle, expected []HistoryExpectation, background *backgroundHistoryCall) (HistoryCycleReceipt, error) {
 	var none HistoryCycleReceipt
 	started := time.Now()
 	now := started.UTC()
-	if h == nil || h.owner == (cycleSourceInstance{}) || cycle.source != h.owner || ctx == nil || ctx.Err() != nil ||
+	if h == nil || h.owner == (cycleSourceInstance{}) || cycle.source != h.owner || ctx == nil || !background.active(ctx) ||
 		(cycle.state != CycleObserved && cycle.state != CyclePartial) ||
 		!freshHistoryCycleFact(cycle.observedAt, now) || len(cycle.facts) > maxCycleAttempts || len(expected) > maxHistoryCycleScopes {
 		return none, ErrCycleHistory
@@ -147,8 +164,11 @@ func (h *CycleHistory) Persist(ctx context.Context, cycle Cycle, expected []Hist
 			cutoff = until
 		}
 	}
+	if !background.active(ctx) {
+		return none, ErrCycleHistory
+	}
 	latest := time.Now()
-	if ctx.Err() != nil || !historyCycleTimeCurrent(started, started, cycle.observedAt, cutoff, latest) {
+	if !historyCycleTimeCurrent(started, started, cycle.observedAt, cutoff, latest) {
 		return none, ErrCycleHistory
 	}
 	out := HistoryCycleReceipt{CycleState: cycle.state}
@@ -160,8 +180,12 @@ func (h *CycleHistory) Persist(ctx context.Context, cycle Cycle, expected []Hist
 	ctx, cancel := context.WithDeadline(ctx, cutoff)
 	defer cancel()
 	for _, s := range order {
+		if !background.active(ctx) {
+			out.Failed = &s
+			return out, ErrCycleHistory
+		}
 		now := time.Now()
-		if ctx.Err() != nil || !historyCycleTimeCurrent(started, latest, cycle.observedAt, cutoff, now) {
+		if !historyCycleTimeCurrent(started, latest, cycle.observedAt, cutoff, now) {
 			out.Failed = &s
 			return out, ErrCycleHistory
 		}
@@ -173,6 +197,11 @@ func (h *CycleHistory) Persist(ctx context.Context, cycle Cycle, expected []Hist
 			return out, err
 		}
 		out.Commits = append(out.Commits, HistoryCycleCommit{Scope: s, Cursor: next})
+	}
+	// A commit which entered the atomic publication region before cancellation
+	// can still finish. Report those proven durable changes, not cycle success.
+	if background != nil && (!background.active(ctx) || !historyCycleTimeCurrent(started, latest, cycle.observedAt, cutoff, time.Now())) {
+		return out, ErrCycleHistory
 	}
 	return out, nil
 }

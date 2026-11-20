@@ -98,6 +98,11 @@ func TestObservedWorkflowHistoryRequiresFreshExactLiveReaderAndRevision(t *testi
 		t.Fatalf("fixture did not write a historical row: %+v, %v", written, err)
 	}
 	current := positive(source)
+	// The real loopback observation proves the attempt, not a supported
+	// GitHub.com browser origin. The optional link must stay absent.
+	if link, ok := current.ObservedWorkflowRunLink(source, key); ok || link != (ObservedWorkflowRunLink{}) {
+		t.Fatal("observed unsupported origin produced a browser address")
+	}
 	proof, ok := current.HistoryProof(key)
 	if !ok {
 		t.Fatal("live exact attempt proof unavailable")

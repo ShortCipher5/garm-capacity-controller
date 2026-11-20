@@ -27,8 +27,9 @@ type AttemptSource interface {
 // attempt. Ending pagination does not prove stable or complete job visibility.
 // No display names, runner identifiers, URLs or arbitrary results are retained.
 type Observation struct {
-	Timing cihealth.Timing
-	facts  cihealth.AttemptFacts
+	Timing  cihealth.Timing
+	facts   cihealth.AttemptFacts
+	runLink demandrepair.WorkflowRunLink
 }
 
 // Facts returns an owned copy of validated model inputs for a separate
@@ -63,14 +64,14 @@ var errReadLimit = errors.New("CI observation reached its local read limit")
 // attempt's consecutive job pages. Locators are checked against the existing
 // source enrollment; nothing here grants visibility or changes that enrollment.
 func ReadAttempt(ctx context.Context, source AttemptSource, garmRepo string, runID, attempt int64) (Observation, error) {
-	out, err := readAttempt(ctx, source, garmRepo, runID, attempt, nil, cihealth.MaxJobs, cihealth.MaxTotalSteps)
+	out, err := readAttempt(ctx, source, cycleSourceInstance{}, garmRepo, runID, attempt, nil, cihealth.MaxJobs, cihealth.MaxTotalSteps)
 	if errors.Is(err, errReadLimit) {
 		return Observation{}, ErrAttemptObservation
 	}
 	return out, err
 }
 
-func readAttempt(ctx context.Context, source AttemptSource, garmRepo string, runID, attempt int64, budget *readBudget, maxJobs, maxSteps int) (Observation, error) {
+func readAttempt(ctx context.Context, source AttemptSource, owner cycleSourceInstance, garmRepo string, runID, attempt int64, budget *readBudget, maxJobs, maxSteps int) (Observation, error) {
 	if ctx == nil || ctx.Err() != nil || source == nil || runID <= 0 || attempt <= 0 {
 		return Observation{}, ErrAttemptObservation
 	}
@@ -146,7 +147,11 @@ func readAttempt(ctx context.Context, source AttemptSource, garmRepo string, run
 			if err != nil || ctx.Err() != nil {
 				return Observation{}, ErrAttemptObservation
 			}
-			return Observation{Timing: out, facts: facts}, nil
+			link := owner.prepareWorkflowRunLink(ctx, proof)
+			if ctx.Err() != nil {
+				return Observation{}, ErrAttemptObservation
+			}
+			return Observation{Timing: out, facts: facts, runLink: link}, nil
 		}
 	}
 	return Observation{}, ErrAttemptObservation

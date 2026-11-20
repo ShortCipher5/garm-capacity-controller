@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
@@ -41,6 +42,10 @@ type ciHealthRuntime struct {
 	source   *demandobserver.CIHealthSource
 	snapshot *adminview.CIHealthSnapshot
 	repos    []string
+	// Optional owner-supplied history; buildCIHealth never opens or attaches it.
+	historyMu       sync.Mutex
+	history         *cihealthsource.BackgroundCycleHistory
+	historyDisabled bool
 }
 
 func buildCIHealth(c configuration, dc *demandobserver.Config) (*ciHealthRuntime, error) {
@@ -74,6 +79,43 @@ func buildCIHealth(c configuration, dc *demandobserver.Config) (*ciHealthRuntime
 func (c *ciHealthRuntime) close() {
 	c.snapshot.Withdraw()
 	c.source.Close()
+	c.disableHistory()
+}
+
+// attachOwnedHistory is a construction-time injection, never a settings or
+// startup action. Storage custody and its exact workflow/revision review are
+// independently provided by the caller, not derived from the GARM scope.
+func (c *ciHealthRuntime) attachOwnedHistory(owned *cihealthsource.OwnedCycleHistory, reviewed []cihealthsource.HistoryExpectation) error {
+	c.historyMu.Lock()
+	defer c.historyMu.Unlock()
+	if c.historyDisabled || c.history != nil {
+		return cihealthsource.ErrCycleHistory
+	}
+	history, err := owned.BindBackground(c.source, reviewed)
+	if err != nil {
+		return err
+	}
+	c.history = history
+	return nil
+}
+
+func (c *ciHealthRuntime) activeHistory() *cihealthsource.BackgroundCycleHistory {
+	c.historyMu.Lock()
+	defer c.historyMu.Unlock()
+	if c.historyDisabled {
+		return nil
+	}
+	return c.history
+}
+
+func (c *ciHealthRuntime) disableHistory() {
+	c.historyMu.Lock()
+	c.historyDisabled = true
+	history := c.history
+	c.historyMu.Unlock()
+	if history != nil {
+		_ = history.Close()
+	}
 }
 
 const (
@@ -83,17 +125,14 @@ const (
 )
 
 func (c *ciHealthRuntime) run(ctx context.Context) {
+	defer c.disableHistory()
 	defer c.snapshot.Withdraw()
 	delay := ciHealthCycleDelay
 	for ctx.Err() == nil {
-		to := time.Now().UTC().Truncate(time.Second)
-		cycle, err := cihealthsource.ReadCycle(ctx, c.source, c.repos, to.Add(-ciHealthRecentWindow), to)
-		if err != nil || ctx.Err() != nil || cycle.State() == cihealthsource.CycleUnavailable ||
-			c.snapshot.PublishTiming(cycle.ObservedAt(), cycle.Facts(), cycle.State() == cihealthsource.CyclePartial) != nil {
-			c.snapshot.Withdraw()
-			delay = ciHealthCycleBackoff
-		} else {
+		if c.runCycle(ctx) {
 			delay = ciHealthCycleDelay
+		} else {
+			delay = ciHealthCycleBackoff
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -103,4 +142,23 @@ func (c *ciHealthRuntime) run(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (c *ciHealthRuntime) runCycle(ctx context.Context) bool {
+	to := time.Now().UTC().Truncate(time.Second)
+	cycle, err := cihealthsource.ReadCycle(ctx, c.source, c.repos, to.Add(-ciHealthRecentWindow), to)
+	if err != nil || ctx.Err() != nil || cycle.State() == cihealthsource.CycleUnavailable ||
+		c.snapshot.PublishTiming(cycle.ObservedAt(), cycle.Facts(), cycle.State() == cihealthsource.CyclePartial) != nil {
+		c.snapshot.Withdraw()
+		c.disableHistory()
+		return false
+	}
+	if history := c.activeHistory(); history != nil && cycle.State() == cihealthsource.CycleObserved {
+		if _, err := history.PersistCycle(ctx, cycle); err != nil {
+			c.disableHistory()
+		}
+	}
+	// Optional storage is not the now-view source. Its failure does not turn
+	// freshly read timing into old disk data or change the read cadence.
+	return true
 }
