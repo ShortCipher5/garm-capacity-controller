@@ -90,6 +90,49 @@ func stockPilotFixtureCompleted(p stockReadProfile, stockDER, userRaw, attemptRa
 	return stockPilotFixtureFileAt("stock-auth-binding.json", reviewed), nil
 }
 
+// Render only the fixed completion files from independently supplied preboot
+// roles and persisted bootstrap lineage. Never install or print these bytes.
+// A future disposable caller must verify the observed topology and capture the
+// real persisted bytes; this helper cannot establish either condition.
+func stockPilotFixturePostBootstrap(p stockReadProfile, roles stockPilotTLSRoles, userRaw, attemptRaw, recordRaw []byte) ([]stockPilotFixtureFile, error) {
+	binding, err := stockPilotFixtureCompleted(p, roles.stockDER, userRaw, attemptRaw, recordRaw)
+	if err != nil {
+		return nil, ErrBoundary
+	}
+	auth, err := validateStockReadAuthBinding(p.IDs[0], [5][]byte{binding.Bytes, roles.stockDER, attemptRaw, recordRaw, userRaw})
+	if err != nil {
+		clear(binding.Bytes)
+		return nil, ErrBoundary
+	}
+	review := stockReadServeReview{
+		Version: "stock-read-serve/v1", GarmID: auth.review.GarmID, ControllerID: auth.record.ControllerID,
+		CASHA256: stockBindingDigest(roles.caDER), ServerSHA256: stockBindingDigest(roles.serverDER), ClientSHA256: stockBindingDigest(roles.clientDER),
+		GatewaySPKI: roles.gatewaySPKI, IngressSPKI: roles.ingressSPKI,
+	}
+	raw, err := json.Marshal(review)
+	if err != nil {
+		clear(binding.Bytes)
+		return nil, ErrBoundary
+	}
+	serve := [5][]byte{raw, roles.caDER, roles.serverPEM, roles.serverKey, roles.clientDER}
+	for _, b := range serve {
+		if len(b) == 0 || len(b) > 16384 {
+			clear(binding.Bytes)
+			return nil, ErrBoundary
+		}
+	}
+	if _, err := validateStockReadServeMaterial(serve, auth, roles.stockDER); err != nil {
+		clear(binding.Bytes)
+		return nil, ErrBoundary
+	}
+	names := [5]string{"read-serve.json", "read-serve-ca.der", "read-serve-server.pem", "read-serve-server.key", "read-serve-client.der"}
+	files := []stockPilotFixtureFile{binding}
+	for i, name := range names {
+		files = append(files, stockPilotFixtureFileAt(name, serve[i]))
+	}
+	return files, nil
+}
+
 func TestStockPilotFixtureDocumentsUseExactExistingContracts(t *testing.T) {
 	p, _ := stockReadFixture()
 	p.Directory = stockPilotHarnessDirectory

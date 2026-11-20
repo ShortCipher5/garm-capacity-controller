@@ -1,6 +1,33 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {validateNativeRetirementStatus,retirementGuidance} from './native-retirement-status.js';import {ReadSession,SessionEnded} from './client.js';
+import test from 'node:test';import assert from 'node:assert/strict';import {validateNativeRetirementStatus,retirementGuidance,retirementFreshnessGuidance,retirementReuseView} from './native-retirement-status.js';import {ReadSession,SessionEnded} from './client.js';
 const report=()=>({scope:'canonical_retirement_operations_only',state:'processing',release_authorized:false,status:{At:'2026-11-18T10:00:00Z',Incomplete:false,Result:{Examined:3,AwaitingEvidence:1,OutsideScope:1,OperationsCompleted:1,Unresolved:0,ReleaseAuthorized:false}}});
 test('retirement status is actual cycle results, never release authority',()=>{const v=report();assert.equal(validateNativeRetirementStatus(v),v);assert.match(retirementGuidance('processing'),/last completed cycle/);for(const change of [v=>v.release_authorized=true,v=>v.status.Result.ReleaseAuthorized=true,v=>v.status.Result.Examined=0,v=>v.status.Result.Unresolved=1,v=>v.status.At='0001-01-01T00:00:00Z']){const invalid=report();change(invalid);assert.throws(()=>validateNativeRetirementStatus(invalid));}});
 test('unconfigured and unresolved states preserve no-evidence semantics',()=>{const v=report();v.state='unconfigured';v.status.At='0001-01-01T00:00:00Z';v.status.Incomplete=true;for(const key of ['Examined','AwaitingEvidence','OutsideScope','OperationsCompleted','Unresolved'])v.status.Result[key]=0;assert.equal(validateNativeRetirementStatus(v),v);v.state='unresolved';v.status.At='2026-11-18T10:00:00Z';assert.equal(validateNativeRetirementStatus(v),v);});
 const resource={cpu_millis:0,ram_mib:0,runners:0};const overview={mode:'experimental-ledger',management_enabled:false,policy_revision:'a'.repeat(64),experimental_provisioning_enabled:false,admission_ready:false,epoch:0,immutable_execution_plans:0,legacy_unplanned_reservations:0,legacy_source_preparations:0,observed_at:'2026-11-18T10:00:00Z',global:{budget:resource,allocated:resource},hosts:[],pools:[],states:{},events:[]};
 test('retirement read is fixed GET and disconnected response cannot restore state',async()=>{let finish;const calls=[];const session=new ReadSession(async(url,options)=>{calls.push([url,options]);if(url.endsWith('/overview'))return{ok:true,json:async()=>overview};return new Promise(r=>finish=r);});await session.connect('a'.repeat(64));const pending=session.nativeRetirementStatusSnapshot();session.disconnect();finish({ok:true,json:async()=>report()});await assert.rejects(pending,SessionEnded);assert.equal(calls[1][0],'/admin/api/v1/native-retirement-status');assert.equal(calls[1][1].method,'GET');assert.equal(calls[1][1].signal.aborted,true);});
+test('freshness is supplementary and never makes unresolved history current',()=>{
+ const v=report();v.state='unresolved';v.status.Incomplete=true;v.freshness='stale';
+ assert.equal(validateNativeRetirementStatus(v),v);
+ assert.match(retirementFreshnessGuidance('stale'),/historical/);
+ assert.match(retirementFreshnessGuidance('clock_invalid'),/historical/);
+ assert.match(retirementFreshnessGuidance(undefined),/historical/);
+ assert.match(retirementFreshnessGuidance('within_cycle_window'),/does not prove/);
+ v.freshness='no_cycle';assert.throws(()=>validateNativeRetirementStatus(v));
+ v.freshness='unrecognized';assert.throws(()=>validateNativeRetirementStatus(v));
+});
+
+test('optional capacity reuse uses only bounded labels and never interprets counts as free',()=>{
+ const base=report();base.freshness='within_cycle_window';
+ assert.equal(retirementReuseView(base),null);
+ const value={availability:'last_cycle_diagnostics',reuse_authorized:false,reasons:['retained_diagnostics_are_not_release_proof','physical_capacity_reuse_not_established']};
+ const view={...base,capacity_reuse:value};
+ assert.match(retirementReuseView(view).labels.join(' '),/do not prove physical release/);
+ for(const patch of [{reuse_authorized:true},{reasons:['PRIVATE']},{reasons:[['physical_capacity_reuse_not_established']]},{reasons:[]},{reasons:['cycle_stale']},{availability:'verified'},{extra:'private'}]){
+  const result=retirementReuseView({...view,capacity_reuse:{...value,...patch}});
+  assert.match(result.labels.join(' '),/unavailable or unsupported/);assert.doesNotMatch(result.labels.join(' '),/PRIVATE|private/);
+ }
+ for(const freshness of ['stale','clock_invalid',undefined]){
+  assert.match(retirementReuseView({...view,freshness}).labels.join(' '),/unavailable or unsupported/);
+ }
+ assert.match(retirementReuseView({...base,freshness:'stale',capacity_reuse:{availability:'historical_only',reuse_authorized:false,reasons:['cycle_stale']}}).labels[0],/overdue/);
+ assert.equal(validateNativeRetirementStatus(view),view);
+});

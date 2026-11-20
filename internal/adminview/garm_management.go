@@ -48,11 +48,21 @@ type GarmOverview struct {
 	Pending                 *GarmPending               `json:"pending,omitempty"`
 }
 type GarmPending struct {
+	State               string    `json:"state,omitempty"`
 	ResolutionAvailable bool      `json:"resolution_available"`
 	RequestID           string    `json:"request_id"`
 	Kind                string    `json:"kind"`
 	Target              string    `json:"target"`
 	StartedAt           time.Time `json:"started_at"`
+}
+
+// pendingDisplayState copies only the two unresolved journal states. It is
+// diagnostic metadata, not a determination of dispatch or resolution authority.
+func pendingDisplayState(state string) string {
+	if state == "pending" || state == "unknown" {
+		return state
+	}
+	return ""
 }
 
 // GarmManager must durably journal intent/audit before a remote mutation and

@@ -97,7 +97,8 @@ func stockPilotProbeClient(t *testing.T, r stockPilotTLSRoles, cert, key []byte,
 	return &http.Client{Transport: tr, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrBoundary }}
 }
 func TestStockPilotDedicatedRolesAndRealLoopbackReadProbe(t *testing.T) {
-	_, auth, stock := serveMaterialFixture(t)
+	_, bootstrap := stockAuthFixture(t)
+	stock := bootstrap[1]
 	_, _, gateway := serveMaterialFixture(t)
 	_, _, ingress := serveMaterialFixture(t)
 	roles, e := prepareStockPilotTLSRoles(time.Now(), stock, gateway, ingress)
@@ -108,7 +109,37 @@ func TestStockPilotDedicatedRolesAndRealLoopbackReadProbe(t *testing.T) {
 	if _, e := prepareStockPilotTLSRoles(time.Now(), stock, stock, ingress); e == nil {
 		t.Fatal("shared source role accepted")
 	}
-	material, e := roles.serveMaterial(auth)
+	p, _ := stockReadFixture()
+	p.Directory = stockPilotHarnessDirectory
+	files, e := stockPilotFixturePostBootstrap(p, roles, bootstrap[4], bootstrap[2], bootstrap[3])
+	if e != nil || len(files) != 6 {
+		t.Fatal("post-bootstrap material unavailable", e)
+	}
+	defer func() {
+		for _, f := range files {
+			clear(f.Bytes)
+		}
+	}()
+	names := []string{"stock-auth-binding.json", "read-serve.json", "read-serve-ca.der", "read-serve-server.pem", "read-serve-server.key", "read-serve-client.der"}
+	for i, name := range names {
+		f := files[i]
+		if f.Path != stockPilotHarnessDirectory+"/supervisor-admin/"+name || f.UID != 0 || f.Mode != 0600 {
+			t.Fatal("unexpected completion layout")
+		}
+	}
+	if bad, e := stockPilotFixturePostBootstrap(p, roles, bootstrap[4], bootstrap[2], append([]byte{'!'}, bootstrap[3]...)); e == nil || len(bad) != 0 {
+		t.Fatal("malformed persisted record produced material")
+	}
+	wrongRoles := roles
+	wrongRoles.serverDER = roles.wrongDER
+	if bad, e := stockPilotFixturePostBootstrap(p, wrongRoles, bootstrap[4], bootstrap[2], bootstrap[3]); e == nil || len(bad) != 0 {
+		t.Fatal("changed preboot leaf produced material")
+	}
+	auth, e := validateStockReadAuthBinding(p.IDs[0], [5][]byte{files[0].Bytes, stock, bootstrap[2], bootstrap[3], bootstrap[4]})
+	if e != nil {
+		t.Fatal("completion lineage refused", e)
+	}
+	material, e := validateStockReadServeMaterial([5][]byte{files[1].Bytes, files[2].Bytes, files[3].Bytes, files[4].Bytes, files[5].Bytes}, auth, stock)
 	if e != nil {
 		t.Fatal(e)
 	}

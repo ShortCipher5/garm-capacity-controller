@@ -15,10 +15,28 @@ import (
 type AdvisoryReader struct{ reader *planReader }
 
 func NewAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClient) (*AdvisoryReader, error) {
+	return newAdvisoryReader(store, source, false)
+}
+
+// NewAdvisoryReaderWithStockMaximumPreview reuses the existing read-only
+// observation and pressure veto. It adds no writer or independent poller.
+func NewAdvisoryReaderWithStockMaximumPreview(store *admission.SQLiteStore, source *garmapi.DemandClient) (*AdvisoryReader, error) {
+	return newAdvisoryReader(store, source, true)
+}
+
+// NewAdvisoryReaderWithStockPreviews explicitly opts into independent read-only comparisons.
+func NewAdvisoryReaderWithStockPreviews(store *admission.SQLiteStore, source *garmapi.DemandClient, maximum, idle bool) (*AdvisoryReader, error) {
+	r, err := newAdvisoryReader(store, source, maximum)
+	if err == nil {
+		r.reader.stockIdlePreview = idle
+	}
+	return r, err
+}
+func newAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClient, preview bool) (*AdvisoryReader, error) {
 	if store == nil || source == nil {
 		return nil, capacitybroker.ErrSnapshot
 	}
-	return &AdvisoryReader{reader: &planReader{store: store, source: source, opt: capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 1000}, pressure: true}}, nil
+	return &AdvisoryReader{reader: &planReader{store: store, source: source, opt: capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 1000}, pressure: true, stockMaximumPreview: preview}}, nil
 }
 func (r *AdvisoryReader) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	if r == nil || r.reader == nil || ctx == nil || ctx.Err() != nil {
@@ -116,9 +134,9 @@ func StartAdvisoryLoop(ctx context.Context, reader *AdvisoryReader, interval tim
 	if ctx == nil || ctx.Err() != nil || reader == nil || interval < 15*time.Second || interval > time.Minute {
 		return nil, capacitybroker.ErrSnapshot
 	}
-	return startAdvisoryLoop(ctx, reader.ReadPlan, interval), nil
+	return startAdvisoryLoop(ctx, reader.ReadPlan, interval, 12*time.Second), nil
 }
-func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan, error), interval time.Duration) *AdvisoryLoop {
+func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan, error), interval, pollTimeout time.Duration) *AdvisoryLoop {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &AdvisoryLoop{cancel: cancel, done: make(chan struct{})}
 	go func() {
@@ -134,13 +152,19 @@ func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan
 			if ctx.Err() != nil {
 				return
 			}
-			poll, stop := context.WithTimeout(ctx, 12*time.Second)
+			poll, stop := context.WithTimeout(ctx, pollTimeout)
 			result, err := read(poll)
-			stop()
 			s.mu.Lock()
+			// A late success cannot replace unavailable or older cached advice.
+			// Check before stopping the child; stop itself cancels that context.
+			now := time.Now()
+			if deadline, _ := poll.Deadline(); err == nil && (poll.Err() != nil || !now.Before(deadline)) {
+				err = unavailable("observation_unavailable", capacitybroker.ErrSnapshot)
+			}
+			stop()
 			s.plan = nil
 			s.failure = unavailable(PlanFailureReason(err), capacitybroker.ErrSnapshot)
-			if err == nil && ctx.Err() == nil && result.ExpiresAt.After(time.Now()) {
+			if err == nil && ctx.Err() == nil && result.ExpiresAt.After(now) {
 				copy := cloneReadPlan(result)
 				s.plan = &copy
 				s.failure = nil
@@ -183,12 +207,36 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 		}
 		return ReadPlan{}, unavailable("awaiting_observation", capacitybroker.ErrSnapshot)
 	}
-	if !s.plan.ExpiresAt.After(time.Now()) {
+	now := time.Now()
+	if !s.plan.ExpiresAt.After(now) {
 		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
-	return cloneReadPlan(*s.plan), nil
+	result := cloneReadPlan(*s.plan)
+	if result.StockMaximumPreview != nil && !result.StockMaximumPreview.ExpiresAt.After(now) {
+		result.StockMaximumPreview = nil
+	}
+	if result.StockIdlePreview != nil && !result.StockIdlePreview.ExpiresAt.After(now) {
+		result.StockIdlePreview = nil
+	}
+	return result, nil
 }
 func cloneReadPlan(v ReadPlan) ReadPlan {
+	if v.StockIdlePreview != nil {
+		copy := *v.StockIdlePreview
+		copy.Proposals = append([]StockIdleProposal{}, copy.Proposals...)
+		v.StockIdlePreview = &copy
+	}
+	if v.StockMaximumPreview != nil {
+		copy := *v.StockMaximumPreview
+		copy.Proposals = append([]StockMaximumProposal{}, copy.Proposals...)
+		for i := range copy.Proposals {
+			if copy.Proposals[i].ObservedMinIdle != nil {
+				idle := *copy.Proposals[i].ObservedMinIdle
+				copy.Proposals[i].ObservedMinIdle = &idle
+			}
+		}
+		v.StockMaximumPreview = &copy
+	}
 	v.Pressure = append([]PressureStatus(nil), v.Pressure...)
 	v.Pools = append([]ReadPlanPool(nil), v.Pools...)
 	for i := range v.Pools {

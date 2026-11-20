@@ -20,11 +20,12 @@ func TestNativeRetirementStatusIsAuthenticatedReadOnlyAndNoRelease(t *testing.T)
 	}
 	w := request(t, h, "GET", "/admin/api/v1/native-retirement-status", token)
 	var out struct {
-		State   string                            `json:"state"`
-		Release bool                              `json:"release_authorized"`
-		Status  nativecontroller.RetirementStatus `json:"status"`
+		Freshness string                            `json:"freshness"`
+		State     string                            `json:"state"`
+		Release   bool                              `json:"release_authorized"`
+		Status    nativecontroller.RetirementStatus `json:"status"`
 	}
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || out.State != "unconfigured" || out.Release || !out.Status.At.IsZero() {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || out.State != "unconfigured" || out.Freshness != "no_cycle" || out.Release || !out.Status.At.IsZero() {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

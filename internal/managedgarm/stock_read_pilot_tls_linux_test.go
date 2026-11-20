@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -113,12 +112,4 @@ func prepareStockPilotTLSRoles(now time.Time, stock, gateway, ingress []byte) (s
 	}
 	r.stockDER = append([]byte(nil), stock...)
 	return r, nil
-}
-func (r stockPilotTLSRoles) serveMaterial(auth stockReadAuthBinding) (stockReadServeMaterial, error) {
-	review := stockReadServeReview{Version: "stock-read-serve/v1", GarmID: auth.review.GarmID, ControllerID: auth.record.ControllerID, CASHA256: stockBindingDigest(r.caDER), ServerSHA256: stockBindingDigest(r.serverDER), ClientSHA256: stockBindingDigest(r.clientDER), GatewaySPKI: r.gatewaySPKI, IngressSPKI: r.ingressSPKI}
-	raw, e := json.Marshal(review)
-	if e != nil {
-		return stockReadServeMaterial{}, ErrBoundary
-	}
-	return validateStockReadServeMaterial([5][]byte{raw, r.caDER, r.serverPEM, r.serverKey, r.clientDER}, auth, r.stockDER)
 }

@@ -120,3 +120,33 @@ func TestRetainedDiagnosticsRequireCanonicalDeleteBeforeOwnerReads(t *testing.T)
 		t.Fatal("diagnostic changed canonical state", e)
 	}
 }
+
+func TestRetirementFreshnessIsProcessLocal(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	interval := 30 * time.Second
+	window := interval + retirementCycleTimeout
+	for _, c := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{"no completed cycle after restart", time.Time{}, "no_cycle"},
+		{"future timestamp", now.Add(time.Second), "clock_invalid"},
+		{"finished just now", now, "within_cycle_window"},
+		{"before expiry", now.Add(-window + time.Nanosecond), "within_cycle_window"},
+		{"exact deadline", now.Add(-window), "stale"},
+		{"old success or failure", now.Add(-time.Hour), "stale"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := retirementFreshness(c.at, now, interval); got != c.want {
+				t.Fatalf("got %s; want %s", got, c.want)
+			}
+		})
+	}
+	status := RetirementStatus{At: time.Now().UTC().Add(-time.Hour), Incomplete: true, Result: RetirementCycle{Examined: 1, Unresolved: 1}}
+	s := &RetirementService{status: status, interval: interval}
+	got, freshness := s.LatestWithFreshness()
+	if freshness != "stale" || got != status || got.Result.ReleaseAuthorized {
+		t.Fatalf("freshness obscured unresolved cycle: %+v %s", got, freshness)
+	}
+}

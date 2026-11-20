@@ -51,7 +51,7 @@ func (v *managedSettingsView) Snapshot(ctx context.Context) (GarmOverview, error
 			if !v.pools[target] {
 				target = "outside current scope"
 			}
-			out.Pending = &GarmPending{RequestID: p.RequestID, Kind: p.Kind, Target: target, StartedAt: at, ResolutionAvailable: false}
+			out.Pending = &GarmPending{State: pendingDisplayState(p.State), RequestID: p.RequestID, Kind: p.Kind, Target: target, StartedAt: at, ResolutionAvailable: false}
 		}
 		return nil
 	}

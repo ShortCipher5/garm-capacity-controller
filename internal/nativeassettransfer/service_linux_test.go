@@ -54,6 +54,10 @@ func TestWorkflowActualSSHRetainsIntentAndHistoricalReceipt(t *testing.T) {
 	if state.Status != "artifacts_prepared_not_activated" || state.Attempt.Status != state.Status || state.Receipt == nil || state.Receipt.ActivationAuthorized {
 		t.Fatal(state)
 	}
+	// A visible terminal receipt does not join the original worker, which
+	// still holds the journal lock until apply unwinds. Test recovery only
+	// after it releases that lock, so a busy refusal cannot mask a replay.
+	s.wg.Wait()
 	// Reconstructed service and CLI both honor the identical permanent Plan intent.
 	restored, e := NewService(b, target, journal)
 	if e != nil {

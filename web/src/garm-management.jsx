@@ -131,7 +131,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {snapshot?.discovery_only && <p>Provider discovery only. No pools are enrolled for management and no management journal or write controls are enabled.</p>}
     {snapshot && !snapshot.discovery_only && !snapshot.settings_available && <p className="error">Remote settings are unavailable. Durable journal status is still shown; editing stays disabled.</p>}
     {snapshot?.write_blocked && <p className="error">A durable pending or unknown operation blocks Garm writes. Reading fresh state does not fence a delayed write and cannot safely clear this block.</p>}
-    {snapshot?.pending && <div><p>Pending request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target}</p>
+    {snapshot?.pending && <div><p>Unresolved request {snapshot.pending.request_id}: {snapshot.pending.kind} / {snapshot.pending.target}</p>
       {snapshot.pending.resolution_available === true ? <form onSubmit={resolvePendingWrite}>
         <p>Attempt exact receipt-based resolution. An uncertain result remains blocked; this is not a fresh settings edit.</p>
         <label>Resolution management token<input ref={resolutionToken} type="password" autoComplete="off" spellCheck={false} disabled={busy||syncError||needsRefresh||!canEditGarm(snapshot)} required /></label>
