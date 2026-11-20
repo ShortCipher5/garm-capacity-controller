@@ -186,3 +186,68 @@ func TestStockMaximumPreviewUnavailableOmitsHostEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	end := now.Add(20 * time.Second)
+	sample := func(at time.Time) scalingPreviewSample {
+		return scalingPreviewSample{
+			scope: [32]byte{1},
+			StockScalingSample: StockScalingSample{
+				source: "reviewed", revision: 1, sequence: 4, budget: 3,
+				start: at, finish: at, expires: at.Add(time.Minute),
+				pools:    map[string]scalingPool{"visible-pool": {repo: "visible-repo", enabled: true, current: 1, target: 2}},
+				repoCaps: map[string]int64{"visible-repo": 3}, order: []string{"visible-pool"},
+				configuredMaximumFit: roomyMaximumFit("visible-pool"),
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*scalingPreviewSample, *scalingPreviewSample)
+		want   string
+		both   bool
+	}{
+		{"veto", func(a, b *scalingPreviewSample) {}, "configured_maximum_fit_veto", true},
+		{"fit unavailable", func(a, b *scalingPreviewSample) { b.configuredMaximumFit = nil }, "configured_maximum_fit_unavailable", true},
+		{"no demand", func(a, b *scalingPreviewSample) {
+			p := b.pools["visible-pool"]
+			p.target = p.current
+			b.pools["visible-pool"] = p
+		}, "no_confirmed_change", false},
+		{"expired prior", func(a, b *scalingPreviewSample) { a.expires = end }, "no_confirmed_change", false},
+		{"unconfirmed prior", func(a, b *scalingPreviewSample) { a.finish = end }, "no_confirmed_change", false},
+		{"changed scope", func(a, b *scalingPreviewSample) { b.scope = [32]byte{2} }, "awaiting_matching_sample", false},
+		{"incomplete current", func(a, b *scalingPreviewSample) { b.incomplete = true }, "incomplete_evidence", false},
+		{"hidden assignment", func(a, b *scalingPreviewSample) {
+			const hidden = "private-other-pool"
+			p := b.pools["visible-pool"]
+			p.target = p.current
+			b.pools["visible-pool"] = p
+			a.configuredMaximumFit.pools[hidden] = a.configuredMaximumFit.pools["visible-pool"]
+			b.configuredMaximumFit.pools[hidden] = b.configuredMaximumFit.pools["visible-pool"]
+			b.order = []string{hidden}
+		}, "no_confirmed_change", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := sample(now), sample(end)
+			a.configuredMaximumFit.global[0] = 999
+			tc.mutate(&a, &b)
+			history := scalingPreviewHistory{prior: a}
+			preview := history.accept(b, nil, end, end.Add(time.Minute))
+			wantExpiry := b.expires
+			if tc.both {
+				wantExpiry = a.expires
+			}
+			if preview.Reason != tc.want || len(preview.Proposals) != 0 || !preview.ExpiresAt.Equal(wantExpiry) {
+				t.Fatalf("preview=%+v want reason %s, expiry %s", preview, tc.want, wantExpiry)
+			}
+			if tc.both {
+				wire, err := json.Marshal(preview)
+				if err != nil || strings.Contains(string(wire), "visible-pool") || strings.Contains(string(wire), "visible-repo") || strings.Contains(string(wire), "private-other-pool") || strings.Contains(string(wire), "999") {
+					t.Fatalf("private fit details escaped: %s", wire)
+				}
+			}
+		})
+	}
+}

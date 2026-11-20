@@ -56,3 +56,18 @@ test('unconstrained saved profile cannot contribute to a bounded mix', () => {
  assert.deepEqual(runnerMix(budget,profiles,[0,1]).fits,[null,6]);
  assert.equal(runnerMix(budget,profiles,[1,1]).invalid,true);
 });
+
+test('disk overrides compare with the selected pool instead of claiming host remainder is pool headroom', () => {
+ const scoped = {...result, totals:{...result.totals,storage_pool:'selected',storage_pool_disk_mib:80000,storage_pool_disk_mib_used:40000}};
+ const g = hostBudgetGuidance(scoped);
+ assert.equal(g.budget.disk_mib,29760);
+ const entered = {...g.budget,disk_mib:40000};
+ const over = assessBudget(scoped,entered,g).join(' ');
+ assert.match(over,/10240 MiB above the suggested 29760 MiB/);
+ assert.match(over,/used space.*selected storage pool/);
+ assert.doesNotMatch(over,/200000 remains/);
+ assert.match(assessBudget(scoped,{...entered,disk_mib:80001},g).join(' '),/selected storage pool total of 80000/);
+ const exhausted = {...scoped,totals:{...scoped.totals,storage_pool_disk_mib_used:80000}};
+ assert.match(assessBudget(exhausted,{...entered,disk_mib:1}).join(' '),/no budget was suggested/);
+ assert.match(hostBudgetGuidance(exhausted).warnings.join(' '),/No disk capacity remains/);
+});

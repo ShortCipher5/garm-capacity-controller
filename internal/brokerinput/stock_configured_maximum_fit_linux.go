@@ -66,25 +66,43 @@ func compareStockMaximumFit(a, b *stockConfiguredMaximumFit) stockMaximumFitComp
 	return v
 }
 
-// tryGrowth is local to this comparison. Only an accepted +1 spends quota.
-// Reductions never participate, and the captured samples remain immutable.
+type stockMaximumFitResult uint8
+
+const (
+	stockMaximumFitNotChecked stockMaximumFitResult = iota
+	stockMaximumFitAllowed
+	stockMaximumFitVeto
+	stockMaximumFitUnavailable
+)
+
 func (v *stockMaximumFitComparison) tryGrowth(id string) bool {
+	return v.checkGrowth(id) == stockMaximumFitAllowed
+}
+
+// checkGrowth is local to this comparison. Only an accepted +1 spends quota.
+// Reductions never participate, and the captured samples remain immutable.
+func (v *stockMaximumFitComparison) checkGrowth(id string) stockMaximumFitResult {
 	if v.a == nil || v.b == nil {
-		return false
+		return stockMaximumFitUnavailable
 	}
 	a, hasA := v.a.pools[id]
 	b, hasB := v.b.pools[id]
 	if !hasA || !hasB || a.size != b.size {
-		return false
+		return stockMaximumFitUnavailable
 	}
 	for d := 0; d < 3; d++ {
-		if a.size[d] <= 0 || a.size[d] > min(a.remaining[d], b.remaining[d], v.leftA[d], v.leftB[d]) {
-			return false
+		if a.size[d] <= 0 {
+			return stockMaximumFitUnavailable
+		}
+	}
+	for d := 0; d < 3; d++ {
+		if a.size[d] > min(a.remaining[d], b.remaining[d], v.leftA[d], v.leftB[d]) {
+			return stockMaximumFitVeto
 		}
 	}
 	for d := 0; d < 3; d++ {
 		v.leftA[d] -= a.size[d]
 		v.leftB[d] -= a.size[d]
 	}
-	return true
+	return stockMaximumFitAllowed
 }

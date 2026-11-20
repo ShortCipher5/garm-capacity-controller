@@ -60,8 +60,19 @@ export function assessBudget(result, budget, guidance = hostBudgetGuidance(resul
     const total = result.totals?.[key];
     if (!valid(total) || total === 0) return [`${key}: physical capacity is unknown; this budget cannot be checked.`];
     if (value > total) return [`${key}: assigned budget exceeds detected physical capacity.`];
-    if (guidance.budget[key] === undefined) return [`${key}: existing workload allowance is unknown; review the budget manually.`];
-    if (value > guidance.budget[key]) return [`${key}: only ${total - value} remains outside this runner budget; this is below the suggested allowance for system headroom and observed guests.`];
+    if (key === 'disk_mib' && result.totals.storage_pool && valid(result.totals.storage_pool_disk_mib) &&
+        result.totals.storage_pool_disk_mib > 0 && value > result.totals.storage_pool_disk_mib) {
+      return [`disk_mib: assigned budget exceeds the detected selected storage pool total of ${result.totals.storage_pool_disk_mib} MiB.`];
+    }
+    const proposed = guidance.budget[key];
+    if (proposed === undefined) return [`${key}: no budget was suggested. Review the discovery warnings before assigning a manual value.`];
+    if (value > proposed) {
+      if (key === 'disk_mib') {
+        const pool = result.totals.storage_pool ? ' and the selected storage pool' : '';
+        return [`disk_mib: assigned budget is ${value - proposed} MiB above the suggested ${proposed} MiB after accounting for used space, observed guest limits, system headroom${pool}. Review storage before overriding.`];
+      }
+      return [`${key}: only ${total - value} remains outside this runner budget. The override is ${value - proposed} above the suggested ${proposed}, leaving less allowance for system headroom and observed guests.`];
+    }
     return [];
   });
 }

@@ -128,19 +128,27 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 	out.State = "no_confirmed_proposals"
 	out.Reason = "awaiting_matching_sample"
 	var changes []StockMaximumProposal
+	var fit stockMaximumFitResult
 	if h.prior.scope == current.scope {
 		if h.prior.source != "" {
 			out.Reason = "no_confirmed_change"
 		}
-		changes = ProposeStockMaximums(h.prior.StockScalingSample, current.StockScalingSample, now)
+		changes, fit = compareStockMaximums(h.prior.StockScalingSample, current.StockScalingSample, now)
 	}
 	if len(changes) != 0 {
 		out.State = "proposed"
 		out.Reason = ""
 		out.Proposals = changes
-		if h.prior.expires.Before(out.ExpiresAt) {
-			out.ExpiresAt = h.prior.expires
+	} else {
+		switch fit {
+		case stockMaximumFitVeto:
+			out.Reason = "configured_maximum_fit_veto"
+		case stockMaximumFitUnavailable:
+			out.Reason = "configured_maximum_fit_unavailable"
 		}
+	}
+	if (len(changes) != 0 || fit != stockMaximumFitNotChecked) && h.prior.expires.Before(out.ExpiresAt) {
+		out.ExpiresAt = h.prior.expires
 	}
 	if current.expires.Before(out.ExpiresAt) {
 		out.ExpiresAt = current.expires

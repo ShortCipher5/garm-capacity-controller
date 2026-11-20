@@ -157,17 +157,25 @@ func stockScalingSample(state admission.BrokerGrantState, snapshot capacitybroke
 // headroom from a proposed reduction. This limits rapid reversals; it is not a
 // durable cooldown or protection against races with external GARM writers.
 func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) []StockMaximumProposal {
+	proposals, _ := compareStockMaximums(previous, current, now)
+	return proposals
+}
+
+// The fit result is only explanatory evidence from otherwise eligible growth
+// in the current visible comparison. It is not a capacity or placement result.
+func compareStockMaximums(previous, current StockScalingSample, now time.Time) ([]StockMaximumProposal, stockMaximumFitResult) {
 	if current.source == "" || previous.source != current.source ||
 		previous.revision != current.revision || previous.sequence > current.sequence ||
 		previous.budget != current.budget || !previous.expires.After(now) || !current.expires.After(now) ||
 		current.start.Before(previous.finish.Add(15*time.Second)) || current.finish.After(now) ||
 		previous.incomplete || current.incomplete {
-		return nil
+		return nil, stockMaximumFitNotChecked
 	}
 	if !sameStockMaximumSettings(previous, current) {
-		return nil
+		return nil, stockMaximumFitNotChecked
 	}
 	var out []StockMaximumProposal
+	var diagnostic stockMaximumFitResult
 	// A recommendation must fit both captures, not only their matching demand
 	// directions. Do not widen advice when charged occupancy dipped in just
 	// the latest capture; neither snapshot proves physical capacity release.
@@ -201,18 +209,23 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 			continue
 		}
 		considered[id] = true
-		p := current.pools[id]
-		if p.target <= p.current || previous.pools[id].target <= p.current || global >= current.budget || repo[p.repo] >= current.repoCaps[p.repo] {
+		p, visible := current.pools[id]
+		prior, previouslyVisible := previous.pools[id]
+		if !visible || !previouslyVisible || p.target <= p.current || prior.target <= p.current || global >= current.budget || repo[p.repo] >= current.repoCaps[p.repo] {
 			continue
 		}
-		if !fit.tryGrowth(id) {
+		if outcome := fit.checkGrowth(id); outcome != stockMaximumFitAllowed {
+			// Incomplete comparison evidence takes precedence over a veto.
+			if diagnostic != stockMaximumFitUnavailable {
+				diagnostic = outcome
+			}
 			continue
 		}
 		appendProposal(id, p, p.current+1)
 		global++
 		repo[p.repo]++
 	}
-	return out
+	return out, diagnostic
 }
 
 // A configured enabled maximum can still be consumed by stock, and charges

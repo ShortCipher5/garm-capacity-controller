@@ -91,6 +91,7 @@ export function ServerCard({ host, readUsage }) {
 export function DiscoveryResultView({ result }) {
   const unmanaged = result.guests.filter((guest) => !guest.managed).length;
   const utilization = result.utilization;
+  const guidance = hostBudgetGuidance(result);
   return (
     <div className="discovery-result" role="status">
       <h3>Discovery observation · {result.profile_id}</h3>
@@ -119,8 +120,18 @@ export function DiscoveryResultView({ result }) {
         <p className="drain-warning" data-unmanaged={unmanaged}>{unmanaged} unmanaged guest(s) observed without runner-controller attribution: the shared limit may not cover them.</p>
       )}
       <h4>Suggested budget — advisory only, never applied</h4>
-      <p className="muted">This API estimate subtracts fixed headroom only. The enrollment planner below refines the proposal with observed workloads and disk usage; neither estimate proves available capacity.</p>
-      <p>CPU {fmt(result.suggested_budget.cpu_millis)} millicores · Memory {fmt(result.suggested_budget.ram_mib)} MiB · Disk {fmt(result.suggested_budget.disk_mib)} MiB · Runners {fmt(result.suggested_budget.runners)} (runner count is not derivable from host totals)</p>
+      <p className="muted">The suggestion leaves system headroom and budgets separately for observed guests. Disk also accounts for used space and, when selected, the storage pool. These are estimates, not measurements of free capacity.</p>
+      <div className="table-wrap">
+        <table aria-label="Workload-aware suggested budget">
+          <thead><tr><th>Resource</th><th>Host system reserve</th><th>Suggested runner budget</th></tr></thead>
+          <tbody>
+            {[["CPU", "cpu_millis", "millicores"], ["Memory", "ram_mib", "MiB"], ["Disk", "disk_mib", "MiB"]].map(([label, key, unit]) =>
+              <tr key={key}><th scope="row">{label}</th><td>{guidance.reserve[key] === undefined ? "Not estimated" : `${fmt(guidance.reserve[key])} ${unit}`}</td><td>{guidance.budget[key] === undefined ? "Not suggested" : `${fmt(guidance.budget[key])} ${unit}`}</td></tr>)}
+          </tbody>
+        </table>
+      </div>
+      <p>Runner count is not derivable from host totals. Review local services, provider fair-use limits and workloads before overriding the suggestion.</p>
+      <ul className="warning-list">{guidance.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
       <h4>Observed guests <small className="muted">{result.guests.length}</small></h4>
       {result.guests.length === 0 ? (
         <p className="empty">No guests observed in the bounded inventory.</p>
@@ -169,7 +180,7 @@ export function BudgetPlanner({ result, budget, onChange }) {
   const warnings = assessBudget(result, budget, guidance);
   return <div className="budget-planner">
     <h4>Plan shared runner capacity</h4>
-    <p>Starting allowance: 10% per dimension, with minimum headroom of 1 vCPU, 2 GiB RAM and 10 GiB disk (capped at host totals). Observed guest limits are also reserved. Adjust these proposed budgets for your workload.</p>
+    <p>Suggested system reserve: 10% per dimension, with minimum headroom of 1 vCPU, 2 GiB RAM and 10 GiB disk (capped at host totals). Observed guest limits are also reserved. Adjust these proposed budgets for your workload.</p>
     <div className="budget-fields">
       {[["cpu_millis", "cpu", "Budget CPU millicores"], ["ram_mib", "ram", "Budget memory MiB"], ["disk_mib", "disk", "Budget disk MiB"], ["runners", "runners", "Budget runners"]].map(([key, name, label]) =>
         <label key={key}>{label}<input aria-label={label} name={name} type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" value={budget[key]} onChange={event => onChange({...budget, [key]:event.target.value})} required /></label>)}
