@@ -238,13 +238,8 @@ func (s *Session) RoundTrip(r *http.Request) (*http.Response, error) {
 		if e != nil || len(raw) > 4096 {
 			return nil, ErrBoundary
 		}
-		var update struct {
-			Maximum *uint64 `json:"max_runners,omitempty"`
-			Enabled *bool   `json:"enabled,omitempty"`
-		}
-		d := json.NewDecoder(bytes.NewReader(raw))
-		d.DisallowUnknownFields()
-		if d.Decode(&update) != nil || d.Decode(new(any)) != io.EOF || (update.Maximum == nil && update.Enabled == nil) || (update.Maximum != nil && *update.Maximum > 1000000) || (update.Enabled != nil && *update.Enabled) {
+		update, e := decodeStockPoolUpdate(raw)
+		if e != nil {
 			return nil, ErrBoundary
 		}
 		if update.Maximum != nil && *update.Maximum > 0 {

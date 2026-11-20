@@ -24,7 +24,7 @@ func TestUnmintedSessionCannotDispatch(t *testing.T) {
 }
 func TestSessionRefusesCapacityIncreasesWithoutNetwork(t *testing.T) {
 	s := &Session{token: "internal-test-token"}
-	for _, body := range []string{`{"max_runners":1000001}`, `{"enabled":true}`, `{"min_idle_runners":0}`, `{"tags":["a"]}`, `{"unknown":false}`} {
+	for _, body := range []string{`{"max_runners":1000001}`, `{"enabled":true}`, `{"min_idle_runners":0}`, `{"tags":["a"]}`, `{"unknown":false}`, `{"max_runners":1,"max_runners":2}`, `{"MAX_RUNNERS":2}`, `{"max_runnerſ":2}`, `{"max_runners":0,"enabled":null}`} {
 		r, _ := http.NewRequest("PUT", "https://managed-garm.invalid/api/v1/pools/11111111-1111-4111-8111-111111111111", strings.NewReader(body))
 		if _, e := s.RoundTrip(r); e == nil {
 			t.Fatal("unsafe writer accepted", body)

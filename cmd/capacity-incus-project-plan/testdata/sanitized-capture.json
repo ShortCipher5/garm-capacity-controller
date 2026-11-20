@@ -1,0 +1,37 @@
+{
+  "schema": "incus-project-plan-capture/v1",
+  "project": "fixture-runners",
+  "storage_pool": "fixtures",
+  "reviewed_project_sha256": "c627b7784b5d9e7d739cc4fb6b1caadd7d10bd7884d764fbbeec5cb876863766",
+  "project_response": {
+    "type": "sync", "status": "Success", "status_code": 200, "operation": "", "error_code": 0, "error": "",
+    "metadata": {
+      "name": "fixture-runners", "description": "", "used_by": [],
+      "config": {
+        "restricted": "true", "features.profiles": "true",
+        "limits.instances": "6", "limits.containers": "5", "limits.virtual-machines": "0",
+        "limits.cpu": "12", "limits.memory": "24GiB", "limits.disk": "120GiB"
+      }
+    }
+  },
+  "profiles": [{
+    "name": "fixture-small",
+    "reviewed_sha256": "a12fda928aa30c5a7b9b89618f0d31029e50da12a223f7afbe2377f6f1013e6e",
+    "response": {
+      "type": "sync", "status": "Success", "status_code": 200, "operation": "", "error_code": 0, "error": "",
+      "metadata": {
+        "name": "fixture-small", "project": "fixture-runners", "description": "", "used_by": [],
+        "config": {"limits.cpu": "2", "limits.memory": "2GiB", "limits.memory.enforce": "hard", "security.privileged": "false"},
+        "devices": {
+          "root": {"type": "disk", "path": "/", "pool": "fixtures", "size": "12GiB"},
+          "eth0": {"type": "nic", "network": "fixture-net"}
+        }
+      }
+    }
+  }],
+  "pools": [{
+    "id": "fixture-pool", "profile": "fixture-small", "count": 3,
+    "size": {"cpu_millis": 2000, "ram_mib": 2048, "disk_mib": 12288, "runners": 1}
+  }],
+  "net_host_budget": {"cpu_millis": 12000, "ram_mib": 24576, "disk_mib": 122880, "runners": 5}
+}
