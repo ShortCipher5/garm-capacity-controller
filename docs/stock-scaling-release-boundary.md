@@ -65,3 +65,20 @@ normal and maintenance modes, prove no overlap across handoff or restart,
 show that delayed or unknown writes leave both sides blocked, and verify
 that re-entry requires fresh evidence and explicit review. These checks are
 not authorization to change an installed service.
+
+## Incus provider qualification checkpoint
+
+An unmodified upstream candidate was built twice offline from vendored
+dependencies: [provider source at `d3cc787b`](https://github.com/cloudbase/garm-provider-incus/tree/d3cc787b39365df446f67f2b6e1e68a257ea29ab),
+Go 1.26.10, Linux amd64 (v1), CGO disabled, Incus client v7.5.1 and
+provider-common v0.1.9. The two local executables had the same SHA-256:
+`a5f5edab2c207a69ce37091702931455a0a588265116f1676fe92cba1846c256`.
+This verifies the candidate build, not any installed executable or live route.
+
+Static review did not qualify the candidate for strict routing. Its
+[vendored HTTPS transport](https://github.com/cloudbase/garm-provider-incus/blob/d3cc787b39365df446f67f2b6e1e68a257ea29ab/vendor/github.com/lxc/incus/v7/client/util.go#L24-L158)
+accepts environment proxies and follows redirects. Clearing proxy variables
+does not stop redirects. Before counting that provider as verified, require a
+reviewed strict transport option or independently verified controls that bind
+it to the intended Incus daemon and project. Do not treat a successful build,
+configured endpoint, or apparent project match as sufficient for writes.

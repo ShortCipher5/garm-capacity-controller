@@ -1,16 +1,17 @@
 import {AllocatorPlan} from "./allocator-plan.jsx";
+import {BrokerPolicyReview} from './broker-policy-review.jsx';
 import {BrokerStatus} from "./broker-status.jsx";
 import React, { useEffect, useRef, useState } from 'react';
 import { saveBrokerPolicy, validateBrokerSaveInput } from './broker-policy-client.js';
 export function BrokerPolicy({ readPolicy, readPlan }) {
-  const [comparisonStale,setComparisonStale]=useState(false);
+  const [comparisonStale,setComparisonStale]=useState(false), [savedPolicy,setSavedPolicy]=useState(null);
   const [view,setView]=useState(null), [message,setMessage]=useState(''), [busy,setBusy]=useState(false), [blocked,setBlocked]=useState(true);
   const active=useRef(null), alive=useRef(true), token=useRef(null);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;active.current?.abort();if(token.current)token.current.value='';};},[]);
   async function load(){
     if(active.current || !readPolicy)return;
     const controller=new AbortController();active.current=controller;setBusy(true);setBlocked(true);setComparisonStale(true);setMessage('');
-    try { const next=await readPolicy();if(alive.current&&!controller.signal.aborted){setView(next);setComparisonStale(false);setBlocked(false);} }
+    try { const next=await readPolicy();if(alive.current&&!controller.signal.aborted){setSavedPolicy(next.policy);setView(next);setComparisonStale(false);setBlocked(false);} }
     catch(e){if(alive.current){setMessage(e.message);setComparisonStale(true);}}
     finally{active.current=null;if(alive.current)setBusy(false);}
   }
@@ -37,8 +38,8 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
     <button type="button" disabled={busy||!readPolicy} onClick={load}>Reload policy (discard edits)</button>
     {message&&<p role="status">{message}</p>}
     {view&&<BrokerStatus status={view.status} stale={comparisonStale} />}
-    <AllocatorPlan readPlan={readPlan} policyRevision={view?.policy.revision} ledgerSequence={view?.status?.sequence} policyStale={comparisonStale} />
-    {view&&<form onSubmit={save}><p>Revision {view.policy.revision}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
+    <AllocatorPlan readPlan={readPlan} policyRevision={savedPolicy?.revision} ledgerSequence={view?.status?.sequence} policyStale={comparisonStale} />
+    {view&&<form onSubmit={save}><p>Last loaded revision {savedPolicy?.revision}{comparisonStale ? ' (not verified as current; reload required)' : ''}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
       {view.policy.repositories.map((r,i)=><div className="card" key={i}>
         <h3>Repository row {i + 1}</h3>
         <label>GARM repository UUID<input required value={r.id} onChange={e=>repo(i,'id',e.target.value)}/></label>
@@ -55,6 +56,7 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
         <button type="button" onClick={()=>edit(rows=>rows.filter((_,j)=>j!==i))}>Remove repository from draft policy</button>
       </div>)}
       <button type="button" onClick={()=>edit(rows=>[...rows,{id:'',weight:1,max_runners:0,pools:[]}])}>Add repository</button>
+      <BrokerPolicyReview saved={savedPolicy} draft={view.policy} stale={comparisonStale}/>
       <label>Separate management token<input type="password" autoComplete="off" ref={token}/></label>
       <button type="submit">Save capacity policy</button>
     </fieldset></form>}

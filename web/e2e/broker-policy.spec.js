@@ -16,6 +16,10 @@ test('local validation preserves editable policy draft; dispatched unknown block
  await panel.getByLabel('Repository runner cap').fill('');
  await expect(panel.getByLabel('Repository runner cap')).toHaveValue('');
  await panel.getByLabel('Repository runner cap').fill('8');
+ await panel.getByText('Compare draft with last loaded policy',{exact:true}).click();
+ await expect(panel.getByText('Draft edits are not submitted',{exact:false})).toBeVisible();
+ await expect(panel.getByRole('table').getByRole('row').filter({hasText:'Repository runner cap'})).toContainText('8');
+ expect(calls).toBe(0);
  await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
  await expect(panel.getByRole('status')).toContainText('management token');
  await expect(panel.getByLabel('GARM repository UUID')).toBeEnabled();
@@ -32,6 +36,8 @@ test('local validation preserves editable policy draft; dispatched unknown block
  await panel.getByLabel('Separate management token').fill('c'.repeat(64));
  await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
  await expect(panel.getByRole('status')).toContainText('not confirmed');
+ await expect(panel.getByText('Saved revision 0 is not verified as current',{exact:false})).toBeVisible();
+ await expect(panel.getByRole('table')).toHaveCount(0);
  await expect(panel.getByLabel('GARM repository UUID').first()).toBeDisabled();
  await expect(panel.getByLabel('Separate management token')).toHaveValue('');
  expect(calls).toBe(1);

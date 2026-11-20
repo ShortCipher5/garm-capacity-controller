@@ -162,20 +162,8 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 		previous.incomplete || current.incomplete {
 		return nil
 	}
-	if len(previous.pools) != len(current.pools) || len(previous.repoCaps) != len(current.repoCaps) {
+	if !sameStockMaximumSettings(previous, current) {
 		return nil
-	}
-	for repo, limit := range current.repoCaps {
-		if prior, exist := previous.repoCaps[repo]; !exist || prior != limit {
-			return nil
-		}
-	}
-	for id, p := range current.pools {
-		before, ok := previous.pools[id]
-		if !ok || before.repo != p.repo || before.fingerprint != p.fingerprint ||
-			before.enabled != p.enabled || before.current != p.current || before.idle != p.idle || before.cap != p.cap {
-			return nil
-		}
 	}
 	var out []StockMaximumProposal
 	global := current.outside
@@ -220,4 +208,25 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 		repo[p.repo]++
 	}
 	return out
+}
+
+// sameStockMaximumSettings compares only settings and caps, not demand or
+// current charges. Callers validate source, revisions and observation times.
+func sameStockMaximumSettings(previous, current StockScalingSample) bool {
+	if len(previous.pools) != len(current.pools) || len(previous.repoCaps) != len(current.repoCaps) {
+		return false
+	}
+	for repo, limit := range current.repoCaps {
+		if prior, exist := previous.repoCaps[repo]; !exist || prior != limit {
+			return false
+		}
+	}
+	for id, p := range current.pools {
+		before, ok := previous.pools[id]
+		if !ok || before.repo != p.repo || before.fingerprint != p.fingerprint ||
+			before.enabled != p.enabled || before.current != p.current || before.idle != p.idle || before.cap != p.cap {
+			return false
+		}
+	}
+	return true
 }

@@ -134,9 +134,9 @@ func StartAdvisoryLoop(ctx context.Context, reader *AdvisoryReader, interval tim
 	if ctx == nil || ctx.Err() != nil || reader == nil || interval < 15*time.Second || interval > time.Minute {
 		return nil, capacitybroker.ErrSnapshot
 	}
-	return startAdvisoryLoop(ctx, reader.ReadPlan, interval), nil
+	return startAdvisoryLoop(ctx, reader.ReadPlan, interval, 12*time.Second), nil
 }
-func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan, error), interval time.Duration) *AdvisoryLoop {
+func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan, error), interval, pollTimeout time.Duration) *AdvisoryLoop {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &AdvisoryLoop{cancel: cancel, done: make(chan struct{})}
 	go func() {
@@ -152,13 +152,19 @@ func startAdvisoryLoop(ctx context.Context, read func(context.Context) (ReadPlan
 			if ctx.Err() != nil {
 				return
 			}
-			poll, stop := context.WithTimeout(ctx, 12*time.Second)
+			poll, stop := context.WithTimeout(ctx, pollTimeout)
 			result, err := read(poll)
-			stop()
 			s.mu.Lock()
+			// A late success cannot replace unavailable or older cached advice.
+			// Check before stopping the child; stop itself cancels that context.
+			now := time.Now()
+			if deadline, _ := poll.Deadline(); err == nil && (poll.Err() != nil || !now.Before(deadline)) {
+				err = unavailable("observation_unavailable", capacitybroker.ErrSnapshot)
+			}
+			stop()
 			s.plan = nil
 			s.failure = unavailable(PlanFailureReason(err), capacitybroker.ErrSnapshot)
-			if err == nil && ctx.Err() == nil && result.ExpiresAt.After(time.Now()) {
+			if err == nil && ctx.Err() == nil && result.ExpiresAt.After(now) {
 				copy := cloneReadPlan(result)
 				s.plan = &copy
 				s.failure = nil
