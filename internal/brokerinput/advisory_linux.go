@@ -215,6 +215,9 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	if result.StockMaximumPreview != nil && !result.StockMaximumPreview.ExpiresAt.After(now) {
 		result.StockMaximumPreview = nil
 	}
+	if result.StockMaximumBatchPreview != nil && !result.StockMaximumBatchPreview.ExpiresAt.After(now) {
+		result.StockMaximumBatchPreview = nil
+	}
 	if result.StockIdlePreview != nil && !result.StockIdlePreview.ExpiresAt.After(now) {
 		result.StockIdlePreview = nil
 	}
@@ -226,17 +229,8 @@ func cloneReadPlan(v ReadPlan) ReadPlan {
 		copy.Proposals = append([]StockIdleProposal{}, copy.Proposals...)
 		v.StockIdlePreview = &copy
 	}
-	if v.StockMaximumPreview != nil {
-		copy := *v.StockMaximumPreview
-		copy.Proposals = append([]StockMaximumProposal{}, copy.Proposals...)
-		for i := range copy.Proposals {
-			if copy.Proposals[i].ObservedMinIdle != nil {
-				idle := *copy.Proposals[i].ObservedMinIdle
-				copy.Proposals[i].ObservedMinIdle = &idle
-			}
-		}
-		v.StockMaximumPreview = &copy
-	}
+	v.StockMaximumPreview = cloneStockMaximumPreview(v.StockMaximumPreview)
+	v.StockMaximumBatchPreview = cloneStockMaximumPreview(v.StockMaximumBatchPreview)
 	v.Pressure = append([]PressureStatus(nil), v.Pressure...)
 	v.Pools = append([]ReadPlanPool(nil), v.Pools...)
 	for i := range v.Pools {
@@ -246,4 +240,19 @@ func cloneReadPlan(v ReadPlan) ReadPlan {
 		}
 	}
 	return v
+}
+
+func cloneStockMaximumPreview(preview *StockMaximumPreview) *StockMaximumPreview {
+	if preview != nil {
+		copy := *preview
+		copy.Proposals = append([]StockMaximumProposal{}, copy.Proposals...)
+		for i := range copy.Proposals {
+			if copy.Proposals[i].ObservedMinIdle != nil {
+				idle := *copy.Proposals[i].ObservedMinIdle
+				copy.Proposals[i].ObservedMinIdle = &idle
+			}
+		}
+		return &copy
+	}
+	return nil
 }

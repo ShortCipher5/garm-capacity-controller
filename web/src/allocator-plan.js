@@ -56,6 +56,7 @@ const previewReasonMessages = Object.freeze({
  awaiting_matching_sample: ['no_confirmed_proposals', 'Waiting for another observation with the same effective configuration before comparing maximum suggestions.'],
  configured_maximum_fit_veto: ['no_confirmed_proposals', 'No increase was suggested because the modeled runner load would exceed a configured budget in at least one observation. This is a modeled limit, not a measured host limit or a settings change.'],
  configured_maximum_fit_unavailable: ['no_confirmed_proposals', 'The configured maximums could not be compared for an increase. No increase was suggested; this does not establish a capacity limit.'],
+ awaiting_cadence_window: ['no_confirmed_proposals', 'Waiting for a longer span of matching observations before comparing a smaller batch.'],
  no_confirmed_change: ['no_confirmed_proposals', 'The captured comparison confirmed no maximum change. This does not prove that no change is needed or that every comparison prerequisite was satisfied.'],
 });
 const previewStates = new Set(["unavailable", "no_confirmed_proposals", "proposed"]);
@@ -68,14 +69,25 @@ const wireTimestamp = value => typeof value === "string" &&
 // is missing, malformed or stale. Never render a proposal against a different
 // saved ledger comparison, or after its independent evidence deadline.
 export function stockMaximumPreviewView(plan, comparison, now=Date.now()){
- const preview=plan?.stock_maximum_preview;
+ return stockMaximumView(plan,plan?.stock_maximum_preview,comparison,now,false);
+}
+export function stockMaximumBatchPreviewView(plan, comparison, now=Date.now()){
+ const batch=stockMaximumView(plan,plan?.stock_maximum_batch_preview,comparison,now,true);
+ if(batch?.state!=="proposed")return batch;
+ const regular=stockMaximumPreviewView(plan,comparison,now);
+ if(regular?.state!=="proposed"||batch.expiresAt>regular.expiresAt||batch.proposals.some(p=>!regular.proposals.some(r=>(
+  r.pool_id===p.pool_id&&r.repository_id===p.repository_id&&r.observed===p.observed&&r.suggested===p.suggested&&r.observed_min_idle===p.observed_min_idle))))return {state:"unavailable",proposals:[]};
+ return batch;
+}
+function stockMaximumView(plan,preview,comparison,now,batch){
  if(preview===undefined)return null;
  const unavailable={state:"unavailable",proposals:[]};
  const keys=["state","expires_at","proposals"];
  if(preview&&Object.hasOwn(preview,"reason"))keys.push("reason");
  if(preview&&Object.hasOwn(preview,"host_evidence"))keys.push("host_evidence");
  if(!exactKeys(preview,keys)||(Object.hasOwn(preview,"host_evidence")&&(preview.host_evidence!=="configured_only"||preview.state==="unavailable"))||!previewStates.has(preview.state)||
-  !Array.isArray(plan.pools)||!Array.isArray(preview.proposals)||preview.proposals.length>plan.pools.length||
+  !Array.isArray(plan.pools)||!Array.isArray(preview.proposals)||preview.proposals.length>plan.pools.length||(batch&&preview.proposals.length>2)||
+  (batch&&preview.state!=="unavailable"&&preview.host_evidence!=="configured_only")||
   (preview.state==="proposed")!==(preview.proposals.length>0))return unavailable;
  const expires=wireTimestamp(preview.expires_at),captured=Date.parse(plan.captured_at),planExpiry=Date.parse(plan.expires_at);
  if(![expires,captured,planExpiry,now].every(Number.isFinite)||expires<=captured||expires>planExpiry)return unavailable;
@@ -89,7 +101,7 @@ export function stockMaximumPreviewView(plan, comparison, now=Date.now()){
  }
  if(expires<=now||captured>now+1000)return {state:"expired",proposals:[]};
  if(comparison!=="linked_at_capture")return {state:"comparison_unavailable",proposals:[]};
- const reason=typeof preview.reason==="string"&&Object.hasOwn(previewReasonMessages,preview.reason)&&previewReasonMessages[preview.reason][0]===preview.state?preview.reason:null;
+ const reason=(batch||preview.reason!=="awaiting_cadence_window")&&typeof preview.reason==="string"&&Object.hasOwn(previewReasonMessages,preview.reason)&&previewReasonMessages[preview.reason][0]===preview.state?preview.reason:null;
  return {state:preview.state,expiresAt:expires,proposals:preview.proposals,...(reason?{reason}:{}),...(preview.host_evidence==="configured_only"?{hostEvidence:"configured_only"}:{})};
 }
 
