@@ -115,6 +115,7 @@ type CIAttempt struct {
 	repository CIRepository
 	run        CIRun
 	at         time.Time
+	minted     time.Time // monotonic counterpart of the public UTC observation
 }
 
 func (a CIAttempt) Run() CIRun {
@@ -237,12 +238,13 @@ func (s *CIHealthSource) ReadCIAttempt(ctx context.Context, garmID string, runID
 	if s.client.get(ctx, ciRoot(r)+ciAttemptPath(runID, attempt), url.Values{}, &wire) != nil {
 		return CIAttempt{}, ErrObservation
 	}
-	now := time.Now().UTC()
+	minted := time.Now()
+	now := minted.UTC()
 	run, valid := wire.validate(r, now)
 	if !valid || run.RunID != runID || run.Attempt != attempt {
 		return CIAttempt{}, ErrObservation
 	}
-	return CIAttempt{source: s, repository: r, run: run, at: now}, nil
+	return CIAttempt{source: s, repository: r, run: run, at: now, minted: minted}, nil
 }
 
 // ListCIAttemptJobs reads only the exact action-run attempt. Missing queue
@@ -476,6 +478,7 @@ func ciWireAlias(actual string) bool {
 		"id", "full_name", "total_count", "workflow_runs", "workflow_id", "run_attempt", "repository",
 		"name", "status", "conclusion", "created_at", "run_started_at", "jobs", "run_id", "started_at", "completed_at",
 		"runner_id", "runner_name", "steps", "number",
+		"artifacts", "workflow_run", "repository_id", "size_in_bytes", "expired", "expires_at",
 	} {
 		if actual != canonical && strings.EqualFold(actual, canonical) {
 			return true
