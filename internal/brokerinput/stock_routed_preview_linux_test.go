@@ -23,11 +23,32 @@ func routedStockFixture() (admission.BrokerGrantState, capacitybroker.Snapshot, 
 		Policy:       policy,
 		HostBindings: map[string]admission.HostBinding{"a": {Sequence: 3}, "b": {Sequence: 4}},
 		PoolProfiles: map[string]admission.BrokerPoolProfile{
-			pool: {Pool: pool, SourceIdentity: "stock-source", PoolFingerprint: "registered-ownership",
+			pool: {Pool: pool, Repository: repo, SourceIdentity: "stock-source", PoolFingerprint: "registered-ownership",
+				Domains:   []admission.BrokerProfileDomain{{Host: "a", HostBindingSequence: 3}, {Host: "b", HostBindingSequence: 4}},
 				Authority: admission.StockProviderAuthority{PoolID: pool, ProviderName: "stock-a"}},
 		},
 	}
 	return state, snapshot, observation, opt, []verifiedStockProviderRoute{{"stock-source", "stock-a", "a", 3, opt.Now.Add(-time.Second)}}
+}
+
+func TestRoutedStockPreviewRequiresCurrentEnrolledDestination(t *testing.T) {
+	for name, edit := range map[string]func(*admission.BrokerPoolProfile){
+		"wrong repository":      func(p *admission.BrokerPoolProfile) { p.Repository = "elsewhere" },
+		"missing destination":   func(p *admission.BrokerPoolProfile) { p.Domains = p.Domains[1:] },
+		"stale destination":     func(p *admission.BrokerPoolProfile) { p.Domains[0].HostBindingSequence-- },
+		"duplicate destination": func(p *admission.BrokerPoolProfile) { p.Domains = append(p.Domains, p.Domains[0]) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			state, snapshot, observation, opt, routes := routedStockFixture()
+			profile := state.PoolProfiles[pool]
+			edit(&profile)
+			state.PoolProfiles[pool] = profile
+			plan, expiry, err := planRoutedStockPreview(state, snapshot, observation, "stock-source", opt, routes)
+			if err != capacitybroker.ErrSnapshot || !expiry.IsZero() || len(plan.Assignments) != 0 {
+				t.Fatalf("invalid pool enrollment returned advice: %+v %v %v", plan, expiry, err)
+			}
+		})
+	}
 }
 
 func TestRoutedStockPreviewDoesNotBorrowSpareOnWrongHost(t *testing.T) {

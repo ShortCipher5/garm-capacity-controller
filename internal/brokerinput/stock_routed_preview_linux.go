@@ -63,8 +63,27 @@ func planRoutedStockPreview(state admission.BrokerGrantState, snapshot capacityb
 		profile, enrolled := state.PoolProfiles[id]
 		route, routed := byProvider[remote.ProviderName]
 		if !seen || !enrolled || !routed || profile.SourceIdentity != source ||
-			profile.Pool != id || profile.Authority.PoolID != id || profile.Authority.ProviderName != remote.ProviderName ||
+			profile.Pool != id || profile.Repository != p.Repository || profile.Repository != remote.RepositoryID ||
+			profile.Authority.PoolID != id || profile.Authority.ProviderName != remote.ProviderName ||
 			profile.PoolFingerprint == "" || profile.PoolFingerprint != remote.OwnershipFingerprint {
+			return fail()
+		}
+		// A current global host binding cannot refresh a stale pool enrollment.
+		// Require the exact route destination to be enrolled at that binding.
+		if len(profile.Domains) == 0 || len(profile.Domains) > 1000 {
+			return fail()
+		}
+		matches := 0
+		for _, domain := range profile.Domains {
+			if domain.Host != route.host {
+				continue
+			}
+			if domain.HostBindingSequence != route.hostBindingSequence {
+				return fail()
+			}
+			matches++
+		}
+		if matches != 1 {
 			return fail()
 		}
 		if len(p.Hosts) > len(snapshot.Hosts) {

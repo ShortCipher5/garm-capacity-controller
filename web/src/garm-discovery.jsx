@@ -1,5 +1,8 @@
 import React from "react";
 import { GarmInventoryBrowser } from "./garm-inventory-browser.jsx";
+import { inventoryPoolProviderSummary } from "./garm-inventory-search.js";
+
+const providerSummaryLimit = 20;
 
 export function canEditGarm(snapshot) {
   return snapshot?.settings_available === true && snapshot.writes_enabled === true && snapshot.settings.writes_enabled === true;
@@ -35,9 +38,18 @@ export function GarmSettingsPresentation({ snapshot, children }) {
 // a write review or infer deletion/release from an absent configured pool.
 export function GarmPoolInventory({inventory}) {
   if(!inventory)return <p>Existing-pool inventory is unavailable. No missing pool is recreated.</p>;
+  const providers = inventoryPoolProviderSummary(inventory.pools);
   return <section aria-label="Existing Garm pool inventory">
     <h3>Existing Garm pools</h3>
     <p>Live read-only inventory for configured providers. Discovering a pool does not authorize editing it. Refreshes are observations, not atomic revisions. Owner metadata does not grant access or identify a physical host.</p>
+    {providers.length > 0 && <>
+      <h4>Observed pools by configured provider</h4>
+      <p>Provider-to-host routing is unverified. These counts cover this inventory before display filters and do not show runner usage or host capacity. Disabled does not mean drained.</p>
+      <ul aria-label="Observed pool counts by configured provider">
+        {providers.slice(0, providerSummaryLimit).map(({provider, enabled, disabled}) => <li key={provider}>{provider}: {enabled} enabled · {disabled} disabled</li>)}
+      </ul>
+      {providers.length > providerSummaryLimit && <p>Showing the first {providerSummaryLimit} of {providers.length} observed providers. Use the provider filter below to inspect the others.</p>}
+    </>}
     <GarmInventoryBrowser rows={inventory.pools} kind="pools">{pool=><article key={pool.id}>
       <h4>Pool {pool.id}</h4><p>Provider: {pool.provider_name}</p>
       <p>Owner: {({repository:"Repository",organization:"Organization",enterprise:"Enterprise"})[pool.owner_kind] || "Unknown"}{pool.owner_id ? ` · ${pool.owner_id}` : ""}</p>
