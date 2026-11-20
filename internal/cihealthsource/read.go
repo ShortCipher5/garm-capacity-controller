@@ -15,10 +15,6 @@ var ErrAttemptObservation = errors.New("CI attempt timing observation unavailabl
 
 const attemptReadDeadline = 30 * time.Second
 
-// Observation is one bounded, non-atomic set of reported rows for an exact
-// attempt. Ending pagination does not prove stable or complete job visibility.
-// Conclusion is normalized by the authenticated source; an empty value is
-// unknown. No display names, runner identifiers or URLs are retained here.
 // AttemptSource is the narrow read interface for explicit owner startup
 // composition. An implementation does not confer authorization by itself.
 type AttemptSource interface {
@@ -27,10 +23,12 @@ type AttemptSource interface {
 	ListCIAttemptJobs(context.Context, demandrepair.CIAttempt, int) (demandrepair.CIJobPage, error)
 }
 
+// Observation is one bounded, non-atomic set of reported rows for an exact
+// attempt. Ending pagination does not prove stable or complete job visibility.
+// No display names, runner identifiers, URLs or arbitrary results are retained.
 type Observation struct {
-	Timing     cihealth.Timing
-	Conclusion string
-	facts      cihealth.AttemptFacts
+	Timing cihealth.Timing
+	facts  cihealth.AttemptFacts
 }
 
 // Facts returns an owned copy of validated model inputs for a separate
@@ -148,14 +146,14 @@ func readAttempt(ctx context.Context, source AttemptSource, garmRepo string, run
 			if err != nil || ctx.Err() != nil {
 				return Observation{}, ErrAttemptObservation
 			}
-			return Observation{Timing: out, Conclusion: run.Conclusion, facts: facts}, nil
+			return Observation{Timing: out, facts: facts}, nil
 		}
 	}
 	return Observation{}, ErrAttemptObservation
 }
 
 func sourceClock(status, conclusion string, started, completed *time.Time, at time.Time) cihealth.Clock {
-	clock := cihealth.Clock{ObservedAt: at}
+	clock := cihealth.Clock{ObservedAt: at, Conclusion: sourceConclusion(conclusion)}
 	switch {
 	case status == "skipped" || status == "completed" && conclusion == "skipped":
 		clock.Phase = cihealth.Skipped
@@ -174,4 +172,24 @@ func sourceClock(status, conclusion string, started, completed *time.Time, at ti
 		clock.CompletedAt = *completed
 	}
 	return clock
+}
+
+// sourceConclusion only projects the conclusions admitted by the existing
+// authenticated CI source. An absent result remains unknown even on a record
+// with a terminal phase or duration.
+func sourceConclusion(conclusion string) cihealth.Conclusion {
+	switch conclusion {
+	case "success":
+		return cihealth.ConclusionSuccess
+	case "failure":
+		return cihealth.ConclusionFailure
+	case "cancelled":
+		return cihealth.ConclusionCancelled
+	case "timed_out":
+		return cihealth.ConclusionTimedOut
+	case "neutral", "skipped", "action_required", "stale", "startup_failure":
+		return cihealth.ConclusionOtherTerminal
+	default:
+		return cihealth.ConclusionUnknown
+	}
 }

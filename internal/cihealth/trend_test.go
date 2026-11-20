@@ -134,3 +134,22 @@ func TestTrendRefusesForeignDuplicateOrInvalidEvidenceAtomically(t *testing.T) {
 		})
 	}
 }
+
+func TestTrendUsesExplicitClockConclusionAndRejectsConflicts(t *testing.T) {
+	in := TrendCohort{Scope: trendScopeFixture()}
+	for i, c := range []Conclusion{ConclusionSuccess, ConclusionFailure, ConclusionCancelled, ConclusionTimedOut, ConclusionOtherTerminal, ConclusionUnknown} {
+		a := trendAttemptFixture(int64(i+1), 1, 0)
+		a.Outcome = TrendOutcomeUnknown
+		a.Clock.Conclusion = c
+		in.Attempts = append(in.Attempts, a)
+	}
+	got, err := SummarizeTrend(in)
+	if err != nil || got.Initial.Results != (TrendResultCounts{1, 1, 1, 1, 1, 1}) ||
+		got.Initial.SuccessWall == nil || *got.Initial.SuccessWall != (TrendDurations{Samples: 1}) {
+		t.Fatalf("explicit results did not reach trend: %+v / %v", got, err)
+	}
+	in.Attempts[0].Outcome = TrendOutcomeFailure
+	if got, err := SummarizeTrend(in); err != ErrTrendFacts || got != (TrendSummary{}) {
+		t.Fatalf("contradictory result reached trend: %+v / %v", got, err)
+	}
+}

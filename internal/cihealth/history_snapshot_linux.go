@@ -57,6 +57,8 @@ type HistoryInput struct {
 	Root *os.Root
 	// Initialize publishes the empty store only if the exact slot is absent.
 	// Otherwise an existing valid snapshot is required.
+	// Old snapshots without conclusions remain readable. A binary predating
+	// that optional field will refuse snapshots that contain one.
 	Initialize bool
 }
 
@@ -424,8 +426,10 @@ func (h *History) Cursor(ctx context.Context, scope HistoryScope) (HistoryCursor
 }
 
 // Apply seals a bounded coherent page and its CAS transition as one version.
-// It never merges absent children or infers coverage. I/O failure leaves the
-// handle fenced without publishing its in-memory cursor. ErrHistoryUncertain
+// A replacement cannot lose or contradict a known terminal conclusion on the
+// exact retained attempt, job, or step. It never merges absent children or
+// infers coverage. I/O failure leaves the handle fenced without publishing
+// its in-memory cursor. ErrHistoryUncertain
 // means the durable outcome may have changed and must not be blindly retried.
 // Only the exact most recent accepted transition can be replayed.
 func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next HistoryCursor, page []AttemptFacts, now time.Time) error {
@@ -504,6 +508,8 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 				if leftErr != nil || rightErr != nil || !bytes.Equal(left, right) {
 					return ErrHistoryConflict
 				}
+			} else if !historyPreservesConclusions(old, a) {
+				return ErrHistoryConflict
 			}
 			continue
 		}
@@ -530,6 +536,53 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 	}
 	h.state = pending
 	return nil
+}
+
+// Both attempts have the exact same key and were validated and sorted by
+// historyCopyAttempt. Match child IDs within their parent only. Reject the
+// page, rather than copying old data into a newer observation.
+func historyPreservesConclusions(old, next AttemptFacts) bool {
+	matches := func(a, b Clock) bool {
+		return a.Conclusion == ConclusionUnknown || (a.Conclusion == b.Conclusion && a.Phase == b.Phase &&
+			(a.ObservedAt.IsZero() || (!b.ObservedAt.IsZero() && !b.ObservedAt.Before(a.ObservedAt))))
+	}
+	if !matches(old.Clock, next.Clock) {
+		return false
+	}
+	j := 0
+	for _, job := range old.Jobs {
+		for j < len(next.Jobs) && next.Jobs[j].Key.JobID < job.Key.JobID {
+			j++
+		}
+		if j == len(next.Jobs) || next.Jobs[j].Key != job.Key {
+			if job.Clock.Conclusion != ConclusionUnknown {
+				return false
+			}
+			for _, step := range job.Steps {
+				if step.Clock.Conclusion != ConclusionUnknown {
+					return false
+				}
+			}
+			continue
+		}
+		newJob := next.Jobs[j]
+		if !matches(job.Clock, newJob.Clock) {
+			return false
+		}
+		s := 0
+		for _, step := range job.Steps {
+			if step.Clock.Conclusion == ConclusionUnknown {
+				continue
+			}
+			for s < len(newJob.Steps) && newJob.Steps[s].Key.Number < step.Key.Number {
+				s++
+			}
+			if s == len(newJob.Steps) || newJob.Steps[s].Key != step.Key || !matches(step.Clock, newJob.Steps[s].Clock) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (h *History) Recent(ctx context.Context, s HistoryScope, limit int, now time.Time) ([]AttemptFacts, error) {

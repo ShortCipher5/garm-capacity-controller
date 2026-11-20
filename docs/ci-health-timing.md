@@ -55,6 +55,18 @@ A positive queue sighting is a lower bound, not an exact queue arrival.
 Run creation is not the start time of a rerun. In-flight values are measured at
 the source observation, not at dashboard render time.
 
-This release slice provides timing visibility only. Durable trend history,
-per-test results, and verified per-job CPU, RAM, and disk attribution are separate
-work. No optimization or auto-sizing is enabled by viewing timing.
+CI Health presents source-confirmed results separately from timing for each
+observed run attempt, job, and step. A completed row without a result is
+unknown; a duration alone does not imply success. The view does not expose
+raw source result strings or individual test case outcomes.
+
+This release provides current timing and result visibility only. Durable
+history, comparative trends, per-test results, and verified per-job CPU, RAM,
+and disk attribution are not enabled. Looking at this view never changes runner
+capacity or approves a proposed size.
+
+The optional history snapshot reader accepts older rows with no result field.
+An older binary does not read new snapshots containing results. If history
+publication is enabled in a future release, preserve its data and requalify any
+rollback against the older reader before deploying it; do not erase or
+reinitialize history to get around an incompatible snapshot.

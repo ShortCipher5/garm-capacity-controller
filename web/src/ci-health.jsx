@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from "react";
 import {ciAttemptKey, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
+const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
 const activeAttempt = (a) => a.status === "queued" || a.status === "running";
 
 export function ciHealthNavigationAvailable(enabled, read) {
@@ -33,17 +34,21 @@ function Timing({span, skipped = false}) {
   );
 }
 function Phase({status}) { return <span className="pill">{statuses[status]}</span>; }
+function Result({conclusion}) {
+  return Object.hasOwn(results, conclusion) ? <span>{results[conclusion]}</span> : <span className="muted">Unknown</span>;
+}
 function At({value}) { return <time dateTime={value}>{value.slice(0,19).replace("T", " ")} UTC</time>; }
 
 function StepRows({steps}) {
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th scope="col">Step</th><th scope="col">Status</th><th scope="col">Execution</th><th scope="col">Elapsed when observed</th></tr></thead>
+        <thead><tr><th scope="col">Step</th><th scope="col">Status</th><th scope="col">Result</th><th scope="col">Execution</th><th scope="col">Elapsed when observed</th></tr></thead>
         <tbody>{steps.map((step) => (
           <tr key={step.number}>
             <th scope="row">Step {step.number}</th>
             <td><Phase status={step.status} /></td>
+            <td><Result conclusion={step.conclusion} /></td>
             <td><Timing span={step.execution} skipped={step.status === "skipped"} /></td>
             <td><Timing span={step.elapsed} skipped={step.status === "skipped"} /></td>
           </tr>
@@ -60,6 +65,7 @@ function JobRow({job}) {
         <strong>Job <code>{job.id}</code></strong> <Phase status={job.status} />
       </div>
       <dl className="ci-health-facts">
+        <div><dt>Result</dt><dd><Result conclusion={job.conclusion} /></dd></div>
         {job.status === "queued"
           ? <div><dt>Waiting when observed</dt><dd><Timing span={job.waiting} /></dd></div>
           : <div><dt>Queue wait</dt><dd><Timing span={job.queue} skipped={skip} /></dd></div>}
@@ -82,6 +88,7 @@ function AttemptRow({attempt: a}) {
         <div><dt>Workflow ID</dt><dd><code>{a.workflow_id}</code></dd></div>
         <div><dt>Source ID</dt><dd><code>{a.source}</code></dd></div>
         <div><dt>Last observed</dt><dd><At value={a.observed_at} /></dd></div>
+        <div><dt>Result</dt><dd><Result conclusion={a.conclusion} /></dd></div>
         {a.status === "running"
           ? <div><dt>Attempt elapsed when observed</dt><dd><Timing span={a.elapsed} /></dd></div>
           : <div><dt>Attempt wall time</dt><dd><Timing span={a.wall} skipped={a.status === "skipped"} /></dd></div>}
@@ -190,7 +197,7 @@ export function CIHealthPanel({enabled, read}) {
         <h2 id="ci-health-heading">CI Health</h2>
         <button type="button" disabled={state === "loading"} onClick={refresh}>{snapshot ? "Refresh timing snapshot" : "Load timing snapshot"}</button>
       </div>
-      <p className="muted">Read-only workflow, job and step timing. This view does not show logs, test results, runner utilization or sizing recommendations.</p>
+      <p className="muted">Read-only workflow, job and step timings and outcomes. This view does not show logs, individual test results, runner utilization or sizing recommendations.</p>
       <div role="status">
         {state === "loading" && "Reading CI Health…"}
         {state === "unavailable" && "CI Health timing is unavailable. Try again to read a new snapshot."}

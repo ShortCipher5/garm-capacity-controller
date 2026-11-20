@@ -94,6 +94,39 @@ test("malformed, unsafe, unqualified or oversized timing is rejected", () => {
   }
 });
 
+test("terminal results are optional, exact and consistent with each execution phase", () => {
+  const at = "2026-01-01T00:00:00.123456789Z";
+  const fixture = () => {
+    const view = snapshot(at);
+    const a = view.timing.attempts[0], j = a.jobs[0], s = j.steps[0];
+    a.status = j.status = s.status = "completed";
+    delete j.waiting;
+    return {view, rows: [a, j, s]};
+  };
+  for (let i = 0; i < 3; i++) {
+    const {view, rows} = fixture();
+    assert.doesNotThrow(() => validateCIHealthSnapshot(view)); // old wire
+    for (const exact of ["success", "failure", "cancelled", "timed_out", "other_terminal"]) {
+      rows[i].conclusion = exact;
+      assert.doesNotThrow(() => validateCIHealthSnapshot(view));
+    }
+    for (const other of ["", null, undefined, "Success", "skipped", "<img>", "success\n", 0]) {
+      rows[i].conclusion = other;
+      assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+    }
+    for (const phase of ["queued", "running", "unknown"]) {
+      rows[i].status = phase;
+      rows[i].conclusion = "other_terminal";
+      assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+    }
+    rows[i].status = "skipped";
+    rows[i].conclusion = "success";
+    assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+    rows[i].conclusion = "other_terminal";
+    assert.doesNotThrow(() => validateCIHealthSnapshot(view));
+  }
+});
+
 test("CI Health uses a fixed authenticated GET only after an explicit caller", async () => {
   let calls = 0;
   const session = sessionWith(async (url, options) => {

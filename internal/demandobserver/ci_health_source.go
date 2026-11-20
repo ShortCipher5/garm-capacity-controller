@@ -113,6 +113,13 @@ func (s *CIHealthSource) SourceID() string {
 	return s.source.SourceID()
 }
 
+// LifetimeActive reports only whether this exact opted-in reader has been
+// stopped locally. An exact fresh observation is still required for any view;
+// this method does not check or imply current upstream access by itself.
+func (s *CIHealthSource) LifetimeActive() bool {
+	return s != nil && s.life != nil && s.life.Err() == nil
+}
+
 func (s *CIHealthSource) Repositories() []demandrepair.CIRepository {
 	if s == nil || s.source == nil {
 		return nil

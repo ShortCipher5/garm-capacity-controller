@@ -39,8 +39,9 @@ const (
 )
 
 // TrendAttempt carries just the attempt-level fields of the timing evidence.
-// Outcome is an independently supplied classification of a terminal result;
-// timestamps and Phase never imply success or failure.
+// Clock.Conclusion is the authenticated normalized result when supplied.
+// Outcome optionally carries the existing independent classification; it may
+// not contradict a known clock result. Clocks and phases never infer outcomes.
 type TrendAttempt struct {
 	Key     AttemptKey
 	AsOf    time.Time
@@ -96,12 +97,12 @@ func SummarizeTrend(in TrendCohort) (TrendSummary, error) {
 	for _, row := range in.Attempts {
 		key := row.Key
 		if !validKey(key) || key.Source != in.Scope.Source || key.RepositoryID != in.Scope.RepositoryID || key.WorkflowID != in.Scope.WorkflowID ||
-			seen[key] || !validTime(row.AsOf) || row.Outcome > TrendOutcomeOtherTerminal ||
-			(row.Clock.Phase != Completed && row.Outcome != TrendOutcomeUnknown) {
+			seen[key] || !validTime(row.AsOf) {
 			return TrendSummary{}, ErrTrendFacts
 		}
 		wall, _, ok := measureClock(row.Clock, row.AsOf)
-		if !ok {
+		outcome, consistent := trendOutcome(row)
+		if !ok || !consistent {
 			return TrendSummary{}, ErrTrendFacts
 		}
 		seen[key] = true
@@ -120,7 +121,7 @@ func SummarizeTrend(in TrendCohort) (TrendSummary, error) {
 		case Skipped:
 			bucket.Skipped++
 		case Completed:
-			switch row.Outcome {
+			switch outcome {
 			case TrendOutcomeUnknown:
 				bucket.Results.Unknown++
 			case TrendOutcomeSuccess:
@@ -144,6 +145,30 @@ func SummarizeTrend(in TrendCohort) (TrendSummary, error) {
 	out.Initial.SuccessWall = summarizeTrendDurations(initial)
 	out.Retried.SuccessWall = summarizeTrendDurations(retried)
 	return out, nil
+}
+
+func trendOutcome(row TrendAttempt) (TrendOutcome, bool) {
+	out := TrendOutcomeUnknown
+	switch row.Clock.Conclusion {
+	case ConclusionSuccess:
+		out = TrendOutcomeSuccess
+	case ConclusionFailure:
+		out = TrendOutcomeFailure
+	case ConclusionCancelled:
+		out = TrendOutcomeCanceled
+	case ConclusionTimedOut:
+		out = TrendOutcomeTimedOut
+	case ConclusionOtherTerminal:
+		out = TrendOutcomeOtherTerminal
+	}
+	if row.Outcome == TrendOutcomeUnknown {
+		return out, true
+	}
+	if row.Clock.Phase != Completed || row.Outcome > TrendOutcomeOtherTerminal ||
+		(out != TrendOutcomeUnknown && out != row.Outcome) {
+		return TrendOutcomeUnknown, false
+	}
+	return row.Outcome, true
 }
 
 func summarizeTrendDurations(owned []time.Duration) *TrendDurations {

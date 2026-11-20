@@ -168,7 +168,7 @@ func TestReadAttemptCompletedButUnknownWallAndQueue(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "jobs": []any{j}})
 	})
 	got, err := ReadAttempt(t.Context(), s, scope, runID, 2)
-	if err != nil || got.Conclusion != "success" || got.Timing.Phase != cihealth.Completed ||
+	if err != nil || got.Timing.Conclusion != cihealth.ConclusionSuccess || got.Timing.Phase != cihealth.Completed ||
 		got.Timing.Wall != (cihealth.Span{}) || got.Timing.Active != (cihealth.Span{}) || len(got.Timing.Jobs) != 1 ||
 		got.Timing.Jobs[0].Queue != (cihealth.Span{}) ||
 		got.Timing.Jobs[0].Execution != (cihealth.Span{Basis: cihealth.ObservedEndpoints, Duration: 2 * time.Minute}) {
@@ -208,5 +208,43 @@ func TestReadAttemptRejectsWrongRepositoryOrCrossPageDuplicate(t *testing.T) {
 				t.Fatalf("partial or wrong scope escaped: %+v / %v", got, err)
 			}
 		})
+	}
+}
+
+func TestReadAttemptCarriesOnlyExplicitKnownConclusionsAtEachLevel(t *testing.T) {
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case attemptPath:
+			runResponse(w, repoID, "completed", "cancelled")
+		case attemptPath + "/jobs":
+			j := job(jobID, "completed")
+			j["completed_at"] = "2026-01-02T01:02:00Z"
+			j["conclusion"] = "timed_out"
+			j["steps"] = []map[string]any{
+				{"number": 1, "status": "completed", "conclusion": "failure"},
+				{"number": 2, "status": "skipped", "conclusion": "skipped"},
+				{"number": 3, "status": "skipped"},
+				{"number": 4, "status": "completed", "conclusion": nil, "started_at": j["started_at"], "completed_at": j["started_at"]},
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "jobs": []any{j}})
+		default:
+			t.Error("unexpected request")
+			w.WriteHeader(404)
+		}
+	})
+	got, err := ReadAttempt(t.Context(), s, scope, runID, 2)
+	if err != nil || got.Facts().Clock.Conclusion != cihealth.ConclusionCancelled ||
+		got.Timing.Conclusion != cihealth.ConclusionCancelled || got.Timing.Wall != (cihealth.Span{}) ||
+		len(got.Timing.Jobs) != 1 || got.Timing.Jobs[0].Conclusion != cihealth.ConclusionTimedOut {
+		t.Fatalf("attempt/job result missing or attempt wall inferred: %+v / %v", got, err)
+	}
+	steps := got.Timing.Jobs[0].Steps
+	if len(steps) != 4 ||
+		steps[0].Conclusion != cihealth.ConclusionFailure ||
+		steps[1].Conclusion != cihealth.ConclusionOtherTerminal ||
+		steps[2].Conclusion != cihealth.ConclusionUnknown ||
+		steps[3].Conclusion != cihealth.ConclusionUnknown ||
+		steps[3].Duration != (cihealth.Span{Basis: cihealth.ObservedEndpoints}) {
+		t.Fatalf("step conclusions inferred or lost: %+v", steps)
 	}
 }
