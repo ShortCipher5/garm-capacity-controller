@@ -68,6 +68,22 @@ RUN CGO_ENABLED=0 go test -p 1 ./ancillary-proof && \
 FROM scratch AS ancillary-proof-artifact
 COPY --from=ancillary-proof-build --chmod=0555 /ancillary-proof /ancillary-proof
 
+# Optional build-only export for the separately reviewed read-only pilot command.
+# No ENTRYPOINT, host installation, qualification run or default workflow uses it.
+# Requires the checkout containing cmd/capacity-stock-read-pilot; the normal
+# gateway target does not depend on this stage. Runtime/host compatibility is
+# deliberately not inferred from the build or checksum manifest.
+FROM go-build AS stock-read-pilot-build
+RUN test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64 && \
+    mkdir -p /stock-read-pilot-out && \
+    CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /stock-read-pilot-out/capacity-stock-read-pilot ./cmd/capacity-stock-read-pilot && \
+    cd /stock-read-pilot-out && \
+    sha256sum capacity-stock-read-pilot > SHA256SUMS && \
+    chmod 0555 capacity-stock-read-pilot && chmod 0444 SHA256SUMS
+FROM scratch AS stock-read-pilot-artifact
+COPY --from=stock-read-pilot-build --chmod=0555 /stock-read-pilot-out/capacity-stock-read-pilot /capacity-stock-read-pilot
+COPY --from=stock-read-pilot-build --chmod=0444 /stock-read-pilot-out/SHA256SUMS /SHA256SUMS
+
 FROM debian:bookworm-slim AS runtime-base
 USER 65532:65532
 WORKDIR /

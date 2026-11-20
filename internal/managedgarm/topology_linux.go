@@ -5,8 +5,8 @@ package managedgarm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedboundary"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-var ErrBoundary = errors.New("managed stock GARM boundary not established")
+var ErrBoundary = managedboundary.ErrBoundary
 var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Specification is an installation-time pin set, not evidence. The root-owned

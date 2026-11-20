@@ -1,4 +1,4 @@
-package managedread
+package managedread_test
 
 import (
 	"context"
@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/managedread"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 )
 
@@ -99,7 +100,7 @@ func fingerprint(raw []byte) string { s := sha256.Sum256(raw); return hex.Encode
 func TestActualManagedClientsOverPinnedMTLS(t *testing.T) {
 	serverKey, clientKey, wrongKey, roots := tlsFixture(t)
 	source := &sourceFixture{}
-	h, err := New(source, fingerprint(clientKey.Certificate[0]), []string{"owned"}, []string{poolID}, []string{repoID})
+	h, err := managedread.New(source, fingerprint(clientKey.Certificate[0]), []string{"owned"}, []string{poolID}, []string{repoID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +172,7 @@ func TestRejectBeforeBodyOrSourceAndFreezeScope(t *testing.T) {
 	providers := []string{"owned"}
 	pools := []string{poolID}
 	repos := []string{repoID}
-	h, err := New(source, fingerprint(clientKey.Certificate[0]), providers, pools, repos)
+	h, err := managedread.New(source, fingerprint(clientKey.Certificate[0]), providers, pools, repos)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,25 +228,33 @@ func TestRejectBeforeBodyOrSourceAndFreezeScope(t *testing.T) {
 func TestConfigurationBoundsAndChangedSourceCannotRevive(t *testing.T) {
 	source := &sourceFixture{}
 	for _, leaf := range []string{"", strings.Repeat("A", 64), strings.Repeat("a", 63)} {
-		if _, err := New(source, leaf, []string{"owned"}, nil, nil); err == nil {
+		if _, err := managedread.New(source, leaf, []string{"owned"}, nil, nil); err == nil {
 			t.Fatal("invalid role accepted")
 		}
 	}
 	for _, providers := range [][]string{nil, {"owned", "owned"}, {"/path"}} {
-		if _, err := New(source, strings.Repeat("b", 64), providers, nil, nil); err == nil {
+		if _, err := managedread.New(source, strings.Repeat("b", 64), providers, nil, nil); err == nil {
 			t.Fatal("invalid scope accepted")
 		}
 	}
-	h, err := New(source, strings.Repeat("b", 64), []string{"owned"}, nil, nil)
+	_, clientKey, _, _ := tlsFixture(t)
+	h, err := managedread.New(source, fingerprint(clientKey.Certificate[0]), []string{"owned"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	leaf, _ := x509.ParseCertificate(clientKey.Certificate[0])
+	request := httptest.NewRequest("GET", "/api/v1/instances", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}, VerifiedChains: [][]*x509.Certificate{{leaf}}}
 	source.drift.Store(true)
-	if h.sameSource() {
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
 		t.Fatal("changed source accepted")
 	}
 	source.drift.Store(false)
-	if h.sameSource() {
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || source.reads.Load() != 0 {
 		t.Fatal("revoked source revived")
 	}
 }

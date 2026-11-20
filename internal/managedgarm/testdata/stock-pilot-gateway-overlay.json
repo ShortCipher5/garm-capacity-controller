@@ -1,0 +1,14 @@
+{
+  "managed_inventory_observation": true,
+  "garm": {
+    "managed_proxy": true,
+    "endpoint": "https://127.0.0.1:9445",
+    "proxy_server_key_pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "providers": ["capacity"],
+    "tls": {
+      "ca": "/run/capacity-private/gateway-read-ca.pem",
+      "certificate": "/run/capacity-private/gateway-read-client.pem",
+      "key": "/run/capacity-private/gateway-read-client.key"
+    }
+  }
+}

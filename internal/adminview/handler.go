@@ -89,8 +89,11 @@ type Overview struct {
 	Pools                        []Pool         `json:"pools"`
 	States                       map[string]int `json:"states"`
 	Events                       []Event        `json:"events"`
+
+	ManagedInventoryObservation *ManagedInventoryObservation `json:"managed_inventory_observation,omitempty"`
 }
 type Handler struct {
+	managedInventoryObservation func(time.Time) ManagedInventoryObservation
 	nativeAssets                map[string]NativeAssetsTarget
 	nativeAssetsHash            [32]byte
 	nativeAssetRegistry         *nativeassettransfer.Registry
@@ -334,6 +337,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			fail(http.StatusServiceUnavailable)
 			return
+		}
+		if h.managedInventoryObservation != nil {
+			observation := h.managedInventoryObservation(time.Now().UTC())
+			view.ManagedInventoryObservation = &observation
 		}
 		view.ManagementEnabled = h.management
 		view.GarmManagementAvailable = h.garm != nil
