@@ -63,6 +63,11 @@ func planStockMaximumCycle(samples []scalingPreviewSample, opt stockMaximumCycle
 	// Prefer confirmed increases in existing weighted order over reductions
 	// when truncating. This cannot spend headroom from a proposed reduction.
 	proposed := ProposeStockMaximums(previous.StockScalingSample, current.StockScalingSample, now)
+	disk := filterStockMaximumPreviewDisk(proposed, previous, current, now)
+	if disk.invalidBatch {
+		return fail()
+	}
+	proposed = disk.proposals
 	selected := make([]StockMaximumProposal, 0, min(opt.MaxChanges, len(proposed)))
 	for _, growth := range []bool{true, false} {
 		for _, change := range proposed {
@@ -74,6 +79,10 @@ func planStockMaximumCycle(samples []scalingPreviewSample, opt stockMaximumCycle
 	expiry := previous.expires
 	if current.expires.Before(expiry) {
 		expiry = current.expires
+	}
+	if len(selected) > 0 && selected[0].Suggested > selected[0].Observed &&
+		!disk.growthExpiry.IsZero() && disk.growthExpiry.Before(expiry) {
+		expiry = disk.growthExpiry
 	}
 	return stockMaximumCycle{proposals: selected, expiresAt: expiry}, nil
 }

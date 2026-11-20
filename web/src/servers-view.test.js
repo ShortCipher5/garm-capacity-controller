@@ -99,3 +99,25 @@ test('planner uses saved profile snapshot without claiming counts were saved', a
   assert.doesNotMatch(html,/small planned count/);
  }finally{await server.close()}
 });
+
+test("server card shows only matched runner storage health and hides stale counters", async()=>{
+ const server = await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});
+ try {
+  const {ServerCard}=await server.ssrLoadModule("/src/servers.jsx");
+  const readUsage=async()=>[];
+  const now=Date.now();
+  const iso=offset=>new Date(now+offset).toISOString();
+  const sample={storage_pool:"fixtures",state:"current",observed_at:iso(-1000),expires_at:iso(30000),total_bytes:"123456789",available_bytes:"0",total_inodes:"2000",available_inodes:"12"};
+  const show=overrides=>renderToStaticMarkup(React.createElement(ServerCard,{host:host(overrides),readUsage}));
+  const current=show({runner_disk_health:[sample]});
+  assert.match(current,/Runner disk health/);
+  assert.match(current,/Storage pool fixtures/);
+  assert.match(current,/0 of 123,456,789 bytes available/);
+  assert.match(current,/12 of 2,000 inodes available/);
+  assert.match(current,/not per-runner quotas or a capacity guarantee/);
+  const stale=show({runner_disk_health:[{...sample,observed_at:iso(-30000),expires_at:iso(-1000)}]});
+  assert.match(stale,/Stale: current space and inode availability are unknown/);
+  assert.doesNotMatch(stale,/123,456,789|inodes available/);
+  assert.match(show({}),/Unknown: no verified runner filesystem reading/);
+ } finally {await server.close();}
+});
