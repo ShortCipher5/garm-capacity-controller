@@ -6,14 +6,16 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
 // Validate the closed prelaunch snapshot in memory before a disposable
 // consumer uses any of its bytes. The manifest pin is supplied independently;
-// this does not approve it, observe a topology, or parse/execute the overlay.
+// this does not approve it, observe a topology, or apply the overlay.
 func checkStockPilotPreparedBytes(manifest []byte, expected string, files map[string][]byte, now time.Time) error {
 	names := stockPilotPreparedNames()
 	if len(manifest) == 0 || len(manifest) > 16384 || len(files) != len(names) || !digest.MatchString(expected) || stockBindingDigest(manifest) != expected {
@@ -61,6 +63,9 @@ func checkStockPilotPreparedBytes(manifest []byte, expected string, files map[st
 	if e != nil || seen[prepared.ServerSPKI] || stockBindingDigest(server.RawSubjectPublicKeyInfo) != prepared.ServerSPKI {
 		return ErrBoundary
 	}
+	if checkStockPilotGatewayOverlay(files["gateway-garm-overlay.json"], prepared.ServerSPKI) != nil {
+		return ErrBoundary
+	}
 	launch := files["stock-launch.json"]
 	var proposed stockPilotLaunchDescriptor
 	if !stockBindingJSON(launch, &proposed) || !reflect.DeepEqual(proposed, stockPilotFixtureStockLaunch()) {
@@ -95,6 +100,11 @@ func TestStockPilotPreparedBytesRequireExactCommitments(t *testing.T) {
 		t.Fatal("synthetic TLS leaf unavailable")
 	}
 	m.ServerSPKI = stockBindingDigest(server.RawSubjectPublicKeyInfo)
+	overlay, e := os.ReadFile("testdata/stock-pilot-gateway-overlay.json")
+	if e != nil {
+		t.Fatal("synthetic gateway overlay unavailable")
+	}
+	files["gateway-garm-overlay.json"] = []byte(strings.Replace(string(overlay), strings.Repeat("a", 64), m.ServerSPKI, 1))
 	// Raw file identity differs from the canonical semantic credential hash.
 	files["bootstrap-user.json"] = append([]byte(" \n"), boot[4]...)
 	files["stock-launch.json"], _ = json.Marshal(stockPilotFixtureStockLaunch())
@@ -144,6 +154,36 @@ func TestStockPilotPreparedBytesRequireExactCommitments(t *testing.T) {
 		t.Fatal("raw credential hash substituted for canonical commitment")
 	}
 	m.Review.CredentialDigest = stockBindingDigest(boot[4])
+	originalOverlay := files["gateway-garm-overlay.json"]
+	for name, mut := range map[string]func(string) string{
+		"disabled observation": func(s string) string {
+			return strings.Replace(s, `"managed_inventory_observation": true`, `"managed_inventory_observation": false`, 1)
+		},
+		"alternate origin": func(s string) string { return strings.Replace(s, "127.0.0.1:9445", "127.0.0.2:9445", 1) },
+		"wrong pin":        func(s string) string { return strings.Replace(s, m.ServerSPKI, strings.Repeat("b", 64), 1) },
+		"static token": func(s string) string {
+			return strings.Replace(s, `"garm": {`, `"garm": {"token_file": "/unreviewed",`, 1)
+		},
+		"alternate TLS key":  func(s string) string { return strings.Replace(s, "gateway-read-client.key", "unreviewed.key", 1) },
+		"different provider": func(s string) string { return strings.Replace(s, `"capacity"`, `"outside"`, 1) },
+		"duplicate member": func(s string) string {
+			return strings.Replace(s, `"managed_proxy": true`, `"managed_proxy": false, "managed_proxy": true`, 1)
+		},
+		"writer configuration": func(s string) string { return strings.Replace(s, `"garm": {`, `"allocator_loop": {}, "garm": {`, 1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := mut(string(originalOverlay))
+			if changed == string(originalOverlay) {
+				t.Fatal("mutation not applied")
+			}
+			files["gateway-garm-overlay.json"] = []byte(changed)
+			b, h := seal()
+			if checkStockPilotPreparedBytes(b, h, files, now) == nil {
+				t.Fatal("unsafe overlay accepted with all hashes recomputed")
+			}
+		})
+	}
+	files["gateway-garm-overlay.json"] = originalOverlay
 	changed := stockPilotFixtureStockLaunch()
 	changed.Network = "host"
 	files["stock-launch.json"], _ = json.Marshal(changed)
