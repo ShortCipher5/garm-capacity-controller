@@ -122,7 +122,10 @@ export function DiscoveryResultView({ result }) {
         <p className="drain-warning" data-unmanaged={unmanaged}>{unmanaged} unmanaged guest(s) observed without runner-controller attribution: the shared limit may not cover them.</p>
       )}
       <h4>Suggested budget — advisory only, never applied</h4>
-      <p className="muted">The suggestion leaves system headroom and budgets separately for observed guests. Disk also accounts for used space and, when selected, the storage pool. These are estimates, not measurements of free capacity.</p>
+      <p className="muted">Budget suggestions leave system headroom and account for observed guests. They are estimates, not measurements of free capacity.</p>
+      {guidance.budget.disk_mib === undefined && (
+        <p className="muted">No disk budget was suggested. Review the runner storage pool and discovery warnings before entering any manual budget.</p>
+      )}
       <div className="table-wrap">
         <table aria-label="Workload-aware suggested budget">
           <thead><tr><th>Resource</th><th>Host system reserve</th><th>Suggested runner budget</th></tr></thead>
