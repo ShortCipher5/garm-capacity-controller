@@ -21,6 +21,9 @@ type RetirementConfiguration struct {
 	Owners   []Configuration
 	Interval time.Duration
 }
+
+const retirementCycleTimeout = 2 * time.Minute
+
 type RetirementCycle struct {
 	Examined, AwaitingEvidence, OutsideScope, OperationsCompleted, Unresolved int
 	RetainedDiagnosticsAvailable, RetainedDiagnosticsUnavailable              int
@@ -73,6 +76,30 @@ func (s *RetirementService) Latest() RetirementStatus {
 	return s.status
 }
 
+// LatestWithFreshness is a process-local diagnostic only. The window accounts
+// for both the configured delay after a cycle and the next cycle's deadline.
+// It never says whether the worker is running or supplies release evidence.
+func (s *RetirementService) LatestWithFreshness() (RetirementStatus, string) {
+	status := s.Latest()
+	if s == nil {
+		return status, "no_cycle"
+	}
+	return status, retirementFreshness(status.At, time.Now().UTC(), s.interval)
+}
+
+func retirementFreshness(at, now time.Time, interval time.Duration) string {
+	if at.IsZero() {
+		return "no_cycle"
+	}
+	if now.IsZero() || at.After(now) {
+		return "clock_invalid"
+	}
+	if !now.Before(at.Add(interval + retirementCycleTimeout)) {
+		return "stale"
+	}
+	return "within_cycle_window"
+}
+
 // Cycle's cursor is fairness, not authority. Restart begins from the first row;
 // all mutation/recovery decisions remain in permanent canonical claims/receipts.
 func (s *RetirementService) Cycle(ctx context.Context) (result RetirementCycle, err error) {
@@ -93,7 +120,7 @@ func (s *RetirementService) Cycle(ctx context.Context) (result RetirementCycle, 
 		s.status = RetirementStatus{time.Now().UTC(), result, err != nil || result.Unresolved > 0}
 		s.statusMu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, retirementCycleTimeout)
 	defer cancel()
 	rows, e := s.store.NativeRunnerBindings(ctx, s.after, 64)
 	if e != nil {

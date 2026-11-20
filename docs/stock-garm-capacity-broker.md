@@ -158,3 +158,67 @@ The existing `Stock`/grant-cycle path ignores these new advisory-only edges.
 Only `ReadPlan`/advisory projections opt in. No setting, grant, charge, reservation
 or physical runner is mutated, and a proposed idle/job correlation is not proof
 that GitHub assigned that job. Disabled pools still have zero new/warm eligibility.
+
+### Offline stock maximum proposals
+
+`brokerinput.SampleStockScaling` can compare the canonical, weighted stock
+broker's assigned demand with observed GARM maximums. The existing cap
+reconciler still only reduces a maximum to saved policy; this separate pure
+comparison has no runtime caller and does not change a setting.
+
+`ProposeStockMaximums` requires two non-overlapping, still-fresh observations
+separated by at least 15 seconds, with the same source, policy, pool settings
+and proposal direction. Each suggestion is at most one slot. Growth follows
+the existing weighted assignment order, bounded by the enrolled pool and
+repository limits and the scoped aggregate runner budget. A pending decrease
+never funds a simultaneous increase; existing live maxima and durable charges
+still consume the comparison's headroom. Missing scope or a zero maximum on
+an enabled pool suppresses proposals.
+
+A decrease preserves observed minimum idle, configured warm-idle policy and all
+charged slots, plus one spare where permitted. Unmatched queue demand prevents
+decreases. This is hysteresis for advice, not a durable controller cooldown,
+physical admission boundary, assurance of global inventory completeness, or
+evidence that a runner can be retired.
+
+Only this offline scaling comparison matches existing supply oldest-job-first
+(equal timestamps use job ID), while retaining augmenting maximum-cardinality
+matching. Existing stock and grant-cycle behavior is unchanged.
+
+The production branch exposes this comparison only if
+`allocator_advisory.stock_maximum_preview` is explicitly enabled under the
+existing authenticated, managed read-only advisory, with a 15–45 second
+interval so two one-minute samples can overlap in freshness. Its optional
+`stock_maximum_preview` field on the allocator plan reports only state, expiry,
+and proposed pool/repository/current/suggested maximums. No second collection
+or timer is started. A failed comparison clears its prior evidence, while the
+ordinary advisory plan remains available if its own checks pass.
+
+High, stale, missing or truncated pressure evidence vetoes the entire
+optional maximum preview (including decreases); it cannot create a suggestion.
+Partial low samples do not establish physical headroom. Both participating
+samples must still be fresh, and a cached suggestion disappears when either
+sample's evidence expires.
+
+### Optional normal-pool minimum-idle preview
+
+Separately from the maximum preview, `allocator_advisory.stock_idle_preview`
+is off by default. When explicitly enabled, it uses the same authenticated
+read-only allocator observation and response, not another endpoint, poller or
+credential. The preview is bounded to eight repositories and eight pools, at
+the existing advisory interval of 15–45 seconds.
+
+A suggestion lowers observed minimum idle by just one, never below configured
+`WarmIdle`, and leaves the maximum unchanged. It requires two fresh captures
+at least 15 seconds apart for the same enabled, enrolled pool and unchanged
+scope and settings. Both captures must show visible idle in that pool with
+no creating or unknown supply. Scoped ambiguous or locked demand suppresses
+advice, as does any demand belonging or eligible to the target pool. Identified
+demand eligible only to another repository's pool does not by itself veto
+the suggestion.
+
+This is a comparison of classified, observed repository demand. It does not
+cover webhooks GARM missed, verify the provider's physical destination, change
+settings, retire a runner or establish that physical capacity can be reused.
+The existing dashboard hides the suggestion when its evidence expires or the
+saved comparison cannot be matched.

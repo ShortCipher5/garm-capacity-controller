@@ -67,3 +67,30 @@ test("provider display filter has an explicit stable accessible name",async()=>{
  const {GarmInventoryBrowser}=await server.ssrLoadModule('/src/garm-inventory-browser.jsx');const html=renderToStaticMarkup(React.createElement(GarmInventoryBrowser,{rows:[],kind:'pools',children:()=>null}));assert.match(html,/<select aria-label="Filter pools provider"/);
  }finally{await server.close()}
 });
+
+test("pool provider summary counts the whole observed scope, not hosts or paginated rows", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  try {
+    const { GarmPoolInventory } = await server.ssrLoadModule("/src/garm-discovery.jsx");
+    const pool = (id, provider_name, enabled) => ({ id, provider_name, enabled, configured: false, max_runners: 4, min_idle_runners: 1, priority: 0, tags: [] });
+    const pools = [
+      ...Array.from({length: 100}, (_, i) => pool(`pool-${i}`, "provider-a", true)),
+      pool("beyond-page-a", "provider-a", false),
+      pool("beyond-page-b", "provider-b", false),
+    ];
+    const render = (pools) => renderToStaticMarkup(React.createElement(GarmPoolInventory, { inventory: { pools, missing_configured_pool_ids: ["not-observed"] } }));
+    const html = render(pools);
+    assert.match(html, /Observed pools by configured provider/);
+    assert.match(html, /Provider-to-host routing is unverified/);
+    assert.match(html, /provider-a: 100 enabled · 1 disabled/);
+    assert.match(html, /provider-b: 0 enabled · 1 disabled/);
+    assert.doesNotMatch(html, /Pool beyond-page|not-observed: \d|<form|type="submit"/);
+    const many = render(Array.from({length: 21}, (_, i) => pool(`distinct-${i}`, `provider-${String(i).padStart(2, "0")}`, true)));
+    assert.match(many, /Showing the first 20 of 21 observed providers/);
+    assert.doesNotMatch(many, /<li>provider-20:/);
+    assert.match(many, /<option value="provider-20">/);
+    const empty = render([]);
+    assert.match(empty, /No pools observed in this provider scope/);
+    assert.doesNotMatch(empty, /Observed pools by configured provider/);
+  } finally { await server.close(); }
+});

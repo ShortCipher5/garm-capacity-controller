@@ -93,7 +93,7 @@ func TestGarmJournalLargeHistoryPreservesStatusAndNarrowedScopePrivacy(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > 2<<20 || !view.HistoryTruncated || len(view.History) == 0 || len(view.History) >= 25 || !view.WriteBlocked || view.Pending == nil || view.History[0].State != "unknown" {
+	if len(encoded) > 2<<20 || !view.HistoryTruncated || len(view.History) == 0 || len(view.History) >= 25 || !view.WriteBlocked || view.Pending == nil || view.Pending.State != "unknown" || view.History[0].State != "unknown" {
 		t.Fatalf("large history hid journal safety status: bytes=%d history=%d view=%+v", len(encoded), len(view.History), view)
 	}
 	if view.Pending.ResolutionAvailable {
@@ -101,7 +101,7 @@ func TestGarmJournalLargeHistoryPreservesStatusAndNarrowedScopePrivacy(t *testin
 	}
 	remote.unavailable = true
 	view, err = adapter.Snapshot(ctx)
-	if err != nil || !view.WriteBlocked || view.SettingsAvailable || view.Pending == nil {
+	if err != nil || !view.WriteBlocked || view.SettingsAvailable || view.Pending == nil || view.Pending.State != "unknown" {
 		t.Fatal("upstream outage hid durable block")
 	}
 	remote.unavailable = false
@@ -116,7 +116,7 @@ func TestGarmJournalLargeHistoryPreservesStatusAndNarrowedScopePrivacy(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.History) != 0 || len(view.Settings.Pools) != 0 || !view.WriteBlocked || view.Pending == nil || view.Pending.Target != "outside current scope" {
+	if len(view.History) != 0 || len(view.Settings.Pools) != 0 || !view.WriteBlocked || view.Pending == nil || view.Pending.State != "unknown" || view.Pending.Target != "outside current scope" {
 		t.Fatal("narrowed scope exposed former settings or lost global pending block")
 	}
 }

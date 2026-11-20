@@ -52,7 +52,7 @@ func (j *journalledGarm) Snapshot(ctx context.Context) (GarmOverview, error) {
 			if (pending.Kind == "pool" && !j.pools[target]) || (pending.Kind == "repository" && !j.repositories[target]) {
 				target = "outside current scope"
 			}
-			view.Pending = &GarmPending{RequestID: pending.RequestID, Kind: pending.Kind, Target: target, StartedAt: at, ResolutionAvailable: j.writes && j.pools[pending.Target] && j.manager.CanResolvePoolIntent(pending)}
+			view.Pending = &GarmPending{State: pendingDisplayState(pending.State), RequestID: pending.RequestID, Kind: pending.Kind, Target: target, StartedAt: at, ResolutionAvailable: j.writes && j.pools[pending.Target] && j.manager.CanResolvePoolIntent(pending)}
 		}
 		return nil
 	}

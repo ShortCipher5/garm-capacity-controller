@@ -36,7 +36,7 @@ func TestAdvisoryLoopReadOnlyCacheOwnershipAndClose(t *testing.T) {
 			return ReadPlan{}, ctx.Err()
 		}
 		return ReadPlan{ExpiresAt: time.Now().Add(time.Minute), Pools: []ReadPlanPool{{Pool: "p", Additional: 2}}}, nil
-	}, time.Hour)
+	}, time.Hour, 12*time.Second)
 	<-entered
 	if _, err := s.ReadPlan(context.Background()); err == nil {
 		t.Fatal("inflight fabricated plan")
@@ -69,7 +69,7 @@ func TestAdvisoryLoopCancelsInflightAndRejectsExpired(t *testing.T) {
 		close(entered)
 		<-ctx.Done()
 		return ReadPlan{}, ctx.Err()
-	}, time.Hour)
+	}, time.Hour, 12*time.Second)
 	<-entered
 	s.Close()
 	if _, err := s.ReadPlan(context.Background()); err == nil {
@@ -102,7 +102,7 @@ func TestAdvisoryFailureClearsPreviousCache(t *testing.T) {
 		}
 		<-ctx.Done()
 		return ReadPlan{}, ctx.Err()
-	}, time.Millisecond)
+	}, time.Millisecond, 12*time.Second)
 	defer s.Close()
 	<-first
 	<-second
@@ -201,5 +201,30 @@ func TestAdvisoryPressureCannotEnableOrOverfillAlternative(t *testing.T) {
 				t.Fatalf("invalid alternative %+v %v", plan, err)
 			}
 		})
+	}
+}
+
+// Fake reader ignores its own deadline and returns advice with a future
+// expiry. The real cache must still treat the observation as unavailable.
+func TestAdvisoryLoopRejectsLateSuccessfulPoll(t *testing.T) {
+	next := make(chan struct{})
+	calls := 0
+	s := startAdvisoryLoop(context.Background(), func(ctx context.Context) (ReadPlan, error) {
+		calls++
+		if calls == 2 {
+			close(next)
+		}
+		<-ctx.Done()
+		return ReadPlan{ExpiresAt: time.Now().Add(time.Minute)}, nil
+	}, time.Millisecond, time.Millisecond)
+	defer s.Close()
+	select {
+	case <-next:
+	case <-time.After(time.Second):
+		t.Fatal("next poll did not start")
+	}
+	plan, err := s.ReadPlan(context.Background())
+	if err == nil || PlanFailureReason(err) != "observation_unavailable" || !plan.ExpiresAt.IsZero() {
+		t.Fatalf("late source result was not discarded: %+v %v", plan, err)
 	}
 }

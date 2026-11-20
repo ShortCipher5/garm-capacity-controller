@@ -144,3 +144,7 @@ contract, not a production recovery capability.
 Normal service startup now requires an existing schema2 journal and an independently pinned expected lineage. A missing/empty/different journal cannot silently bootstrap a new history. Explicit new-only initialization is first-install setup, never failure recovery. Schema1 and orphaned sidecars are not auto-adopted.
 
 Matching lineage still does not prove that a same-lineage raw historical copy contains the latest accepted requests. No supported operation activates such a copy. Do not replace the journal or expected lineage to bypass a pending/unknown operation; external request-completion and durable-history fences remain mandatory. A later matching settings GET cannot supply that proof.
+
+## Read-only restart diagnostics
+
+The authenticated overview can report the existing durable status as `pending` or `unknown`. A pending intent alone does not prove dispatch or a running writer. The dashboard distinguishes those recorded states from browser-session uncertainty and labels older results as historical when a refresh fails. Older gateways that omit the state remain blocked when they report a pending write, but the dashboard does not infer its classification from separate history. No additional journal query, retry, or release is performed.

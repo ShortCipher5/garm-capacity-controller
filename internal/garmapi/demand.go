@@ -51,6 +51,7 @@ type ObservedRunner struct {
 }
 type DemandObservation struct {
 	sourceIdentity string
+	idleScope      *repositoryIdleScope
 	Runners        []ObservedRunner `json:"runners"`
 	StartedAt      time.Time        `json:"started_at"`
 	FinishedAt     time.Time        `json:"finished_at"`
@@ -87,7 +88,7 @@ func (c *DemandClient) Close() {
 		c.discovery.Close()
 	}
 }
-func (c *DemandClient) jobs(ctx context.Context) ([]QueuedJob, error) {
+func (c *DemandClient) jobs(ctx context.Context, idleBlocked map[string]bool) ([]QueuedJob, error) {
 	m := c.discovery.management
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/jobs", nil)
 	if err != nil {
@@ -127,6 +128,15 @@ func (c *DemandClient) jobs(ctx context.Context) ([]QueuedJob, error) {
 				return nil, ErrManagement
 			}
 			continue
+		}
+		// Opt-in assessment sees only positively scoped queued rows. It must
+		// not expose the existence of foreign or absent-repository jobs.
+		if idleBlocked != nil {
+			if repo, err := textField(f, "repo_id", false); err == nil && c.repositories[repo] {
+				if scale, err := textField(f, "scaleset_job_id", false); err != nil || scale != "" {
+					idleBlocked[repo] = true
+				}
+			}
 		}
 		scale, e := textField(f, "scaleset_job_id", false)
 		if e != nil {
@@ -213,6 +223,10 @@ func scopedPools(p PoolDiscovery, repos map[string]bool) []DiscoveredPool {
 // It does not subtract supply from jobs: runners are not bound to a specific job,
 // and doing that per matching pool would double-count/double-subtract shared demand.
 func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
+	return c.observe(ctx, false)
+}
+
+func (c *DemandClient) observe(ctx context.Context, assessIdle bool) (DemandObservation, error) {
 	if c == nil || c.discovery == nil || ctx == nil || ctx.Err() != nil {
 		return DemandObservation{}, ErrManagement
 	}
@@ -223,7 +237,14 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 	if e != nil {
 		return DemandObservation{}, ErrManagement
 	}
-	jobs, e := c.jobs(ctx)
+	var idleBlocked map[string]bool
+	if assessIdle {
+		idleBlocked = make(map[string]bool, len(c.repositories))
+		for repo := range c.repositories {
+			idleBlocked[repo] = false
+		}
+	}
+	jobs, e := c.jobs(ctx, idleBlocked)
 	if e != nil {
 		return DemandObservation{}, ErrManagement
 	}
@@ -327,5 +348,8 @@ func (c *DemandClient) Observe(ctx context.Context) (DemandObservation, error) {
 	}
 	digest := sha256.Sum256(canonical)
 	out.Digest = hex.EncodeToString(digest[:])
+	if assessIdle {
+		out.idleScope = assessRepositoryIdleScope(out, idleBlocked)
+	}
 	return out, nil
 }

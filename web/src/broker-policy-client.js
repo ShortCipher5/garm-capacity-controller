@@ -4,11 +4,20 @@ const count = v => Number.isSafeInteger(v) && v >= 0 && v <= 1000000;
 export function validateBrokerPolicy(p) {
   if (!p || !Number.isSafeInteger(p.revision) || p.revision < 0 || p.revision >= Number.MAX_SAFE_INTEGER || !Array.isArray(p.repositories) || p.repositories.length > 1000) throw new Error('Invalid advisory policy.');
   const repos = new Set(), pools = new Set();
-  for (const r of p.repositories) {
-    if (!uuid(r.id) || repos.has(r.id) || !Number.isInteger(r.weight) || r.weight < 1 || r.weight > 4294967295 || !count(r.max_runners) || !Array.isArray(r.pools)) throw new Error('Invalid repository policy.');
+  for (const [i, r] of p.repositories.entries()) {
+    const at = `Invalid repository policy (row ${i + 1})`;
+    if (!r || !uuid(r.id)) throw new Error(`${at}: enter a nonzero lowercase GARM repository UUID.`);
+    if (repos.has(r.id)) throw new Error(`${at}: repository UUID is already used in this draft.`);
+    if (!Number.isInteger(r.weight) || r.weight < 1 || r.weight > 4294967295) throw new Error(`${at}: fairness weight must be a whole number from 1 to 4294967295.`);
+    if (!count(r.max_runners)) throw new Error(`${at}: runner cap must be a whole number from 0 to 1000000.`);
+    if (!Array.isArray(r.pools)) throw new Error(`${at}: pool list is missing or invalid.`);
     repos.add(r.id);
-    for (const pool of r.pools) {
-      if (!uuid(pool.id) || pools.has(pool.id) || !count(pool.max_runners) || pool.max_runners > r.max_runners || !count(pool.warm_idle) || pool.warm_idle > pool.max_runners) throw new Error('Pool IDs must be unique; idle target must fit pool cap, and pool cap must fit repository cap.');
+    for (const [j, pool] of r.pools.entries()) {
+      const poolAt = `Repository row ${i + 1}, pool row ${j + 1}`;
+      if (!pool || !uuid(pool.id)) throw new Error(`${poolAt}: enter a nonzero lowercase GARM pool UUID.`);
+      if (pools.has(pool.id)) throw new Error(`${poolAt}: pool UUID is already used in this draft.`);
+      if (!count(pool.max_runners) || pool.max_runners > r.max_runners) throw new Error(`${poolAt}: runner cap must be a whole number from zero to the repository cap.`);
+      if (!count(pool.warm_idle) || pool.warm_idle > pool.max_runners) throw new Error(`${poolAt}: warm idle target must be a whole number from zero to the pool cap.`);
       pools.add(pool.id);
       if (pools.size > 1000) throw new Error('Too many pools.');
     }
