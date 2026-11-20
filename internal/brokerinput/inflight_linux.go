@@ -2,12 +2,15 @@ package brokerinput
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 )
+
+var errVisibleStockInventoryUnmatched = errors.New("scoped stock runner inventory could not be matched")
 
 // PlanStock reads coherent real ledger/policy input and deduplicates scoped stock
 // identities before planning. It never grants, revokes, mutates GARM or releases
@@ -32,6 +35,13 @@ func runnerKey(provider, pool, name string) string {
 	return strconv.Itoa(len(provider)) + ":" + provider + strconv.Itoa(len(pool)) + ":" + pool + name
 }
 func inflight(snapshot *capacitybroker.Snapshot, state admission.BrokerGrantState, observation garmapi.DemandObservation) error {
+	if err := matchStockInflight(snapshot, state, observation); err != nil {
+		return capacitybroker.ErrSnapshot
+	}
+	return nil
+}
+
+func matchStockInflight(snapshot *capacitybroker.Snapshot, state admission.BrokerGrantState, observation garmapi.DemandObservation) error {
 	if len(observation.Runners) > 10000 {
 		return capacitybroker.ErrSnapshot
 	}
@@ -111,6 +121,20 @@ func inflight(snapshot *capacitybroker.Snapshot, state admission.BrokerGrantStat
 	}
 	// Unaccounted stock identities cannot be covered by unrelated grant charges.
 	if len(rows) != 0 {
+		// The read-only diagnostic can name the check only when it also
+		// failed for a pool already shown by the saved-policy preview. A
+		// source-scoped but undisplayed pool never supplies this reason.
+		unmatchedPools := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			unmatchedPools[row.PoolID] = true
+		}
+		for _, repo := range state.Policy.Repositories {
+			for _, pool := range repo.Pools {
+				if unmatchedPools[pool.ID] {
+					return errVisibleStockInventoryUnmatched
+				}
+			}
+		}
 		return capacitybroker.ErrSnapshot
 	}
 	// Legacy/unidentified startup reservations cannot be deduplicated safely.

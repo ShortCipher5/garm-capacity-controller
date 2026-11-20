@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -94,6 +95,10 @@ func publicCycleTransport(t *testing.T, managed bool) {
 		t.Fatal(err)
 	}
 	poolRow := map[string]any{"id": pool, "repo_id": repo, "provider_name": "capacity", "generation": 1, "max_runners": 4, "enabled": true, "tags": []map[string]string{{"name": "linux"}}, "flavor": "small", "image": "image", "os_arch": "amd64", "os_type": "linux"}
+	const undisplayedPool = "faaf324b-5f76-4c69-b296-af33ecdc6cc0"
+	const unmatchedRow = "d0faae03-8f65-4a26-9673-05917c7fd819"
+	const unmatchedName = "unmatched-fixture-runner"
+	var shownUnmatched, undisplayedUnmatched atomic.Bool
 	var drift atomic.Bool
 	var reductions atomic.Int32
 	var reductionFailure atomic.Bool
@@ -139,13 +144,25 @@ func publicCycleTransport(t *testing.T, managed bool) {
 		}
 		switch r.URL.Path {
 		case "/api/v1/pools":
-			json.NewEncoder(w).Encode([]any{poolRow})
+			rows := []any{poolRow}
+			if undisplayedUnmatched.Load() {
+				extra := map[string]any{"id": undisplayedPool, "repo_id": repo, "provider_name": "capacity", "generation": 1, "max_runners": 2, "enabled": true}
+				rows = append(rows, extra)
+			}
+			json.NewEncoder(w).Encode(rows)
 		case "/api/v1/pools/" + pool:
 			json.NewEncoder(w).Encode(poolRow)
 		case "/api/v1/jobs":
 			json.NewEncoder(w).Encode([]map[string]any{{"workflow_job_id": 1, "repo_id": repo, "status": "queued", "labels": []string{"linux"}, "created_at": time.Now().Add(-time.Minute), "locked_by": "00000000-0000-0000-0000-000000000000"}})
 		case "/api/v1/instances":
-			json.NewEncoder(w).Encode([]any{})
+			rows := []any{}
+			if shownUnmatched.Load() {
+				rows = append(rows, map[string]any{"id": unmatchedRow, "name": unmatchedName, "pool_id": pool, "provider_name": "capacity", "status": "pending_create", "runner_status": "pending"})
+			}
+			if undisplayedUnmatched.Load() {
+				rows = append(rows, map[string]any{"id": "fd8a9b9b-13e7-4076-a9f5-c556a9c9ce33", "name": "undisplayed-fixture-runner", "pool_id": undisplayedPool, "provider_name": "capacity", "status": "pending_create", "runner_status": "pending"})
+			}
+			json.NewEncoder(w).Encode(rows)
 		default:
 			t.Error("unexpected stock path", r.URL.Path)
 			w.WriteHeader(404)
@@ -252,8 +269,25 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	if err != nil || chargedAfter.Sequence != chargedBefore.Sequence || len(chargedAfter.Grants) != 0 {
 		t.Fatal("advisory wrote ledger", err)
 	}
+	for _, tc := range []struct {
+		shown, undisplayed bool
+		reason             string
+	}{
+		{true, false, "stock_inventory_accounting_unavailable"},
+		{true, true, "stock_inventory_accounting_unavailable"},
+		{false, true, "enrollment_or_evidence_unavailable"},
+	} {
+		shownUnmatched.Store(tc.shown)
+		undisplayedUnmatched.Store(tc.undisplayed)
+		got, err := previewService.ReadPlan(ctx)
+		if !errors.Is(err, capacitybroker.ErrSnapshot) || err.Error() != tc.reason || PlanFailureReason(err) != tc.reason || got.Pools != nil || got.StockMaximumPreview != nil {
+			t.Fatalf("unexpected unmatched stock failure: %+v: %+v, %v", tc, got, err)
+		}
+	}
+	shownUnmatched.Store(false)
+	undisplayedUnmatched.Store(false)
 	poolRow["flavor"] = "changed-outside-controller"
-	if _, err := previewService.ReadPlan(ctx); err == nil {
+	if _, err := previewService.ReadPlan(ctx); PlanFailureReason(err) != "enrollment_or_evidence_unavailable" {
 		t.Fatal("drifted pool ownership produced a plan")
 	}
 	poolRow["flavor"] = "small"
@@ -300,6 +334,40 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	final, err = store.ReadBrokerGrantState(ctx)
 	if err != nil || len(final.Grants) != 1 || final.Allocated.Global.Runners != 1 {
 		t.Fatal("service duplicated grants", err)
+	}
+	// Deliberately interleave a real policy commit between the two production
+	// read phases. The fixture has a valid scoped TLS capture and the actual
+	// matching check returned the specific sentinel, but its scope is stale
+	// when the same finalizer used by ReadPlan performs the final SQLite read.
+	shownUnmatched.Store(true)
+	matchedCapture, err := source.Observe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shownUnmatched.Store(false)
+	captured, captureCharges, err := store.ReadBrokerPlanningState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureOpt := opt
+	captureOpt.Now = time.Now()
+	identity := source.SourceIdentity()
+	if _, _, err = enrolledPlanningSnapshotWithReadiness(captured, captureCharges, matchedCapture, identity, captureOpt); err != errVisibleStockInventoryUnmatched {
+		t.Fatalf("fixture did not hit the scoped match gate: %v", err)
+	}
+	matchErr := err
+	if reason := PlanFailureReason(service.reader.finalizeEnrollmentFailure(ctx, matchErr, captured, matchedCapture, identity, opt.MaxAge)); reason != "stock_inventory_accounting_unavailable" {
+		t.Fatalf("stable scoped diagnostic: %s", reason)
+	}
+	if err := store.ReplaceBrokerPolicy(ctx, captured.Policy); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || !current.Ready || current.Policy.Revision != captured.Policy.Revision+1 || current.Sequence <= captured.Sequence {
+		t.Fatalf("fixture did not advance the ready capture's revision: %+v, %v", current, err)
+	}
+	if reason := PlanFailureReason(service.reader.finalizeEnrollmentFailure(ctx, matchErr, captured, matchedCapture, identity, opt.MaxAge)); reason != "enrollment_or_evidence_unavailable" {
+		t.Fatalf("superseded capture exposed a scoped diagnostic: %s", reason)
 	}
 
 	if managed {
