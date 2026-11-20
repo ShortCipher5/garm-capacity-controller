@@ -7,12 +7,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -155,7 +157,18 @@ func TestStockPilotDedicatedRolesAndRealLoopbackReadProbe(t *testing.T) {
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: time.Second, ErrorLog: log.New(io.Discard, "", 0)}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(tls.NewListener(listener, material.tls)) }()
-	t.Cleanup(func() { server.Close(); <-done })
+	joined := false
+	t.Cleanup(func() {
+		if !joined {
+			_ = server.Close()
+			_ = listener.Close()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Error("disposable TLS server did not join")
+			}
+		}
+	})
 	good := stockPilotProbeClient(t, roles, roles.clientPEM, roles.clientKey, material.review.ServerSHA256)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -192,5 +205,31 @@ func TestStockPilotDedicatedRolesAndRealLoopbackReadProbe(t *testing.T) {
 	}
 	if stockPilotProbeReads(ctx, good, strings.Repeat("f", 64), source.ControllerID()) == nil {
 		t.Fatal("wrong provenance accepted")
+	}
+
+	// This witnesses local synthetic endpoint teardown only. It does not
+	// construct a protected owner or report namespace/lifecycle attestation.
+	readsBeforeClose := source.calls.Load()
+	if e := server.Close(); e != nil {
+		t.Fatal("disposable TLS server did not close")
+	}
+	select {
+	case e := <-done:
+		joined = true
+		if !errors.Is(e, http.ErrServerClosed) {
+			t.Fatal("unexpected disposable TLS serve result")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("disposable TLS serve did not join")
+	}
+	// A fresh, previously authorized client must encounter a closed listener,
+	// rather than an HTTP error from a still-running endpoint.
+	after := stockPilotProbeClient(t, roles, roles.clientPEM, roles.clientKey, material.review.ServerSHA256)
+	res, e := after.Get("https://127.0.0.1:9445/api/v1/instances")
+	if res != nil {
+		_ = res.Body.Close()
+	}
+	if res != nil || !errors.Is(e, syscall.ECONNREFUSED) || source.calls.Load() != readsBeforeClose {
+		t.Fatal("disposable endpoint still reachable after close")
 	}
 }
