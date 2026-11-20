@@ -119,11 +119,33 @@ func syncJSON(w http.ResponseWriter, metadata any) {
 }
 
 func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
-	for _, provision := range []bool{false, true} {
-		t.Run(map[bool]string{false: "default-read-only", true: "explicit-local-fixture-opt-in"}[provision], func(t *testing.T) {
+	for _, scenario := range []struct {
+		name                  string
+		provision, remoteDisk bool
+	}{
+		{"default-read-only", false, false},
+		{"explicit-local-fixture-opt-in", true, false},
+		{"read-only-reviewed-remote-disk-opt-in", false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			provision := scenario.provision
 			keys := credentials(t)
 			var garmFailure atomic.Bool
 			var creates atomic.Int32
+			var failedReads atomic.Int32
+			var diskCalls *atomic.Int32
+			var diskConfig *remoteRunnerDiskConfiguration
+			if scenario.remoteDisk {
+				garmFailure.Store(true)
+				d, _, calls := remoteRunnerDiskConfigurationFixtureHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					if garmFailure.Load() {
+						t.Error("remote disk read began before a successful reconciliation")
+					}
+					serveRemoteRunnerDiskFixture(t, diskConfig.Routes[0], w, r)
+				})
+				d.Routes[0].HostID = "a"
+				diskCalls, diskConfig = calls, &d
+			}
 			incus := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Query().Get("project") != "runners" {
 					t.Error("wrong physical scope")
@@ -151,6 +173,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 					return
 				}
 				if garmFailure.Load() {
+					failedReads.Add(1)
 					w.WriteHeader(503)
 					_, _ = w.Write([]byte("private-fault-must-not-log"))
 					return
@@ -203,6 +226,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 				t.Fatal(err)
 			}
 			config.Admin = &adminConfiguration{Listen: adminAddress, TLS: keys.serverFiles, TokenFile: adminTokenPath, Assets: assets}
+			config.RemoteRunnerDisk = diskConfig
 			// Exercise the real private JSON configuration path, not only typed setup.
 			rawConfig, err := json.Marshal(config)
 			if err != nil {
@@ -221,6 +245,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 				t.Fatalf("canonical full gateway configuration rejected: %v", err)
 			}
 			config = decoded
+			config.EnableRemoteRunnerDisk = scenario.remoteDisk
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			initializeRuntimeFixture(t, &config)
@@ -248,6 +273,49 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			}
 			adminClient := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: keys.root, MinVersion: tls.VersionTLS13}}}
 			defer adminClient.CloseIdleConnections()
+			if scenario.remoteDisk {
+				getDisk := func() bool {
+					request, _ := http.NewRequest("GET", "https://"+adminAddress+"/admin/api/v1/overview", nil)
+					request.Header.Set("Authorization", "Bearer "+adminToken)
+					response, err := adminClient.Do(request)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer response.Body.Close()
+					var view adminview.Overview
+					if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&view) != nil {
+						t.Fatal("invalid authenticated overview")
+					}
+					for _, host := range view.Hosts {
+						for _, disk := range host.RunnerDiskHealth {
+							if host.ID != "a" || disk.StoragePool != "fixture-pool" || disk.State != "current" ||
+								disk.TotalBytes != "8192" || disk.AvailableBytes != "0" || disk.TotalInodes != "15" || disk.AvailableInodes != "0" {
+								t.Fatalf("unexpected reviewed disk scope or counts: %+v", disk)
+							}
+							return true
+						}
+					}
+					return false
+				}
+				deadline := time.Now().Add(5 * time.Second)
+				for failedReads.Load() < 2 && time.Now().Before(deadline) {
+					time.Sleep(20 * time.Millisecond)
+				}
+				if failedReads.Load() < 2 || diskCalls.Load() != 0 || getDisk() {
+					t.Fatal("a failed reconciliation started or published disk telemetry")
+				}
+				garmFailure.Store(false)
+				deadline = time.Now().Add(5 * time.Second)
+				for !getDisk() {
+					if time.Now().After(deadline) {
+						t.Fatal("reviewed read did not reach the existing Servers overview")
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				if diskCalls.Load() != 1 {
+					t.Fatal("unexpected immediate read retry")
+				}
+			}
 			for _, authorized := range []bool{false, true} {
 				request, _ := http.NewRequest("GET", "https://"+adminAddress+"/admin/api/v1/overview", nil)
 				if authorized {
@@ -336,7 +404,7 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			if creates.Load() != 0 {
 				t.Fatal("admission/read paths dispatched a physical create")
 			}
-			if !provision {
+			if !provision && !scenario.remoteDisk {
 				// A verified TLS connection that has not finished its first HTTP header is
 				// StateNew. net/http deliberately grants it a >5s quiescence window during
 				// graceful Shutdown; do not impose a shorter test deadline than the server.

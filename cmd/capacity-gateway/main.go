@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,6 +44,8 @@ type garmConfiguration struct {
 type configuration struct {
 	CIHealth                      *ciHealthConfiguration                   `json:"ci_health,omitempty"`
 	EnableCIHealth                bool                                     `json:"-"`
+	RemoteRunnerDisk              *remoteRunnerDiskConfiguration           `json:"remote_runner_disk,omitempty"`
+	EnableRemoteRunnerDisk        bool                                     `json:"-"`
 	DemandObserverConfigFile      string                                   `json:"demand_observer_config_file,omitempty"`
 	NativeRetirement              *nativeRetirementConfiguration           `json:"native_retirement,omitempty"`
 	EnableNativeRetirement        bool                                     `json:"-"`
@@ -79,6 +82,9 @@ func (redactedConnectionLog) Write(message []byte) (int, error) {
 }
 
 func serve(ctx context.Context, config configuration, provision, monitoring bool) error {
+	if err := validateRemoteRunnerDiskConfiguration(config); err != nil {
+		return err
+	}
 	if config.NativeClaims != nil || config.NativeRetirement != nil {
 		return errNativeClaimsRuntime
 	} // Refuse before any listener or key read.
@@ -105,6 +111,15 @@ func serveOnListener(ctx context.Context, config configuration, provision, monit
 
 func serveOnListeners(ctx context.Context, config configuration, provision, monitoring bool, listener, adminListener net.Listener) error {
 	defer listener.Close()
+	if err := validateRemoteRunnerDiskConfiguration(config); err != nil {
+		return err
+	}
+	if config.Admin != nil {
+		// Existing runtime fields belong only to this invocation. Never put
+		// them or optional read sources into the shared startup configuration.
+		startupAdmin := *config.Admin
+		config.Admin = &startupAdmin
+	}
 	address, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !address.IP.IsLoopback() {
 		return gatewayrpc.ErrConfiguration
@@ -261,7 +276,16 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if config.Admin != nil {
 		config.Admin.onboardingRuntime = onboardingManager
 	}
-	adminServer, closeAdmin, err := newAdminServerWithCIHealth(config.Admin, store, provision, ciSnapshot)
+	remoteDisk, err := buildRemoteRunnerDiskCoordinator(config.EnableRemoteRunnerDisk, config.RemoteRunnerDisk, config.Hosts)
+	if err != nil {
+		return err
+	}
+	sources := adminStartupSources{ciHealth: ciSnapshot}
+	if remoteDisk != nil {
+		sources.runnerDisk = remoteDisk
+		defer remoteDisk.Close()
+	}
+	adminServer, closeAdmin, err := newAdminServerWithSources(config.Admin, store, provision, sources)
 	if err != nil {
 		return err
 	}
@@ -297,11 +321,15 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if interval > 30*time.Second {
 		interval = 30 * time.Second
 	}
+	diskReady := make(chan struct{})
+	var diskReadyOnce sync.Once
 	reconcile := func() {
 		check, cancel := context.WithTimeout(runctx, time.Minute)
 		defer cancel()
 		if f.Reconcile(check, garm) != nil {
 			log.Print("inventory unavailable; admission remains blocked")
+		} else if remoteDisk != nil && check.Err() == nil {
+			diskReadyOnce.Do(func() { close(diskReady) })
 		}
 	}
 	reconcile()
@@ -363,8 +391,25 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	} else {
 		close(ciHealthDone)
 	}
+	remoteDiskDone := make(chan struct{})
+	if remoteDisk != nil {
+		go func() {
+			defer close(remoteDiskDone)
+			select {
+			case <-diskReady:
+				_ = remoteDisk.Run(runctx)
+			case <-runctx.Done():
+			}
+		}()
+	} else {
+		close(remoteDiskDone)
+	}
 	defer func() {
 		cancel()
+		if remoteDisk != nil {
+			remoteDisk.Close()
+		}
+		<-remoteDiskDone
 		<-ciHealthDone
 		<-loopDone
 		<-monitorDone
@@ -428,6 +473,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	ciHealth := flag.Bool("allow-ci-health-timing", false, "enable explicitly enrolled read-only GitHub Actions timing observations")
+	remoteDisk := flag.Bool("allow-remote-runner-disk-telemetry", false, "display separately reviewed remote runner disk readings; never supplies capacity or changes runners")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
 	retirement := flag.Bool("allow-experimental-native-retirement", false, "configure canonical STOP/DELETE orchestration; active runtime still refused, no release")
 	jobObserver := flag.Bool("allow-job-observer", false, "enable positive authenticated job/root journal correlation only; no retirement or release")
@@ -544,6 +590,7 @@ func main() {
 	}
 	config.EnableStockProvider = *stockProvider
 	config.EnableCIHealth = *ciHealth
+	config.EnableRemoteRunnerDisk = *remoteDisk
 	config.EnableJobObserver = *jobObserver
 	config.EnableNativeRetirement = *retirement
 	if *bootstrap {

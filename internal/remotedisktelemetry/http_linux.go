@@ -143,6 +143,21 @@ func reviewedHTTPOrigin(origin string) (*url.URL, bool) {
 	return u, true
 }
 
+// HTTPOriginIdentity does local shape validation only. All reads use a fixed
+// path, so the canonical authority also identifies a duplicate read route.
+// This does not resolve DNS, connect, or authenticate a peer.
+func HTTPOriginIdentity(origin string) (string, bool) {
+	u, ok := reviewedHTTPOrigin(origin)
+	if !ok {
+		return "", false
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	return net.JoinHostPort(u.Hostname(), port), true
+}
+
 // Copy only conventional software credentials already supplied by the owner.
 // In particular, RSA PKCS8 serialization may precompute on its input; do not
 // pass the caller's mutable key object to it.
@@ -303,13 +318,20 @@ func (r *HTTPReader) singleTransport(readCtx context.Context, absolute time.Time
 	}
 }
 
+// MatchesReview checks the startup-owned review without I/O. Matching does
+// not authenticate a peer, observe a disk, or prove the reviewed route.
+func (r *HTTPReader) MatchesReview(review Review) bool {
+	review.ExpiresAt = review.ExpiresAt.UTC()
+	return r != nil && r.inFlight != nil && r.trust != nil && r.review == review
+}
+
 // Read makes at most one request for this exact current reviewed route. It
 // returns the bounded display record only, never an authenticated caller
 // capability, a local descriptor sample or a scaler input.
 func (r *HTTPReader) Read(ctx context.Context, current Review) (DisplayReading, error) {
 	var none DisplayReading
 	current.ExpiresAt = current.ExpiresAt.UTC()
-	if r == nil || r.inFlight == nil || r.trust == nil || ctx == nil || ctx.Err() != nil || r.review != current ||
+	if ctx == nil || ctx.Err() != nil || !r.MatchesReview(current) ||
 		!r.inFlight.CompareAndSwap(false, true) {
 		return none, ErrHTTPReader
 	}

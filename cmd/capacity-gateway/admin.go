@@ -68,11 +68,23 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	return newAdminServerWithCIHealth(config, store, provision, nil)
 }
 
-// A CI source is owned by this startup instance and must not be saved in a
-// reused Admin configuration, even on a later startup with observation off.
 func newAdminServerWithCIHealth(config *adminConfiguration, store *admission.SQLiteStore, provision bool, ciHealth *adminview.CIHealthSnapshot) (*http.Server, func(), error) {
+	return newAdminServerWithSources(config, store, provision, adminStartupSources{ciHealth: ciHealth})
+}
+
+// Optional data sources are owned by a startup instance, not a shared/reused
+// Admin configuration. Neither attachment creates a worker or opens a route.
+type adminStartupSources struct {
+	ciHealth   *adminview.CIHealthSnapshot
+	runnerDisk adminview.RunnerDiskHealthSource
+}
+
+func newAdminServerWithSources(config *adminConfiguration, store *admission.SQLiteStore, provision bool, sources adminStartupSources) (*http.Server, func(), error) {
 	noop := func() {}
 	if config == nil {
+		if sources.ciHealth != nil || sources.runnerDisk != nil {
+			return nil, noop, adminview.ErrConfiguration
+		}
 		return nil, noop, nil
 	}
 	if !nativeRegistrationModeAllowed(config) {
@@ -109,11 +121,14 @@ func newAdminServerWithCIHealth(config *adminConfiguration, store *admission.SQL
 	if config.allocatorAdvisory != nil {
 		handler.SetAllocatorPlanSource(config.allocatorAdvisory)
 	}
-	if ciHealth != nil {
-		if err := handler.SetCIHealthSnapshot(ciHealth); err != nil {
+	if sources.ciHealth != nil {
+		if err := handler.SetCIHealthSnapshot(sources.ciHealth); err != nil {
 			cleanup()
 			return nil, noop, err
 		}
+	}
+	if sources.runnerDisk != nil {
+		handler.SetRunnerDiskHealthSource(sources.runnerDisk)
 	}
 	handler.SetDemandObserver(config.demandObserverRuntime)
 	handler.SetJobObserver(config.jobObserverRuntime)
