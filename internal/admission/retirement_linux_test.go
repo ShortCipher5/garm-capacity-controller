@@ -2,6 +2,7 @@ package admission
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -110,6 +111,50 @@ func TestRetirementOriginalOperationRecoveryRemainsCharged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Another freshly pinned fixture can present identical logical and remote
+	// identifiers. Its valid read cannot stand in for the original backend.
+	other := newCreateEvidenceFixture(t, "confirmed", true)
+	other.kind.Store("Deleting instance")
+	other.operation.Store(operation)
+	wrongIdentity, err := other.client.ObserveInstanceIdentity(ctx, incusapi.IdentityExpectation{
+		Name: "runner-1", ControllerID: "controller-1", PoolID: f.request.Pool,
+		ReservationKey: f.request.Key, CPUMillis: 1000, RAMMiB: 2048,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := other.client.CaptureTerminalOperation(ctx, wrongIdentity, operation, incusapi.RecoveryDelete)
+	if err != nil || !wrong.Valid() || !observation.Valid() {
+		t.Fatalf("fixture reads must mint valid observations: %v", err)
+	}
+	originalRecord, wrongRecord := observation.Record(), wrong.Record()
+	originalSubject, wrongSubject := originalRecord.Identity.Subject, wrongRecord.Identity.Subject
+	if wrongRecord.OperationID != originalRecord.OperationID ||
+		wrongRecord.Identity.SubjectFingerprint == originalRecord.Identity.SubjectFingerprint ||
+		wrongSubject.BackendKeyFingerprint == originalSubject.BackendKeyFingerprint {
+		t.Fatal("fixture did not isolate independent backend identity")
+	}
+	wrongSubject.BackendKeyFingerprint = originalSubject.BackendKeyFingerprint
+	wrongSubject.OriginFingerprint = originalSubject.OriginFingerprint
+	wrongSubject.ScopeFingerprint = originalSubject.ScopeFingerprint
+	if wrongSubject != originalSubject {
+		t.Fatal("fixture introduced non-backend subject differences")
+	}
+	beforeWrong := sqliteSnapshot(t, f.store)
+	if err := f.store.StoreRetirementObservation(ctx, permit.key, wrong); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different backend replaced original retirement observation: %v", err)
+	}
+	held, err := f.store.RecoverRetirement(ctx, permit.key)
+	if err != nil || !reflect.DeepEqual(held, submitted) {
+		t.Fatal("different backend changed retirement history", err)
+	}
+	if after := sqliteSnapshot(t, f.store); !reflect.DeepEqual(after, beforeWrong) {
+		t.Fatal("different backend changed ledger snapshot")
+	}
+	if _, err := f.store.LookupRelease(ctx, permit.key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("different backend produced a release or lookup failed: %v", err)
+	}
+
 	if err := f.store.StoreRetirementObservation(ctx, permit.key, observation); err != nil {
 		t.Fatal(err)
 	}
@@ -138,11 +183,15 @@ func TestRetirementOriginalOperationRecoveryRemainsCharged(t *testing.T) {
 	if err != nil || recovery.State != "terminal_observed" || recovery.RecoveryAction != "retain_charge_await_qualified_finalizer" {
 		t.Fatal(recovery, err)
 	}
-	if sqliteSnapshot(t, f.store).Allocated.Global.Runners != 1 || f.writes.Load() != 1 {
-		t.Fatal("terminal observation freed charge or dispatched")
+	afterMatched := sqliteSnapshot(t, f.store)
+	if !reflect.DeepEqual(afterMatched.Allocated, beforeWrong.Allocated) ||
+		!reflect.DeepEqual(afterMatched.Reservations, beforeWrong.Reservations) ||
+		!reflect.DeepEqual(afterMatched.Inventory, beforeWrong.Inventory) ||
+		afterMatched.Allocated.Global.Runners != 1 || f.writes.Load() != 1 || other.writes.Load() != 1 {
+		t.Fatal("terminal observation changed charges or invoked a backend write")
 	}
-	if _, err := f.store.LookupRelease(ctx, permit.key); err == nil {
-		t.Fatal("release manufactured")
+	if _, err := f.store.LookupRelease(ctx, permit.key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("release manufactured or lookup failed: %v", err)
 	}
 	backup := filepath.Join(filepath.Dir(f.store.path), "retirement-backup.db")
 	if err := f.store.BackupSQLite(ctx, backup); err != nil {

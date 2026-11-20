@@ -208,3 +208,58 @@ func TestStockMaximumDiskPreviewRejectsPendingFromDifferentFreeSpace(t *testing.
 		t.Fatal("sample-bound pending was accepted with different free space", out, cycle, err)
 	}
 }
+
+func TestStockMaximumDiskPreviewRetainsPendingObligationWithoutGuestOrStockRow(t *testing.T) {
+	const obligation = "previously-retained-work"
+	planned := map[string]stockDiskAmount{"light": {4096, 1}, "heavy": {4096, 9}}
+	bind := func(d *stockMaximumPreviewDisk, profile string, rowPresent bool) {
+		f := d.filesystem
+		sample := stockDiskHeadroomSample{
+			at:        f.ObservedAt,
+			total:     stockDiskAmount{uint64(f.TotalBytes), uint64(f.TotalInodes)},
+			available: stockDiskAmount{uint64(f.AvailableBytes), uint64(f.AvailableInodes)},
+		}
+		capture := stockDiskPendingCapture{sample: sample, expiresAt: d.pending.expiresAt, scope: map[string]string{obligation: profile}}
+		if rowPresent {
+			// The trusted capture confirms no materialized footprint, not the
+			// absence of a future allocation by already-retained work.
+			capture.rows = []stockDiskWorkFootprint{{obligation, profile, stockDiskWorkMayAllocate, &stockDiskAmount{}}}
+		}
+		d.pending = estimateStockDiskPending(&sample, &capture, planned, sample.at)
+	}
+	for _, tc := range []struct {
+		name       string
+		profile    string
+		rowPresent bool
+		want       []string
+		veto       stockMaximumDiskReason
+	}{
+		{"small still fits", "light", true, []string{"empty", "z", "a"}, ""},
+		{"current larger footprint is owed even with no guest", "heavy", true, []string{"empty"}, stockDiskInodesReserve},
+		{"stock row missing is not complete empty scope", "heavy", false, []string{"empty"}, stockDiskPendingUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := diskPreviewFixture(t)
+			prior, current := h[2], h[3]
+			bind(prior.disk, "light", true)
+			bind(current.disk, tc.profile, tc.rowPresent)
+			// The stock MAX comparison alone still suggests both increases and
+			// an unrelated cut. The candidate cut does not fund either increase.
+			proposals := ProposeStockMaximums(prior.StockScalingSample, current.StockScalingSample, current.finish)
+			if !slices.Equal(diskPreviewPools(proposals), []string{"empty", "z", "a"}) {
+				t.Fatalf("invalid stock fixture: %+v", proposals)
+			}
+			got := filterStockMaximumPreviewDisk(proposals, prior, current, current.finish)
+			if got.invalidBatch || !slices.Equal(diskPreviewPools(got.proposals), tc.want) {
+				t.Fatalf("unexpected brake result: %+v", got)
+			}
+			var wantVetoes []stockMaximumDiskVeto
+			if tc.veto != "" {
+				wantVetoes = []stockMaximumDiskVeto{{"z", tc.veto}, {"a", tc.veto}}
+			}
+			if !slices.Equal(got.vetoes, wantVetoes) {
+				t.Fatalf("unexpected vetoes: %+v", got.vetoes)
+			}
+		})
+	}
+}
