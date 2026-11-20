@@ -18,7 +18,7 @@ export function RunnerDiskHealth({ readings }) {
     return () => clearTimeout(timer);
   }, [nextExpiry]);
 
-  return <div className="usage-panel" aria-label="Runner disk health">
+  return <div className="runner-disk-health-panel" aria-label="Runner disk health">
     <h3>Runner disk health</h3>
     {rows.length === 0 ?
       <p className="muted">Unknown: no verified runner filesystem reading. Host root and configured runner sizes are not substitutes.</p> :

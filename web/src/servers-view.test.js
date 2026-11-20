@@ -110,6 +110,8 @@ test("server card shows only matched runner storage health and hides stale count
   const sample={storage_pool:"fixtures",state:"current",observed_at:iso(-1000),expires_at:iso(30000),total_bytes:"123456789",available_bytes:"0",total_inodes:"2000",available_inodes:"12"};
   const show=overrides=>renderToStaticMarkup(React.createElement(ServerCard,{host:host(overrides),readUsage}));
   const current=show({runner_disk_health:[sample]});
+  assert.equal((current.match(/class="usage-panel"/g) ?? []).length,1);
+  assert.match(current,/class="runner-disk-health-panel" aria-label="Runner disk health"/);
   assert.match(current,/Runner disk health/);
   assert.match(current,/Storage pool fixtures/);
   assert.match(current,/0 of 123,456,789 bytes available/);
