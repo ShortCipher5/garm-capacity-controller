@@ -18,9 +18,11 @@ func TestStockIdleAdviceAuthenticCrossRepositoryQueue(t *testing.T) {
 	const repoB = "33333333-3333-4333-8333-333333333333"
 	const poolB = "44444444-4444-4444-8444-444444444444"
 	// These are protocol fixtures, not claims about any live host or released slot.
-	for _, mode := range []string{"preview", "B-only", "A-demand", "locked-B", "legacy", "not-enrolled", "floor", "zero", "settings-drift", "tampered", "expiry", "repeat", "unknown-supply", "detached", "scope-drift", "absent-idle", "busy-only", "creating-only"} {
+	for _, mode := range []string{"preview", "direction-growth", "extra-scope-scaleset", "B-only", "A-demand", "locked-B", "legacy", "not-enrolled", "floor", "zero", "settings-drift", "tampered", "expiry", "repeat", "unknown-supply", "detached", "scope-drift", "absent-idle", "busy-only", "creating-only"} {
 		t.Run(mode, func(t *testing.T) {
 			drifting := false
+			extraScope := mode == "extra-scope-scaleset"
+			growth := mode == "direction-growth" || extraScope
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != "GET" || r.Header.Get("Authorization") != "Bearer test-token" {
 					t.Error("non-authenticated read")
@@ -30,15 +32,30 @@ func TestStockIdleAdviceAuthenticCrossRepositoryQueue(t *testing.T) {
 				switch r.URL.Path {
 				case "/api/v1/pools":
 
-					minimum := 1
+					minimum, maximum := 1, 3
+					if growth {
+						maximum = 2
+					}
 					if mode == "zero" {
 						minimum = 0
 					}
 					if mode == "settings-drift" && drifting {
 						minimum = 2
 					}
-					json.NewEncoder(w).Encode([]any{map[string]any{"id": pool, "repo_id": repo, "provider_name": "capacity", "generation": 1, "max_runners": 3, "min_idle_runners": minimum, "enabled": true, "tags": []map[string]string{{"name": "linux"}}}, map[string]any{"id": poolB, "repo_id": repoB, "provider_name": "capacity", "generation": 1, "max_runners": 3, "enabled": true, "tags": []map[string]string{{"name": "linux"}}}})
+					rows := []any{map[string]any{"id": pool, "repo_id": repo, "provider_name": "capacity", "generation": 1, "max_runners": maximum, "min_idle_runners": minimum, "enabled": true, "tags": []map[string]string{{"name": "linux"}}}}
+					if !extraScope {
+						rows = append(rows, map[string]any{"id": poolB, "repo_id": repoB, "provider_name": "capacity", "generation": 1, "max_runners": maximum, "enabled": true, "tags": []map[string]string{{"name": "linux"}}})
+					}
+					json.NewEncoder(w).Encode(rows)
 				case "/api/v1/jobs":
+					if extraScope {
+						json.NewEncoder(w).Encode([]any{map[string]any{"repo_id": repoB, "status": "queued", "scaleset_job_id": "observed-scale-set-job"}})
+						return
+					}
+					if mode == "direction-growth" {
+						json.NewEncoder(w).Encode([]any{})
+						return
+					}
 					target := repoB
 					if mode == "A-demand" {
 						target = repo
@@ -88,7 +105,7 @@ func TestStockIdleAdviceAuthenticCrossRepositoryQueue(t *testing.T) {
 				return o
 			}
 			first := read()
-			if mode == "preview" {
+			if mode == "preview" || growth {
 				time.Sleep(15 * time.Second)
 			} // Real capture gap; never rewrite sealed timestamps.
 			drifting = true
@@ -110,12 +127,17 @@ func TestStockIdleAdviceAuthenticCrossRepositoryQueue(t *testing.T) {
 			host := state.Config.Hosts["host"]
 			host.ObservedAt = first.StartedAt
 			state.Config.Hosts["host"] = host
-			state.Config.Pools[poolB] = state.Config.Pools[pool]
 			state.Policy.Repositories[0].MaxRunners = 3
 			state.Policy.Repositories[0].Pools[0].MaxRunners = 3
-			state.Policy.Repositories = append(state.Policy.Repositories, admission.BrokerRepositoryPolicy{ID: repoB, Weight: 1, MaxRunners: 3, Pools: []admission.BrokerPoolPolicy{{ID: poolB, MaxRunners: 3}}})
+			if !extraScope {
+				state.Config.Pools[poolB] = state.Config.Pools[pool]
+				state.Policy.Repositories = append(state.Policy.Repositories, admission.BrokerRepositoryPolicy{ID: repoB, Weight: 1, MaxRunners: 3, Pools: []admission.BrokerPoolPolicy{{ID: poolB, MaxRunners: 3}}})
+			}
 			if mode == "floor" {
 				state.Policy.Repositories[0].Pools[0].WarmIdle = 1
+			}
+			if growth {
+				state.Policy.Repositories[0].Pools[0].WarmIdle = 2
 			}
 			size := admission.Resources{CPU: 1000, RAM: 1000, Disk: 1000, Runners: 1}
 			req := admission.Request{Key: "warm-request", Pool: pool, Host: "host", Resources: size}
@@ -139,6 +161,61 @@ func TestStockIdleAdviceAuthenticCrossRepositoryQueue(t *testing.T) {
 				if _, _, e := enrolledPlanningSnapshot(state, charges, first, client.SourceIdentity(), opt); e != nil {
 					t.Fatalf("enrolled snapshot: %v; policy=%v", e, admission.ValidateBrokerPolicy(state.Policy))
 				}
+			}
+			if extraScope {
+				// The real projector omits queued scale sets from normal Jobs
+				// but preserves the opaque blocked assessment of the extra repo.
+				for _, o := range []garmapi.DemandObservation{first, second} {
+					if len(o.Jobs) != 0 || !o.RepositoryIdleScope(repo, opt.Now, opt.MaxAge).Classified() ||
+						o.RepositoryIdleScope(repoB, opt.Now, opt.MaxAge).Classified() {
+						t.Fatal("fixture did not capture omitted, unclassified in-source work")
+					}
+				}
+				pressure := []PressureStatus{{Host: "host", State: "partial_sample_not_headroom", SampledAt: first.StartedAt}}
+				a, ae := sampleStockIdleDecision(state, charges, first, client.SourceIdentity(), opt, pressure)
+				b, be := sampleStockIdleDecision(state, charges, second, client.SourceIdentity(), opt, pressure)
+				var h stockIdleDecisionHistory
+				h.accept(a, ae, opt.Now, a.expiry)
+				decision := h.accept(b, be, opt.Now, b.expiry)
+				if ae != nil || be != nil || decision != nil {
+					t.Fatalf("extra in-source repository allowed a decision: %+v %v %v", decision, ae, be)
+				}
+				return
+			}
+			if mode == "direction-growth" || mode == "preview" {
+				pressure := []PressureStatus{{Host: "host", State: "partial_sample_not_headroom", SampledAt: first.StartedAt}}
+				a, ae := sampleStockIdleDecision(state, charges, first, client.SourceIdentity(), opt, pressure)
+				b, be := sampleStockIdleDecision(state, charges, second, client.SourceIdentity(), opt, pressure)
+				got, ok := proposeStockIdleDecision(a, b, opt.Now)
+				want, max := int64(0), int64(3)
+				if mode == "direction-growth" {
+					want, max = 2, 2
+				}
+				if ae != nil || be != nil || !ok || got.PoolID != pool || got.Observed != 1 || got.Suggested != want ||
+					got.UnchangedMaximum != max || got.Actionable || got.CapacityReleased || got.CompleteCoverage {
+					t.Fatalf("bidirectional decision: %+v supported=%v sample errors=%v %v", got, ok, ae, be)
+				}
+				var h stockIdleDecisionHistory
+				if first := h.accept(a, nil, opt.Now, a.expiry); first != nil {
+					t.Fatal("first capture confirmed a decision")
+				}
+				wire := h.accept(b, nil, opt.Now, b.expiry)
+				direction := "decrease"
+				if mode == "direction-growth" {
+					direction = "increase"
+				}
+				if wire == nil || wire.Direction != direction || wire.SuggestedMinIdle != want ||
+					wire.UnchangedMaximum != max || wire.HostEvidence != "configured_only" || !wire.ExpiresAt.Equal(got.ExpiresAt) {
+					t.Fatalf("shadow wire lost signed recommendation: %+v", wire)
+				}
+				if _, ok := proposeStockIdleDecision(a, b, got.ExpiresAt); ok {
+					t.Fatal("decision survived exact expiry")
+				}
+				b.observation.Supply[0].Idle++
+				if _, ok := proposeStockIdleDecision(a, b, opt.Now); ok {
+					t.Fatal("modified observation retained a decision")
+				}
+				b.observation.Supply[0].Idle--
 			}
 			prior, e1 := sampleStockIdleAdvice(state, charges, first, client.SourceIdentity(), pool, opt)
 			if mode == "scope-drift" {

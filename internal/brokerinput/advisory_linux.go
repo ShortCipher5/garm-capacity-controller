@@ -218,12 +218,19 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	if result.StockMaximumBatchPreview != nil && !result.StockMaximumBatchPreview.ExpiresAt.After(now) {
 		result.StockMaximumBatchPreview = nil
 	}
+	if result.StockIdleDecisionPreview != nil && !result.StockIdleDecisionPreview.ExpiresAt.After(now) {
+		result.StockIdleDecisionPreview = nil
+	}
 	if result.StockIdlePreview != nil && !result.StockIdlePreview.ExpiresAt.After(now) {
 		result.StockIdlePreview = nil
 	}
 	return result, nil
 }
 func cloneReadPlan(v ReadPlan) ReadPlan {
+	if v.StockIdleDecisionPreview != nil {
+		copy := *v.StockIdleDecisionPreview
+		v.StockIdleDecisionPreview = &copy
+	}
 	if v.StockIdlePreview != nil {
 		copy := *v.StockIdlePreview
 		copy.Proposals = append([]StockIdleProposal{}, copy.Proposals...)

@@ -81,6 +81,8 @@ test('enrollment planner presents headroom warnings, distinct alternatives and u
     assert.match(markup,/unconstrained disk/);
     assert.match(markup,/Maximum|maximum/);
     assert.match(markup,/Mix unavailable/);
+    assert.match(markup,/<button type="button" disabled="">Use planned total as runner limit<\/button>/);
+    assert.match(markup,/Refresh discovery to copy a planned total/);
     assert.match(markup,/small planned count/);
     assert.match(markup,/not saved profiles/);
   } finally { await server.close(); }

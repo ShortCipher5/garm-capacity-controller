@@ -50,13 +50,24 @@ func (o DemandObservation) RepositoryIdleScope(repo string, now time.Time, maxAg
 // Successful entries can still be unclassified. The returned map owns its
 // values; it is not a freshness cache or permission to reduce idle targets.
 func (o DemandObservation) RepositoryIdleScopes(repositories []string, now time.Time, maxAge time.Duration) map[string]RepositoryIdleAssessment {
+	return o.repositoryIdleScopes(repositories, now, maxAge, false)
+}
+
+// ExactRepositoryIdleScopes additionally requires the requested set to equal
+// the complete configured repository scope of this sealed capture. It gives
+// no information about which other repositories or jobs were witnessed.
+func (o DemandObservation) ExactRepositoryIdleScopes(repositories []string, now time.Time, maxAge time.Duration) map[string]RepositoryIdleAssessment {
+	return o.repositoryIdleScopes(repositories, now, maxAge, true)
+}
+
+func (o DemandObservation) repositoryIdleScopes(repositories []string, now time.Time, maxAge time.Duration, exact bool) map[string]RepositoryIdleAssessment {
 	s := o.idleScope
 	if s == nil || s.source == "" || s.source != o.sourceIdentity || s.digest != o.Digest || s.start != o.StartedAt || s.finish != o.FinishedAt || now.IsZero() || maxAge <= 0 || maxAge > time.Minute || s.start.IsZero() || s.finish.Before(s.start) || s.finish.After(now) || !s.start.Add(maxAge).After(now) {
 		return nil
 	}
 	// Validate the complete requested scope before hashing. All-or-nothing
 	// refusal prevents a partial map being mistaken for full scope coverage.
-	if len(repositories) == 0 || len(repositories) > 1000 {
+	if len(repositories) == 0 || len(repositories) > 1000 || (exact && len(repositories) != len(s.blocked)) {
 		return nil
 	}
 	out := make(map[string]RepositoryIdleAssessment, len(repositories))

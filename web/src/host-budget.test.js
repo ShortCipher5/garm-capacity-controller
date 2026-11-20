@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS } from './host-budget.js';
+import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS, plannedRunnerLimit } from './host-budget.js';
 const result = { totals: {cpu_millis: 12000, ram_mib: 24576, disk_mib: 240000, disk_mib_used: 20000}, guests: [], blockers: [] };
 test('suggestion reserves proportional headroom and existing disk usage', () => {
   const g = hostBudgetGuidance(result);
@@ -70,4 +70,30 @@ test('disk overrides compare with the selected pool instead of claiming host rem
  const exhausted = {...scoped,totals:{...scoped.totals,storage_pool_disk_mib_used:80000}};
  assert.match(assessBudget(exhausted,{...entered,disk_mib:1}).join(' '),/no budget was suggested/);
  assert.match(hostBudgetGuidance(exhausted).warnings.join(' '),/No disk capacity remains/);
+});
+
+test("copy only a positive known reviewed mix fitting both draft and suggested headroom", () => {
+  const observed = "2026-01-01T00:00:00Z", expired = "2026-01-01T00:01:00Z";
+  const now = Date.parse(observed) + 1000;
+  const proposal = {version:1, size_source:"illustrative-presets", sizes:RUNNER_PRESETS, budget:{cpu_millis:5000,ram_mib:12000,disk_mib:110000}};
+  const result = {profile_id:"candidate", review:{profile_id:"candidate",id:"11111111-1111-4111-8111-111111111111",revision:"a".repeat(64)}, observed_at:observed, review_expires_at:expired, proposal};
+  const draft = {...proposal.budget,runners:0};
+  assert.equal(plannedRunnerLimit(result,draft,["1","1","0"],now),2);
+  assert.equal(draft.runners,0);
+  assert.equal(plannedRunnerLimit(result,draft,[0,0,0],now),undefined);
+  assert.equal(plannedRunnerLimit(result,draft,[0,0,2],now),undefined);
+  assert.equal(plannedRunnerLimit(result,{...draft,cpu_millis:2000},[1,1,0],now),undefined);
+  assert.equal(plannedRunnerLimit(result,{cpu_millis:9000,ram_mib:20000,disk_mib:200000},[0,0,2],now),undefined);
+  for (const counts of [[1,0], [null,0,1], [1.5,0,0], [1,"",0], [Number.MAX_SAFE_INTEGER,1,0]]) {
+    assert.equal(plannedRunnerLimit(result,draft,counts,now),undefined);
+  }
+  const unknown = {...result,proposal:{...proposal,budget:{cpu_millis:5000,ram_mib:12000}}};
+  assert.equal(plannedRunnerLimit(unknown,draft,[1,0,0],now),undefined);
+  const unbounded = {...result,proposal:{...proposal,size_source:"saved-profiles",sizes:[{...RUNNER_PRESETS[0],disk_mib:0}]}};
+  assert.equal(plannedRunnerLimit(unbounded,draft,[1],now),undefined);
+  assert.equal(plannedRunnerLimit(result,{...draft,disk_mib:0},[1,0,0],now),undefined);
+  assert.equal(plannedRunnerLimit(result,draft,[1,0,0],Date.parse(expired)),undefined);
+  assert.equal(plannedRunnerLimit(result,draft,[1,0,0],Date.parse(observed)-1),undefined);
+  assert.equal(plannedRunnerLimit({...result,review_expires_at:undefined},draft,[1,0,0],now),undefined);
+  assert.equal(plannedRunnerLimit({...result,review:{...result.review,profile_id:"other"}},draft,[1,0,0],now),undefined);
 });

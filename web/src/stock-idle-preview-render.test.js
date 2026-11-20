@@ -11,5 +11,13 @@ test('idle recommendations are passive, configured-only and disappear when stale
  assert.match(html,/Observed minimum idle/);assert.match(html,/Suggested minimum idle/);assert.match(html,/Maximum \(unchanged\)/);assert.match(html,/<td>1<\/td><td>0<\/td><td>3<\/td>/);
  assert.match(html,/provider destination is not verified/);assert.match(html,/not applied settings/);assert.doesNotMatch(html,/<button|<form/);
  for(const extra of [{now:now+10000},{comparison:'preview_superseded'}])assert.doesNotMatch(render(extra),/<table|provider destination/);
+ const increase={...plan,stock_idle_decision_preview:{...plan.stock_idle_preview.proposals[0],direction:'increase',host_evidence:'configured_only',expires_at:new Date(now+5000).toISOString(),observed_min_idle:0,suggested_min_idle:1}};
+ const renderedIncrease=render({plan:increase});
+ assert.match(renderedIncrease,/increasing minimum idle by 1/);assert.match(renderedIncrease,/<td>0<\/td><td>1<\/td><td>3<\/td>/);
+ assert.equal((renderedIncrease.match(/<tbody><tr>/g)||[]).length,1);assert.doesNotMatch(renderedIncrease,/<button|<form/);
+ assert.doesNotMatch(render({plan:increase,now:now+5000}),/<table|provider destination/);
+ assert.doesNotMatch(render({plan:increase,comparison:'saved_comparison_stale'}),/<table|provider destination/);
+ const decrease={...plan,stock_idle_decision_preview:{...increase.stock_idle_decision_preview,direction:'decrease',observed_min_idle:1,suggested_min_idle:0}};
+ assert.match(render({plan:decrease}),/decreasing minimum idle by 1/);
  }finally{try{await server?.close();}finally{await rm(cacheDir,{recursive:true,force:true});}}
 });

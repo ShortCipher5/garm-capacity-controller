@@ -14,22 +14,23 @@ import (
 // Stock reads are non-atomic; exact source, ownership and ledger revision are
 // checked, and the capture interval is explicit rather than called a live total.
 type ReadPlan struct {
-	StockIdlePreview         *StockIdlePreview    `json:"stock_idle_preview,omitempty"`
-	Source                   string               `json:"source"`
-	SourceIdentity           string               `json:"source_identity"`
-	DemandDigest             string               `json:"demand_digest"`
-	LedgerSequence           int64                `json:"ledger_sequence"`
-	PolicyRevision           int64                `json:"policy_revision"`
-	StartedAt                time.Time            `json:"started_at"`
-	FinishedAt               time.Time            `json:"finished_at"`
-	CapturedAt               time.Time            `json:"captured_at"`
-	ExpiresAt                time.Time            `json:"expires_at"`
-	Atomic                   bool                 `json:"atomic"`
-	Pools                    []ReadPlanPool       `json:"pools"`
-	RemainingJobs            int                  `json:"remaining_jobs"`
-	Pressure                 []PressureStatus     `json:"pressure,omitempty"`
-	StockMaximumPreview      *StockMaximumPreview `json:"stock_maximum_preview,omitempty"`
-	StockMaximumBatchPreview *StockMaximumPreview `json:"stock_maximum_batch_preview,omitempty"`
+	StockIdlePreview         *StockIdlePreview         `json:"stock_idle_preview,omitempty"`
+	StockIdleDecisionPreview *StockIdleDecisionPreview `json:"stock_idle_decision_preview,omitempty"`
+	Source                   string                    `json:"source"`
+	SourceIdentity           string                    `json:"source_identity"`
+	DemandDigest             string                    `json:"demand_digest"`
+	LedgerSequence           int64                     `json:"ledger_sequence"`
+	PolicyRevision           int64                     `json:"policy_revision"`
+	StartedAt                time.Time                 `json:"started_at"`
+	FinishedAt               time.Time                 `json:"finished_at"`
+	CapturedAt               time.Time                 `json:"captured_at"`
+	ExpiresAt                time.Time                 `json:"expires_at"`
+	Atomic                   bool                      `json:"atomic"`
+	Pools                    []ReadPlanPool            `json:"pools"`
+	RemainingJobs            int                       `json:"remaining_jobs"`
+	Pressure                 []PressureStatus          `json:"pressure,omitempty"`
+	StockMaximumPreview      *StockMaximumPreview      `json:"stock_maximum_preview,omitempty"`
+	StockMaximumBatchPreview *StockMaximumPreview      `json:"stock_maximum_batch_preview,omitempty"`
 }
 type ReadPlanPool struct {
 	Pool                 string                `json:"pool"`
@@ -53,6 +54,7 @@ type planReader struct {
 	pressure            bool
 	stockIdlePreview    bool
 	idleHistory         stockIdleHistory
+	idleDecisionHistory stockIdleDecisionHistory
 	stockMaximumPreview bool
 	scalingHistory      scalingPreviewHistory
 	maximumBatchHistory stockMaximumBatchHistory
@@ -73,6 +75,7 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 			p.scalingHistory.reset()
 			p.maximumBatchHistory.reset()
 			p.idleHistory.reset()
+			p.idleDecisionHistory.reset()
 		}
 		p.mu.Unlock()
 	}()
@@ -139,8 +142,14 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	}
 	var idleSamples map[string]stockIdleSample
 	var idleErr error
+	var idleDecision stockIdleDecisionSample
+	var idleDecisionErr error
 	if p.stockIdlePreview {
 		idleSamples, idleErr = sampleStockIdlePreview(state, charges, observed, identity, opt)
+		idleDecisionErr = idleErr
+		if idleErr == nil {
+			idleDecision, idleDecisionErr = sampleStockIdleDecisionFromCapture(state, snapshot, observed, identity, opt, pressure, idleSamples)
+		}
 	}
 	// Reject a ledger revision changed during the read/plan window. This is not
 	// a cross-system transaction and does not stop future changes after response.
@@ -172,6 +181,7 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	}
 	if p.stockIdlePreview {
 		result.StockIdlePreview = p.idleHistory.accept(idleSamples, idleErr, now, result.ExpiresAt)
+		result.StockIdleDecisionPreview = p.idleDecisionHistory.accept(idleDecision, idleDecisionErr, now, result.ExpiresAt)
 	}
 	return result, nil
 }
