@@ -246,7 +246,7 @@ completed commitments before opening an existing-only read session.
 ### Hosted compilation preflight (no execution)
 
 The stable Go model CI leg compiles the separate Linux/amd64 pilot command and
-both tagged fixture packages, then discards the binaries. It never executes
+all three tagged fixture packages, then discards the binaries. It never executes
 the tagged harness or the command, installs a profile, opens a Docker socket,
 selects the hosted bootstrap, or uploads a pilot artifact. This keeps tagged
 fixture and command compatibility checked on changes to either package without

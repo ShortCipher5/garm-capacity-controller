@@ -38,6 +38,7 @@ jobs:
           go build -trimpath -buildvcs=false -o "$output/capacity-stock-read-pilot" ./cmd/capacity-stock-read-pilot
           go test -c -tags stock_read_pilot_harness -o "$output/managedgarm.test" ./internal/managedgarm
           go test -c -tags stock_read_pilot_harness -o "$output/admission.test" ./internal/admission
+          go test -c -tags stock_read_pilot_harness -o "$output/capacity-gateway.test" ./cmd/capacity-gateway
       - name: Require actual Unix packet sender credentials and pidfd
         env:
           GCC_SENDER_PIDFD_TESTS: "1"
