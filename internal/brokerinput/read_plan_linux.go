@@ -117,9 +117,9 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 			}
 		}
 	}
-	snapshot, _, err := enrolledPlanningSnapshot(state, charges, observed, identity, opt)
+	snapshot, _, err := enrolledPlanningSnapshotWithReadiness(state, charges, observed, identity, opt)
 	if err != nil {
-		return ReadPlan{}, unavailable("enrollment_or_evidence_unavailable", err)
+		return ReadPlan{}, p.finalizeEnrollmentFailure(ctx, err, state, observed, identity, opt.MaxAge)
 	}
 	// Read-only advice alone includes disabled-pool existing idle edges.
 	plan, err := stock(snapshot, state.Policy, observed, opt, true)
@@ -151,11 +151,8 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 			idleDecision, idleDecisionErr = sampleStockIdleDecisionFromCapture(state, snapshot, observed, identity, opt, pressure, idleSamples)
 		}
 	}
-	// Reject a ledger revision changed during the read/plan window. This is not
-	// a cross-system transaction and does not stop future changes after response.
-	current, err := p.store.ReadBrokerGrantState(ctx)
-	now := time.Now().UTC()
-	if err != nil || ctx.Err() != nil || !current.Ready || current.Sequence != state.Sequence || current.Policy.Revision != state.Policy.Revision || p.source.SourceIdentity() != identity || now.Sub(observed.StartedAt) > opt.MaxAge {
+	now, current := p.currentCapture(ctx, state, observed, identity, opt.MaxAge)
+	if !current {
 		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
 	result := projectReadPlan(state, observed, plan, now, opt.MaxAge)
@@ -185,6 +182,28 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	}
 	return result, nil
 }
+
+func (p *planReader) finalizeEnrollmentFailure(ctx context.Context, err error, state admission.BrokerGrantState, observed garmapi.DemandObservation, identity string, maxAge time.Duration) error {
+	if err == errVisibleStockInventoryUnmatched {
+		if _, current := p.currentCapture(ctx, state, observed, identity, maxAge); current {
+			return unavailable(stockInventoryAccountingUnavailable, capacitybroker.ErrSnapshot)
+		}
+	}
+	return unavailable("enrollment_or_evidence_unavailable", capacitybroker.ErrSnapshot)
+}
+
+// Recheck the captured ledger revision before reporting either a result or a
+// policy-scoped accounting failure. This is not a cross-system transaction and
+// does not rule out future changes after the response.
+func (p *planReader) currentCapture(ctx context.Context, state admission.BrokerGrantState, observed garmapi.DemandObservation, identity string, maxAge time.Duration) (time.Time, bool) {
+	current, err := p.store.ReadBrokerGrantState(ctx)
+	sameSource := p.source.SourceIdentity() == identity
+	now := time.Now().UTC()
+	return now, err == nil && ctx.Err() == nil && current.Ready && current.Sequence == state.Sequence &&
+		current.Policy.Revision == state.Policy.Revision && sameSource && !observed.FinishedAt.After(now) &&
+		now.Before(observed.StartedAt.Add(maxAge))
+}
+
 func projectReadPlan(state admission.BrokerGrantState, observed garmapi.DemandObservation, plan capacitybroker.JobPlan, now time.Time, maxAge time.Duration) ReadPlan {
 	out := ReadPlan{Source: "scoped-stock-and-coherent-ledger", SourceIdentity: observed.SourceIdentity(), DemandDigest: observed.Digest, LedgerSequence: state.Sequence, PolicyRevision: state.Policy.Revision, StartedAt: observed.StartedAt, FinishedAt: observed.FinishedAt, CapturedAt: now, ExpiresAt: observed.StartedAt.Add(maxAge), Pools: []ReadPlanPool{}, RemainingJobs: len(plan.RemainingJobs)}
 	// The comparison expires with its oldest participating host evidence, not

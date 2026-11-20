@@ -124,6 +124,7 @@ const readinessMessages = Object.freeze({
  pool_mapping_missing: 'A required enrolled pool mapping is missing.',
  host_binding_unavailable: 'A required host binding is unavailable or has changed.',
  enrollment_or_evidence_unavailable: 'Required enrollment or supporting evidence is unavailable.',
+ stock_inventory_accounting_unavailable: 'The scoped GARM runner inventory could not be matched to saved accounting for an enrolled pool. This does not establish runner ownership, whether a runner was deleted, or whether capacity is free.',
  planning_unavailable: 'The advisory calculation could not be completed.',
  snapshot_changed_or_expired: 'The observation changed or expired during the preview.',
  awaiting_observation: 'The advisory preview is waiting for its first observation.',

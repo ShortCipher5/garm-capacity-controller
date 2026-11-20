@@ -19,13 +19,19 @@ test('monitoring veto remains distinct from capacity and rejects malformed field
 });
 
 test('fixed readiness reasons never display raw response errors or identifiers',()=>{
- for(const reason of ['source_not_configured','preview_unavailable','observation_unavailable','ledger_unavailable','pool_mapping_missing','host_binding_unavailable','enrollment_or_evidence_unavailable','planning_unavailable','snapshot_changed_or_expired','awaiting_observation','preview_stopped']) {
+ for(const reason of ['source_not_configured','preview_unavailable','observation_unavailable','ledger_unavailable','pool_mapping_missing','host_binding_unavailable','enrollment_or_evidence_unavailable','stock_inventory_accounting_unavailable','planning_unavailable','snapshot_changed_or_expired','awaiting_observation','preview_stopped']) {
   const message=allocatorFailureMessage(new AllocatorReadinessError({state:'unavailable',reason,error:'PRIVATE'}));
   assert.match(message,/Current observation and plan are unknown/);assert.match(message,/advisory readiness/);assert.doesNotMatch(message,/PRIVATE/);
  }
  for(const body of [null,{},[],{state:'ready',reason:'ledger_unavailable'},{state:'unavailable',reason:'PRIVATE'},{state:'unavailable',reason:['ledger_unavailable']},{state:'unavailable',reason:'constructor'}]) {
   assert.equal(allocatorFailureMessage(new AllocatorReadinessError(body)),allocatorFailureMessage(new Error('PRIVATE')));
  }
+});
+test('stock accounting refusal does not imply deletion or available capacity',()=>{
+ const message=allocatorFailureMessage(new AllocatorReadinessError({state:'unavailable',reason:'stock_inventory_accounting_unavailable',pool_id:'PRIVATE'}));
+ assert.match(message,/could not be matched to saved accounting/);
+ assert.match(message,/does not establish runner ownership, whether a runner was deleted, or whether capacity is free/);
+ assert.doesNotMatch(message,/PRIVATE/);
 });
 test('503 fixed readiness survives only within the current read session',async()=>{
  let finish;const session=new ReadSession(async url=>url.endsWith('/overview')?{ok:true,json:async()=>overview}:{ok:false,status:503,json:()=>new Promise(resolve=>finish=resolve)});

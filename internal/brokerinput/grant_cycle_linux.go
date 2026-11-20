@@ -82,6 +82,16 @@ func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garma
 // enrolledPlanningSnapshot validates the exact stock/profile/ledger join without
 // creating a grant batch or changing any capacity accounting.
 func enrolledPlanningSnapshot(state admission.BrokerGrantState, charges []admission.BrokerPlanningCharge, observation garmapi.DemandObservation, source string, opt capacitybroker.Options) (capacitybroker.Snapshot, map[string]map[string]admission.BrokerProfileDomain, error) {
+	snapshot, domains, err := enrolledPlanningSnapshotWithReadiness(state, charges, observation, source, opt)
+	if err != nil {
+		return capacitybroker.Snapshot{}, nil, capacitybroker.ErrSnapshot
+	}
+	return snapshot, domains, nil
+}
+
+// Only the authenticated read-only preview consumes the more specific failure.
+// Other callers retain the same generic planning refusal.
+func enrolledPlanningSnapshotWithReadiness(state admission.BrokerGrantState, charges []admission.BrokerPlanningCharge, observation garmapi.DemandObservation, source string, opt capacitybroker.Options) (capacitybroker.Snapshot, map[string]map[string]admission.BrokerProfileDomain, error) {
 	fail := func() (capacitybroker.Snapshot, map[string]map[string]admission.BrokerProfileDomain, error) {
 		return capacitybroker.Snapshot{}, nil, capacitybroker.ErrSnapshot
 	}
@@ -123,8 +133,8 @@ func enrolledPlanningSnapshot(state admission.BrokerGrantState, charges []admiss
 	if err != nil {
 		return fail()
 	}
-	if err = inflight(&snapshot, state, observation); err != nil {
-		return fail()
+	if err = matchStockInflight(&snapshot, state, observation); err != nil {
+		return capacitybroker.Snapshot{}, nil, err
 	}
 	return snapshot, domains, nil
 }
