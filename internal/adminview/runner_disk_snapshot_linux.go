@@ -148,6 +148,25 @@ func (c *RunnerDiskHealthCache) Complete(attempt *RunnerDiskHealthAttempt, obser
 // evidence is private; only the opaque sampler's method reaches it outside
 // synthetic package tests. This avoids exporting a path for caller counters.
 func (c *RunnerDiskHealthCache) complete(attempt *RunnerDiskHealthAttempt, evidence func() (hostinventory.DirFilesystemSample, uint64, time.Time, bool)) bool {
+	return c.completeLatest(attempt, func(s *runnerDiskSnapshotSlot, now time.Time) (RunnerDiskHealthReading, bool) {
+		sample, inode, review, ok := evidence()
+		sample.ObservedAt, review = sample.ObservedAt.UTC(), review.UTC()
+		if !ok {
+			return RunnerDiskHealthReading{}, false
+		}
+		if sample.Scope != s.binding.Scope || inode != s.binding.DirectoryInode {
+			s.revoke()
+			return RunnerDiskHealthReading{}, false
+		}
+		host, reading, ok := acceptRunnerDiskHealth(s.binding, sample, inode, review, now)
+		return reading, ok && host == attempt.key.host
+	})
+}
+
+// completeLatest is private and must only be called by the two qualified
+// sources. It shares read ordering, freshness and withdrawal, not evidence:
+// remote receipts cannot mint or replace the local descriptor observation.
+func (c *RunnerDiskHealthCache) completeLatest(attempt *RunnerDiskHealthAttempt, accepted func(*runnerDiskSnapshotSlot, time.Time) (RunnerDiskHealthReading, bool)) bool {
 	if c == nil || c.now == nil || attempt == nil || attempt.owner != c {
 		return false
 	}
@@ -160,21 +179,13 @@ func (c *RunnerDiskHealthCache) complete(attempt *RunnerDiskHealthAttempt, evide
 	s.active = nil
 	// Latest attempt replaces, rather than silently keeping, previous data.
 	s.reading = RunnerDiskHealthReading{}
-	sample, inode, review, ok := evidence()
-	sample.ObservedAt, review = sample.ObservedAt.UTC(), review.UTC()
 	now := c.wallNow()
-	if !s.current(now) || !ok {
+	if !s.current(now) {
 		return false
 	}
-	if sample.Scope != s.binding.Scope || inode != s.binding.DirectoryInode {
-		s.revoke()
-		return false
-	}
-	if !sample.ObservedAt.After(attempt.startedAt) || !sample.ObservedAt.After(s.lastObserved) {
-		return false
-	}
-	host, reading, ok := acceptRunnerDiskHealth(s.binding, sample, inode, review, now)
-	if !ok || host != attempt.key.host || reading.StoragePool != attempt.key.pool {
+	reading, ok := accepted(s, now)
+	if !ok || reading.StoragePool != attempt.key.pool || !reading.ObservedAt.After(attempt.startedAt) ||
+		!reading.ObservedAt.After(s.lastObserved) {
 		return false
 	}
 	s.reading, s.lastObserved = reading, reading.ObservedAt
