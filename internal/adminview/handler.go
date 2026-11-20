@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -78,6 +79,7 @@ type Overview struct {
 	UnplannedReservationCount    int64          `json:"legacy_unplanned_reservations"`
 	LegacySourcePreparationCount int64          `json:"legacy_source_preparations"`
 	GarmManagementAvailable      bool           `json:"garm_management_available"`
+	CIHealthAvailable            bool           `json:"ci_health_available,omitempty"`
 	PolicyRevision               string         `json:"policy_revision"`
 	ManagementEnabled            bool           `json:"management_enabled"`
 	Mode                         string         `json:"mode"`
@@ -128,6 +130,7 @@ type Handler struct {
 	onboardingProbe             bool
 	onboardingHash              [32]byte
 	runnerDiskHealth            RunnerDiskHealthSource
+	ciHealth                    atomic.Pointer[CIHealthSnapshot]
 	store                       *admission.SQLiteStore
 	tokenHash                   [32]byte
 	writeHash                   [32]byte
@@ -185,6 +188,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		fail(http.StatusServiceUnavailable)
 		return
+	}
+	if r.URL.Path == "/admin/api/v1/ci-health" {
+		if source := h.ciHealth.Load(); source != nil {
+			h.serveCIHealth(w, r, source)
+			return
+		}
 	}
 	if r.URL.Path == "/admin/api/v1/demand-observer-status" {
 		h.serveDemandObserver(w, r)
@@ -340,6 +349,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		view.ManagementEnabled = h.management
 		view.GarmManagementAvailable = h.garm != nil
 		view.OnboardingPreflightAvailable = h.onboarding != nil
+		view.CIHealthAvailable = h.ciHealth.Load() != nil
 		h.attachRunnerDiskHealth(&view)
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {

@@ -12,6 +12,7 @@ import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboardi
 import { validateGarm } from "./garm-client.js";
 import { validateProfilesList } from "./profiles-client.js";
 import { validateUsageHistory } from "./usage-client.js";
+import { ciHealthEndpoint, ciHealthFresh, readCIHealthBody } from "./ci-health-client.js";
 
 // This client has no persistence and no configurable remote endpoint.
 export const endpoint = "/admin/api/v1/overview";
@@ -38,6 +39,7 @@ export function validateOverview(value) {
     !object(value) ||
     value.mode !== "experimental-ledger" ||
     !bool(value.management_enabled) ||
+    (Object.hasOwn(value, "ci_health_available") && !bool(value.ci_health_available)) ||
     typeof value.policy_revision !== "string" ||
     !/^[0-9a-f]{64}$/.test(value.policy_revision) ||
     !bool(value.experimental_provisioning_enabled) ||
@@ -94,6 +96,7 @@ export function validateOverview(value) {
   return value;
 }
 export class ReadSession {
+  #ciHealthRequest;
  #demandObserverRequest;
  #demandObserverGeneration=0;
  #enrollmentRequest;
@@ -132,6 +135,8 @@ export class ReadSession {
     this.fetcher = fetcher.bind(globalThis);
   }
   disconnect() {
+    this.#ciHealthRequest?.abort();
+    this.#ciHealthRequest = undefined;
  this.#demandObserverGeneration++;this.#demandObserverRequest?.abort();this.#demandObserverRequest=undefined;
  this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
  this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
@@ -288,6 +293,43 @@ export class ReadSession {
       if(generation!==this.#demandObserverGeneration||controller.signal.aborted)throw new SessionEnded();
       return result;
     } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async ciHealthSnapshot({signal} = {}) {
+    if (!this.#token || signal?.aborted) throw new SessionEnded();
+    this.#ciHealthRequest?.abort();
+    const controller = new AbortController();
+    this.#ciHealthRequest = controller;
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, {once: true});
+    const timeout = setTimeout(abort, 15000);
+    const active = () => {
+      if (this.#ciHealthRequest !== controller || controller.signal.aborted) throw new SessionEnded();
+    };
+    try {
+      const response = await this.fetcher(ciHealthEndpoint, {
+        method: "GET",
+        headers: {Authorization: `Bearer ${this.#token}`, Accept: "application/json"},
+        credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal,
+      });
+      active();
+      if (response.status === 401) {
+        this.disconnect();
+        throw new SessionEnded("Read authorization ended. Reconnect to the admin service.");
+      }
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error("CI Health response unavailable.");
+      const result = await readCIHealthBody(response, controller.signal);
+      active();
+      return ciHealthFresh(result, Date.now()) || result.state === "unavailable" ? result : null;
+    } catch (error) {
+      if (error instanceof SessionEnded) throw error;
+      active();
+      throw new Error("CI Health response unavailable.");
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      if (this.#ciHealthRequest === controller) this.#ciHealthRequest = undefined;
+    }
   }
   async allocatorStatusSnapshot({signal}={}) {
     if(!this.#token) throw new SessionEnded();

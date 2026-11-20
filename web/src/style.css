@@ -795,3 +795,14 @@ td {
 /* Keep lifecycle tables locally scrollable; long state/blocker identifiers wrap. */
 #lifecycle { min-width: 0; overflow-wrap: anywhere; }
 #lifecycle .table-wrap { max-width: 100%; }
+
+/* Read-only CI timing; no change to shared table navigation or form controls. */
+.ci-health-attempt { border-top: 1px solid #cbd5e1; padding: .65rem 0; }
+.ci-health-attempt > summary, .ci-health-jobs summary { cursor: pointer; }
+.ci-health-facts { display: flex; flex-wrap: wrap; gap: .55rem 1.35rem; }
+.ci-health-facts div { min-width: 0; }
+.ci-health-facts dt { font-size: .85rem; }
+.ci-health-facts dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.ci-health-jobs { margin: .75rem 0 0; padding-inline-start: 1.25rem; }
+.ci-health-jobs > li { padding: .45rem 0 .7rem; }
+.ci-health-row-head { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }

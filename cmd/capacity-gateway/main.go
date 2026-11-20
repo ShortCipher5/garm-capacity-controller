@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gatewayrpc"
@@ -40,6 +41,8 @@ type garmConfiguration struct {
 	ScaleSets         map[uint64]string    `json:"scalesets"`
 }
 type configuration struct {
+	CIHealth                      *ciHealthConfiguration                   `json:"ci_health,omitempty"`
+	EnableCIHealth                bool                                     `json:"-"`
 	DemandObserverConfigFile      string                                   `json:"demand_observer_config_file,omitempty"`
 	NativeRetirement              *nativeRetirementConfiguration           `json:"native_retirement,omitempty"`
 	EnableNativeRetirement        bool                                     `json:"-"`
@@ -151,6 +154,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	}
 
 	var demand *demandobserver.Service
+	var demandConfig *demandobserver.Config
 	if config.DemandObserverConfigFile != "" {
 		if config.Admin == nil {
 			return demandobserver.ErrObserver
@@ -159,11 +163,21 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		if e != nil {
 			return e
 		}
+		demandConfig = &dc
 		demand, e = demandobserver.NewService(dc)
 		if e != nil {
 			return e
 		}
 		config.Admin.demandObserverRuntime = demand
+	}
+	ciHealth, err := buildCIHealth(config, demandConfig)
+	if err != nil {
+		return err
+	}
+	var ciSnapshot *adminview.CIHealthSnapshot
+	if ciHealth != nil {
+		defer ciHealth.close()
+		ciSnapshot = ciHealth.snapshot
 	}
 	backends := map[string]gateway.Backend{}
 	monitors := map[string]hostmetrics.Source{}
@@ -247,7 +261,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	if config.Admin != nil {
 		config.Admin.onboardingRuntime = onboardingManager
 	}
-	adminServer, closeAdmin, err := newAdminServer(config.Admin, store, provision)
+	adminServer, closeAdmin, err := newAdminServerWithCIHealth(config.Admin, store, provision, ciSnapshot)
 	if err != nil {
 		return err
 	}
@@ -343,8 +357,15 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	} else {
 		close(demandDone)
 	}
+	ciHealthDone := make(chan struct{})
+	if ciHealth != nil {
+		go func() { defer close(ciHealthDone); ciHealth.run(runctx) }()
+	} else {
+		close(ciHealthDone)
+	}
 	defer func() {
 		cancel()
+		<-ciHealthDone
 		<-loopDone
 		<-monitorDone
 		<-observerDone
@@ -406,6 +427,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 }
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
+	ciHealth := flag.Bool("allow-ci-health-timing", false, "enable explicitly enrolled read-only GitHub Actions timing observations")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
 	retirement := flag.Bool("allow-experimental-native-retirement", false, "configure canonical STOP/DELETE orchestration; active runtime still refused, no release")
 	jobObserver := flag.Bool("allow-job-observer", false, "enable positive authenticated job/root journal correlation only; no retirement or release")
@@ -521,6 +543,7 @@ func main() {
 		config.Admin.EnableFirstboot = true
 	}
 	config.EnableStockProvider = *stockProvider
+	config.EnableCIHealth = *ciHealth
 	config.EnableJobObserver = *jobObserver
 	config.EnableNativeRetirement = *retirement
 	if *bootstrap {
