@@ -472,3 +472,34 @@ func testsupportIdentity(t *testing.T) *incusapi.Client {
 		writeDiscoverySync(w, root)
 	})
 }
+
+func TestDiscoveryWarnsOnlyForSameDaemonDifferentConfiguredProjectScope(t *testing.T) {
+	client := discoveryFixture(t, standardDiscoveryServer(nil, nil, nil))
+	observed, err := client.PhysicalIdentity(context.Background())
+	if err != nil || !observed.Valid() {
+		t.Fatal("local TLS fixture identity unavailable", err)
+	}
+	exact := admission.HostBinding{ServerKeyFingerprint: observed.ServerKeyFingerprint(), OriginFingerprint: observed.OriginFingerprint(), ScopeFingerprint: observed.ScopeFingerprint(), ServerName: observed.ServerName()}
+	other := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name         string
+		change       func(*admission.HostBinding)
+		wantMismatch bool
+	}{
+		{"same scope", func(_ *admission.HostBinding) {}, false},
+		{"same origin and key but different project scope", func(v *admission.HostBinding) { v.ScopeFingerprint = other }, true},
+		{"different origin with same key", func(v *admission.HostBinding) { v.OriginFingerprint = other; v.ScopeFingerprint = other }, false},
+		{"changed daemon key", func(v *admission.HostBinding) { v.ServerKeyFingerprint = other; v.ScopeFingerprint = other }, false},
+		{"missing scope not evidence", func(v *admission.HostBinding) { v.ScopeFingerprint = "" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := exact
+			tc.change(&binding)
+			// An exact match elsewhere must not mask a distinct overlap.
+			overlap, mismatch := discoveryBindingOverlap(observed, map[string]admission.HostBinding{"prior": binding, "exact": exact})
+			if !overlap || mismatch != tc.wantMismatch {
+				t.Fatalf("overlap=%v mismatch=%v", overlap, mismatch)
+			}
+		})
+	}
+}

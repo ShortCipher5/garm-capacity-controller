@@ -204,14 +204,32 @@ func (m *Manager) discoverIdentity(ctx context.Context, source DiscoverySource, 
 		return identity, true, identity.ServerVersion, "not_checked"
 	}
 	identity.BindingClass = "no_match_observed"
-	for _, binding := range bindings {
-		if binding.ServerKeyFingerprint == observed.ServerKeyFingerprint() || binding.OriginFingerprint == observed.OriginFingerprint() || binding.ScopeFingerprint == observed.ScopeFingerprint() || strings.EqualFold(binding.ServerName, observed.ServerName()) {
-			identity.BindingClass = "match_observed"
-			result.Warnings = append(result.Warnings, "stored binding match observed: overlapping identity is a warning, not separate capacity")
-			break
-		}
+	overlap, differentProjectScope := discoveryBindingOverlap(observed, bindings)
+	if overlap {
+		identity.BindingClass = "match_observed"
+		result.Warnings = append(result.Warnings, "stored binding match observed: overlapping identity is a warning, not separate capacity")
+	}
+	if differentProjectScope {
+		result.Warnings = append(result.Warnings, "Same Incus origin and server key, but a different configured project scope from a stored binding. This inventory does not verify the GARM provider route.")
 	}
 	return identity, true, identity.ServerVersion, identity.BindingClass
+}
+
+// Scope fingerprints commit to origin AND configured project. Distinct scopes
+// at different origins (even with a reused TLS key) cannot diagnose a project
+// mismatch. Preserve the broader overlap warning independently.
+func discoveryBindingOverlap(observed incusapi.PhysicalServerIdentity, bindings map[string]admission.HostBinding) (overlap, differentProjectScope bool) {
+	if !observed.Valid() {
+		return false, false
+	}
+	for _, binding := range bindings {
+		sameKey := binding.ServerKeyFingerprint == observed.ServerKeyFingerprint()
+		sameOrigin := binding.OriginFingerprint == observed.OriginFingerprint()
+		sameScope := binding.ScopeFingerprint == observed.ScopeFingerprint()
+		overlap = overlap || sameKey || sameOrigin || sameScope || strings.EqualFold(binding.ServerName, observed.ServerName())
+		differentProjectScope = differentProjectScope || (sameKey && sameOrigin && binding.ScopeFingerprint != "" && !sameScope)
+	}
+	return overlap, differentProjectScope
 }
 
 func (m *Manager) discoverTotals(ctx context.Context, source DiscoverySource, result *DiscoveryResult) (*DiscoveryTotals, bool) {
