@@ -380,3 +380,37 @@ func TestReadsRequireTrustedIdentityAndExactInstance(t *testing.T) {
 		})
 	}
 }
+
+func TestHostTotalsDoesNotTreatIncusBlockInventoryAsDiskCapacity(t *testing.T) {
+	server, credentials := tlsFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/1.0":
+			writeSync(w, rootMetadata())
+		case "/1.0/resources":
+			// Incus 7.0.2 Resources.Storage.Disks is block-device inventory,
+			// not filesystem capacity or a named storage pool's free space.
+			writeSync(w, json.RawMessage(`{"cpu":{"total":8},"memory":{"total":17179869184},"storage":{"total":1,"disks":[{"id":"vda","size":274877906944,"partitions":[{"id":"vda1","size":273804165120}]}]}}`))
+		default:
+			t.Errorf("unexpected resource read: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	client, err := New(server.URL, "runners", credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pool := range []string{"", "default"} {
+		scoped, err := client.WithStoragePool(pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		totals, err := scoped.HostTotals(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := HostTotals{CPUMillisTotal: 8000, RAMMiBTotal: 16384}
+		if totals != want {
+			t.Fatalf("HostTotals for pool %q = %+v, want %+v (disk and pool unknown)", pool, totals, want)
+		}
+	}
+}

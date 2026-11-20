@@ -58,6 +58,19 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.match(withProposal, /Memory<\/th><td>3,277 MiB<\/td><td>24,000 MiB<\/td>/);
     assert.match(withProposal, /Disk<\/th><td>52,429 MiB<\/td><td>Not suggested<\/td>/);
     assert.match(withProposal, /Selected storage pool usage is unknown/);
+    assert.match(withProposal, /No disk budget was suggested\. Review the runner storage pool and discovery warnings before entering any manual budget/);
+    const withDiskBudget = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: {...discovery, proposal: {...proposal, budget: {...proposal.budget, disk_mib: 40000}, warnings: []}} }));
+    assert.match(withDiskBudget, /Disk<\/th><td>52,429 MiB<\/td><td>40,000 MiB<\/td>/);
+    assert.doesNotMatch(withDiskBudget, /No disk budget was suggested/);
+    const exhausted = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: {
+      ...discovery,
+      totals: {...discovery.totals, disk_mib_used: discovery.totals.disk_mib},
+      guests: discovery.guests.filter(guest => guest.root_disk_mib !== undefined),
+    }}));
+    assert.match(exhausted, /Disk<\/th><td>52,429 MiB<\/td><td>Not suggested<\/td>/);
+    assert.match(exhausted, /No disk capacity remains in this proposal/);
+    assert.match(exhausted, /Review the runner storage pool and discovery warnings before entering any manual budget/);
+    assert.doesNotMatch(exhausted, /enter a reviewed disk budget manually|disk usage unknown/);
     assert.doesNotMatch(withProposal, /<form|type="submit"/);
     assert.match(view, /data-unmanaged="2"/);
     assert.match(view, /runner-1/);
