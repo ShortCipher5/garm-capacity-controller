@@ -99,6 +99,7 @@ func TestInverseIncreaseRequiresFreshHeadroomAndCap(t *testing.T) {
 		p.current = 2
 		p.target = 3
 		s.pools["pool"] = p
+		s.configuredMaximumFit = roomyMaximumFit("pool")
 	}
 	got := assessStockInverseAdvice(old, stockInverseOutcomeObserved, a, b, opt, now)
 	if got.Plan == nil || got.Plan.Suggested != 3 || got.Plan.Actionable {

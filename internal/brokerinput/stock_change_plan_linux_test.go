@@ -11,7 +11,7 @@ func changePlanFixture(delta int64) (scalingPreviewSample, scalingPreviewSample,
 	now := time.Unix(1700000100, 0)
 	scope := sha256.Sum256([]byte("same reviewed configuration, bindings and profiles"))
 	makeSample := func(start time.Time) scalingPreviewSample {
-		return scalingPreviewSample{scope: scope, StockScalingSample: StockScalingSample{source: "checked-source", sequence: 4, revision: 2, budget: 10, start: start, finish: start.Add(time.Second), expires: now.Add(20 * time.Second), pools: map[string]scalingPool{"pool": {repo: "repo", fingerprint: "checked-settings", enabled: true, current: 3, idle: 1, used: 1, cap: 8, target: 3 + delta}}, repoCaps: map[string]int64{"repo": 10}, order: []string{"pool"}}}
+		return scalingPreviewSample{scope: scope, StockScalingSample: StockScalingSample{source: "checked-source", sequence: 4, revision: 2, budget: 10, start: start, finish: start.Add(time.Second), expires: now.Add(20 * time.Second), pools: map[string]scalingPool{"pool": {repo: "repo", fingerprint: "checked-settings", enabled: true, current: 3, idle: 1, used: 1, cap: 8, target: 3 + delta}}, repoCaps: map[string]int64{"repo": 10}, order: []string{"pool"}, configuredMaximumFit: roomyMaximumFit("pool")}}
 	}
 	prior, current := makeSample(now.Add(-30*time.Second)), makeSample(now.Add(-10*time.Second))
 	request := stockChangePlanRequest{PoolID: "pool", RepositoryID: "repo", Source: "checked-source", Fingerprint: "checked-settings", Sequence: 4, Revision: 2, Observed: 3, Delta: delta, Scope: scope}

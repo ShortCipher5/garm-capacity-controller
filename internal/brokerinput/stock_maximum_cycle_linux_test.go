@@ -21,8 +21,9 @@ func maximumCycleHistory(count int, budget int64) []scalingPreviewSample {
 				"z":     {repo: "repo-z", fingerprint: "z-settings", enabled: true, current: 1, cap: 4, target: 2},
 				"empty": {repo: "repo-a", fingerprint: "empty-settings", enabled: true, current: 3, cap: 4, target: 1},
 			},
-			repoCaps: map[string]int64{"repo-a": 5, "repo-z": 4},
-			order:    []string{"z", "a"},
+			repoCaps:             map[string]int64{"repo-a": 5, "repo-z": 4},
+			order:                []string{"z", "a"},
+			configuredMaximumFit: roomyMaximumFit("empty", "a", "z"),
 		}})
 	}
 	return out
