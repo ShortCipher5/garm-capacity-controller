@@ -11,6 +11,14 @@ minimum idle, and be strictly below a fresh authenticated current maximum.
 The root Session mutex serializes that final read and PUT; actual topology is
 rechecked around both. No minimum-idle change, increase or re-enable is accepted.
 
+Both current tuple fields must be present explicitly in that fresh read. Stock
+v0.2.1 [omits zero minimum idle from its pool response](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/params/params.go#L465-L474).
+As a result, this endpoint currently refuses positive maximum reductions for
+zero-minimum stock pools whose response omits the field. The supervisor verifies
+the configured image ID, command, topology and TLS identity, not an independent
+binding between that running image and this specific stock response serializer.
+Missing or null minimum idle is never inferred to be zero.
+
 The existing settings manager/journal records the original request before PUT.
 Any possibly dispatched failure remains UNKNOWN across restart, even if later
 reads match. A rejection during the final extra read may conservatively leave

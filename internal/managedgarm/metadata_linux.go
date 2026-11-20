@@ -107,6 +107,12 @@ type pendingMetadataInstance struct {
 }
 
 func metadataObject(raw []byte) (map[string]json.RawMessage, error) {
+	return keyedJSONObject(raw, false)
+}
+
+// keyedJSONObject preserves the existing duplicate checks even when the
+// caller needs exact wire names rather than normalized metadata keys.
+func keyedJSONObject(raw []byte, preserveKeys bool) (map[string]json.RawMessage, error) {
 	if len(raw) > 1<<20 {
 		return nil, ErrBoundary
 	}
@@ -116,15 +122,20 @@ func metadataObject(raw []byte) (map[string]json.RawMessage, error) {
 		return nil, ErrBoundary
 	}
 	out := map[string]json.RawMessage{}
+	seen := map[string]bool{}
 	for d.More() {
 		tok, e = d.Token()
 		key, ok := tok.(string)
 		if e != nil || !ok {
 			return nil, ErrBoundary
 		}
-		key = strings.ToLower(key)
-		if _, ok := out[key]; ok {
+		folded := strings.ToLower(key)
+		if seen[folded] {
 			return nil, ErrBoundary
+		}
+		seen[folded] = true
+		if !preserveKeys {
+			key = folded
 		}
 		var v json.RawMessage
 		if d.Decode(&v) != nil {
