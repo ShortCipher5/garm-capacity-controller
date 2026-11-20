@@ -196,9 +196,7 @@ func (c *Client) snapshot(ctx context.Context) (garmmanagement.Snapshot, error) 
 	v.Pools = filtered
 	v.Repositories = []garmapi.ManagedRepository{}
 	v.WritesEnabled = c.writes && !c.unknown && !c.revoked && v.WritesEnabled
-	if c.unknown {
-		v.Status.WriteBlocked = true
-	}
+	c.overlayLocalWriteHold(&v.Status)
 	return v, nil
 }
 func (c *Client) Snapshot(ctx context.Context) (garmmanagement.Snapshot, error) {
@@ -217,10 +215,17 @@ func (c *Client) Status(ctx context.Context) (garmmanagement.Status, error) {
 	if e := c.exchange(ctx, http.MethodGet, "/v1/managed/status", nil, &s); e != nil || !validStatus(s) {
 		return s, ErrSettings
 	}
+	c.overlayLocalWriteHold(&s)
+	return s, nil
+}
+
+// overlayLocalWriteHold runs only after authenticating and validating supervisor
+// status. A pending journal row, when present, remains the primary evidence.
+func (c *Client) overlayLocalWriteHold(s *garmmanagement.Status) {
 	if c.unknown {
 		s.WriteBlocked = true
+		s.ManagedClientWriteHold = len(s.Pending) == 0
 	}
-	return s, nil
 }
 func (c *Client) ReduceMaximum(ctx context.Context, request, pool, expected string, target uint64, reason string) (garmapi.ManagedPool, error) {
 	if e := c.enter(ctx); e != nil {

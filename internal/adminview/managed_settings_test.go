@@ -92,3 +92,85 @@ func TestOptionalHistoryDeadlinePreservesRequiredSettings(t *testing.T) {
 		t.Fatal("history request not cancelled")
 	}
 }
+
+func TestManagedSettingsViewSeparatesGatewayHoldFromDurableIntent(t *testing.T) {
+	poolID := "11111111-1111-4111-8111-111111111111"
+	controller := "22222222-2222-4222-8222-222222222222"
+	intent := garmmanagement.Intent{RequestID: "33333333-3333-4333-8333-333333333333", Kind: "pool", Target: poolID, State: "unknown", CreatedAt: "2026-11-18T10:00:00Z"}
+	pool := garmapi.ManagedPool{ID: poolID, ProviderName: "capacity", Fingerprint: strings.Repeat("b", 64), MaxRunners: 3, MinIdleRunners: 1}
+	var phase, posts atomic.Int32
+	server, trust, _ := testsupport.NativeTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(managedsource.SourceHeader, strings.Repeat("a", 64))
+		w.Header().Set(managedsource.ControllerHeader, controller)
+		state := garmmanagement.Status{}
+		p := phase.Load()
+		if p == 3 {
+			state = garmmanagement.Status{WriteBlocked: true, Pending: []garmmanagement.Intent{intent}}
+		}
+		switch r.URL.Path {
+		case "/v1/managed/status":
+			// Even authenticated upstream JSON cannot supply local provenance.
+			if p == 0 {
+				w.Write([]byte(`{"write_blocked":false,"pending":[],"managed_client_write_hold":true,"ManagedClientWriteHold":true}`))
+				return
+			}
+			json.NewEncoder(w).Encode(state)
+		case "/v1/managed/settings":
+			if p == 2 || p == 0 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			json.NewEncoder(w).Encode(garmmanagement.Snapshot{ManagementSnapshot: garmapi.ManagementSnapshot{WritesEnabled: true, Pools: []garmapi.ManagedPool{pool}}, Status: state})
+		case "/v1/managed/history":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case "/v1/managed/pools/" + poolID + "/reduce-maximum":
+			posts.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Error("unexpected route")
+			w.WriteHeader(404)
+		}
+	}))
+	pin := sha256.Sum256(server.Certificate().RawSubjectPublicKeyInfo)
+	client, err := managedsettings.New(managedsettings.Configuration{Endpoint: server.URL, ServerKeyPin: hex.EncodeToString(pin[:]), ControllerID: controller, TLS: trust, Providers: []string{"capacity"}, PoolIDs: []string{poolID}, AllowReductions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	view, err := NewManagedSettingsView(client, true, []string{poolID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	check := func(blocked, local, settings, durable bool) {
+		t.Helper()
+		got, err := view.Snapshot(ctx)
+		if err != nil || got.WriteBlocked != blocked || got.ManagedClientWriteHold != local || got.SettingsAvailable != settings ||
+			(got.Pending != nil) != durable || (blocked && got.WritesEnabled) {
+			t.Fatalf("unexpected overview: %+v, %v", got, err)
+		}
+		if durable && (got.Pending.State != "unknown" || got.Pending.RequestID != intent.RequestID) {
+			t.Fatalf("lost durable row: %+v", got.Pending)
+		}
+		raw, err := json.Marshal(got)
+		if err != nil || strings.Contains(string(raw), `"managed_client_write_hold":true`) != local ||
+			(!local && strings.Contains(string(raw), `"managed_client_write_hold"`)) {
+			t.Fatalf("incorrect optional provenance shape: %s, %v", raw, err)
+		}
+	}
+	check(false, false, false, false)
+	phase.Store(1)
+	n := uint64(2)
+	if _, err := view.UpdatePool(ctx, intent.RequestID, poolID, pool.Fingerprint, garmapi.PoolUpdate{MaxRunners: &n}, "reviewed reduction"); !errors.Is(err, garmapi.ErrManagementOutcomeUnknown) {
+		t.Fatalf("expected unknown response: %v", err)
+	}
+	check(true, true, true, false)
+	phase.Store(2)
+	check(true, true, false, false)
+	phase.Store(3)
+	check(true, false, true, true)
+	if _, err := view.UpdatePool(ctx, intent.RequestID, poolID, pool.Fingerprint, garmapi.PoolUpdate{MaxRunners: &n}, "never replay"); !errors.Is(err, garmapi.ErrManagementDisabled) || posts.Load() != 1 {
+		t.Fatalf("existing write clamp changed: posts=%d, %v", posts.Load(), err)
+	}
+}

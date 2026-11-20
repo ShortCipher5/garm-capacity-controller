@@ -1,11 +1,13 @@
 import React, { useState } from "react";
 import { writerRecoveryEvidence, writerRecoveryEvidenceGuidance, writerRecoveryReport, writerRecoveryState } from "./garm-recovery.js";
+import { observePendingPoolSettings, pendingPoolObservationGuidance } from "./garm-pending-pool-observation.js";
 
 export function GarmRecoveryPanel({ snapshot, conflict, unavailable, uncertain }) {
   const [message, setMessage] = useState("");
   const state = writerRecoveryState({ snapshot, conflict, unavailable, uncertain });
   if (!state) return null;
   const evidence = writerRecoveryEvidenceGuidance(writerRecoveryEvidence({ snapshot, unavailable, uncertain }));
+  const poolObservation = pendingPoolObservationGuidance(observePendingPoolSettings({ snapshot, unavailable, conflict }));
   function download() {
     let url;
     try {
@@ -21,6 +23,7 @@ export function GarmRecoveryPanel({ snapshot, conflict, unavailable, uncertain }
     <h3>Restore safe settings ownership</h3>
     {state === "external-change" ? <p>Another settings change was observed. Your draft has not been silently reapplied. Compare the changed fields above, then discard and refresh before reviewing a new change.</p> : state === "unknown-write" ? <p>A write may still be in flight or may have completed without a reply. Do not resend it with a new request ID, delete the journal, or assume matching settings settles the outcome.</p> : <p>The latest settings check failed. Previously displayed values are not current evidence. Check the configured connection and management supervisor status, then use Refresh Garm settings.</p>}
     {evidence && <p>{evidence}</p>}
+    {poolObservation && <p>{poolObservation}</p>}
     <ol>
       <li>Stop additional settings edits in other Garm UI, CLI and automation sessions while investigating. Do not stop running jobs or delete runners.</li>
       <li>Preserve the authoritative settings journal and the pending request ID. Download the diagnostic summary below for the operator investigating the writer.</li>

@@ -33,3 +33,10 @@ this code.
 The controller role can read `/v1/managed/history`: up to 25 recent current-pool/provider-scoped journal receipts, bounded to 512 KiB. The supervisor projects typed settings fields, never raw dispatch data or unknown JSON fields. The admin overview uses the existing history list and sets `managed_history_available` only after a successful authenticated read. Unavailable and truncated history are not evidence that an operation had no effect.
 
 Confirmed receipts describe the original request, not present settings or physical capacity. Reading history never clears a client uncertainty latch or the supervisor's unresolved journal slot, never retries a PUT, and exposes no reset/replay operation. A different confirmed request cannot resolve an unknown request.
+
+The existing admin overview optionally reports `managed_client_write_hold: true`
+when the gateway process has latched an unknown outcome but its latest
+authenticated supervisor status has no unresolved journal row. A durable pending
+or unknown row takes precedence when available. This is display-only provenance
+for the existing write block; absence of a row or a process restart does not
+settle the original outcome.

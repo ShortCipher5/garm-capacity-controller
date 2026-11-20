@@ -46,3 +46,29 @@ test("classifies durable, historical and browser-only uncertainty without late p
  assert.equal(report.pending.state,"");
  assert.equal(report.write_blocked,true);
 });
+
+test("process-local gateway hold is diagnostic only, current or historical",()=>{
+ const snapshot={write_blocked:true,managed_client_write_hold:true};
+ assert.equal(writerRecoveryState({snapshot}),"unknown-write");
+ assert.equal(writerRecoveryEvidence({snapshot}),"managed-client-hold");
+ assert.equal(writerRecoveryEvidence({snapshot,unavailable:true}),"historical-managed-client-hold");
+ assert.equal(writerRecoveryEvidence({snapshot,unavailable:true,uncertain:true}),"browser-uncertain");
+ assert.match(writerRecoveryEvidenceGuidance("managed-client-hold"),/Neither that read nor a restart proves the original outcome/);
+ const report=writerRecoveryReport({snapshot});
+ assert.equal(report.evidence,"managed-client-hold");
+ assert.equal(report.write_blocked,true);
+ assert.equal(report.pending,null);
+});
+
+test("legacy and malformed optional hold markers do not create new evidence",()=>{
+ for(const marker of [undefined,false,"true",[true],{}]){
+  assert.equal(writerRecoveryEvidence({snapshot:{write_blocked:true,managed_client_write_hold:marker}}),"durable-unclassified");
+ }
+ assert.equal(writerRecoveryEvidence({snapshot:{write_blocked:false,managed_client_write_hold:true}}),null);
+ for(const state of ["pending","unknown"]){
+  const snapshot={write_blocked:true,managed_client_write_hold:true,pending:{state}};
+  assert.equal(writerRecoveryEvidence({snapshot}),`durable-${state}`);
+  assert.equal(writerRecoveryEvidence({snapshot,unavailable:true}),`historical-${state}`);
+ }
+ assert.doesNotMatch(writerRecoveryEvidenceGuidance("durable-unclassified"),/journal|durable/);
+});
