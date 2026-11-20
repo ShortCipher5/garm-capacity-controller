@@ -49,7 +49,16 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.match(stale, /Stale or unavailable observation/);
     const view = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: discovery }));
     assert.match(view, /Discovery observation · candidate-discover/);
-    assert.match(view, /CPU 6,000 millicores · Memory 30,720 MiB · Disk 471,860 MiB · Runners 0/);
+    assert.match(view, /Workload-aware suggested budget/);
+    assert.match(view, /<th scope="row">CPU<\/th><td>Not estimated<\/td><td>Not suggested<\/td>/);
+    assert.doesNotMatch(view, /6,000 millicores|30,720 MiB|471,860 MiB/);
+    const proposal = { version: 1, budget: {cpu_millis:4500,ram_mib:24000}, reserve:{cpu_millis:1000,ram_mib:3277,disk_mib:52429}, warnings:['Selected storage pool usage is unknown.'] };
+    const withProposal = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: {...discovery,proposal} }));
+    assert.match(withProposal, /CPU<\/th><td>1,000 millicores<\/td><td>4,500 millicores<\/td>/);
+    assert.match(withProposal, /Memory<\/th><td>3,277 MiB<\/td><td>24,000 MiB<\/td>/);
+    assert.match(withProposal, /Disk<\/th><td>52,429 MiB<\/td><td>Not suggested<\/td>/);
+    assert.match(withProposal, /Selected storage pool usage is unknown/);
+    assert.doesNotMatch(withProposal, /<form|type="submit"/);
     assert.match(view, /data-unmanaged="2"/);
     assert.match(view, /runner-1/);
     assert.match(view, /Managed runner/);

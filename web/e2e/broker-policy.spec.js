@@ -42,3 +42,30 @@ test('local validation preserves editable policy draft; dispatched unknown block
  await expect(panel.getByLabel('Separate management token')).toHaveValue('');
  expect(calls).toBe(1);
 });
+
+test('read-only policy supports unsaved local exploration without submission', async ({page}) => {
+ const repo='11111111-1111-4111-8111-111111111111';
+ const pool='22222222-2222-4222-8222-222222222222';
+ let writes=0;
+ await page.route('**/admin/api/v1/broker-policy',route=>{
+  if(route.request().method()!=='GET'){writes++;return route.fulfill({status:405});}
+  return route.fulfill({json:{advisory_only:true,writes_enabled:false,policy:{revision:3,repositories:[{id:repo,weight:1,max_runners:4,pools:[{id:pool,max_runners:4,warm_idle:1}]}]}}});
+ });
+ await page.goto('/');
+ await page.getByLabel('Admin read token').fill('a'.repeat(64));
+ await page.getByRole('button',{name:'Connect read-only'}).click();
+ const panel=page.locator('#broker-policy');
+ await expect(panel.getByText('No save is available.',{exact:false})).toBeVisible();
+ await panel.getByLabel('Fairness weight').fill('2');
+ await panel.getByLabel('Warm idle target').fill('3');
+ await expect(panel.getByText('Draft soft pool idle targets combined: 3.',{exact:false})).toBeVisible();
+ await panel.getByText('Compare draft with last loaded policy',{exact:true}).click();
+ await expect(panel.getByRole('table').getByRole('row').filter({hasText:'Fairness weight'}).locator('td').last()).toHaveText('2');
+ await expect(panel.getByRole('button',{name:'Save capacity policy'})).toHaveCount(0);
+ await expect(panel.getByLabel('Separate management token')).toHaveCount(0);
+ await panel.locator('form').evaluate(form=>form.requestSubmit());
+ await panel.getByRole('button',{name:'Reload policy (discard edits)',exact:true}).click();
+ await expect(panel.getByLabel('Fairness weight')).toHaveValue('1');
+ await expect(panel.getByLabel('Warm idle target')).toHaveValue('1');
+ expect(writes).toBe(0);
+});

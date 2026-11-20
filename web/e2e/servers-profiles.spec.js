@@ -20,7 +20,15 @@ test("read-only discovery, reviewed enrollment and honest duplicate error", asyn
   await discovery.getByLabel("Discovery management token", { exact: true }).fill(write);
   await discovery.getByRole("button", { name: "Discover candidate-discover", exact: true }).click();
   await expect(discovery.getByText(/Physical totals \(complete\): CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB \(131,072 MiB used\)/)).toBeVisible();
-  await expect(discovery.getByText(/CPU 6,000 millicores · Memory 30,720 MiB · Disk 471,860 MiB · Runners 0/)).toBeVisible();
+  const suggestion = discovery.getByRole("table", { name: "Workload-aware suggested budget", exact: true });
+  for (const [resource, reserve, budget] of [
+    ["CPU", "1,000 millicores", "4,500 millicores"],
+    ["Memory", "3,277 MiB", "24,371 MiB"],
+    ["Disk", "52,429 MiB", "315,187 MiB"],
+  ]) {
+    const row = suggestion.getByRole("row").filter({ has: page.getByRole("rowheader", { name: resource, exact: true }) });
+    await expect(row.getByRole("cell")).toHaveText([reserve, budget]);
+  }
   await expect(discovery.locator("[data-unmanaged]")).toHaveText(/1 unmanaged guest\(s\)/);
   await expect(discovery.getByText(/unmanaged guests: the shared limit may not cover them/)).toBeVisible();
   await expect(discovery.getByText(/physical_capacity_scope_unqualified/)).toBeVisible();

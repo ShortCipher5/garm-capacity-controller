@@ -26,3 +26,17 @@ export function brokerPolicyDraftReview(saved,draft,stale){
  }
  return {state:rows.length?'changed':'unchanged',rows};
 }
+
+
+// Display only: the sum of soft pool targets is not a per-repository floor.
+// A cleared or otherwise invalid draft input must not be treated as zero.
+export function warmIdleDraftTotal(pools) {
+ if (!Array.isArray(pools) || pools.length > 1000) return null;
+ let total = 0;
+ for (const p of pools) {
+  if (!Number.isSafeInteger(p?.max_runners) || p.max_runners < 0 || p.max_runners > 1000000 ||
+      !Number.isSafeInteger(p.warm_idle) || p.warm_idle < 0 || p.warm_idle > p.max_runners) return null;
+  total += p.warm_idle;
+ }
+ return total;
+}

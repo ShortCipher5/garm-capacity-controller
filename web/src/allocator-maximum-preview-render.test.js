@@ -41,6 +41,15 @@ test('optional maximum advice renders in the existing panel with no apply contro
   }
   assert.doesNotMatch(render({plan:blocked,now:now+10000}),/Required pressure evidence/);
   assert.doesNotMatch(render({plan:blocked,comparison:'preview_superseded'}),/Required pressure evidence/);
+  const fit=(reason,state='no_confirmed_proposals')=>({...plan,stock_maximum_preview:{...plan.stock_maximum_preview,state,reason,proposals:[]}});
+  const veto=fit('configured_maximum_fit_veto');
+  const vetoHTML=render({plan:veto});
+  assert.match(vetoHTML,/would exceed a configured budget/);assert.match(vetoHTML,/not a measured host limit or a settings change/);
+  assert.doesNotMatch(vetoHTML,/<button|<form/);
+  assert.match(render({plan:fit('configured_maximum_fit_unavailable')}),/could not be compared/);
+  assert.doesNotMatch(render({plan:fit('configured_maximum_fit_veto','unavailable')}),/would exceed a configured budget/);
+  assert.doesNotMatch(render({plan:veto,now:now+10000}),/would exceed a configured budget/);
+  assert.doesNotMatch(render({plan:veto,comparison:'preview_superseded'}),/would exceed a configured budget/);
   const stale=render({now:now+10000});
   assert.match(stale,/preview expired/);assert.doesNotMatch(stale,/<table|<button/);
   const changed=render({comparison:'preview_superseded'});

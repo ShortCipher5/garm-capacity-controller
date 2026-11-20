@@ -54,6 +54,8 @@ const previewReasonMessages = Object.freeze({
  incomplete_evidence: ['unavailable', 'The captured stock scaling evidence is incomplete. No maximum suggestions are shown.'],
  evidence_unavailable: ['unavailable', 'Required stock scaling evidence is unavailable. No maximum suggestions are shown.'],
  awaiting_matching_sample: ['no_confirmed_proposals', 'Waiting for another observation with the same effective configuration before comparing maximum suggestions.'],
+ configured_maximum_fit_veto: ['no_confirmed_proposals', 'No increase was suggested because the modeled runner load would exceed a configured budget in at least one observation. This is a modeled limit, not a measured host limit or a settings change.'],
+ configured_maximum_fit_unavailable: ['no_confirmed_proposals', 'The configured maximums could not be compared for an increase. No increase was suggested; this does not establish a capacity limit.'],
  no_confirmed_change: ['no_confirmed_proposals', 'The captured comparison confirmed no maximum change. This does not prove that no change is needed or that every comparison prerequisite was satisfied.'],
 });
 const previewStates = new Set(["unavailable", "no_confirmed_proposals", "proposed"]);

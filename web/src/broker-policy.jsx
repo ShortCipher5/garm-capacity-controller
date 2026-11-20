@@ -1,4 +1,5 @@
 import {AllocatorPlan} from "./allocator-plan.jsx";
+import {warmIdleDraftTotal} from './broker-policy-review.js';
 import {BrokerPolicyReview} from './broker-policy-review.jsx';
 import {BrokerStatus} from "./broker-status.jsx";
 import React, { useEffect, useRef, useState } from 'react';
@@ -20,7 +21,7 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
   const repo=(i,k,value)=>edit(rows=>rows.map((r,j)=>j===i?{...r,[k]:value}:r));
   const pool=(i,j,k,value)=>edit(rows=>rows.map((r,x)=>x===i?{...r,pools:r.pools.map((p,y)=>y===j?{...p,[k]:value}:p)}:r));
   async function save(e){
-    e.preventDefault();if(active.current||blocked)return;
+    e.preventDefault();if(active.current||blocked||view?.writes_enabled!==true)return;
     const credential = token.current?.value || '';
     // Proven pre-dispatch failures must not discard or lock an editable draft.
     try { validateBrokerSaveInput(credential, view.policy); }
@@ -39,8 +40,8 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
     {message&&<p role="status">{message}</p>}
     {view&&<BrokerStatus status={view.status} stale={comparisonStale} />}
     <AllocatorPlan readPlan={readPlan} policyRevision={savedPolicy?.revision} ledgerSequence={view?.status?.sequence} policyStale={comparisonStale} />
-    {view&&<form onSubmit={save}><p>Last loaded revision {savedPolicy?.revision}{comparisonStale ? ' (not verified as current; reload required)' : ''}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
-      {view.policy.repositories.map((r,i)=><div className="card" key={i}>
+    {view&&<form onSubmit={save}>{!view.writes_enabled&&<p>Read-only mode: explore unsaved changes locally. No save is available. Allocation previews still use saved policy, not this draft.</p>}<p>Last loaded revision {savedPolicy?.revision}{comparisonStale ? ' (not verified as current; reload required)' : ''}</p><fieldset disabled={busy||blocked}>
+      {view.policy.repositories.map((r,i)=>{const idleTotal=warmIdleDraftTotal(r.pools);return <div className="card" key={i}>
         <h3>Repository row {i + 1}</h3>
         <label>GARM repository UUID<input required value={r.id} onChange={e=>repo(i,'id',e.target.value)}/></label>
         <label>Fairness weight<input type="number" min="1" max="4294967295" required value={r.weight} onChange={e=>repo(i,'weight',e.target.value===''?'':Number(e.target.value))}/></label>
@@ -52,13 +53,14 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
           <label>Warm idle target<input type="number" min="0" max={p.max_runners===''?undefined:p.max_runners} required value={p.warm_idle} onChange={e=>pool(i,j,'warm_idle',e.target.value===''?'':Number(e.target.value))}/></label>
           <button type="button" onClick={()=>repo(i,'pools',r.pools.filter((_,x)=>x!==j))}>Remove pool from draft policy</button>
         </div>)}
+        <p>Draft soft pool idle targets combined: {idleTotal ?? 'not available until pool values are valid'}. This is not a guaranteed repository idle floor.</p>
         <button type="button" onClick={()=>repo(i,'pools',[...r.pools,{id:'',max_runners:0,warm_idle:0}])}>Add pool</button>
         <button type="button" onClick={()=>edit(rows=>rows.filter((_,j)=>j!==i))}>Remove repository from draft policy</button>
-      </div>)}
+      </div>;})}
       <button type="button" onClick={()=>edit(rows=>[...rows,{id:'',weight:1,max_runners:0,pools:[]}])}>Add repository</button>
       <BrokerPolicyReview saved={savedPolicy} draft={view.policy} stale={comparisonStale}/>
-      <label>Separate management token<input type="password" autoComplete="off" ref={token}/></label>
-      <button type="submit">Save capacity policy</button>
+      {view.writes_enabled&&<><label>Separate management token<input type="password" autoComplete="off" ref={token}/></label>
+      <button type="submit">Save capacity policy</button></>}
     </fieldset></form>}
   </div></section>;
 }

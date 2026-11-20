@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {brokerPolicyDraftReview} from './broker-policy-review.js';
+import {brokerPolicyDraftReview,warmIdleDraftTotal} from './broker-policy-review.js';
 const repo='11111111-1111-4111-8111-111111111111',pool='22222222-2222-4222-8222-222222222222',other='33333333-3333-4333-8333-333333333333';
 const policy=()=>({revision:4,repositories:[{id:repo,weight:1,max_runners:5,pools:[{id:pool,max_runners:4,warm_idle:1}]}]});
 test('exact review preserves saved values, zero, add/remove and verifies no automatic edit',()=>{
@@ -24,4 +24,10 @@ test('stale and unreviewable drafts never expose a misleading comparison',()=>{
  assert.deepEqual(brokerPolicyDraftReview(saved,draft,false),{state:'invalid',rows:[]});
  assert.deepEqual(brokerPolicyDraftReview(saved,draft,true),{state:'stale',rows:[]});
  assert.deepEqual(brokerPolicyDraftReview(saved,{...draft,revision:5},false),{state:'stale',rows:[]});
+});
+
+test('soft pool target sum preserves invalid and blank draft values as unavailable',()=>{
+ assert.equal(warmIdleDraftTotal([]),0);
+ assert.equal(warmIdleDraftTotal([{warm_idle:2,max_runners:3},{warm_idle:1,max_runners:1}]),3);
+ for(const invalid of ['',-1,0.5,4,undefined])assert.equal(warmIdleDraftTotal([{warm_idle:invalid,max_runners:3}]),null);
 });
