@@ -89,6 +89,7 @@ type DiscoveryResult struct {
 	ConnectionRevision int64                      `json:"connection_revision,omitempty"`
 	Proposal           *BudgetProposal            `json:"proposal,omitempty"`
 	Review             *admission.DiscoveryReview `json:"review,omitempty"`
+	ReviewExpiresAt    *time.Time                 `json:"review_expires_at,omitempty"`
 	Profile            string                     `json:"profile_id"`
 	ObservedAt         time.Time                  `json:"observed_at"`
 	Identity           DiscoveryIdentity          `json:"identity"`

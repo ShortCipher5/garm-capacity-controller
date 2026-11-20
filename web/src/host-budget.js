@@ -91,3 +91,44 @@ export function runnerMix(budget, profiles, counts) {
   const fits = profiles.map(profile => DIMENSIONS.some(key => !valid(profile[key]) || profile[key] === 0) ? null : Math.min(...DIMENSIONS.map(key => Math.floor(Number(budget[key]) / profile[key]))));
   return { totals, fits, exceeds: DIMENSIONS.filter(key => totals[key] > Number(budget[key])) };
 }
+
+// Presentation-only deadline from the exact discovery review. Older responses
+// still support manual enrollment, but cannot copy their plan into the draft.
+export function runnerPlanningReviewWindow(result) {
+  const review = result?.review;
+  if (!review || review.profile_id !== result.profile_id ||
+      typeof review.id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(review.id) ||
+      typeof review.revision !== 'string' || !/^[0-9a-f]{64}$/.test(review.revision) ||
+      typeof result.observed_at !== 'string' || typeof result.review_expires_at !== 'string') return undefined;
+  const observed = Date.parse(result.observed_at), expires = Date.parse(result.review_expires_at);
+  if (!Number.isFinite(observed) || !Number.isFinite(expires) || expires <= observed) return undefined;
+  return { observed, expires };
+}
+
+const enteredInteger = value => typeof value === 'number' ? valid(value) :
+  typeof value === 'string' && /^[0-9]+$/.test(value) && valid(Number(value));
+
+// Do not treat a manual override of unknown/headroom-constrained physical
+// dimensions as evidence. A copied count fits BOTH the entered draft and the
+// existing reviewed recommendation. This cannot save or activate anything.
+export function plannedRunnerLimit(result, budget, counts, now = Date.now()) {
+  const window = runnerPlanningReviewWindow(result), proposal = result?.proposal;
+  if (!window || !Number.isFinite(now) || now < window.observed || now >= window.expires ||
+      proposal?.version !== 1 || !['saved-profiles','illustrative-presets'].includes(proposal.size_source) ||
+      !Array.isArray(proposal.sizes) || proposal.sizes.length < 1 || proposal.sizes.length > 512 ||
+      !Array.isArray(counts) || counts.length !== proposal.sizes.length ||
+      DIMENSIONS.some(key => !valid(proposal.budget?.[key]) || proposal.budget[key] === 0 ||
+        !enteredInteger(budget?.[key]) || Number(budget[key]) === 0)) return undefined;
+
+  let total = 0;
+  for (let i = 0; i < counts.length; i++) {
+    if (!enteredInteger(counts[i]) || !proposal.sizes[i]) return undefined;
+    total += Number(counts[i]);
+    if (!valid(total)) return undefined;
+  }
+  if (total === 0) return undefined;
+  const mix = runnerMix(budget, proposal.sizes, counts);
+  if (mix.unknown || mix.invalid || mix.exceeds.length ||
+      DIMENSIONS.some(key => mix.totals[key] > proposal.budget[key])) return undefined;
+  return total;
+}

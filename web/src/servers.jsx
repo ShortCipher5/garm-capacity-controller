@@ -5,7 +5,7 @@ import { SSHInventory } from "./ssh-inventory.jsx";
 import { ConnectionManager } from "./connections.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
-import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS } from "./host-budget.js";
+import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS, plannedRunnerLimit, runnerPlanningReviewWindow } from "./host-budget.js";
 import { Usage } from "./usage-bars.jsx";
 import { UsageChart, USAGE_DIMENSIONS, formatSampleAge } from "./usage-chart.jsx";
 
@@ -172,12 +172,28 @@ export function DiscoveryResultView({ result }) {
     </div>
   );
 }
-export function BudgetPlanner({ result, budget, onChange }) {
+export function BudgetPlanner({ result, budget, onChange, allowPlan = true }) {
   const guidance = hostBudgetGuidance(result);
   const sizes = result.proposal ? result.proposal.sizes : RUNNER_PRESETS;
   const [counts, setCounts] = useState(() => sizes.map(() => 0));
   const mix = sizes.length ? runnerMix(budget, sizes, counts) : { unknown: true };
   const warnings = assessBudget(result, budget, guidance);
+  const [now, setNow] = useState(Date.now);
+  const reviewWindow = runnerPlanningReviewWindow(result);
+  const observed = reviewWindow?.observed, expires = reviewWindow?.expires;
+  useEffect(() => {
+    let timer;
+    function update() {
+      const current = Date.now();
+      setNow(current);
+      const transition = current < observed ? observed : expires;
+      if (current < transition) timer = setTimeout(update, Math.min(transition - current, 2147483647));
+    }
+    update();
+    return () => clearTimeout(timer);
+  }, [observed, expires]);
+  const plannedLimit = allowPlan ? plannedRunnerLimit(result, budget, counts, now) : undefined;
+  const reviewFresh = reviewWindow && now >= observed && now < expires;
   return <div className="budget-planner">
     <h4>Plan shared runner capacity</h4>
     <p>Suggested system reserve: 10% per dimension, with minimum headroom of 1 vCPU, 2 GiB RAM and 10 GiB disk (capped at host totals). Observed guest limits are also reserved. Adjust these proposed budgets for your workload.</p>
@@ -194,10 +210,18 @@ export function BudgetPlanner({ result, budget, onChange }) {
     </tbody></table></div>
     <p role="status">{mix.unknown ? "Mix unavailable: enter explicit positive CPU, RAM and disk budgets." : mix.invalid ? "Enter valid whole-number counts." : `Combined mix: ${mix.totals.cpu_millis} millicores, ${mix.totals.ram_mib} MiB RAM, ${mix.totals.disk_mib} MiB disk. ${mix.exceeds.length ? "Exceeds shared budget: " + mix.exceeds.join(", ") : "Within the entered resource budget; not an admission guarantee."}`}</p>
     {Number(budget.runners) < counts.reduce((sum,count) => sum + Number(count),0) && <p className="drain-warning">Planned count exceeds the entered runner count limit.</p>}
+    <button type="button" disabled={plannedLimit === undefined} onClick={() => {
+      // Recheck expiry on click even when a background-tab timer was delayed.
+      const fresh = Date.now();
+      const limit = allowPlan ? plannedRunnerLimit(result, budget, counts, fresh) : undefined;
+      setNow(fresh);
+      if (limit !== undefined) onChange({...budget, runners: limit});
+    }}>Use planned total as runner limit</button>
+    <p>{reviewFresh ? "This only fills the runner limit in this form; it does not save the mix or enroll the host." : "Refresh discovery to copy a planned total. You can still edit the runner limit manually."}</p>
     <p>Runner count limit is separate. Set it to cover the desired mix; zero CPU, RAM or runner budget blocks new claims. Planning does not transfer or free existing allocations.</p>
   </div>;
 }
-function EnrollForm({ result, busy, onSubmit, onCancel }) {
+function EnrollForm({ result, busy, allowPlan, onSubmit, onCancel }) {
   const [budget, setBudget] = useState(() => {
     const proposed = hostBudgetGuidance(result).budget;
     return {cpu_millis:proposed.cpu_millis ?? "",ram_mib:proposed.ram_mib ?? "",disk_mib:proposed.disk_mib ?? "",runners:0};
@@ -207,7 +231,7 @@ function EnrollForm({ result, busy, onSubmit, onCancel }) {
       <h4>Enroll as a new ledger host</h4>
       <p className="drain-warning">Enrollment records a disabled or draining host budget. It never adopts or rewrites an existing host, and it is not activation: enabling stays a separate reviewed action after qualification.</p>
       <label>New host name<input aria-label="New host name" name="name" defaultValue={result.profile_id} required maxLength={256} /></label>
-      <BudgetPlanner result={result} budget={budget} onChange={setBudget} />
+      <BudgetPlanner result={result} budget={budget} onChange={setBudget} allowPlan={allowPlan && !busy} />
       <label>Initial host mode<select aria-label="Initial host mode" name="mode" defaultValue="disabled"><option value="disabled">Disabled: pause new claims</option><option value="draining">Draining</option></select></label>
       <label>Enrollment management token<input aria-label="Enrollment management token" name="token" type="password" autoComplete="off" spellCheck={false} required disabled={busy} /></label>
       <p className="muted">Used once and cleared on submission. Known proposed budgets are prefilled after headroom and observed workload allowance; unknown dimensions remain blank for manual review. The server checks that this discovery review is current, unused and fresh. Complete detected totals are recorded without marking the host healthy.</p>
@@ -318,7 +342,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh, readOverhead
                         <div className="profile-result">
                           <DiscoveryResultView result={results[entry.id]} />
                           {enrolling === entry.id ? (
-                            <EnrollForm result={results[entry.id]} busy={busy} onSubmit={enroll} onCancel={() => setEnrolling("")} />
+                            <EnrollForm result={results[entry.id]} busy={busy} allowPlan={data.management_enabled === true} onSubmit={enroll} onCancel={() => setEnrolling("")} />
                           ) : (
                             <button className="quiet" type="button" disabled={busy || !data.management_enabled} onClick={() => { setEnrolling(entry.id); setMessage(""); }}>Enroll this host</button>
                           )}

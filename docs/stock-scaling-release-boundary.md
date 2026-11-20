@@ -82,3 +82,21 @@ does not stop redirects. Before counting that provider as verified, require a
 reviewed strict transport option or independently verified controls that bind
 it to the intended Incus daemon and project. Do not treat a successful build,
 configured endpoint, or apparent project match as sufficient for writes.
+
+## Minimum-idle shadow comparison
+
+With the existing read-only minimum-idle preview enabled, the same scoped
+capture can also emit one optional `stock_idle_decision_preview` on the
+allocation-plan response. Its `direction` is `increase` or `decrease`; it
+reports the observed and suggested minimum, the unchanged maximum, and an
+independent evidence expiry. The separate legacy reduction preview is unchanged.
+Absence means no decision was confirmed, not that no change is needed.
+
+An increase is one slot toward the saved warm target and requires two fresh
+matching captures with a classified quiet observed queue, no ambiguous warm
+supply, and fitting the existing floors as well as the extra slot. The saved
+policy repositories must exactly match the configured observation scope for
+an increase; narrower policy coverage is not treated as a quiet queue. This is
+configured-only modeling, not verified provider placement. A decrease is not
+accounted as a release and cannot fund an increase. No recommendation queues or
+applies a change, and history is held only in memory.

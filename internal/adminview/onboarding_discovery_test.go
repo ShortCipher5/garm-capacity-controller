@@ -304,6 +304,16 @@ func TestDiscoveryIncludesVersionedProposalAndSavedSizes(t *testing.T) {
 	if result.Review == nil || result.Proposal == nil || result.Proposal.Version != 1 || result.Proposal.SizeSource != "saved-profiles" || len(result.Proposal.Sizes) != 1 {
 		t.Fatalf("missing reviewed proposal: %+v", result)
 	}
+	status, err := store.Snapshot(context.Background())
+	if err != nil || result.ReviewExpiresAt == nil || !result.ReviewExpiresAt.Equal(result.ObservedAt.Add(status.Config.MaxObservationAge)) {
+		t.Fatalf("review expiry not taken from the persisted review window: %v", err)
+	}
+	var responseFields struct {
+		Review map[string]json.RawMessage `json:"review"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &responseFields) != nil || len(responseFields.Review) != 3 {
+		t.Fatal("presentation metadata changed enrollment review wire shape")
+	}
 	size := result.Proposal.Sizes[0]
 	if size.Name != "custom" || size.CPU != 2000 || size.RAM != 6144 || size.Disk != 40960 {
 		t.Fatal(size)

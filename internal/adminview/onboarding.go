@@ -225,6 +225,7 @@ func (h *Handler) serveOnboardingProfileDiscovery(w http.ResponseWriter, r *http
 			return
 		}
 		result.Review = &review
+		result.ReviewExpiresAt = &review.ExpiresAt
 		var body bytes.Buffer
 		if json.NewEncoder(&body).Encode(result) != nil || body.Len() > 2<<20 {
 			fail(http.StatusServiceUnavailable, "discovery view unavailable")

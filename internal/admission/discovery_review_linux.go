@@ -21,9 +21,10 @@ PRAGMA user_version=13;
 // DiscoveryReview identifies an immutable, sanitized server observation, not a
 // transport binding, physical authority, health check or activation permit.
 type DiscoveryReview struct {
-	ID       string `json:"id"`
-	Revision string `json:"revision"`
-	Profile  string `json:"profile_id"`
+	ID        string    `json:"id"`
+	Revision  string    `json:"revision"`
+	Profile   string    `json:"profile_id"`
+	ExpiresAt time.Time `json:"-"` // presentation only; enrollment rechecks current durable policy
 }
 
 // RecordDiscoveryReview retains the bounded view that the operator actually
@@ -69,6 +70,7 @@ func (s *SQLiteStore) RecordConnectionDiscoveryReview(ctx context.Context, id, p
 		if age < 0 || age > config.MaxObservationAge {
 			return ErrDenied
 		}
+		review.ExpiresAt = observedAt.Add(config.MaxObservationAge).UTC()
 		var latest string
 		latestErr := tx.QueryRow("SELECT observed_at FROM onboarding_reviews WHERE profile=? AND current=1", profile).Scan(&latest)
 		if latestErr != nil && latestErr != sql.ErrNoRows {

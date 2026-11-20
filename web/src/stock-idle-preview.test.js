@@ -48,3 +48,47 @@ test('bounded scope reason is specific only for current unavailable previews',()
  p.stock_idle_preview.reason=['scope_limit_exceeded'];
  assert.equal(stockIdlePreviewView(p,'linked_at_capture',now).reason,undefined);
 });
+
+const withDecision=(direction='increase')=>{
+ const p=plan();
+ p.stock_idle_decision_preview={...p.stock_idle_preview.proposals[0],host_evidence:'configured_only',direction,
+  expires_at:new Date(now+5000).toISOString(),...(direction==='increase'?{observed_min_idle:0,suggested_min_idle:1}:{})};
+ return p;
+};
+
+test('single idle decision selects a visible increase or decrease over legacy cuts',()=>{
+ for(const direction of ['increase','decrease']){
+  const p=withDecision(direction),v=stockIdlePreviewView(p,'linked_at_capture',now);
+  assert.equal(v.state,'proposed');assert.equal(v.direction,direction);assert.equal(v.proposals.length,1);
+  assert.match(stockIdlePreviewMessage(v),direction==='increase'?/increasing minimum idle by 1/:/decreasing minimum idle by 1/);
+  assert.equal(v.proposals[0].unchanged_maximum,3);
+ }
+ const p=withDecision();delete p.stock_idle_decision_preview;
+ assert.equal(stockIdlePreviewView(p,'linked_at_capture',now).proposals[0].suggested_min_idle,0);
+});
+
+test('single idle decision refuses malformed, unscoped and contradictory rows',()=>{
+ for(const change of [
+  p=>p.stock_idle_decision_preview=null,p=>p.stock_idle_decision_preview.direction='flat',
+  p=>p.stock_idle_decision_preview.direction='decrease',
+  p=>p.stock_idle_decision_preview.suggested_min_idle=2,
+  p=>p.stock_idle_decision_preview.observed_min_idle=-1,
+  p=>p.stock_idle_decision_preview.unchanged_maximum=0,
+  p=>p.stock_idle_decision_preview.unchanged_maximum=1000001,
+  p=>p.stock_idle_decision_preview.host_evidence='verified',
+  p=>p.stock_idle_decision_preview.actionable=true,
+  p=>p.stock_idle_decision_preview.expires_at=new Date(now+30000).toISOString(),
+  p=>p.stock_idle_decision_preview.repository_id='22222222-2222-4222-8222-222222222222',
+  p=>p.pools=[],p=>p.pools.push({...p.pools[0]}),
+ ]){
+  const p=withDecision();change(p);
+  assert.deepEqual(stockIdlePreviewView(p,'linked_at_capture',now),{state:'unavailable',proposals:[]});
+ }
+});
+
+test('single idle decision clears when evidence expires or saved comparison changes, with no legacy revival',()=>{
+ for(const [comparison,at,state] of [['linked_at_capture',now+5000,'expired'],['policy_changed',now,'comparison_unavailable'],['preview_superseded',now,'comparison_unavailable']]){
+  assert.deepEqual(stockIdlePreviewView(withDecision(),comparison,at),{state,proposals:[]});
+ }
+ assert.equal(stockIdlePreviewView(null,'linked_at_capture',now),null);
+});
