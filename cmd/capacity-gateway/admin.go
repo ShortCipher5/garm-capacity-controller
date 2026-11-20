@@ -65,6 +65,12 @@ type adminConfiguration struct {
 }
 
 func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, provision bool) (*http.Server, func(), error) {
+	return newAdminServerWithCIHealth(config, store, provision, nil)
+}
+
+// A CI source is owned by this startup instance and must not be saved in a
+// reused Admin configuration, even on a later startup with observation off.
+func newAdminServerWithCIHealth(config *adminConfiguration, store *admission.SQLiteStore, provision bool, ciHealth *adminview.CIHealthSnapshot) (*http.Server, func(), error) {
 	noop := func() {}
 	if config == nil {
 		return nil, noop, nil
@@ -102,6 +108,12 @@ func newAdminServer(config *adminConfiguration, store *admission.SQLiteStore, pr
 	handler.SetAllocatorStatusSource(config.allocatorRuntime)
 	if config.allocatorAdvisory != nil {
 		handler.SetAllocatorPlanSource(config.allocatorAdvisory)
+	}
+	if ciHealth != nil {
+		if err := handler.SetCIHealthSnapshot(ciHealth); err != nil {
+			cleanup()
+			return nil, noop, err
+		}
 	}
 	handler.SetDemandObserver(config.demandObserverRuntime)
 	handler.SetJobObserver(config.jobObserverRuntime)

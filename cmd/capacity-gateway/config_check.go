@@ -36,6 +36,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if validateNativeRetirement(c) != nil {
 		return nativecontroller.ErrConfiguration
 	}
+	if validateCIHealthConfiguration(c) != nil {
+		return fail()
+	}
 	if validateJobObserver(c) != nil {
 		return fail()
 	}
