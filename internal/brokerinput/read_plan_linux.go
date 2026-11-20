@@ -14,21 +14,22 @@ import (
 // Stock reads are non-atomic; exact source, ownership and ledger revision are
 // checked, and the capture interval is explicit rather than called a live total.
 type ReadPlan struct {
-	StockIdlePreview    *StockIdlePreview    `json:"stock_idle_preview,omitempty"`
-	Source              string               `json:"source"`
-	SourceIdentity      string               `json:"source_identity"`
-	DemandDigest        string               `json:"demand_digest"`
-	LedgerSequence      int64                `json:"ledger_sequence"`
-	PolicyRevision      int64                `json:"policy_revision"`
-	StartedAt           time.Time            `json:"started_at"`
-	FinishedAt          time.Time            `json:"finished_at"`
-	CapturedAt          time.Time            `json:"captured_at"`
-	ExpiresAt           time.Time            `json:"expires_at"`
-	Atomic              bool                 `json:"atomic"`
-	Pools               []ReadPlanPool       `json:"pools"`
-	RemainingJobs       int                  `json:"remaining_jobs"`
-	Pressure            []PressureStatus     `json:"pressure,omitempty"`
-	StockMaximumPreview *StockMaximumPreview `json:"stock_maximum_preview,omitempty"`
+	StockIdlePreview         *StockIdlePreview    `json:"stock_idle_preview,omitempty"`
+	Source                   string               `json:"source"`
+	SourceIdentity           string               `json:"source_identity"`
+	DemandDigest             string               `json:"demand_digest"`
+	LedgerSequence           int64                `json:"ledger_sequence"`
+	PolicyRevision           int64                `json:"policy_revision"`
+	StartedAt                time.Time            `json:"started_at"`
+	FinishedAt               time.Time            `json:"finished_at"`
+	CapturedAt               time.Time            `json:"captured_at"`
+	ExpiresAt                time.Time            `json:"expires_at"`
+	Atomic                   bool                 `json:"atomic"`
+	Pools                    []ReadPlanPool       `json:"pools"`
+	RemainingJobs            int                  `json:"remaining_jobs"`
+	Pressure                 []PressureStatus     `json:"pressure,omitempty"`
+	StockMaximumPreview      *StockMaximumPreview `json:"stock_maximum_preview,omitempty"`
+	StockMaximumBatchPreview *StockMaximumPreview `json:"stock_maximum_batch_preview,omitempty"`
 }
 type ReadPlanPool struct {
 	Pool                 string                `json:"pool"`
@@ -54,6 +55,7 @@ type planReader struct {
 	idleHistory         stockIdleHistory
 	stockMaximumPreview bool
 	scalingHistory      scalingPreviewHistory
+	maximumBatchHistory stockMaximumBatchHistory
 }
 
 func (s *Service) ReadPlan(ctx context.Context) (ReadPlan, error) {
@@ -69,6 +71,7 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	defer func() {
 		if resultErr != nil {
 			p.scalingHistory.reset()
+			p.maximumBatchHistory.reset()
 			p.idleHistory.reset()
 		}
 		p.mu.Unlock()
@@ -165,6 +168,7 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	}
 	if p.stockMaximumPreview {
 		result.StockMaximumPreview = p.scalingHistory.accept(scale, scaleErr, now, result.ExpiresAt)
+		result.StockMaximumBatchPreview = p.maximumBatchHistory.accept(scale, scaleErr, now, result.ExpiresAt)
 	}
 	if p.stockIdlePreview {
 		result.StockIdlePreview = p.idleHistory.accept(idleSamples, idleErr, now, result.ExpiresAt)

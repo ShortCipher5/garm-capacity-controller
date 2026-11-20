@@ -12,7 +12,7 @@ test('optional maximum advice renders in the existing panel with no apply contro
  let server;
  try{
   server=await createServer({cacheDir,server:{middlewareMode:true,hmr:false},appType:'custom'});
-  const {AllocatorPlan,StockMaximumSuggestions}=await server.ssrLoadModule('/src/allocator-plan.jsx');
+  const {AllocatorPlan,StockMaximumSuggestions,StockMaximumBatchSuggestions}=await server.ssrLoadModule('/src/allocator-plan.jsx');
   const initial=renderToStaticMarkup(React.createElement(AllocatorPlan,{readPlan:()=>{throw Error('must not fetch on mount');}}));
   assert.match(initial,/Why automatic cross-repository scaling is unavailable here/);
   assert.match(initial,/every runner start must pass/);
@@ -50,6 +50,18 @@ test('optional maximum advice renders in the existing panel with no apply contro
   assert.doesNotMatch(render({plan:fit('configured_maximum_fit_veto','unavailable')}),/would exceed a configured budget/);
   assert.doesNotMatch(render({plan:veto,now:now+10000}),/would exceed a configured budget/);
   assert.doesNotMatch(render({plan:veto,comparison:'preview_superseded'}),/would exceed a configured budget/);
+  const renderBatch=(delta={})=>renderToStaticMarkup(React.createElement(StockMaximumBatchSuggestions,{plan:{...withIdle,stock_maximum_batch_preview:withIdle.stock_maximum_preview},comparison:'linked_at_capture',now,...delta}));
+  assert.equal(renderBatch({plan}),"");
+  assert.match(renderBatch(),/does not monitor applied changes, enforce a cooldown, or queue any action/);
+  assert.match(renderBatch(),/Minimum idle: 0/);
+  assert.doesNotMatch(renderBatch(),/<button|<form/);
+  assert.doesNotMatch(renderBatch({now:now+10000}),/<table|Minimum idle:/);
+  assert.doesNotMatch(renderBatch({comparison:'preview_superseded'}),/<table|Minimum idle:/);
+  const mismatch={...withIdle.stock_maximum_preview,proposals:[{...withIdle.stock_maximum_preview.proposals[0],suggested:1}]};
+  assert.doesNotMatch(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:mismatch}}),/<table/);
+  const waiting={...withIdle.stock_maximum_preview,state:'no_confirmed_proposals',reason:'awaiting_cadence_window',proposals:[]};
+  assert.match(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:waiting}}),/Waiting for a longer span of matching observations/);
+  assert.doesNotMatch(render({plan:{...withIdle,stock_maximum_preview:waiting}}),/Waiting for a longer span of matching observations/);
   const stale=render({now:now+10000});
   assert.match(stale,/preview expired/);assert.doesNotMatch(stale,/<table|<button/);
   const changed=render({comparison:'preview_superseded'});
