@@ -54,23 +54,30 @@ type stockPilotSyntheticGatewayOverlay struct {
 }
 
 func checkStockPilotSyntheticComposition(baseRaw, overlayRaw []byte, basePin, overlayPin, serverPin, dormantProviderPin string, policy admission.Config) error {
+	_, err := composeStockPilotSyntheticComposition(baseRaw, overlayRaw, basePin, overlayPin, serverPin, dormantProviderPin, policy)
+	return err
+}
+
+// Return only the final bytes accepted by the real decoder and the existing
+// inventory-only constraints. This helper does not place or start a fixture.
+func composeStockPilotSyntheticComposition(baseRaw, overlayRaw []byte, basePin, overlayPin, serverPin, dormantProviderPin string, policy admission.Config) ([]byte, error) {
 	if len(baseRaw) > 16384 || len(overlayRaw) > 16384 ||
 		stockPilotCompositionDigest(baseRaw) != basePin || stockPilotCompositionDigest(overlayRaw) != overlayPin {
-		return errStaticConfig
+		return nil, errStaticConfig
 	}
 	for _, pin := range []string{serverPin, dormantProviderPin} {
 		b, err := hex.DecodeString(pin)
 		if err != nil || len(b) != 32 || hex.EncodeToString(b) != pin {
-			return errStaticConfig
+			return nil, errStaticConfig
 		}
 	}
 	if serverPin == dormantProviderPin {
-		return errStaticConfig
+		return nil, errStaticConfig
 	}
 	var base stockPilotSyntheticGatewayBase
 	var overlay stockPilotSyntheticGatewayOverlay
 	if gatewayrpc.Decode(bytes.NewReader(baseRaw), &base) != nil || gatewayrpc.Decode(bytes.NewReader(overlayRaw), &overlay) != nil {
-		return errStaticConfig
+		return nil, errStaticConfig
 	}
 	const mount = "/run/capacity-private/"
 	roleTLS := func(prefix string) securefiles.TLSFiles {
@@ -92,15 +99,15 @@ func checkStockPilotSyntheticComposition(baseRaw, overlayRaw []byte, basePin, ov
 		overlay.Garm.Endpoint != "https://127.0.0.1:9445" || overlay.Garm.Pin != serverPin ||
 		!reflect.DeepEqual(overlay.Garm.Providers, []string{"capacity"}) ||
 		overlay.Garm.TLS != (securefiles.TLSFiles{CA: mount + "gateway-read-ca.pem", Certificate: mount + "gateway-read-client.pem", Key: mount + "gateway-read-client.key"}) {
-		return errStaticConfig
+		return nil, errStaticConfig
 	}
 	var merged, overlayFields map[string]json.RawMessage
 	if json.Unmarshal(baseRaw, &merged) != nil || json.Unmarshal(overlayRaw, &overlayFields) != nil || len(merged) != 9 || len(overlayFields) != 2 {
-		return errStaticConfig
+		return nil, errStaticConfig
 	}
 	for key, value := range overlayFields {
 		if _, exists := merged[key]; exists {
-			return errStaticConfig
+			return nil, errStaticConfig
 		}
 		merged[key] = value
 	}
@@ -114,9 +121,9 @@ func checkStockPilotSyntheticComposition(baseRaw, overlayRaw []byte, basePin, ov
 		cfg.Admin.Listen != base.Admin.Listen || cfg.Admin.TLS != base.Admin.TLS || cfg.Admin.TokenFile != base.Admin.TokenFile ||
 		cfg.Garm.Endpoint != overlay.Garm.Endpoint || cfg.Garm.ProxyServerKeyPin != overlay.Garm.Pin ||
 		!reflect.DeepEqual(cfg.Garm.Providers, overlay.Garm.Providers) || cfg.Garm.TLS != overlay.Garm.TLS {
-		return errStaticConfig
+		return nil, errStaticConfig
 	}
-	return nil
+	return final, nil
 }
 
 func TestStockPilotSyntheticBaseOverlayComposition(t *testing.T) {

@@ -17,14 +17,14 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
-// Static fixture bytes only, not a full gateway config or installation recipe.
+// Static fixture bytes only, not a launcher or installation recipe.
 // Expected commitments are supplied by the separate reviewer. Never emit new
 // expected hashes from this renderer or read environment, files or credentials.
 type stockPilotStaticInputs struct {
 	FacadeSPKI, DormantProviderFingerprint      string
 	ReviewedBase, ReviewedOverlay, ReviewedSeed string
 }
-type stockPilotStaticBytes struct{ Base, Overlay, Seed []byte }
+type stockPilotStaticBytes struct{ Base, Overlay, Seed, GatewayConfig []byte }
 
 func renderStockPilotStatic(in stockPilotStaticInputs) (stockPilotStaticBytes, error) {
 	refuse := func() (stockPilotStaticBytes, error) { return stockPilotStaticBytes{}, errStaticConfig }
@@ -62,11 +62,14 @@ func renderStockPilotStatic(in stockPilotStaticInputs) (stockPilotStaticBytes, e
 	overlayRaw, err2 := json.Marshal(overlay)
 	seedRaw, err3 := json.Marshal(seed)
 	var decodedSeed admission.Config
-	if err1 != nil || err2 != nil || err3 != nil || stockPilotCompositionDigest(seedRaw) != in.ReviewedSeed || gatewayrpc.Decode(bytes.NewReader(seedRaw), &decodedSeed) != nil ||
-		checkStockPilotSyntheticComposition(baseRaw, overlayRaw, in.ReviewedBase, in.ReviewedOverlay, in.FacadeSPKI, in.DormantProviderFingerprint, decodedSeed) != nil {
+	if err1 != nil || err2 != nil || err3 != nil || stockPilotCompositionDigest(seedRaw) != in.ReviewedSeed || gatewayrpc.Decode(bytes.NewReader(seedRaw), &decodedSeed) != nil {
 		return refuse()
 	}
-	return stockPilotStaticBytes{Base: baseRaw, Overlay: overlayRaw, Seed: seedRaw}, nil
+	gatewayConfig, err := composeStockPilotSyntheticComposition(baseRaw, overlayRaw, in.ReviewedBase, in.ReviewedOverlay, in.FacadeSPKI, in.DormantProviderFingerprint, decodedSeed)
+	if err != nil {
+		return refuse()
+	}
+	return stockPilotStaticBytes{Base: baseRaw, Overlay: overlayRaw, Seed: seedRaw, GatewayConfig: gatewayConfig}, nil
 }
 
 func TestStockPilotStaticRendererUsesIndependentCommitments(t *testing.T) {
@@ -82,8 +85,15 @@ func TestStockPilotStaticRendererUsesIndependentCommitments(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(one, two) {
 		t.Fatal("static fixture was not deterministic")
 	}
+	var cfg configuration
+	if gatewayrpc.Decode(bytes.NewReader(two.GatewayConfig), &cfg) != nil ||
+		!cfg.ManagedInventoryObservation || !managedInventoryObservationAllowed(cfg, false) || managedInventoryObservationAllowed(cfg, true) ||
+		cfg.Garm.ProxyServerKeyPin != in.FacadeSPKI || cfg.Garm.Endpoint != "https://127.0.0.1:9445" || cfg.Garm.TokenFile != "" {
+		t.Fatal("handed-off bytes are not the actual inventory-only configuration")
+	}
 	one.Base[0] = '!'
-	if one.Base[0] == two.Base[0] {
+	one.GatewayConfig[0] = '!'
+	if one.Base[0] == two.Base[0] || one.GatewayConfig[0] == two.GatewayConfig[0] {
 		t.Fatal("two rendered fixtures alias")
 	}
 	for _, change := range []func(*stockPilotStaticInputs){
