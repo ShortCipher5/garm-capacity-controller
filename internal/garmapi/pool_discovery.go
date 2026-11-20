@@ -26,7 +26,15 @@ type DiscoveredPool struct {
 	OwnerID              string `json:"owner_id,omitempty"`
 	Configured           bool   `json:"configured"`
 	DiscoveryFingerprint string `json:"discovery_fingerprint"`
+	explicitMinIdle      *uint64
 }
+
+// HasExplicitMinimumIdle distinguishes canonical wire evidence from a decoded
+// stock zero default. It is advisory only and is not part of a write fingerprint.
+func (p DiscoveredPool) HasExplicitMinimumIdle() bool {
+	return p.explicitMinIdle != nil && *p.explicitMinIdle == p.MinIdleRunners
+}
+
 type PoolDiscovery struct {
 	Pools []DiscoveredPool `json:"pools"`
 	// Missing means absent from this provider-scoped complete observation. It is
@@ -152,6 +160,11 @@ func (m *ManagementClient) DiscoverPools(ctx context.Context) (PoolDiscovery, er
 		}
 		digest := sha256.Sum256(canonical)
 		entry := DiscoveredPool{ManagedPool: pool, OwnerKind: ownerKind, OwnerID: ownerID, Configured: m.pools[id], DiscoveryFingerprint: hex.EncodeToString(digest[:])}
+		if _, present := fields["min_idle_runners"]; present {
+			// decodePool already rejected case aliases and invalid/null values.
+			minimum := pool.MinIdleRunners
+			entry.explicitMinIdle = &minimum
+		}
 		if facts, e := stockidentity.ParseFacts(rawRow); e == nil {
 			entry.OwnershipFingerprint = facts.Fingerprint()
 		}

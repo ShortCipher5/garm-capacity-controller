@@ -18,7 +18,7 @@ func maximumCycleHistory(count int, budget int64) []scalingPreviewSample {
 			start: start, finish: start.Add(time.Second), expires: start.Add(time.Minute),
 			pools: map[string]scalingPool{
 				"a":     {repo: "repo-a", fingerprint: "a-settings", enabled: true, current: 1, cap: 4, target: 2},
-				"z":     {repo: "repo-z", fingerprint: "z-settings", enabled: true, current: 1, cap: 4, target: 2},
+				"z":     {repo: "repo-z", fingerprint: "z-settings", enabled: true, idleExplicit: true, current: 1, cap: 4, target: 2},
 				"empty": {repo: "repo-a", fingerprint: "empty-settings", enabled: true, current: 3, cap: 4, target: 1},
 			},
 			repoCaps:             map[string]int64{"repo-a": 5, "repo-z": 4},

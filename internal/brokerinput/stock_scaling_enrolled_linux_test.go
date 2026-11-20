@@ -67,14 +67,16 @@ func TestSampleStockScalingEnrolledSourceRespectsWeights(t *testing.T) {
 	}
 	prior.StartedAt = prior.StartedAt.Add(-20 * time.Second)
 	prior.FinishedAt = prior.FinishedAt.Add(-20 * time.Second)
+	// The stock fixture omits zero minimum idle: it does not supply an
+	// explicit value to display alongside the computed maximum.
 	for _, tc := range []struct {
 		name    string
 		weight  uint32
 		healthy bool
 		want    []StockMaximumProposal
 	}{
-		{"equal", 1, true, []StockMaximumProposal{{pool, repo, 1, 2, new(int64)}}},
-		{"weighted", 3, true, []StockMaximumProposal{{poolB, repoB, 1, 2, new(int64)}}},
+		{"equal", 1, true, []StockMaximumProposal{{pool, repo, 1, 2, nil}}},
+		{"weighted", 3, true, []StockMaximumProposal{{poolB, repoB, 1, 2, nil}}},
 		{"host_not_accepting", 3, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

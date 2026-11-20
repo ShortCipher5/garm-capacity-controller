@@ -13,7 +13,7 @@ func TestStockMaximumReviewPreservesObservedIdleAndCacheOwnership(t *testing.T) 
 		sample := func(start time.Time) StockScalingSample {
 			return StockScalingSample{source: "source", revision: 1, sequence: 1, budget: 5,
 				start: start, finish: start, expires: now.Add(time.Minute),
-				pools:    map[string]scalingPool{"pool": {repo: "repo", enabled: true, current: 4, idle: idle, cap: 5, target: 3}},
+				pools:    map[string]scalingPool{"pool": {repo: "repo", enabled: true, current: 4, idle: idle, idleExplicit: true, cap: 5, target: 3}},
 				repoCaps: map[string]int64{"repo": 5}}
 		}
 		prior, current := sample(now), sample(now.Add(20*time.Second))
