@@ -29,3 +29,39 @@ controller cannot trust a recommendation. They do not create a writer,
 enforce a physical quota, or make the preview safe to apply. Activation
 requires a separately qualified bounded stock API path and rollout; it must
 not be inferred from previews, local checks, or a successful image build.
+
+## Pool settings ownership and maintenance
+
+**Agreed operating model, not implemented or enabled.** The controller UI is
+the normal entry point for edits to autoscaled pool settings. Stock GARM
+remains responsible for its runner lifecycle; operators use its UI or CLI for
+observation outside maintenance. The preview stays read-only. Stock GARM
+v0.2.1 has neither a controller-specific pool-write role nor an atomic
+conditional update; a local acknowledgement or matching readback cannot
+establish exclusive ownership.
+
+- **Normal operation:** Write readiness would require verified sole ownership
+  of managed settings, a healthy durable journal with no unresolved writes,
+  and fresh, matching scope and capacity evidence. If any prerequisite is
+  missing, stale or contradictory, stay read-only. A settings change is not
+  proof of released capacity.
+- **Maintenance entry:** In a separately authorized window, stop controller
+  settings writes and confirm the controller writer and accepted requests can
+  no longer commit. Resolve every pending or unknown outcome under the
+  [external completion fence](garm-management-recovery.md) before permitting
+  direct stock edits. Stopping the controller, a timeout, and an elapsed
+  maintenance window are not completion evidence.
+- **Emergency and re-entry:** If the completion fence or outcome cannot be
+  established, keep both sides closed to settings writes and preserve the
+  journal. Do not retry, restore a prior setting by guess, or replace history.
+  After maintenance, end direct stock write access, confirm outstanding
+  requests have settled, and re-establish exclusive controller ownership.
+  Review authoritative settings against saved policy and collect fresh
+  evidence before an explicit return to normal operation. No automatic
+  re-entry on a timer, restart, or matching GET.
+
+Acceptance for future implementation: demonstrate exclusive ownership in
+normal and maintenance modes, prove no overlap across handoff or restart,
+show that delayed or unknown writes leave both sides blocked, and verify
+that re-entry requires fresh evidence and explicit review. These checks are
+not authorization to change an installed service.

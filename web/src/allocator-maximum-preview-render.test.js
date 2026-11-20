@@ -12,7 +12,12 @@ test('optional maximum advice renders in the existing panel with no apply contro
  let server;
  try{
   server=await createServer({cacheDir,server:{middlewareMode:true,hmr:false},appType:'custom'});
-  const {StockMaximumSuggestions}=await server.ssrLoadModule('/src/allocator-plan.jsx');
+  const {AllocatorPlan,StockMaximumSuggestions}=await server.ssrLoadModule('/src/allocator-plan.jsx');
+  const initial=renderToStaticMarkup(React.createElement(AllocatorPlan,{readPlan:()=>{throw Error('must not fetch on mount');}}));
+  assert.match(initial,/Why automatic cross-repository scaling is unavailable here/);
+  assert.match(initial,/every runner start must pass/);
+  assert.match(initial,/configuration, not proof/);
+  assert.match(initial,/lower existing maxima only/);
   const id='11111111-1111-4111-8111-111111111111', now=Date.parse('2026-11-18T10:00:00Z');
   const plan={captured_at:new Date(now).toISOString(),expires_at:new Date(now+20000).toISOString(),
    pools:[{pool:id,repository:id}],stock_maximum_preview:{state:'proposed',expires_at:new Date(now+10000).toISOString(),

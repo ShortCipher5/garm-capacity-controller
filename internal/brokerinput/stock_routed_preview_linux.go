@@ -21,7 +21,8 @@ type verifiedStockProviderRoute struct {
 
 // planRoutedStockPreview is deliberately not wired to runtime. It narrows
 // only new placement candidates, leaves every existing charge on its original
-// host, and returns the earliest route expiry for any future advisory caller.
+// host, and bounds this calculation by route, demand and capacity freshness.
+// A future advisory caller must also apply any shorter upstream validity bound.
 func planRoutedStockPreview(state admission.BrokerGrantState, snapshot capacitybroker.Snapshot, observation garmapi.DemandObservation, source string, opt capacitybroker.Options, routes []verifiedStockProviderRoute) (capacitybroker.JobPlan, time.Time, error) {
 	fail := func() (capacitybroker.JobPlan, time.Time, error) {
 		return capacitybroker.JobPlan{}, time.Time{}, capacitybroker.ErrSnapshot
@@ -109,6 +110,14 @@ func planRoutedStockPreview(state admission.BrokerGrantState, snapshot capacityb
 	snapshot.Pools = pools
 	plan, err := stockPlan(snapshot, state.Policy, observation, opt, true, true)
 	if err != nil {
+		return fail()
+	}
+	// stockPlan records the earlier of the capacity sample and the start of
+	// stock collection. A newer route cannot extend either input's lifetime.
+	if deadline := plan.ObservedAt.Add(opt.MaxAge); deadline.Before(expiry) {
+		expiry = deadline
+	}
+	if !expiry.After(opt.Now) {
 		return fail()
 	}
 	return plan, expiry, nil

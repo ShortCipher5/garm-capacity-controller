@@ -15,6 +15,7 @@ export function AllocatorPlan({readPlan,policyRevision,ledgerSequence,policyStal
  const comparison=allocatorComparisonState(view,{policyRevision,ledgerSequence,policyStale,now});
  return <section aria-label="Observed runners and fresh allocation plan"><h3>Observed runners and fresh allocation plan</h3>
  <p>Read-only demand preview using saved policy. Additional planned runners are advisory, not created runners, a replacement total or a guarantee of GitHub job assignment. No grants, expiry, pool settings or runners are changed by this read.</p>
+ <details><summary>Why automatic cross-repository scaling is unavailable here</summary><p>These previews suggest changes but do not apply them. A separately configured cap reconciler can lower existing maxima only; it is not an automatic cross-repository scaler.</p><p>Production scaling needs a verified provider destination, a single settings writer, and a shared capacity check that every runner start must pass. Reusing capacity also needs evidence that the previous runner’s resources were released. Saved mappings and budgets are configuration, not proof that these checks are in place.</p></details>
  <button type="button" disabled={busy||!readPlan} onClick={load}>{busy?'Reading demand and ledger…':'Read fresh allocation plan'}</button>
  {error&&<p role="status">{error}</p>}
  {!view&&<p>Observed runner counts and demand-derived plan: unknown until a successful fresh read.</p>}

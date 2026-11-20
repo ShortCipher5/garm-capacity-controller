@@ -148,3 +148,25 @@ func TestRoutedStockPreviewKeepsSpareForActuallyRoutedPool(t *testing.T) {
 		t.Fatalf("misallocated pooled spare capacity: %+v %v %v", plan, expiry, err)
 	}
 }
+
+func TestRoutedStockPreviewBoundsExpiryByDemandAndCapacity(t *testing.T) {
+	for _, input := range []string{"demand started", "capacity observed"} {
+		t.Run(input, func(t *testing.T) {
+			state, snapshot, observation, opt, routes := routedStockFixture()
+			oldest := &snapshot.ObservedAt
+			if input == "demand started" {
+				oldest = &observation.StartedAt
+			}
+			*oldest = opt.Now.Add(-opt.MaxAge + time.Second)
+			plan, expiry, err := planRoutedStockPreview(state, snapshot, observation, "stock-source", opt, routes)
+			if err != nil || !expiry.Equal(opt.Now.Add(time.Second)) || len(plan.RemainingJobs) != 1 {
+				t.Errorf("expected routed advice to expire with %s: %+v %v %v", input, plan, expiry, err)
+			}
+			*oldest = opt.Now.Add(-opt.MaxAge)
+			plan, expiry, err = planRoutedStockPreview(state, snapshot, observation, "stock-source", opt, routes)
+			if err != capacitybroker.ErrSnapshot || !expiry.IsZero() || len(plan.RemainingJobs) != 0 {
+				t.Errorf("expired %s still returned routed advice: %+v %v %v", input, plan, expiry, err)
+			}
+		})
+	}
+}
