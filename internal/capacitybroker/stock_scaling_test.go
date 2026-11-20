@@ -69,3 +69,41 @@ func TestStockScalingChronologicalSupplyClassificationAndIdleFloor(t *testing.T)
 		t.Fatalf("changed supply class, accounting or warm floor: %+v, %v", adv, err)
 	}
 }
+
+func TestStockScalingMixedSizesConserveCPUAndRAMBeforeSlots(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		budget, large, small Resources
+	}{
+		{"CPU", Resources{4000, 8000, 8000, 6}, Resources{3000, 1000, 1000, 1}, Resources{1000, 2000, 1000, 1}},
+		{"RAM", Resources{8000, 4000, 8000, 6}, Resources{1000, 3000, 1000, 1}, Resources{2000, 1000, 1000, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, o := jobsFixture()
+			s.Global = tc.budget
+			// The host independently has enough capacity for a large runner;
+			// it is the shared CPU or RAM budget that constrains this comparison.
+			s.Hosts["h"] = Host{Budget: Resources{10000, 10000, 10000, 6}, AcceptNew: true}
+			a, b := s.Pools["a"], s.Pools["b"]
+			a.Size, b.Size = tc.large, tc.small
+			s.Pools["a"], s.Pools["b"] = a, b
+			s.Charges = []Charge{{ID: "modeled-existing", Host: "h", Pool: "a", Resources: tc.large}}
+			prior := append([]Charge(nil), s.Charges...)
+			jobs := []QueuedDemand{
+				{"large-older", []string{"a"}, o.Now.Add(-time.Minute)},
+				{"small-fits", []string{"b"}, o.Now.Add(-time.Second)},
+				{"small-after-exhaustion", []string{"b"}, o.Now},
+			}
+			plan, err := BuildForStockScaling(s, o, jobs, nil)
+			if err != nil || len(plan.Assignments) != 1 || plan.Assignments[0].JobID != "small-fits" || plan.Assignments[0].Resources != tc.small {
+				t.Fatalf("wanted one fitting small job, not the blocked older job: %+v %v", plan, err)
+			}
+			if !reflect.DeepEqual(plan.RemainingJobs, []QueuedDemand{jobs[0], jobs[2]}) {
+				t.Fatalf("blocked jobs must stay queued despite spare runner slots: %+v", plan.RemainingJobs)
+			}
+			if !reflect.DeepEqual(s.Charges, prior) || !reflect.DeepEqual(s.Pools["a"], a) || !reflect.DeepEqual(s.Pools["b"], b) {
+				t.Fatal("advisory planning changed charges or runner profiles")
+			}
+		})
+	}
+}

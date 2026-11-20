@@ -15,7 +15,7 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
     finally{active.current=null;if(alive.current)setBusy(false);}
   }
   useEffect(()=>{void load();},[]);
-  const edit=(fn)=>setView(v=>({...v,policy:{...v.policy,repositories:fn(v.policy.repositories)}}));
+  const edit=(fn)=>{setMessage('');setView(v=>({...v,policy:{...v.policy,repositories:fn(v.policy.repositories)}}));};
   const repo=(i,k,value)=>edit(rows=>rows.map((r,j)=>j===i?{...r,[k]:value}:r));
   const pool=(i,j,k,value)=>edit(rows=>rows.map((r,x)=>x===i?{...r,pools:r.pools.map((p,y)=>y===j?{...p,[k]:value}:p)}:r));
   async function save(e){
@@ -40,13 +40,15 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
     <AllocatorPlan readPlan={readPlan} policyRevision={view?.policy.revision} ledgerSequence={view?.status?.sequence} policyStale={comparisonStale} />
     {view&&<form onSubmit={save}><p>Revision {view.policy.revision}</p><fieldset disabled={busy||blocked||!view.writes_enabled}>
       {view.policy.repositories.map((r,i)=><div className="card" key={i}>
+        <h3>Repository row {i + 1}</h3>
         <label>GARM repository UUID<input required value={r.id} onChange={e=>repo(i,'id',e.target.value)}/></label>
-        <label>Fairness weight<input type="number" min="1" max="4294967295" required value={r.weight} onChange={e=>repo(i,'weight',e.target.value===''?NaN:Number(e.target.value))}/></label>
-        <label>Repository runner cap<input type="number" min="0" max="1000000" required value={r.max_runners} onChange={e=>repo(i,'max_runners',e.target.value===''?NaN:Number(e.target.value))}/></label>
+        <label>Fairness weight<input type="number" min="1" max="4294967295" required value={r.weight} onChange={e=>repo(i,'weight',e.target.value===''?'':Number(e.target.value))}/></label>
+        <label>Repository runner cap<input type="number" min="0" max="1000000" required value={r.max_runners} onChange={e=>repo(i,'max_runners',e.target.value===''?'':Number(e.target.value))}/></label>
         {r.pools.map((p,j)=><div key={j}>
+          <h4>Pool row {j + 1}</h4>
           <label>GARM pool UUID<input required value={p.id} onChange={e=>pool(i,j,'id',e.target.value)}/></label>
-          <label>Pool runner cap<input type="number" min="0" max={r.max_runners} required value={p.max_runners} onChange={e=>pool(i,j,'max_runners',e.target.value===''?NaN:Number(e.target.value))}/></label>
-          <label>Warm idle target<input type="number" min="0" max={p.max_runners} required value={p.warm_idle} onChange={e=>pool(i,j,'warm_idle',e.target.value===''?NaN:Number(e.target.value))}/></label>
+          <label>Pool runner cap<input type="number" min="0" max={r.max_runners===''?undefined:r.max_runners} required value={p.max_runners} onChange={e=>pool(i,j,'max_runners',e.target.value===''?'':Number(e.target.value))}/></label>
+          <label>Warm idle target<input type="number" min="0" max={p.max_runners===''?undefined:p.max_runners} required value={p.warm_idle} onChange={e=>pool(i,j,'warm_idle',e.target.value===''?'':Number(e.target.value))}/></label>
           <button type="button" onClick={()=>repo(i,'pools',r.pools.filter((_,x)=>x!==j))}>Remove pool from draft policy</button>
         </div>)}
         <button type="button" onClick={()=>repo(i,'pools',[...r.pools,{id:'',max_runners:0,warm_idle:0}])}>Add pool</button>

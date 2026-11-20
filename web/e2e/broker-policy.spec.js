@@ -13,6 +13,8 @@ test('local validation preserves editable policy draft; dispatched unknown block
  const panel=page.locator('#broker-policy');
  await panel.getByRole('button',{name:'Add repository',exact:true}).click();
  await panel.getByLabel('GARM repository UUID').fill(id);
+ await panel.getByLabel('Repository runner cap').fill('');
+ await expect(panel.getByLabel('Repository runner cap')).toHaveValue('');
  await panel.getByLabel('Repository runner cap').fill('8');
  await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
  await expect(panel.getByRole('status')).toContainText('management token');
@@ -23,7 +25,7 @@ test('local validation preserves editable policy draft; dispatched unknown block
  await panel.getByLabel('GARM repository UUID').nth(1).fill(id);
  await panel.getByLabel('Separate management token').fill('c'.repeat(64));
  await panel.getByRole('button',{name:'Save capacity policy',exact:true}).click();
- await expect(panel.getByRole('status')).toContainText('Invalid repository policy');
+ await expect(panel.getByRole('status')).toContainText('Invalid repository policy (row 2): repository UUID is already used');
  await expect(panel.getByLabel('GARM repository UUID').nth(1)).toBeEnabled();
  expect(calls).toBe(0);
  await panel.getByLabel('GARM repository UUID').nth(1).fill('22222222-2222-4222-8222-222222222222');

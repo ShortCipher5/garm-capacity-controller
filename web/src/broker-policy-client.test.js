@@ -21,3 +21,20 @@ test('invalid local inputs never dispatch a policy write',async()=>{
  await assert.rejects(saveBrokerPolicy('a'.repeat(64),duplicate,{fetcher}),/repository policy/);
  assert.equal(calls,0);
 });
+
+test('draft diagnostics locate the problem without echoing entered identifiers', async()=>{
+ const cases=[
+  [p=>p.repositories[0].id='private input',/row 1.*repository UUID/],
+  [p=>p.repositories.push({...p.repositories[0]}),/row 2.*already used/],
+  [p=>p.repositories[0].weight='',/row 1.*fairness weight/],
+  [p=>p.repositories[0].max_runners='',/row 1.*runner cap/],
+  [p=>p.repositories[0].pools[0].max_runners=6,/row 1, pool row 1.*repository cap/],
+  [p=>p.repositories[0].pools[0].warm_idle='',/row 1, pool row 1.*warm idle/],
+ ];
+ let calls=0;
+ for(const [mutate,expected] of cases){
+  const p=policy();mutate(p);
+  await assert.rejects(saveBrokerPolicy('a'.repeat(64),p,{fetcher:async()=>{calls++;}}),e=>expected.test(e.message)&&!e.message.includes('private input'));
+ }
+ assert.equal(calls,0);
+});
