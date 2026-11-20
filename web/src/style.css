@@ -806,3 +806,4 @@ td {
 .ci-health-jobs { margin: .75rem 0 0; padding-inline-start: 1.25rem; }
 .ci-health-jobs > li { padding: .45rem 0 .7rem; }
 .ci-health-row-head { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.ci-health-workflow-key span { display: block; overflow-wrap: anywhere; }
