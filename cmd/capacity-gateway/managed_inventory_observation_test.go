@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,7 +76,7 @@ func TestManagedInventoryObservationDoesNotLeakAcrossRuns(t *testing.T) {
 }
 
 func TestManagedInventoryObservationPinnedReadFreshnessAndFailure(t *testing.T) {
-	var fail atomic.Bool
+	var response atomic.Int32
 	var calls atomic.Int64
 	srv, trust, _ := testsupport.NativeTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -83,11 +85,15 @@ func TestManagedInventoryObservationPinnedReadFreshnessAndFailure(t *testing.T) 
 			http.Error(w, "refused", http.StatusForbidden)
 			return
 		}
-		if fail.Load() {
+		switch response.Load() {
+		case 2:
 			http.Error(w, "fixture unavailable", http.StatusServiceUnavailable)
 			return
+		case 1:
+			_, _ = w.Write([]byte(`[{"provider_name":"foreign-fixture","name":"foreign-row"}]`))
+		default:
+			_, _ = w.Write([]byte(`[{"provider_name":"capacity","name":"scoped-row","pool_id":"fixture-pool","status":"running"},{"provider_name":"foreign-fixture","name":"foreign-row"}]`))
 		}
-		_, _ = w.Write([]byte("[]"))
 	}))
 	pin := sha256.Sum256(srv.Certificate().RawSubjectPublicKeyInfo)
 	client, err := garmapi.NewManagedInventory(srv.URL, hex.EncodeToString(pin[:]), trust, []string{"capacity"}, nil)
@@ -96,12 +102,50 @@ func TestManagedInventoryObservationPinnedReadFreshnessAndFailure(t *testing.T) 
 	}
 	defer client.Close()
 	o := &managedInventoryObserver{ctx: t.Context(), read: client.Instances}
+	// Use the real admin handler in process, without starting an admin daemon.
+	// Only the existing disposable mTLS inventory fixture uses a socket.
+	token := strings.Repeat("a", 64)
+	handler, err := adminview.New(managementStore(t), token, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetManagedInventoryObservation(o.snapshot)
+	checkOverview := func(wantAvailable bool, wantCount int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "https://127.0.0.1/admin/api/v1/overview", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, req)
+		var view adminview.Overview
+		if out.Code != http.StatusOK || json.Unmarshal(out.Body.Bytes(), &view) != nil || view.ManagedInventoryObservation == nil {
+			t.Fatal("inventory observation absent from authenticated overview")
+		}
+		if view.Ready || view.Provisioning || view.ManagementEnabled || view.GarmManagementAvailable {
+			t.Fatal("inventory presentation changed readiness or write authority")
+		}
+		body := out.Body.String()
+		if strings.Contains(body, "scoped-row") || strings.Contains(body, "foreign-row") {
+			t.Fatal("inventory identities leaked into overview")
+		}
+		got := view.ManagedInventoryObservation
+		if got.Available != wantAvailable {
+			t.Fatal("unexpected inventory availability")
+		}
+		if wantAvailable {
+			if got.SampledAt == nil || got.Count == nil || *got.Count != wantCount {
+				t.Fatal("unexpected scoped inventory count or timestamp")
+			}
+		} else if got.SampledAt != nil || got.Count != nil {
+			t.Fatal("unavailable observation exposed stale inventory")
+		}
+	}
+	checkOverview(false, 0)
 	if o.snapshot(time.Now()).Available {
 		t.Fatal("fresh result before first read")
 	}
 	o.sample()
 	status := o.snapshot(time.Now())
-	if !status.Available || status.Count == nil || *status.Count != 0 || status.SampledAt == nil {
+	if !status.Available || status.Count == nil || *status.Count != 1 || status.SampledAt == nil {
 		t.Fatal(status)
 	}
 	for _, now := range []time.Time{status.SampledAt.Add(-time.Nanosecond), status.SampledAt.Add(managedInventoryFreshness)} {
@@ -110,9 +154,14 @@ func TestManagedInventoryObservationPinnedReadFreshnessAndFailure(t *testing.T) 
 			t.Fatal("invalid status", stale)
 		}
 	}
-	fail.Store(true)
+	checkOverview(true, 1)
+	response.Store(1)
 	o.sample()
-	if current := o.snapshot(time.Now()); current.Available || current.Count != nil || current.SampledAt != nil || calls.Load() != 2 {
+	checkOverview(true, 0)
+	response.Store(2)
+	o.sample()
+	checkOverview(false, 0)
+	if current := o.snapshot(time.Now()); current.Available || current.Count != nil || current.SampledAt != nil || calls.Load() != 3 {
 		t.Fatal("retained invalid sample", current, calls.Load())
 	}
 }
