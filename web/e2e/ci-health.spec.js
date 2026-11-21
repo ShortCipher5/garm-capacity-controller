@@ -23,6 +23,9 @@ function timing(at) {
     source: "fixture", repository_id: "9007199254740993", workflow_id: "7",
     run_id: "9007199254740995", attempt: "2", observed_at: at, status: "unknown", jobs: [
       {id: "9007199254740997", status: "queued", steps: []},
+      {id: "9007199254740998", status: "completed", steps: [
+        {number: "7", status: "completed", execution: {basis: "observed_endpoints", nanoseconds: "2000000000"}},
+      ]},
     ],
   }]}};
 }
@@ -57,6 +60,9 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   const queued = panel.getByRole("table", {name: "Queued jobs (1 observed)"});
   await expect(queued).toContainText("9007199254740997");
   await expect(queued).toContainText("Unknown");
+  const longest = panel.getByRole("table", {name: "Longest measured steps in this snapshot"});
+  await expect(longest).toContainText("Job 9007199254740998, step 7");
+  await expect(longest).toContainText("2 s");
   expect(calls).toBe(1);
 
   status = 401;
@@ -65,6 +71,7 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   await expect(page.getByRole("alert")).toContainText("Read authorization ended");
   await expect(nav).toHaveCount(0);
   await expect(queued).toHaveCount(0);
+  await expect(longest).toHaveCount(0);
   await expect(page.getByText("9007199254740995", {exact: true})).toHaveCount(0);
   expect(calls).toBe(2);
 });

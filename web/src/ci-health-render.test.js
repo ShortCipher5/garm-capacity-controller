@@ -65,6 +65,11 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(html, /not the full GitHub queue or history/);
     assert.match(html, /Coverage is unknown/);
     assert.match(html, /Observed attempt results by workflow/);
+    const longSection = (markup) => markup.match(/<section aria-labelledby="ci-longest-steps">.*?<\/section>/)?.[0] ?? "";
+    assert.match(longSection(html), /Longest measured steps in this snapshot/);
+    assert.match(longSection(html), /1 of 2 observed steps have a measured completed duration/);
+    assert.match(longSection(html), /Job <code>9007199254741002<\/code>, step <code>2<\/code>.*title="2100000000 nanoseconds">2\.1 s<\/span>.*Unknown/);
+    assert.doesNotMatch(longSection(html), /step <code>7<\/code>/);
     assert.match(html, /Observed subset only:.*not workflow totals or outcome rates/);
     assert.match(html, /Workflow <code>17<\/code>/);
     assert.match(html, /Repository <code>9007199254740993<\/code>/);
@@ -79,7 +84,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(render(snapshot, Date.parse(observed) - 1), "");
     assert.equal(render({state: "unavailable", timing: {attempts: []}}), "");
     assert.match(render({...snapshot, timing: {attempts: []}}), /No attempts were included/);
-    assert.doesNotMatch(render({...snapshot, timing: {attempts: []}}), /Observed attempt results by workflow|Active jobs in this snapshot/);
+    assert.doesNotMatch(render({...snapshot, timing: {attempts: []}}), /Observed attempt results by workflow|Active jobs in this snapshot|Longest measured steps/);
     assert.equal(render({...snapshot, timing: {attempts: [{...first, run_id: 123}]}}), "");
 
     const observedFirst = structuredClone(first);
@@ -128,6 +133,23 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(render(activeJobs, now + 120_000), "");
     assert.equal(render({...activeJobs, timing: {attempts: [{...first, jobs: [{...first.jobs[0], id: 9007199254741001}]}]}}), "");
 
+    const longSnapshot = {...snapshot, coverage: "bounded_partial", timing: {attempts: [
+      {...previous, jobs: [{id: "9007199254741002", status: "completed", steps: [
+        ...Array.from({length: 13}, (_, i) => ({number: String(i + 1), status: "completed", execution: exact(String((i + 1) * 1_000_000_000))})),
+        {number: "14", status: "skipped"},
+        {number: "15", status: "completed"}, // No endpoint pair.
+      ]}]},
+    ]}};
+    const longRanking = longSection(render(longSnapshot));
+    assert.match(longRanking, /13 of 15 observed steps/);
+    assert.match(longRanking, /Showing 12 of 13 measured steps/);
+    assert.deepEqual([...longRanking.matchAll(/, step <code>(\d+)<\/code>/g)].map((m) => m[1]),
+      Array.from({length: 12}, (_, i) => String(13 - i)));
+    assert.match(render(longSnapshot), /Partial coverage/);
+    assert.match(render(longSnapshot), /Step 1<\/th>/); // Capped rows remain in attempt details.
+    assert.equal(render(longSnapshot, Date.parse(observed) + 120_000), "");
+    assert.match(longSection(render({...snapshot, timing: {attempts: [previous]}})), /No completed step durations were measured/);
+
     const conclusions = structuredClone(snapshot);
     conclusions.timing.attempts[0].jobs[1].conclusion = "success";
     conclusions.timing.attempts[0].jobs[1].steps[0].conclusion = "timed_out";
@@ -137,6 +159,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(withResults, /<dt>Result<\/dt><dd><span>Success<\/span>/);
     assert.match(withResults, /<th scope="col">Status<\/th><th scope="col">Result<\/th>/);
     assert.match(withResults, /<span class="pill">Completed<\/span><\/td><td><span>Timed out<\/span>/);
+    assert.match(longSection(withResults), /<td><span>Timed out<\/span><\/td>/);
     assert.match(withResults, /<span class="pill">Skipped<\/span><\/td><td><span>Other terminal result<\/span>/);
     assert.match(withResults, /<dt>Result<\/dt><dd><span>Cancelled<\/span>/);
     assert.match(withResults, /<dt>Result<\/dt><dd><span class="muted">Unknown<\/span>/);
