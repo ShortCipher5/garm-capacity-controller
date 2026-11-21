@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from "react";
 import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
+import {observedActiveJobs} from "./ci-health-active-jobs.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -101,6 +102,47 @@ function AttemptRow({attempt: a}) {
   );
 }
 
+function ActiveJobGroup({phase, group}) {
+  const title = phase === "queued" ? "Queued jobs" : "Running jobs";
+  const heading = "ci-active-jobs-" + phase;
+  return <section aria-labelledby={heading}>
+    <h4 id={heading}>{title} ({group.observed} observed)</h4>
+    {group.observed === 0 ? <p className="muted">None observed in this snapshot.</p> : <>
+      {group.shown.length < group.observed && <p className="muted">
+        Showing {group.shown.length} of {group.observed} observed jobs. All observed jobs remain in the attempt details below.
+      </p>}
+      <div className="table-wrap">
+        <table aria-labelledby={heading}>
+          <thead><tr>
+            <th scope="col">Job ID</th><th scope="col">Run and attempt</th><th scope="col">Workflow scope</th>
+            <th scope="col">{phase === "queued" ? "Waiting when observed" : "Execution elapsed when observed"}</th>
+          </tr></thead>
+          <tbody>{group.shown.map((row) => <tr key={row.key}>
+            <th scope="row"><code>{row.job}</code></th>
+            <td>Run <code>{row.run}</code>, attempt <code>{row.attempt}</code></td>
+            <td className="ci-health-workflow-key">
+              <span>Workflow <code>{row.workflow}</code></span>
+              <span>Repository <code>{row.repository}</code></span>
+              <span>Source <code>{row.source}</code></span>
+            </td>
+            <td><Timing span={row.timing} /></td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+    </>}
+  </section>;
+}
+
+function ActiveJobs({attempts}) {
+  const {queued, running} = observedActiveJobs(attempts);
+  return <section aria-labelledby="ci-active-jobs">
+    <h3 id="ci-active-jobs">Active jobs in this snapshot</h3>
+    <p className="muted">Jobs are grouped by their recorded status. This is not the live queue. Rows are ordered by identity, not by wait or runtime.</p>
+    <ActiveJobGroup phase="queued" group={queued} />
+    <ActiveJobGroup phase="running" group={running} />
+  </section>;
+}
+
 function WorkflowCountCells({counts}) {
   return <>
     <td>{counts.shown}</td><td>{counts.active}</td><td>{counts.success}</td>
@@ -154,8 +196,9 @@ export function CIHealthTiming({snapshot, now = Date.now()}) {
       </p>
       {attempts.length === 0 && <p>No attempts were included in this snapshot.</p>}
       {attempts.length > 0 && <>
+        <ActiveJobs attempts={attempts} />
         <WorkflowCounts groups={groups} />
-        <h3>Active at observation</h3>
+        <h3>Active attempts at observation</h3>
         {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
         {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} />) : <p>No other attempts in this snapshot.</p>}

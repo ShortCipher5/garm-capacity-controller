@@ -30,6 +30,8 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     const observed = "2026-01-01T00:00:00Z";
     const now = Date.parse(observed) + 5_000;
     const exact = (nanoseconds) => ({basis: "observed_endpoints", nanoseconds});
+    // Synthetic timing contract only: the current GitHub reader does not
+    // supply a prior queue sighting. The source-shaped fixture below omits it.
     const lower = {basis: "observed_lower_bound", nanoseconds: "7000000001"};
     const common = {source: "fixture_source", repository_id: "9007199254740993", workflow_id: "17", run_id: "9223372036854775807", observed_at: observed};
     const first = {...common, attempt: "2", status: "running", elapsed: exact("3000000000"), jobs: [
@@ -43,7 +45,11 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     const snapshot = {state: "observed", observed_at: observed, timing: {attempts: [first, previous]}};
     const render = (value, at = now) => renderToStaticMarkup(React.createElement(CIHealthTiming, {snapshot: value, now: at}));
     const html = render(snapshot);
-    assert.match(html, /Active at observation/);
+    assert.match(html, /Active jobs in this snapshot/);
+    assert.match(html, /Queued jobs \(1 observed\)/);
+    assert.match(html, /Running jobs \(0 observed\)/);
+    assert.match(html, /<section aria-labelledby="ci-active-jobs-queued">.*At least 7\.000000001 s.*?<\/section>/);
+    assert.match(html, /Active attempts at observation/);
     assert.match(html, /Other observed attempts/);
     assert.match(html, /9223372036854775807.*attempt <code>2/);
     assert.match(html, /9223372036854775807.*attempt <code>1/);
@@ -73,8 +79,55 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(render(snapshot, Date.parse(observed) - 1), "");
     assert.equal(render({state: "unavailable", timing: {attempts: []}}), "");
     assert.match(render({...snapshot, timing: {attempts: []}}), /No attempts were included/);
-    assert.doesNotMatch(render({...snapshot, timing: {attempts: []}}), /Observed attempt results by workflow/);
+    assert.doesNotMatch(render({...snapshot, timing: {attempts: []}}), /Observed attempt results by workflow|Active jobs in this snapshot/);
     assert.equal(render({...snapshot, timing: {attempts: [{...first, run_id: 123}]}}), "");
+
+    const observedFirst = structuredClone(first);
+    delete observedFirst.jobs[0].waiting;
+    const queued = [
+      ...Array.from({length: 10}, (_, i) => ({id: String(100 + i), status: "queued", steps: []})),
+      {id: "9007199254741001", status: "queued", steps: []},
+      {id: "9007199254741002", status: "queued", steps: []},
+    ];
+    const activeJobs = {
+      ...snapshot, coverage: "bounded_partial", timing: {attempts: [
+        observedFirst,
+        // A GitHub requested/waiting/pending attempt projects as unknown.
+        {...previous, status: "unknown", jobs: [
+          ...queued.reverse(),
+          {id: "9007199254741003", status: "running", steps: []},
+          {id: "9007199254741004", status: "running", elapsed: exact("2000000000"), steps: []},
+          {id: "9007199254741005", status: "completed", steps: []},
+          {id: "9007199254741006", status: "running", elapsed: exact("0"), steps: []},
+        ]},
+        {...common, repository_id: "9007199254740995", run_id: "9223372036854775806",
+          status: "unknown", attempt: "1", jobs: [{id: "9007199254741003", status: "running", steps: []}]},
+      ]},
+    };
+    const activeHTML = render(activeJobs);
+    const sectionOf = (phase) => activeHTML.match(new RegExp('<section aria-labelledby="ci-active-jobs-' + phase + '">.*?</section>'))?.[0] ?? "";
+    const queuedSection = sectionOf("queued");
+    const runningSection = sectionOf("running");
+    assert.match(activeHTML, /Partial coverage/);
+    assert.match(activeHTML, /This is not the live queue\. Rows are ordered by identity/);
+    assert.match(queuedSection, /Queued jobs \(13 observed\)/);
+    assert.match(queuedSection, /Showing 12 of 13 observed jobs/);
+    assert.equal((queuedSection.match(/<th scope="row">/g) ?? []).length, 12);
+    assert.deepEqual([...queuedSection.matchAll(/<th scope="row"><code>(\d+)<\/code>/g)].map((m) => m[1]),
+      [...Array.from({length: 10}, (_, i) => String(100 + i)), "9007199254741001", "9007199254741002"]);
+    assert.match(queuedSection, /<code>9007199254741001<\/code>.*attempt <code>1<\/code>.*Unknown/);
+    assert.equal((queuedSection.match(/<span class="muted">Unknown<\/span>/g) ?? []).length, 12);
+    assert.doesNotMatch(queuedSection, /attempt <code>2<\/code>|At least|nanoseconds/);
+    assert.match(activeHTML, /<strong>Run <code>9223372036854775807<\/code>, attempt <code>2<\/code><\/strong>.*<strong>Job <code>9007199254741001<\/code><\/strong>/);
+    assert.match(runningSection, /Running jobs \(4 observed\)/);
+    assert.match(runningSection, /<code>9007199254741003<\/code>.*Run <code>9223372036854775806<\/code>, attempt <code>1<\/code>.*<code>9007199254740995<\/code>.*<code>fixture_source<\/code>.*Unknown/);
+    assert.equal((runningSection.match(/<th scope="row"><code>9007199254741003/g) ?? []).length, 2);
+    assert.match(runningSection, /<code>9007199254741004<\/code>.*title="2000000000 nanoseconds">2 s/);
+    assert.match(runningSection, /<code>9007199254741006<\/code>.*title="0 nanoseconds">0 s/);
+    assert.doesNotMatch(runningSection, /9007199254741005|<a |<form/);
+    assert.equal(render(activeJobs, now + 120_000), "");
+    assert.equal(render({...activeJobs, timing: {attempts: [{...first, jobs: [{...first.jobs[0], id: 9007199254741001}]}]}}), "");
+
     const conclusions = structuredClone(snapshot);
     conclusions.timing.attempts[0].jobs[1].conclusion = "success";
     conclusions.timing.attempts[0].jobs[1].steps[0].conclusion = "timed_out";

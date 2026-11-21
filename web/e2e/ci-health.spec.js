@@ -21,7 +21,9 @@ async function login(page) {
 function timing(at) {
   return {state: "observed", observed_at: at, timing: {attempts: [{
     source: "fixture", repository_id: "9007199254740993", workflow_id: "7",
-    run_id: "9007199254740995", attempt: "2", observed_at: at, status: "queued", jobs: [],
+    run_id: "9007199254740995", attempt: "2", observed_at: at, status: "unknown", jobs: [
+      {id: "9007199254740997", status: "queued", steps: []},
+    ],
   }]}};
 }
 
@@ -52,6 +54,9 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   await nav.click();
   await panel.getByRole("button", {name: "Load timing snapshot"}).click();
   await expect(panel).toContainText("9007199254740995");
+  const queued = panel.getByRole("table", {name: "Queued jobs (1 observed)"});
+  await expect(queued).toContainText("9007199254740997");
+  await expect(queued).toContainText("Unknown");
   expect(calls).toBe(1);
 
   status = 401;
@@ -59,6 +64,7 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   await expect(page.getByRole("heading", {name: "Connect to your ledger"})).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("Read authorization ended");
   await expect(nav).toHaveCount(0);
+  await expect(queued).toHaveCount(0);
   await expect(page.getByText("9007199254740995", {exact: true})).toHaveCount(0);
   expect(calls).toBe(2);
 });
