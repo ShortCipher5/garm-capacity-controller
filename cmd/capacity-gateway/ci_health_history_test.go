@@ -23,12 +23,13 @@ import (
 )
 
 type ciHistoryFixture struct {
-	runtime *ciHealthRuntime
-	owned   *cihealthsource.OwnedCycleHistory
-	expect  []cihealthsource.HistoryExpectation
-	root    *os.Root
-	mode    atomic.Int32
-	entered chan struct{}
+	runtime  *ciHealthRuntime
+	owned    *cihealthsource.OwnedCycleHistory
+	expect   []cihealthsource.HistoryExpectation
+	root     *os.Root
+	mode     atomic.Int32
+	notFound atomic.Int32
+	entered  chan struct{}
 }
 
 func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
@@ -90,6 +91,11 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 				return
 			}
 			if len(parts) == 3 {
+				if f.mode.Load() == 6 && id == baseRun {
+					f.notFound.Add(1)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				out = run(id)
 			} else if len(parts) == 4 && parts[3] == "jobs" {
 				out = map[string]any{"total_count": 0, "jobs": []any{}}
@@ -197,6 +203,27 @@ func TestCIHistoryBackgroundPersistsOnlyCleanObservedGroupsAndClosesViews(t *tes
 	f.mode.Store(0)
 	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() != nil {
 		t.Fatal("timing recovery reopened optional history")
+	}
+	f.ensureHistory(t, 1)
+}
+
+func TestCIHistoryBackgroundExactAttemptNotFoundLeavesRetainedRevision(t *testing.T) {
+	f := newCIHistoryFixture(t)
+	ctx := t.Context()
+	if err := f.runtime.attachOwnedHistory(f.owned, f.expect); err != nil {
+		t.Fatal(err)
+	}
+	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() == nil {
+		t.Fatal("initial observation did not persist")
+	}
+	f.mode.Store(6) // The run remains listed, but its exact attempt is unavailable.
+	if f.runtime.runCycle(ctx) || f.runtime.activeHistory() != nil || f.notFound.Load() != 1 {
+		t.Fatal("an unavailable exact attempt was accepted or kept the history attachment open")
+	}
+	f.ensureHistory(t, 1)
+	f.mode.Store(0)
+	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() != nil {
+		t.Fatal("a later successful timing read resumed history without an owner review")
 	}
 	f.ensureHistory(t, 1)
 }

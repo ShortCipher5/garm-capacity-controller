@@ -94,6 +94,17 @@ history, comparative trends, per-test results, and verified per-job CPU, RAM,
 and disk attribution are not enabled. Looking at this view never changes runner
 capacity or approves a proposed size.
 
+GitHub can remove runs before this reader sees them. An attempt that is
+missing from a listing or returns HTTP 404 does not establish why the source
+is unavailable. Do not count it as passed, failed, skipped, or covered by
+historical backfill.
+
+Before enabling any future durable history view, qualify the case where an
+already observed exact attempt becomes unavailable: previously observed
+facts may remain in the store within approved retention, but unobserved
+coverage stays unknown. Verify separately that withdrawing repository scope
+stops history visibility. A stored observation is not current authorization.
+
 The optional history snapshot reader accepts older rows with no result field.
 An older binary does not read new snapshots containing results. If history
 publication is enabled in a future release, preserve its data and requalify any
