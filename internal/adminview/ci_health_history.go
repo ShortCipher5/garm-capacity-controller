@@ -31,10 +31,11 @@ type ciHistoryWorkflow struct {
 }
 
 type ciHistoryWindow struct {
-	From    time.Time       `json:"from"`
-	To      time.Time       `json:"to"`
-	Initial ciHistoryBucket `json:"initial"`
-	Retries ciHistoryBucket `json:"retries"`
+	From                     time.Time       `json:"from"`
+	To                       time.Time       `json:"to"`
+	Initial                  ciHistoryBucket `json:"initial"`
+	Retries                  ciHistoryBucket `json:"retries"`
+	RecoveredInitialFailures int             `json:"recovered_initial_failures"`
 }
 
 type ciHistoryBucket struct {
@@ -62,7 +63,8 @@ type ciHistoryDuration struct {
 }
 
 func ciHistoryWindowView(w cihealth.RetainedTrendWindow) ciHistoryWindow {
-	return ciHistoryWindow{From: w.From, To: w.To, Initial: ciHistoryBucketView(w.Initial), Retries: ciHistoryBucketView(w.Retries)}
+	return ciHistoryWindow{From: w.From, To: w.To, Initial: ciHistoryBucketView(w.Initial), Retries: ciHistoryBucketView(w.Retries),
+		RecoveredInitialFailures: w.RecoveredInitialFailures}
 }
 
 func ciHistoryBucketView(b cihealth.RetainedTrendBucket) ciHistoryBucket {

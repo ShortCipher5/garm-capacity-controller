@@ -74,9 +74,12 @@ function validRetainedHistory(history, observed, scopes) {
     seen.add(key);
     let retainedAttempts = 0;
     let retainedRecords = 0;
+    let recoveryWindows = 0;
+    let recovered = 0;
+    let possibleRecovered = 0;
     let end = null;
     for (const window of [w.previous, w.current]) {
-      if (!exactKeys(window, ["from", "to", "initial", "retries"])) return false;
+      if (!exactKeys(window, ["from", "to", "initial", "retries"], ["recovered_initial_failures"])) return false;
       const from = timestamp(window.from), to = timestamp(window.to);
       if (!from || !to || to.milliseconds - from.milliseconds !== trendWeek ||
           from.exact.slice(20) !== to.exact.slice(20) || (end && from.exact !== end.exact)) return false;
@@ -90,8 +93,15 @@ function validRetainedHistory(history, observed, scopes) {
         retainedAttempts += bucket.attempts.observed;
         retainedRecords += bucket.attempts.observed + bucket.jobs.observed + bucket.steps.observed;
       }
+      if (Object.hasOwn(window, "recovered_initial_failures")) {
+        if (!count(window.recovered_initial_failures, window.initial.attempts.failure)) return false;
+        recoveryWindows++;
+        recovered += window.recovered_initial_failures;
+      }
+      possibleRecovered += Math.min(window.retries.attempts.success, window.retries.distinct_runs);
     }
-    if (end.exact !== observed.exact || retainedAttempts > 64 || retainedRecords > 12000) return false;
+    if (end.exact !== observed.exact || retainedAttempts > 64 || retainedRecords > 12000 ||
+        (recoveryWindows !== 0 && recoveryWindows !== 2) || recovered > possibleRecovered) return false;
   }
   return true;
 }

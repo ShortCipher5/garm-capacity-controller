@@ -18,7 +18,7 @@ import (
 
 func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 	const owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	for _, mode := range []string{"persistence-only", "owner-close", "exact-404", "record-budget"} {
+	for _, mode := range []string{"persistence-only", "owner-close", "exact-404", "record-budget", "retry-recovery"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCIHistoryFixture(t)
 			ctx := t.Context()
@@ -71,8 +71,22 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if mode == "retry-recovery" {
+				f.mode.Store(7)
+			}
 			if !f.runtime.runCycle(ctx) {
 				t.Fatal("positive exact timing fixture failed")
+			}
+			if mode == "retry-recovery" {
+				status, body := read(owner)
+				if status != http.StatusOK || !strings.Contains(body, `"recovered_initial_failures":0`) ||
+					strings.Contains(body, `"recovered_initial_failures":1`) {
+					t.Fatal("an initial failure alone established recovery")
+				}
+				f.mode.Store(8)
+				if !f.runtime.runCycle(ctx) {
+					t.Fatal("exact same-run retry timing fixture failed")
+				}
 			}
 			status, body := read(owner)
 			if status != http.StatusOK || !strings.Contains(body, `"state":"observed"`) {
@@ -93,9 +107,13 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 					Workflows []struct {
 						ID        string `json:"workflow_id"`
 						Selection string `json:"selection_limited"`
-						Current   struct {
-							To      time.Time `json:"to"`
-							Initial struct {
+						Previous  struct {
+							Recovered *int `json:"recovered_initial_failures"`
+						} `json:"previous"`
+						Current struct {
+							To        time.Time `json:"to"`
+							Recovered *int      `json:"recovered_initial_failures"`
+							Initial   struct {
 								Runs     int `json:"distinct_runs"`
 								Attempts struct {
 									Observed, Active, Failure int
@@ -104,6 +122,9 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 									Observed int
 								}
 							} `json:"initial"`
+							Retries struct {
+								Attempts struct{ Success int } `json:"attempts"`
+							} `json:"retries"`
 						} `json:"current"`
 					} `json:"workflows"`
 				} `json:"history"`
@@ -116,14 +137,20 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 			}
 			w := view.History.Workflows[0]
 			wantRuns, wantJobs, wantSteps, wantSelection := 1, 0, 0, ""
+			wantActive, wantInitialFailures, wantRetrySuccesses, wantRecovered := 1, 0, 0, 0
 			if mode == "record-budget" {
 				// Fresh positive timing has one active attempt. Exactly 38 of
 				// the 39 older complete attempts fit beside it.
 				wantRuns, wantJobs, wantSteps, wantSelection = 39, 38*28, 38*279, "records"
 			}
+			if mode == "retry-recovery" {
+				wantActive, wantInitialFailures, wantRetrySuccesses, wantRecovered = 0, 1, 1, 1
+			}
 			if w.ID != "622" || !w.Current.To.Equal(view.At) || w.Current.Initial.Runs != wantRuns ||
-				w.Current.Initial.Attempts.Observed != wantRuns || w.Current.Initial.Attempts.Active != 1 || w.Current.Initial.Attempts.Failure != 0 ||
-				w.Current.Initial.Jobs.Observed != wantJobs || w.Current.Initial.Steps.Observed != wantSteps || w.Selection != wantSelection {
+				w.Current.Initial.Attempts.Observed != wantRuns || w.Current.Initial.Attempts.Active != wantActive || w.Current.Initial.Attempts.Failure != wantInitialFailures ||
+				w.Current.Initial.Jobs.Observed != wantJobs || w.Current.Initial.Steps.Observed != wantSteps || w.Selection != wantSelection ||
+				w.Previous.Recovered == nil || *w.Previous.Recovered != 0 || w.Current.Recovered == nil || *w.Current.Recovered != wantRecovered ||
+				w.Current.Retries.Attempts.Success != wantRetrySuccesses {
 				t.Fatalf("wrong retained scope or invented outcome: %+v", w)
 			}
 			if status, body := read(""); status != http.StatusUnauthorized || strings.Contains(body, `"history":`) {
