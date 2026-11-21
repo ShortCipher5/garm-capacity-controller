@@ -97,6 +97,25 @@ func compareIncus702ProjectDeclaration(projectRaw, profileRaw []byte, reviewed i
 }
 
 func incus702DeclarationMetadata(raw []byte, names ...string) (map[string]json.RawMessage, error) {
+	metadata, err := incus702SyncMetadata(raw, names...)
+	if err != nil {
+		return nil, err
+	}
+	description, a := field[string](metadata, "description")
+	used, b := field[[]string](metadata, "used_by")
+	if a != nil || b != nil || !incus702DeclarationText(description, 4096) || len(used) > 1024 {
+		return nil, ErrResponse
+	}
+	// Informational links are never resolved, hashed as config, or exposed.
+	for _, entry := range used {
+		if !strings.HasPrefix(entry, "/1.0/") || !incus702DeclarationText(entry, 1024) {
+			return nil, ErrResponse
+		}
+	}
+	return metadata, nil
+}
+
+func incus702SyncMetadata(raw []byte, names ...string) (map[string]json.RawMessage, error) {
 	const max = 64 << 10
 	if len(raw) == 0 || len(raw) > max || !utf8.Valid(raw) {
 		return nil, ErrResponse
@@ -115,22 +134,7 @@ func incus702DeclarationMetadata(raw []byte, names ...string) (map[string]json.R
 		typ != "sync" || status != "Success" || code != 200 || op != "" || errorCode != 0 || errorText != "" {
 		return nil, ErrResponse
 	}
-	metadata, err := incus702DeclarationObject(response["metadata"], names...)
-	if err != nil {
-		return nil, err
-	}
-	description, a := field[string](metadata, "description")
-	used, b := field[[]string](metadata, "used_by")
-	if a != nil || b != nil || !incus702DeclarationText(description, 4096) || len(used) > 1024 {
-		return nil, ErrResponse
-	}
-	// Informational links are never resolved, hashed as config, or exposed.
-	for _, entry := range used {
-		if !strings.HasPrefix(entry, "/1.0/") || !incus702DeclarationText(entry, 1024) {
-			return nil, ErrResponse
-		}
-	}
-	return metadata, nil
+	return incus702DeclarationObject(response["metadata"], names...)
 }
 
 func incus702DeclarationObject(raw []byte, names ...string) (map[string]json.RawMessage, error) {

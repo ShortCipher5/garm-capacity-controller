@@ -94,3 +94,44 @@ plus the project ceiling against the host budget. `route_verified` and
   review before a later authorized conformance test, not permission to run one.
 - **1**: at least one modeled comparison exceeds its budget.
 - **2**: unknown or unusable input, unsupported invocation, or output failure.
+
+### Optional project-state cross-check for an intended empty baseline
+
+To include an operator-supplied snapshot, use capture schema
+`incus-project-plan-capture/v2`, with all v1 fields plus
+`"project_state": {"project": "the-reviewed-project", "response": {...}}`.
+The response must be the exact sanitized synchronous JSON body of
+[the v7.0.2 project state GET](https://github.com/lxc/incus/blob/v7.0.2/cmd/incusd/api_project.go#L1477-L1503).
+Use `Limit` and `Usage` exactly as serialized by the
+[v7.0.2 Go response type](https://github.com/lxc/incus/blob/v7.0.2/shared/api/project.go#L81-L101).
+This deliberately supports no pool-specific limit keys or alternate schema.
+V1 captures and reports are unchanged. Both schemas require the modeled
+aggregate `limits.disk` and explicitly sized profile root disk. This optional
+consistency check cannot qualify a setup without those declarations, including
+a soft disk-pressure-only setup that omits them.
+
+A recognized v2 capture yields the v2 report with one additional redacted
+field, `supplied_project_state`:
+
+- `reported_allocations_zero`: the supplied counts and declared CPU/RAM/disk
+  totals are zero and its instance/container/VM/CPU/RAM/disk caps exactly
+  match the reviewed project declarations. Only this state can accompany a
+  v2 success. Standalone networks are allowed; positive process allocations
+  without instances are contradictory. Network and process caps are not
+  compared to the declaration model, but neither allocation may exceed its
+  own reported finite cap.
+- `reported_allocations_nonzero`: the supplied allocatable counters are not all
+  zero, including reported storage allocation without any instances. Exit 1.
+- `conflicting`: supplied counts, allocations or caps contradict each other
+  or the reviewed declarations. Exit 1.
+- `unknown`: malformed, unsupported, mislabeled or unavailable data. Exit 2.
+
+The response body has no project identity; the required matching project label
+is supplied by the operator, not authenticated by this command. Incus reports
+[database allocations](https://github.com/lxc/incus/blob/v7.0.2/internal/server/project/state.go#L14-L91),
+not cgroups, in-flight operations, backing-filesystem usage, unused space or
+current host headroom; some unset values are omitted from its sums. These
+inputs do not prove the same daemon, snapshot freshness, complete coverage,
+an empty physical project, route, verified enforcement, or safe runner
+starts. Do not add these figures to a proposed full mix, treat them as free
+capacity, or use them to settle a charge.

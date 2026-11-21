@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
@@ -90,5 +91,85 @@ func TestProjectPlanCommandRefusesArgumentsAndOutputFailure(t *testing.T) {
 	if run(nil, strings.NewReader(fixture(t)), failingWriter{}, &diagnostic) != 2 ||
 		diagnostic.String() != "could not write offline comparison report\n" {
 		t.Fatal("write failure not handled")
+	}
+}
+
+const fictionalProjectState = `{
+  "project": "fixture-runners",
+  "response": {
+    "type":"sync","status":"Success","status_code":200,"operation":"","error_code":0,"error":"",
+    "metadata":{"resources":{
+      "instances":{"Limit":6,"Usage":0},"containers":{"Limit":5,"Usage":0},"virtual-machines":{"Limit":0,"Usage":0},
+      "cpu":{"Limit":12,"Usage":0},"memory":{"Limit":25769803776,"Usage":0},"disk":{"Limit":128849018880,"Usage":0},
+      "networks":{"Limit":-1,"Usage":1},"processes":{"Limit":-1,"Usage":0}
+    }}
+  }
+}`
+
+func captureWithState(t *testing.T, state string, v2 bool) string {
+	t.Helper()
+	raw := strings.TrimSpace(fixture(t))
+	if v2 {
+		raw = strings.Replace(raw, "incus-project-plan-capture/v1", "incus-project-plan-capture/v2", 1)
+	}
+	if state != "" {
+		raw = strings.TrimSuffix(raw, "}") + `,"project_state":` + state + "}"
+	}
+	return raw
+}
+
+func TestProjectPlanV2RequiresMatchingSuppliedCapsAndReportedEmptyBaseline(t *testing.T) {
+	busy := strings.NewReplacer(
+		`"instances":{"Limit":6,"Usage":0}`, `"instances":{"Limit":6,"Usage":1}`,
+		`"containers":{"Limit":5,"Usage":0}`, `"containers":{"Limit":5,"Usage":1}`,
+		`"cpu":{"Limit":12,"Usage":0}`, `"cpu":{"Limit":12,"Usage":2}`,
+		`"memory":{"Limit":25769803776,"Usage":0}`, `"memory":{"Limit":25769803776,"Usage":2147483648}`,
+		`"disk":{"Limit":128849018880,"Usage":0}`, `"disk":{"Limit":128849018880,"Usage":12884901888}`,
+	).Replace(fictionalProjectState)
+	for _, tc := range []struct {
+		name, state, status string
+		code                int
+	}{
+		{"matched reported zero with standalone network", fictionalProjectState, "reported_allocations_zero", 0},
+		{"standalone network at finite limit", strings.Replace(fictionalProjectState, `"networks":{"Limit":-1,"Usage":1}`, `"networks":{"Limit":1,"Usage":1}`, 1), "reported_allocations_zero", 0},
+		{"standalone network above finite limit", strings.Replace(fictionalProjectState, `"networks":{"Limit":-1,"Usage":1}`, `"networks":{"Limit":0,"Usage":1}`, 1), "conflicting", 1},
+		{"process allocation without instances", strings.Replace(fictionalProjectState, `"processes":{"Limit":-1,"Usage":0}`, `"processes":{"Limit":-1,"Usage":1}`, 1), "conflicting", 1},
+		{"process allocation above finite limit", strings.Replace(busy, `"processes":{"Limit":-1,"Usage":0}`, `"processes":{"Limit":10,"Usage":11}`, 1), "conflicting", 1},
+		{"reported container", busy, "reported_allocations_nonzero", 1},
+		{"reported storage without instances", strings.Replace(fictionalProjectState, `"disk":{"Limit":128849018880,"Usage":0}`, `"disk":{"Limit":128849018880,"Usage":1}`, 1), "reported_allocations_nonzero", 1},
+		{"missing effective allocation", strings.Replace(busy, `"memory":{"Limit":25769803776,"Usage":2147483648}`, `"memory":{"Limit":25769803776,"Usage":0}`, 1), "conflicting", 1},
+		{"different count limit", strings.Replace(fictionalProjectState, `"Limit":5`, `"Limit":6`, 1), "conflicting", 1},
+		{"memory limit differs by one byte", strings.Replace(fictionalProjectState, `25769803776`, `25769803775`, 1), "conflicting", 1},
+		{"CPU missing configured cap", strings.Replace(fictionalProjectState, `"Limit":12`, `"Limit":-1`, 1), "conflicting", 1},
+		{"contradictory count", strings.Replace(fictionalProjectState, `"containers":{"Limit":5,"Usage":0}`, `"containers":{"Limit":5,"Usage":1}`, 1), "conflicting", 1},
+		{"nonzero virtual machine", strings.Replace(fictionalProjectState, `"virtual-machines":{"Limit":0,"Usage":0}`, `"virtual-machines":{"Limit":0,"Usage":1}`, 1), "conflicting", 1},
+		{"usage above matched declared cap", strings.Replace(busy, `"cpu":{"Limit":12,"Usage":2}`, `"cpu":{"Limit":12,"Usage":13}`, 1), "conflicting", 1},
+		{"operator project label disagrees", strings.Replace(fictionalProjectState, "fixture-runners", "not-to-be-printed", 1), "unknown", 2},
+		{"wrong exact key case", strings.Replace(fictionalProjectState, `"Usage":`, `"usage":`, 1), "unknown", 2},
+		{"duplicate key", strings.Replace(fictionalProjectState, `"Usage":0`, `"Usage":0,"Usage":0`, 1), "unknown", 2},
+		{"omitted usage", strings.Replace(fictionalProjectState, `,"Usage":0`, "", 1), "unknown", 2},
+		{"null usage", strings.Replace(fictionalProjectState, `"Usage":0`, `"Usage":null`, 1), "unknown", 2},
+		{"fractional usage", strings.Replace(fictionalProjectState, `"Usage":0`, `"Usage":0.0`, 1), "unknown", 2},
+		{"unknown extra resource", strings.Replace(fictionalProjectState, `"processes":`, `"not-to-be-printed":{"Limit":0,"Usage":0},"processes":`, 1), "unknown", 2},
+		{"missing state", "", "unknown", 2},
+		{"null state", "null", "unknown", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, diagnostic bytes.Buffer
+			code := run(nil, strings.NewReader(captureWithState(t, tc.state, true)), &out, &diagnostic)
+			var got output
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil || code != tc.code || got.Schema != "incus-project-plan-report/v2" ||
+				got.SuppliedProjectState != tc.status || got.RouteVerified || got.EnforcementVerified ||
+				diagnostic.Len() != 0 || strings.Contains(out.String(), "not-to-be-printed") || strings.Contains(out.String(), "fixture-runners") {
+				t.Fatalf("code=%d status=%q wanted %d/%s; decode=%v", code, got.SuppliedProjectState, tc.code, tc.status, err)
+			}
+		})
+	}
+	// A v1 capture cannot smuggle in an optional state or silently downgrade a v2.
+	expect(t, strings.NewReader(captureWithState(t, fictionalProjectState, false)), 2, "unknown", "unknown", "unknown")
+	var out, diagnostic bytes.Buffer
+	v2BudgetMismatch := strings.Replace(captureWithState(t, fictionalProjectState, true), `"runners": 5`, `"runners": 4`, 1)
+	if code := run(nil, strings.NewReader(v2BudgetMismatch), &out, &diagnostic); code != 1 {
+		t.Fatalf("zero report overrode modeled cap/budget mismatch: %d", code)
 	}
 }

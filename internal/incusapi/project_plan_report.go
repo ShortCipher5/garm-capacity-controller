@@ -16,6 +16,7 @@ type Incus702ProjectPlan struct {
 	Profiles                                    []Incus702PlanProfile
 	Pools                                       []Incus702PlannedPool
 	NetHostBudget                               *capacitybroker.Resources
+	projectStateResponse                        []byte // only populated by the closed v2 capture decoder
 }
 
 type Incus702PlanProfile struct {
@@ -46,6 +47,7 @@ const (
 // physical occupancy, runtime quota enforcement, or authority to allocate.
 type Incus702ProjectPlanReport struct {
 	AgainstProject, AgainstNetHost, ProjectCeilingAgainstNetHost Incus702PlanComparison
+	SuppliedProjectState                                         Incus702ProjectStateCheck
 }
 
 // CompareIncus702ProjectPlan checks exact supplied v7.0.2 declarations against
@@ -138,5 +140,11 @@ func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanRepor
 			break
 		}
 	}
-	return Incus702ProjectPlanReport{againstProject, againstHost, ceilingAgainstHost}
+	out := Incus702ProjectPlanReport{
+		AgainstProject: againstProject, AgainstNetHost: againstHost, ProjectCeilingAgainstNetHost: ceilingAgainstHost,
+	}
+	if in.projectStateResponse != nil {
+		out.SuppliedProjectState = checkIncus702ProjectState(in.projectStateResponse, project)
+	}
+	return out
 }

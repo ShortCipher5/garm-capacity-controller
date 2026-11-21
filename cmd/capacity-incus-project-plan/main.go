@@ -20,6 +20,7 @@ type output struct {
 	ProjectCeilingVsNetHost string `json:"project_ceiling_against_net_host"`
 	RouteVerified           bool   `json:"route_verified"`
 	EnforcementVerified     bool   `json:"enforcement_verified"`
+	SuppliedProjectState    string `json:"supplied_project_state,omitempty"`
 }
 
 func comparison(code incusapi.Incus702PlanComparison) string {
@@ -53,6 +54,19 @@ func run(args []string, input io.Reader, stdout, stderr io.Writer) int {
 		PlanAgainstNetHost:      comparison(report.AgainstNetHost),
 		ProjectCeilingVsNetHost: comparison(report.ProjectCeilingAgainstNetHost),
 	}
+	if report.SuppliedProjectState != incusapi.Incus702ProjectStateNotSupplied {
+		out.Schema = "incus-project-plan-report/v2"
+		switch report.SuppliedProjectState {
+		case incusapi.Incus702ProjectStateConflicting:
+			out.SuppliedProjectState = "conflicting"
+		case incusapi.Incus702ProjectStateReportedAllocationsNonzero:
+			out.SuppliedProjectState = "reported_allocations_nonzero"
+		case incusapi.Incus702ProjectStateReportedAllocationsZero:
+			out.SuppliedProjectState = "reported_allocations_zero"
+		default:
+			out.SuppliedProjectState = "unknown"
+		}
+	}
 	if json.NewEncoder(stdout).Encode(out) != nil {
 		fmt.Fprintln(stderr, "could not write offline comparison report")
 		return 2
@@ -62,6 +76,12 @@ func run(args []string, input io.Reader, stdout, stderr io.Writer) int {
 		if part == "unknown" {
 			return 2
 		}
+	}
+	if out.SuppliedProjectState == "unknown" {
+		return 2
+	}
+	if out.SuppliedProjectState == "conflicting" || out.SuppliedProjectState == "reported_allocations_nonzero" {
+		return 1
 	}
 	for _, part := range parts {
 		if part != "modeled_fit" {

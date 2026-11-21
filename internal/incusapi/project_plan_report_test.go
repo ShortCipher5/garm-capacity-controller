@@ -31,7 +31,7 @@ func incus702PlanFixture() Incus702ProjectPlan {
 func TestIncus702ProjectPlanReportUsesCheckedProfiles(t *testing.T) {
 	in := incus702PlanFixture()
 	fit, over := Incus702PlanModeledFit, Incus702PlanModeledExceedsBudget
-	if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{fit, fit, fit}) {
+	if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{AgainstProject: fit, AgainstNetHost: fit, ProjectCeilingAgainstNetHost: fit}) {
 		t.Fatalf("expected separate modeled fits, got %+v", got)
 	}
 	for dimension, name := range []string{"cpu", "ram", "disk", "count"} {
@@ -39,11 +39,11 @@ func TestIncus702ProjectPlanReportUsesCheckedProfiles(t *testing.T) {
 			in := incus702PlanFixture()
 			budget := capacitybroker.Resources{8000, 12 * 1024, 49 * 1024, 3}
 			in.NetHostBudget = &budget
-			if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{fit, fit, over}) {
+			if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{AgainstProject: fit, AgainstNetHost: fit, ProjectCeilingAgainstNetHost: over}) {
 				t.Fatalf("exact mix and full declared ceiling are distinct, got %+v", got)
 			}
 			budget[dimension]--
-			if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{fit, over, over}) {
+			if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{AgainstProject: fit, AgainstNetHost: over, ProjectCeilingAgainstNetHost: over}) {
 				t.Fatalf("one short host dimension must refuse modeled fit, got %+v", got)
 			}
 		})
@@ -51,7 +51,7 @@ func TestIncus702ProjectPlanReportUsesCheckedProfiles(t *testing.T) {
 	// The declared CPU ceiling rejects this five-slot mix independently of the host.
 	in.Pools[0].Count, in.Pools[1].Count = 3, 2
 	in.NetHostBudget = &capacitybroker.Resources{16000, 24 * 1024, 120 * 1024, 5}
-	if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{over, fit, fit}) {
+	if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{AgainstProject: over, AgainstNetHost: fit, ProjectCeilingAgainstNetHost: fit}) {
 		t.Fatalf("host room cannot hide the project's aggregate CPU limit, got %+v", got)
 	}
 }
@@ -65,7 +65,7 @@ func TestIncus702ProjectPlanReportSharesContainerCount(t *testing.T) {
 	fit, over := Incus702PlanModeledFit, Incus702PlanModeledExceedsBudget
 	// Each pool fits alone and the total instance limit is six; only the
 	// shared project container limit of five is exceeded.
-	if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{over, fit, fit}) {
+	if got := CompareIncus702ProjectPlan(in); got != (Incus702ProjectPlanReport{AgainstProject: over, AgainstNetHost: fit, ProjectCeilingAgainstNetHost: fit}) {
 		t.Fatalf("profile reuse must not multiply the container cap: %+v", got)
 	}
 }
