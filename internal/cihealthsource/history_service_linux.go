@@ -2,6 +2,7 @@ package cihealthsource
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"sync"
@@ -47,6 +48,46 @@ type ownedCycleHistoryCell struct {
 // slot and reads initial per-workflow CAS metadata only. The caller retains
 // its Root and reader. Disabled is a no-op even if other fields are invalid.
 func OpenOwnedCycleHistory(ctx context.Context, source Source, in OwnedCycleHistoryInput) (*OwnedCycleHistory, []HistoryExpectation, error) {
+	return openOwnedCycleHistory(ctx, source, in, nil)
+}
+
+// ReopenReviewedCycleHistory requires an exact independent review of the
+// dedicated existing snapshot and every approved initial cursor. It exposes
+// no unreviewed cursor, creates no files and cannot initialize a store.
+func ReopenReviewedCycleHistory(ctx context.Context, source Source, root *os.Root, digest [sha256.Size]byte, reviewed []HistoryExpectation) (*OwnedCycleHistory, []HistoryExpectation, error) {
+	if len(reviewed) == 0 || len(reviewed) > maxHistoryCycleScopes {
+		return nil, nil, ErrCycleHistory
+	}
+	want := make(map[cihealth.HistoryScope]cihealth.HistoryCursor, len(reviewed))
+	scopes := make([]cihealth.HistoryScope, 0, len(reviewed))
+	for _, item := range reviewed {
+		cur := item.Cursor
+		if _, duplicate := want[item.Scope]; duplicate || cur.Revision < 0 || cur.Checkpoint < 0 ||
+			(cur.Revision == 0 && cur.Checkpoint != 0) {
+			return nil, nil, ErrCycleHistory
+		}
+		want[item.Scope] = cur
+		scopes = append(scopes, item.Scope)
+	}
+	owner, current, err := openOwnedCycleHistory(ctx, source, OwnedCycleHistoryInput{Enabled: true, Root: root, Workflows: scopes},
+		&cihealth.HistoryReopenReview{SnapshotSHA256: digest, AllowedScopes: scopes})
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, item := range current {
+		if cursor, ok := want[item.Scope]; !ok || cursor != item.Cursor {
+			_ = owner.Close()
+			return nil, nil, ErrCycleHistory
+		}
+	}
+	if ctx.Err() != nil || len(current) != len(want) {
+		_ = owner.Close()
+		return nil, nil, ErrCycleHistory
+	}
+	return owner, current, nil
+}
+
+func openOwnedCycleHistory(ctx context.Context, source Source, in OwnedCycleHistoryInput, review *cihealth.HistoryReopenReview) (*OwnedCycleHistory, []HistoryExpectation, error) {
 	if !in.Enabled {
 		return nil, nil, nil
 	}
@@ -57,7 +98,7 @@ func OpenOwnedCycleHistory(ctx context.Context, source Source, in OwnedCycleHist
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := cihealth.OpenHistory(ctx, cihealth.HistoryInput{Enabled: true, Root: in.Root, Initialize: in.Initialize})
+	store, err := cihealth.OpenHistory(ctx, cihealth.HistoryInput{Enabled: true, Root: in.Root, Initialize: in.Initialize, Review: review})
 	if err != nil {
 		return nil, nil, err
 	}

@@ -15,10 +15,11 @@ var errCIHealthConfiguration = errors.New("CI health timing configuration unavai
 
 type ciHealthConfiguration struct {
 	Repositories []demandobserver.CIHealthRepositoryPin `json:"repositories"`
+	History      *ciHealthHistoryConfiguration          `json:"history,omitempty"`
 }
 
 func validateCIHealthConfiguration(c configuration) error {
-	if c.CIHealth == nil && !c.EnableCIHealth {
+	if c.CIHealth == nil && !c.EnableCIHealth && !c.EnableCIHealthHistory {
 		return nil
 	}
 	if c.CIHealth == nil || !c.EnableCIHealth || c.Admin == nil || c.DemandObserverConfigFile == "" ||
@@ -33,7 +34,7 @@ func validateCIHealthConfiguration(c configuration) error {
 		}
 		ids[p.GitHubID], locators[p.GarmID] = true, true
 	}
-	return nil
+	return validateCIHealthHistoryConfiguration(c, ids)
 }
 
 // ciHealthRuntime only polls the already-approved GitHub read source. It
@@ -42,7 +43,7 @@ type ciHealthRuntime struct {
 	source   *demandobserver.CIHealthSource
 	snapshot *adminview.CIHealthSnapshot
 	repos    []string
-	// Optional owner-supplied history; buildCIHealth never opens or attaches it.
+	// Optional owner-supplied history; ordinary timing construction never opens it.
 	historyMu       sync.Mutex
 	history         *cihealthsource.BackgroundCycleHistory
 	historyDisabled bool
@@ -83,16 +84,15 @@ func (c *ciHealthRuntime) close() {
 	c.disableHistory()
 }
 
-// attachOwnedHistory is a construction-time injection, never a settings or
-// startup action. Storage custody and its exact workflow/revision review are
-// independently provided by the caller, not derived from the GARM scope.
+// attachOwnedHistory is a construction-time injection, never a settings
+// action. Custody and workflow/revision review are independently provided.
 func (c *ciHealthRuntime) attachOwnedHistory(owned *cihealthsource.OwnedCycleHistory, reviewed []cihealthsource.HistoryExpectation) error {
 	return c.attachHistory(owned, reviewed, false)
 }
 
 // attachOwnedHistoryWithTrends is explicit consent to publish scoped
-// aggregates through the same loopback owner endpoint. Startup never calls
-// it from the ordinary timing configuration or opens history by default.
+// aggregates through the same loopback owner endpoint. Ordinary timing
+// configuration does not call it or open history.
 func (c *ciHealthRuntime) attachOwnedHistoryWithTrends(owned *cihealthsource.OwnedCycleHistory, reviewed []cihealthsource.HistoryExpectation) error {
 	return c.attachHistory(owned, reviewed, true)
 }

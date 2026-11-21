@@ -90,11 +90,42 @@ unknown; a duration alone does not imply success. The view does not expose
 raw source result strings or individual test case outcomes.
 
 Ordinary gateway configuration still provides current timing and result
-visibility only. A separately constructed loopback owner may opt into retained
-workflow summaries by injecting an independently held private history store
-with its exact reviewed workflow scope and starting revisions. This path is
-not activated by the timing flag or default configuration. Confirm custody
-and revision review before wiring any deployment activation.
+visibility only. Retained summaries also require both the separate
+`--allow-ci-health-retained-history` flag and an independently reviewed
+`ci_health.history` block in the private gateway configuration. Keep
+`--allow-ci-health-timing` and the existing loopback admin configuration.
+No new token, route, collector, or GitHub scope is needed. Serve the matching
+dashboard assets when opting in.
+
+The review block requires `directory` (the absolute canonical path),
+`directory_device` and `directory_inode` (the exact positive Linux stat
+identities), `snapshot_sha256` (lowercase SHA-256 of the exact held snapshot
+bytes), `source_id` (the exact configured CI reader ID), and `workflows`
+(a nonempty list of exact `repository_id`, `workflow_id`, `start_revision`
+and `start_checkpoint` values). Repository IDs must already be enrolled for
+timing; zero revision and checkpoint must be explicitly reviewed for an
+approved workflow with no stored checkpoint. Do not copy review values from
+the gateway's current guesses or infer approval from a successful static
+configuration check. That check verifies syntax only.
+
+The operator must already control a dedicated directory owned by the service
+UID with mode 0700, not shared with any other component or exposed as assets.
+Every ancestor must be root- or service-UID-owned, not writable by group or
+others, and not a symlink. Hold that UID and storage exclusively; qualify
+local locking, rename and file/directory fsync behavior separately. The
+gateway checks the held identity and reopens only an existing clean directory
+with its one fixed canonical snapshot. It will not create, reinitialize,
+repair, transplant, guess a path, or adopt a snapshot from another workflow.
+An open writer, unexpected file or unresolved stage/intent is refused.
+
+After a committed change, the previous digest and cursor review will no
+longer authorize the opted-in startup. The gateway rejects that invocation
+before opening the admission database or starting services. Quiesce the
+writer, independently review unchanged custody and the new exact bytes and
+cursor for every approved workflow, then reissue the private review. This
+does not support unattended history restarts. There is no automatic initializer or
+migration. The timings-only path remains available without this flag and
+block; do not erase history to get past a refusal.
 
 With that explicit opt-in, the existing owner read can show two rolling
 seven-day buckets, based on last observed time. It considers the newest
@@ -105,9 +136,9 @@ limited. It never splits an attempt or skips past it to fit smaller rows.
 Hitting a selection limit does not change the persisted facts, revisions, or
 future writes. The marker is about the bounded local read, not proof that a
 particular seven-day bucket lost observations. The view separately counts
-initial attempts and retry attempts and their distinct run IDs. Failure share uses recorded successes
-and failures only. Mean and p95 use actual completed durations with both
-endpoints; job and step observations are pooled, not compared by guessed
+initial attempts and retry attempts and their distinct run IDs. Failure share
+uses recorded successes and failures only. Mean and p95 use actual completed
+durations with both endpoints; job and step observations are pooled, not compared by guessed
 definition. Workflow wall duration remains unavailable without an exact
 attempt end. The retained subset is not complete upstream history. No verified
 test reports, job resource measurements or sizing recommendations are
@@ -131,7 +162,7 @@ coverage stays unknown. Verify separately that withdrawing repository scope
 stops history visibility. A stored observation is not current authorization.
 
 The optional history snapshot reader accepts older rows with no result field.
-An older binary does not read new snapshots containing results. If history
-publication is enabled in a future release, preserve its data and requalify any
-rollback against the older reader before deploying it; do not erase or
-reinitialize history to get around an incompatible snapshot.
+An older binary does not read new snapshots containing results. If enabling
+retained history for a deployment, preserve its data and requalify any
+rollback against the older reader; do not erase or reinitialize history to get
+around an incompatible snapshot.
