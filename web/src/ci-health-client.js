@@ -62,12 +62,14 @@ function validRetainedHistory(history, observed, scopes) {
   if (!expiry || expiry.exact <= observed.exact || expiry.milliseconds > observed.milliseconds + lifetime) return false;
   const seen = new Set();
   for (const w of history.workflows) {
-    if (!exactKeys(w, ["source", "repository_id", "workflow_id", "previous", "current"]) ||
-        typeof w.source !== "string" || !decimal(w.repository_id) || !decimal(w.workflow_id)) return false;
+    if (!exactKeys(w, ["source", "repository_id", "workflow_id", "previous", "current"], ["selection_limited"]) ||
+        typeof w.source !== "string" || !decimal(w.repository_id) || !decimal(w.workflow_id) ||
+        (Object.hasOwn(w, "selection_limited") && !["attempts", "records"].includes(w.selection_limited))) return false;
     const key = [w.source, w.repository_id, w.workflow_id].join(":");
     if (seen.has(key) || !scopes.has(key)) return false;
     seen.add(key);
     let retainedAttempts = 0;
+    let retainedRecords = 0;
     let end = null;
     for (const window of [w.previous, w.current]) {
       if (!exactKeys(window, ["from", "to", "initial", "retries"])) return false;
@@ -77,14 +79,15 @@ function validRetainedHistory(history, observed, scopes) {
       end = to;
       for (const [bucket, initial] of [[window.initial, true], [window.retries, false]]) {
         if (!exactKeys(bucket, ["distinct_runs", "attempts", "jobs", "steps"]) ||
-            !validRetainedMetric(bucket.attempts, 64) || !validRetainedMetric(bucket.jobs, 64000) ||
-            !validRetainedMetric(bucket.steps, 640000) || !count(bucket.distinct_runs, bucket.attempts.observed) ||
+            !validRetainedMetric(bucket.attempts, 64) || !validRetainedMetric(bucket.jobs, 12000) ||
+            !validRetainedMetric(bucket.steps, 12000) || !count(bucket.distinct_runs, bucket.attempts.observed) ||
             (initial && bucket.distinct_runs !== bucket.attempts.observed) ||
             (!bucket.distinct_runs && (bucket.attempts.observed || bucket.jobs.observed || bucket.steps.observed))) return false;
         retainedAttempts += bucket.attempts.observed;
+        retainedRecords += bucket.attempts.observed + bucket.jobs.observed + bucket.steps.observed;
       }
     }
-    if (end.exact !== observed.exact || retainedAttempts > 64) return false;
+    if (end.exact !== observed.exact || retainedAttempts > 64 || retainedRecords > 12000) return false;
   }
   return true;
 }

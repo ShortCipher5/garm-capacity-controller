@@ -12,15 +12,19 @@ import (
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealthsource"
 )
 
 func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 	const owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	for _, mode := range []string{"persistence-only", "owner-close", "exact-404"} {
+	for _, mode := range []string{"persistence-only", "owner-close", "exact-404", "record-budget"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCIHistoryFixture(t)
 			ctx := t.Context()
+			if mode == "record-budget" {
+				seedCIHistoryRecordBudget(t, f)
+			}
 			budget := admission.Resources{CPU: 1, RAM: 1, Runners: 1}
 			policy := admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}},
 				Pools: map[string]admission.Pool{"pool": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}
@@ -87,14 +91,18 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 					Coverage  string    `json:"coverage"`
 					Reports   string    `json:"test_results"`
 					Workflows []struct {
-						ID      string `json:"workflow_id"`
-						Current struct {
+						ID        string `json:"workflow_id"`
+						Selection string `json:"selection_limited"`
+						Current   struct {
 							To      time.Time `json:"to"`
 							Initial struct {
 								Runs     int `json:"distinct_runs"`
 								Attempts struct {
 									Observed, Active, Failure int
 								} `json:"attempts"`
+								Jobs, Steps struct {
+									Observed int
+								}
 							} `json:"initial"`
 						} `json:"current"`
 					} `json:"workflows"`
@@ -107,8 +115,15 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 				t.Fatalf("history omitted, overstated or outside exact lease: %+v, %v", view, err)
 			}
 			w := view.History.Workflows[0]
-			if w.ID != "622" || !w.Current.To.Equal(view.At) || w.Current.Initial.Runs != 1 ||
-				w.Current.Initial.Attempts.Observed != 1 || w.Current.Initial.Attempts.Active != 1 || w.Current.Initial.Attempts.Failure != 0 {
+			wantRuns, wantJobs, wantSteps, wantSelection := 1, 0, 0, ""
+			if mode == "record-budget" {
+				// Fresh positive timing has one active attempt. Exactly 38 of
+				// the 39 older complete attempts fit beside it.
+				wantRuns, wantJobs, wantSteps, wantSelection = 39, 38*28, 38*279, "records"
+			}
+			if w.ID != "622" || !w.Current.To.Equal(view.At) || w.Current.Initial.Runs != wantRuns ||
+				w.Current.Initial.Attempts.Observed != wantRuns || w.Current.Initial.Attempts.Active != 1 || w.Current.Initial.Attempts.Failure != 0 ||
+				w.Current.Initial.Jobs.Observed != wantJobs || w.Current.Initial.Steps.Observed != wantSteps || w.Selection != wantSelection {
 				t.Fatalf("wrong retained scope or invented outcome: %+v", w)
 			}
 			if status, body := read(""); status != http.StatusUnauthorized || strings.Contains(body, `"history":`) {
@@ -133,9 +148,74 @@ func TestCIHistoryTrendsExplicitOwnerProjection(t *testing.T) {
 					t.Fatalf("failed cycle reused previous history: %s", body)
 				}
 				f.ensureHistory(t, 1)
+			case "record-budget":
+				if f.runtime.activeHistory() == nil || !f.runtime.runCycle(ctx) || f.runtime.activeHistory() == nil {
+					t.Fatal("bounded read closed the owner or stopped later persistence")
+				}
+				if status, body := read(owner); status != http.StatusOK || !strings.Contains(body, `"selection_limited":"records"`) {
+					t.Fatal("later positive publication lost bounded history")
+				}
+				if err := f.owned.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if status, body := read(owner); status != http.StatusOK || strings.Contains(body, `"history":`) {
+					t.Fatal("bounded history outlived closed authority")
+				}
+				f.ensureHistory(t, 4) // two seed transitions and two successful gateway cycle commits
 			}
 		})
 	}
+}
+
+func seedCIHistoryRecordBudget(t *testing.T, f *ciHistoryFixture) {
+	t.Helper()
+	ctx := t.Context()
+	if err := f.owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := cihealth.OpenHistory(ctx, cihealth.HistoryInput{Enabled: true, Root: f.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	now := time.Now()
+	stamp := now.Add(-time.Hour).UTC()
+	scope := f.expect[0].Scope
+	c := cihealth.Clock{Phase: cihealth.Completed, StartedAt: stamp.Add(-time.Minute), CompletedAt: stamp, ObservedAt: stamp}
+	rows := make([]cihealth.AttemptFacts, 39)
+	for i := range rows {
+		a := cihealth.AttemptKey{Source: scope.Source, RepositoryID: scope.RepositoryID, WorkflowID: scope.WorkflowID, RunID: int64(i + 1), Attempt: 1}
+		fact := cihealth.AttemptFacts{Key: a, AsOf: stamp, Clock: c}
+		for j := int64(1); j <= 28; j++ {
+			key := cihealth.JobKey{Attempt: a, JobID: j}
+			job := cihealth.JobFacts{Key: key, Clock: c}
+			for step := int64(1); step <= 10; step++ {
+				if j == 28 && step == 10 {
+					break
+				}
+				job.Steps = append(job.Steps, cihealth.StepFacts{Key: cihealth.StepKey{Job: key, Number: step}, Clock: c})
+			}
+			fact.Jobs = append(fact.Jobs, job)
+		}
+		rows[i] = fact
+	}
+	one, two := cihealth.HistoryCursor{Revision: 1}, cihealth.HistoryCursor{Revision: 2}
+	if err := h.Apply(ctx, scope, cihealth.HistoryCursor{}, one, rows[:38], now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(ctx, scope, one, two, rows[38:], now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.owned, f.expect, err = cihealthsource.OpenOwnedCycleHistory(ctx, f.runtime.source, cihealthsource.OwnedCycleHistoryInput{
+		Enabled: true, Root: f.root, Workflows: []cihealth.HistoryScope{scope, f.expect[1].Scope},
+	})
+	if err != nil || len(f.expect) != 2 || f.expect[0].Cursor != two {
+		t.Fatal("fixture failed to independently review the held revisions", err)
+	}
+	t.Cleanup(func() { _ = f.owned.Close() })
 }
 
 func TestCIHistoryTrendsLeaseUsesEarliestProofAndCurrentRevision(t *testing.T) {

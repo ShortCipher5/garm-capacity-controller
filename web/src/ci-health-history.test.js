@@ -42,6 +42,9 @@ test("retained history accepts only authorized scope, exact windows, bounded sam
     (v) => { v.history.workflows[0].current.initial.jobs.duration.samples = 4; },
     (v) => { v.history.workflows[0].current.initial.jobs.duration.mean_ns = 0; },
     (v) => { v.history.workflows[0].current.initial.distinct_runs = 1; },
+    (v) => { v.history.workflows[0].selection_limited = "unknown"; },
+    (v) => { v.history.workflows[0].selection_limited = null; },
+    (v) => { const bucket = v.history.workflows[0].current.initial; bucket.steps = {...none(), observed: 11996, unknown: 11996}; },
     (v) => { v.history.test_results = "verified"; },
     (v) => { v.history.coverage = "complete"; },
     (v) => { v.history.expires_at = "2026-01-21T00:03:00Z"; },
@@ -78,6 +81,16 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
     const markup = render(snapshot, {showHistory: true});
     assert.match(markup, /Retained workflow timing and results/);
     assert.match(markup, /not complete workflow history/);
+    assert.doesNotMatch(markup, /Limited selection|Additional older retained attempts/);
+    for (const [selection, label] of [["attempts", "64-attempt"], ["records", "12,000-record"]]) {
+      const limited = fixture();
+      limited.history.workflows[0].selection_limited = selection;
+      assert.equal(validateCIHealthSnapshot(limited), limited);
+      const html = render(limited, {showHistory: true});
+      assert.match(html, /Limited selection/);
+      assert.ok(html.includes(label + " limit"));
+      assert.match(html, /No attempt was split/);
+    }
     assert.match(markup, /Verified test reports are unavailable/);
     assert.match(markup, /1\/2 \(50\.0%\)/);
     assert.match(markup, /Jobs \(pooled\).*<td>2<\/td><td>1 s<\/td><td>2 s<\/td>/);

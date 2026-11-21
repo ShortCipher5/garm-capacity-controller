@@ -2,6 +2,7 @@ package cihealth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -42,6 +43,138 @@ func snapAttempt(s HistoryScope, run, attempt int64, now time.Time) AttemptFacts
 	j := JobKey{k, 7}
 	c := Clock{Phase: Completed, StartedAt: now.Add(-time.Minute), CompletedAt: now, ObservedAt: now}
 	return AttemptFacts{Key: k, AsOf: now, Clock: c, Jobs: []JobFacts{{Key: j, Clock: c, Steps: []StepFacts{{Key: StepKey{j, 4}, Clock: c}}}}}
+}
+
+func sizedSnapAttempt(s HistoryScope, run int64, observed time.Time, jobs, steps int) AttemptFacts {
+	a := snapAttempt(s, run, 1, observed)
+	a.Jobs = nil
+	for i := 0; i < jobs; i++ {
+		j := JobFacts{Key: JobKey{a.Key, int64(i + 1)}, Clock: a.Clock}
+		stepsInJob := steps / jobs
+		if i < steps%jobs {
+			stepsInJob++
+		}
+		for n := 0; n < stepsInJob; n++ {
+			j.Steps = append(j.Steps, StepFacts{Key: StepKey{j.Key, int64(n + 1)}, Clock: a.Clock})
+		}
+		a.Jobs = append(a.Jobs, j)
+	}
+	return a
+}
+
+func TestSnapshotHistoryRecentPrefixWholeAttemptRecordBudget(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 901, 100}
+	seed := make([]AttemptFacts, 38)
+	for i := range seed {
+		seed[i] = sizedSnapAttempt(s, int64(i+3), now, 28, 279)
+	}
+	write := func(expected, next int64, page []AttemptFacts) {
+		t.Helper()
+		if err := h.Apply(t.Context(), s, HistoryCursor{Revision: expected}, HistoryCursor{Revision: next}, page, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(0, 1, seed) // 11,704 whole records.
+	p, err := h.RecentPrefix(t.Context(), s, 38, now)
+	if err != nil || p.Limited != "" || len(p.Attempts) != 38 {
+		t.Fatalf("exactly the attempt cap is not truncation: %d %q %v", len(p.Attempts), p.Limited, err)
+	}
+	write(1, 2, []AttemptFacts{
+		sizedSnapAttempt(s, 2, now, 28, 279), // 39 x 308 = 12,012, not a storage fault.
+		snapAttempt(s, 1, 1, now),            // Would fit individually; must not skip newer run 2.
+	})
+	before, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err = h.RecentPrefix(t.Context(), s, 64, now)
+	if err != nil || p.Limited != HistorySelectionRecordLimit || len(p.Attempts) != 38 ||
+		p.Attempts[0].Key.RunID != 40 || p.Attempts[37].Key.RunID != 3 {
+		t.Fatalf("expected newest contiguous 38 complete attempts: %d %q %v", len(p.Attempts), p.Limited, err)
+	}
+	for _, a := range p.Attempts {
+		if len(a.Jobs) != 28 || historyRecordCount(a) != 308 {
+			t.Fatal("selected partial attempt", a.Key)
+		}
+	}
+	p.Attempts[37].Jobs[0].Steps[0].Key.Number = 999
+	p, err = h.RecentPrefix(t.Context(), s, 64, now)
+	if err != nil || len(p.Attempts) != 38 || p.Attempts[37].Jobs[0].Steps[0].Key.Number != 1 {
+		t.Fatal("returned shared mutable data", err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 64, now); rows != nil || !errors.Is(err, ErrHistory) {
+		t.Fatal("legacy strict read contract changed", err)
+	}
+	if c, err := h.Cursor(t.Context(), s); c.Revision != 2 || err != nil {
+		t.Fatal("selection or strict read changed underlying cursor", c, err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(before, after) {
+		t.Fatal("bounded selection changed retained snapshot bytes", err)
+	}
+
+	// An exactly full record page has no marker unless another eligible whole
+	// attempt exists. A different scope cannot establish truncation.
+	exact := s
+	exact.WorkflowID++
+	last := sizedSnapAttempt(exact, 1, now, 28, 267) // 296 remaining records.
+	for i := range seed {
+		seed[i] = sizedSnapAttempt(exact, int64(i+2), now, 28, 279)
+	}
+	if err := h.Apply(t.Context(), exact, HistoryCursor{}, HistoryCursor{Revision: 1}, append(seed, last), now); err != nil {
+		t.Fatal(err)
+	}
+	p, err = h.RecentPrefix(t.Context(), exact, 64, now)
+	if err != nil || p.Limited != "" || len(p.Attempts) != 39 || p.Attempts[38].Key != last.Key {
+		t.Fatalf("exact record fit falsely described as limited: %d %q %v", len(p.Attempts), p.Limited, err)
+	}
+}
+
+func TestSnapshotHistoryRecentPrefixAttemptCapAndActualFaults(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 902, 100}
+	rows := make([]AttemptFacts, 64)
+	for i := range rows {
+		rows[i] = snapAttempt(s, int64(i+1), 1, now)
+	}
+	current, next := HistoryCursor{Revision: 1}, HistoryCursor{Revision: 2}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, current, rows, now); err != nil {
+		t.Fatal(err)
+	}
+	// Positive rows from another scope or beyond now do not set a marker.
+	other := s
+	other.WorkflowID++
+	if err := h.Apply(t.Context(), other, HistoryCursor{}, current, []AttemptFacts{snapAttempt(other, 100, 1, now)}, now); err != nil {
+		t.Fatal(err)
+	}
+	future := now.Add(time.Second)
+	if err := h.Apply(t.Context(), s, current, next, []AttemptFacts{snapAttempt(s, 65, 1, future)}, future); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := h.RecentPrefix(t.Context(), s, 64, now)
+	if err != nil || exact.Limited != "" || len(exact.Attempts) != 64 || exact.Attempts[63].Key.RunID != 1 {
+		t.Fatalf("without another eligible row exact cap should be unmarked: %d %q %v", len(exact.Attempts), exact.Limited, err)
+	}
+	p, err := h.RecentPrefix(t.Context(), s, 64, future)
+	if err != nil || p.Limited != HistorySelectionAttemptLimit || len(p.Attempts) != 64 ||
+		p.Attempts[0].Key.RunID != 65 || p.Attempts[63].Key.RunID != 2 {
+		t.Fatalf("eligible additional row was not reported: %d %q %v", len(p.Attempts), p.Limited, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if canceled, err := h.RecentPrefix(ctx, s, 64, future); canceled.Attempts != nil || canceled.Limited != "" || !errors.Is(err, ErrHistory) {
+		t.Fatal("cancellation turned into a partial success", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, historyStage), []byte("unexpected stage"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if invalid, err := h.RecentPrefix(t.Context(), s, 64, future); invalid.Attempts != nil || invalid.Limited != "" || !errors.Is(err, ErrHistory) {
+		t.Fatal("actual held store fault turned into a partial success", err)
+	}
 }
 
 func TestSnapshotHistoryExactAtomicPageReviewAndRestart(t *testing.T) {

@@ -585,41 +585,80 @@ func historyPreservesConclusions(old, next AttemptFacts) bool {
 	return true
 }
 
+// HistorySelectionLimit reports why an additional eligible retained attempt
+// could not be included. The zero value makes no claim of upstream coverage.
+type HistorySelectionLimit string
+
+const (
+	HistorySelectionAttemptLimit HistorySelectionLimit = "attempts"
+	HistorySelectionRecordLimit  HistorySelectionLimit = "records"
+)
+
+type HistoryRecentPrefix struct {
+	Attempts []AttemptFacts
+	Limited  HistorySelectionLimit
+}
+
 func (h *History) Recent(ctx context.Context, s HistoryScope, limit int, now time.Time) ([]AttemptFacts, error) {
+	p, err := h.recent(ctx, s, limit, now, false)
+	return p.Attempts, err
+}
+
+// RecentPrefix is the bounded aggregate read. It returns newest first, stops
+// before the first whole attempt that does not fit, and never skips one to
+// backfill a smaller older attempt. Only this surface treats excess matching
+// data as a partial selection rather than a storage error.
+func (h *History) RecentPrefix(ctx context.Context, s HistoryScope, limit int, now time.Time) (HistoryRecentPrefix, error) {
+	return h.recent(ctx, s, limit, now, true)
+}
+
+func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now time.Time, prefix bool) (HistoryRecentPrefix, error) {
 	now = now.UTC()
 	cutoff := now.Add(-historyRetention)
 	if h == nil || !s.valid() || limit < 1 || limit > historyMaxRecent || !historyWall(now) || !historyWall(cutoff) {
-		return nil, ErrHistory
+		return HistoryRecentPrefix{}, ErrHistory
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.available(ctx) {
-		return nil, ErrHistory
+		return HistoryRecentPrefix{}, ErrHistory
 	}
-	out := make([]AttemptFacts, 0, limit)
+	out := HistoryRecentPrefix{Attempts: make([]AttemptFacts, 0, limit)}
 	records := 0
 	for _, a := range h.state.Attempts {
+		if !historyActive(ctx) {
+			return HistoryRecentPrefix{}, ErrHistory
+		}
 		if !a.AsOf.After(cutoff) {
 			break
 		}
 		if a.AsOf.After(now) || historyScope(a.Key) != s {
 			continue
 		}
-		records += historyRecordCount(a)
-		if records > historyMaxPageRecords || !historyActive(ctx) {
-			return nil, ErrHistory
+		if len(out.Attempts) == limit {
+			out.Limited = HistorySelectionAttemptLimit
+			break
+		}
+		n := historyRecordCount(a)
+		if n > historyMaxPageRecords-records {
+			if !prefix {
+				return HistoryRecentPrefix{}, ErrHistory
+			}
+			out.Limited = HistorySelectionRecordLimit
+			break
 		}
 		row, err := historyCopyAttempt(a)
 		if err != nil {
-			return nil, err
+			return HistoryRecentPrefix{}, err
 		}
-		out = append(out, row)
-		if len(out) == limit {
+		out.Attempts = append(out.Attempts, row)
+		records += n
+		if !prefix && len(out.Attempts) == limit {
 			break
 		}
 	}
-	if !historyActive(ctx) {
-		return nil, ErrHistory
+	if !historyActive(ctx) || (prefix && !h.available(ctx)) {
+		return HistoryRecentPrefix{}, ErrHistory
 	}
 	return out, nil
 }

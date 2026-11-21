@@ -97,9 +97,15 @@ not activated by the timing flag or default configuration. Confirm custody
 and revision review before wiring any deployment activation.
 
 With that explicit opt-in, the existing owner read can show two rolling
-seven-day buckets, based on last observed time, across up to 64 retained
-attempts per workflow. It separately counts initial attempts and retry
-attempts and their distinct run IDs. Failure share uses recorded successes
+seven-day buckets, based on last observed time. It considers the newest
+whole retained attempts per workflow, at most 64 attempts and at most 12,000
+attempt, job and step records combined. If the next eligible retained attempt
+would exceed either limit, the read stops before it and marks the selection
+limited. It never splits an attempt or skips past it to fit smaller rows.
+Hitting a selection limit does not change the persisted facts, revisions, or
+future writes. The marker is about the bounded local read, not proof that a
+particular seven-day bucket lost observations. The view separately counts
+initial attempts and retry attempts and their distinct run IDs. Failure share uses recorded successes
 and failures only. Mean and p95 use actual completed durations with both
 endpoints; job and step observations are pooled, not compared by guessed
 definition. Workflow wall duration remains unavailable without an exact

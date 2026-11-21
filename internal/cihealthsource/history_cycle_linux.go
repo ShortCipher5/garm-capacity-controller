@@ -75,6 +75,13 @@ func (h *CycleHistory) Recent(ctx context.Context, scope cihealth.HistoryScope, 
 	return h.history.Recent(ctx, scope, limit, time.Now())
 }
 
+func (h *CycleHistory) recentPrefix(ctx context.Context, scope cihealth.HistoryScope, limit int) (cihealth.HistoryRecentPrefix, error) {
+	if !h.allows(scope) {
+		return cihealth.HistoryRecentPrefix{}, ErrCycleHistory
+	}
+	return h.history.RecentPrefix(ctx, scope, limit, time.Now())
+}
+
 type HistoryExpectation struct {
 	Scope  cihealth.HistoryScope
 	Cursor cihealth.HistoryCursor

@@ -12,8 +12,9 @@ type historyTrendVersion struct{ at, sealedAt time.Time }
 // ObservedWorkflowTrend carries only aggregates and exact numeric scope.
 // It contains no retained rows, artifact data, or read credentials.
 type ObservedWorkflowTrend struct {
-	Scope  cihealth.TrendScope
-	Trends cihealth.RetainedTrends
+	Scope   cihealth.TrendScope
+	Trends  cihealth.RetainedTrends
+	Limited cihealth.HistorySelectionLimit
 }
 
 // WorkflowTrendsSnapshot is bound to this exact source, the earliest selected
@@ -110,7 +111,7 @@ func (s *BackgroundCycleHistory) SummarizeObservedTrends(ctx context.Context, cy
 		if err != nil {
 			return fail()
 		}
-		lease.workflows = append(lease.workflows, ObservedWorkflowTrend{scope, got})
+		lease.workflows = append(lease.workflows, got)
 		lease.proofs = append(lease.proofs, p)
 		if lease.expiresAt.IsZero() || p.wallDeadline.Before(lease.expiresAt) {
 			lease.expiresAt = p.wallDeadline
@@ -126,8 +127,8 @@ func (s *BackgroundCycleHistory) SummarizeObservedTrends(ctx context.Context, cy
 }
 
 func summarizeObservedWorkflow(ctx context.Context, cell *ownedCycleHistoryCell, p WorkflowHistoryProof,
-	expected HistoryExpectation, scope cihealth.TrendScope, at time.Time) (cihealth.RetainedTrends, error) {
-	fail := func() (cihealth.RetainedTrends, error) { return cihealth.RetainedTrends{}, ErrCycleHistory }
+	expected HistoryExpectation, scope cihealth.TrendScope, at time.Time) (ObservedWorkflowTrend, error) {
+	fail := func() (ObservedWorkflowTrend, error) { return ObservedWorkflowTrend{}, ErrCycleHistory }
 	ctx, cancel := context.WithDeadline(ctx, p.deadline)
 	defer cancel()
 	current := func() bool {
@@ -136,16 +137,16 @@ func summarizeObservedWorkflow(ctx context.Context, cell *ownedCycleHistoryCell,
 	if cursor, err := cell.history.Cursor(ctx, expected.Scope); err != nil || cursor != expected.Cursor || !current() {
 		return fail()
 	}
-	rows, err := cell.history.Recent(ctx, expected.Scope, cihealth.MaxRetainedTrendAttempts)
+	page, err := cell.history.recentPrefix(ctx, expected.Scope, cihealth.MaxRetainedTrendAttempts)
 	if err != nil || !current() {
 		return fail()
 	}
-	trends, err := cihealth.SummarizeRetainedTrends(scope, at, rows)
+	trends, err := cihealth.SummarizeRetainedTrends(scope, at, page.Attempts)
 	if err != nil {
 		return fail()
 	}
 	if cursor, err := cell.history.Cursor(ctx, expected.Scope); err != nil || cursor != expected.Cursor || !current() {
 		return fail()
 	}
-	return trends, nil
+	return ObservedWorkflowTrend{Scope: scope, Trends: trends, Limited: page.Limited}, nil
 }

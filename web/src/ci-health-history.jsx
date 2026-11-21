@@ -38,14 +38,17 @@ function HistoryWindow({label, value, durationText}) {
 export function CIHealthHistory({history, durationText}) {
   return <section aria-labelledby="ci-retained-history">
     <h3 id="ci-retained-history">Retained workflow timing and results</h3>
-    <p><strong>Retained subset only.</strong> Uses up to 64 locally retained attempts per reviewed workflow.
+    <p><strong>Retained subset only.</strong> Uses the newest whole attempts, up to 64 attempts and 12,000 attempt, job and step records per reviewed workflow.
       Windows are based on each attempt’s last observation, not when a job ended.
       Earlier or unavailable observations are not counted. This is not complete workflow history.</p>
     <p className="muted">Failure share is failure divided by recorded success plus failure.
       Durations use only completed rows with both endpoints; jobs and steps are pooled, not grouped by equivalent definitions.
       A run can appear in both attempt types. Verified test reports are unavailable.</p>
     {history.workflows.map((w) => <details key={ciWorkflowKey(w)} className="ci-health-attempt">
-      <summary>Workflow <code>{w.workflow_id}</code>, repository <code>{w.repository_id}</code>, source <code>{w.source}</code></summary>
+      <summary>Workflow <code>{w.workflow_id}</code>, repository <code>{w.repository_id}</code>, source <code>{w.source}</code>
+        {w.selection_limited && <> · Limited selection</>}</summary>
+      {w.selection_limited && <p className="muted">Additional older retained attempts were not included because of the {w.selection_limited === "records"
+        ? "12,000-record limit" : "64-attempt limit"}. No attempt was split.</p>}
       <HistoryWindow label="Most recent 7 days" value={w.current} durationText={durationText} />
       <HistoryWindow label="Previous 7 days" value={w.previous} durationText={durationText} />
     </details>)}

@@ -22,11 +22,12 @@ type ciHistoryView struct {
 }
 
 type ciHistoryWorkflow struct {
-	Source     string          `json:"source"`
-	Repository string          `json:"repository_id"`
-	Workflow   string          `json:"workflow_id"`
-	Previous   ciHistoryWindow `json:"previous"`
-	Current    ciHistoryWindow `json:"current"`
+	Source           string                         `json:"source"`
+	Repository       string                         `json:"repository_id"`
+	Workflow         string                         `json:"workflow_id"`
+	Previous         ciHistoryWindow                `json:"previous"`
+	Current          ciHistoryWindow                `json:"current"`
+	SelectionLimited cihealth.HistorySelectionLimit `json:"selection_limited,omitempty"`
 }
 
 type ciHistoryWindow struct {
@@ -100,10 +101,15 @@ func (s *CIHealthSnapshot) PublishRetainedTrends(source cihealthsource.WorkflowT
 		if !allowed || key.WorkflowID <= 0 || seen[key] {
 			return errCIProjection
 		}
+		switch row.Limited {
+		case "", cihealth.HistorySelectionAttemptLimit, cihealth.HistorySelectionRecordLimit:
+		default:
+			return errCIProjection
+		}
 		seen[key] = true
 		view.Workflows = append(view.Workflows, ciHistoryWorkflow{
 			Source: key.Source, Repository: ciInt(key.RepositoryID), Workflow: ciInt(key.WorkflowID),
-			Previous: ciHistoryWindowView(row.Trends.Previous), Current: ciHistoryWindowView(row.Trends.Current),
+			Previous: ciHistoryWindowView(row.Trends.Previous), Current: ciHistoryWindowView(row.Trends.Current), SelectionLimited: row.Limited,
 		})
 	}
 	extra, err := json.Marshal(view)
