@@ -23,11 +23,17 @@ func CheckIncus702ProjectPlanCapture(raw []byte) Incus702ProjectPlanReport {
 		return unknown
 	}
 	schema, err := field[string](header, "schema")
-	if err != nil || (schema != "incus-project-plan-capture/v1" && schema != "incus-project-plan-capture/v2") {
+	if err != nil || (schema != "incus-project-plan-capture/v1" && schema != "incus-project-plan-capture/v2" && schema != "incus-project-plan-capture/v3") {
 		return unknown
 	}
 	keys := []string{"schema", "project", "storage_pool", "reviewed_project_sha256", "project_response", "profiles", "pools", "net_host_budget"}
 	v2 := schema == "incus-project-plan-capture/v2"
+	v3 := schema == "incus-project-plan-capture/v3"
+	unknown.DiskNotEvaluated = v3
+	readResources := incus702CaptureResources
+	if v3 {
+		readResources = incus702CaptureResourcesWithoutDisk
+	}
 	if v2 {
 		keys = append(keys, "project_state")
 		unknown.SuppliedProjectState = Incus702ProjectStateUnknown
@@ -51,13 +57,13 @@ func CheckIncus702ProjectPlanCapture(raw []byte) Incus702ProjectPlanReport {
 	}
 	profiles, a := field[[]json.RawMessage](fields, "profiles")
 	pools, b := field[[]json.RawMessage](fields, "pools")
-	budget, c := incus702CaptureResources(fields["net_host_budget"])
+	budget, c := readResources(fields["net_host_budget"])
 	if a != nil || b != nil || c != nil || len(profiles) < 1 || len(profiles) > 32 || len(pools) < 1 || len(pools) > 32 {
 		return unknown
 	}
 	in := Incus702ProjectPlan{
 		Project: project, StoragePool: storage, ReviewedProjectSHA256: projectPin,
-		ProjectResponse: fields["project_response"], NetHostBudget: &budget,
+		ProjectResponse: fields["project_response"], NetHostBudget: &budget, withoutDiskCeiling: v3,
 	}
 	if v2 {
 		state, err := incus702DeclarationObject(fields["project_state"], "project", "response")
@@ -88,7 +94,7 @@ func CheckIncus702ProjectPlanCapture(raw []byte) Incus702ProjectPlanReport {
 		id, a := field[string](p, "id")
 		profile, b := field[string](p, "profile")
 		count, c := field[int64](p, "count")
-		size, d := incus702CaptureResources(p["size"])
+		size, d := readResources(p["size"])
 		if a != nil || b != nil || c != nil || d != nil {
 			return unknown
 		}
@@ -115,6 +121,20 @@ func incus702CaptureResources(raw []byte) (capacitybroker.Resources, error) {
 		return none, ErrResponse
 	}
 	return capacitybroker.Resources{cpu, ram, disk, runners}, nil
+}
+
+func incus702CaptureResourcesWithoutDisk(raw []byte) (capacitybroker.Resources, error) {
+	fields, err := incus702DeclarationObject(raw, "cpu_millis", "ram_mib", "runners")
+	if err != nil {
+		return capacitybroker.Resources{}, err
+	}
+	cpu, a := field[int64](fields, "cpu_millis")
+	ram, b := field[int64](fields, "ram_mib")
+	runners, c := field[int64](fields, "runners")
+	if a != nil || b != nil || c != nil {
+		return capacitybroker.Resources{}, ErrResponse
+	}
+	return capacitybroker.Resources{cpu, ram, 0, runners}, nil
 }
 
 func incus702CaptureMetadataSanitized(raw []byte, names ...string) bool {

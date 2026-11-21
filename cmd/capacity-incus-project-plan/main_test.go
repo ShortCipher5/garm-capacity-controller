@@ -173,3 +173,46 @@ func TestProjectPlanV2RequiresMatchingSuppliedCapsAndReportedEmptyBaseline(t *te
 		t.Fatalf("zero report overrode modeled cap/budget mismatch: %d", code)
 	}
 }
+
+func TestProjectPlanV3DoesNotQualifyDisk(t *testing.T) {
+	raw, err := os.ReadFile("testdata/sanitized-capture-without-disk.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fit, exceeds, unknown = "modeled_fit", "modeled_exceeds_budget", "unknown"
+	for _, tc := range []struct {
+		name, old, new         string
+		code                   int
+		project, host, ceiling string
+	}{
+		{"valid modeled dimensions", "", "", 0, fit, fit, fit},
+		{"planned mix exceeds both bounded ceilings", `"count": 3`, `"count": 7`, 1, exceeds, exceeds, fit},
+		{"planned CPU exceeds host", `"cpu_millis": 12000`, `"cpu_millis": 5999`, 1, fit, exceeds, exceeds},
+		{"planned memory exceeds host", `"ram_mib": 24576`, `"ram_mib": 6143`, 1, fit, exceeds, exceeds},
+		{"planned count exceeds host", `"runners": 5`, `"runners": 2`, 1, fit, exceeds, exceeds},
+		{"mix fits but ceiling does not", `"runners": 5`, `"runners": 4`, 1, fit, fit, exceeds},
+		{"disk estimate is not a hard comparison input", `"ram_mib": 24576`, `"ram_mib": 24576, "disk_mib": 0`, 2, unknown, unknown, unknown},
+		{"empty baseline is not a v3 input", `"schema":`, `"project_state":{},"schema":`, 2, unknown, unknown, unknown},
+		{"exact review pins required", `"limits.cpu": "2"`, `"limits.cpu": "3"`, 2, unknown, unknown, unknown},
+		{"exact modeled sizes required", `"cpu_millis": 2000`, `"cpu_millis": 1999`, 2, unknown, unknown, unknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := string(raw)
+			if tc.old != "" {
+				input = strings.Replace(input, tc.old, tc.new, 1)
+				if input == string(raw) {
+					t.Fatal("fixture mutation missing")
+				}
+			}
+			var out, diagnostic bytes.Buffer
+			code := run(nil, strings.NewReader(input), &out, &diagnostic)
+			want := `{"schema":"incus-project-plan-report/v3","plan_against_project":"` + tc.project +
+				`","plan_against_net_host":"` + tc.host + `","project_ceiling_against_net_host":"` + tc.ceiling +
+				`","route_verified":false,"enforcement_verified":false,"disk_assessment":"not_evaluated"}` + "\n"
+			if code != tc.code || out.String() != want || diagnostic.Len() != 0 {
+				t.Fatalf("unexpected exit %d or report %q", code, out.String())
+			}
+		})
+	}
+	expect(t, strings.NewReader(strings.Replace(string(raw), "capture/v3", "capture/v1", 1)), 2, unknown, unknown, unknown)
+}

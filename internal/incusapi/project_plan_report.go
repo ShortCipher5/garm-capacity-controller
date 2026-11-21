@@ -17,6 +17,7 @@ type Incus702ProjectPlan struct {
 	Pools                                       []Incus702PlannedPool
 	NetHostBudget                               *capacitybroker.Resources
 	projectStateResponse                        []byte // only populated by the closed v2 capture decoder
+	withoutDiskCeiling                          bool   // only set by the closed v3 capture decoder
 }
 
 type Incus702PlanProfile struct {
@@ -48,36 +49,39 @@ const (
 type Incus702ProjectPlanReport struct {
 	AgainstProject, AgainstNetHost, ProjectCeilingAgainstNetHost Incus702PlanComparison
 	SuppliedProjectState                                         Incus702ProjectStateCheck
+	DiskNotEvaluated                                             bool
 }
 
 // CompareIncus702ProjectPlan checks exact supplied v7.0.2 declarations against
-// one proposed whole-project mix and one finite modeled host, using the
-// stock planner for count/CPU/RAM/disk fit. It performs no I/O. No caller uses
+// one proposed whole-project mix and one finite modeled host. Existing schemas
+// use the stock planner for count/CPU/RAM/disk; the distinct v3 capture only
+// checks count, CPU and RAM. It performs no I/O. No caller uses
 // it for live planning; independent source/build/route/override/freshness
 // qualification remains outside this offline comparison.
 func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanReport {
 	const maxProfiles, maxPools, maxCount = 32, 32, 256
+	unknown := Incus702ProjectPlanReport{DiskNotEvaluated: in.withoutDiskCeiling}
 	if len(in.Profiles) == 0 || len(in.Profiles) > maxProfiles || len(in.Pools) == 0 || len(in.Pools) > maxPools || in.NetHostBudget == nil {
-		return Incus702ProjectPlanReport{}
+		return unknown
 	}
 	netHost := *in.NetHostBudget
 	for _, n := range netHost {
 		if n < 0 {
-			return Incus702ProjectPlanReport{}
+			return unknown
 		}
 	}
 	profiles := make(map[string]capacitybroker.Resources, len(in.Profiles))
 	var project incus702ProjectDeclaration
 	for _, p := range in.Profiles {
 		if _, duplicate := profiles[p.Name]; duplicate {
-			return Incus702ProjectPlanReport{}
+			return unknown
 		}
 		d, err := compareIncus702ProjectDeclaration(in.ProjectResponse, p.Response, incus702DeclarationReview{
 			project: in.Project, pool: in.StoragePool, profile: p.Name,
-			projectSHA256: in.ReviewedProjectSHA256, profileSHA256: p.ReviewedSHA256,
+			projectSHA256: in.ReviewedProjectSHA256, profileSHA256: p.ReviewedSHA256, withoutDiskCeiling: in.withoutDiskCeiling,
 		})
 		if err != nil {
-			return Incus702ProjectPlanReport{}
+			return unknown
 		}
 		profiles[p.Name] = capacitybroker.Resources{d.profileCPU * 1000, bytesToMiB(d.profileMemoryBytes), bytesToMiB(d.profileRootBytes), 1}
 		project = d // Every row parsed the same pinned project declaration.
@@ -93,20 +97,28 @@ func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanRepor
 	}
 	used := make(map[string]bool, len(in.Profiles))
 	var total int64
+	var plannedWithoutDisk capacitybroker.Resources
 	for _, p := range in.Pools {
 		size, ok := profiles[p.Profile]
 		_, duplicate := s.Pools[p.ID]
 		if !ok || !name(p.ID) || duplicate || p.Count < 0 || p.Count > maxCount-total || size != p.Size {
-			return Incus702ProjectPlanReport{}
+			return unknown
 		}
 		used[p.Profile] = true
 		total += p.Count
+		if in.withoutDiskCeiling {
+			// At most 256 runners; whole CPU is uint32-bounded, memory is
+			// int64 bytes divided into MiB. Both products fit in int64.
+			plannedWithoutDisk[0] += p.Count * size[0]
+			plannedWithoutDisk[1] += p.Count * size[1]
+			plannedWithoutDisk[3] += p.Count
+		}
 		s.Pools[p.ID] = capacitybroker.Pool{
 			Repository: repo, Size: size, Hosts: []string{host}, MaxRunners: p.Count, Waiting: p.Count, OldestWaiting: modelTime,
 		}
 	}
 	if total == 0 || len(used) != len(profiles) {
-		return Incus702ProjectPlanReport{}
+		return unknown
 	}
 	s.Repositories[repo] = capacitybroker.Repository{Weight: 1, MaxRunners: total}
 	maxRunners := min(project.instances, project.containers) // Explicit VM limit is zero.
@@ -118,6 +130,17 @@ func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanRepor
 	ceiling := capacitybroker.Resources{project.cpu * 1000, bytesToMiB(project.memoryBytes), bytesToMiB(project.diskBytes), maxRunners}
 
 	compare := func(budget capacitybroker.Resources) Incus702PlanComparison {
+		if in.withoutDiskCeiling {
+			// For a fixed complete mix on one host this is just an
+			// aggregate cap comparison, not a broker assignment.
+			// No synthetic nonzero disk size or budget is supplied.
+			for _, dimension := range [...]int{0, 1, 3} {
+				if plannedWithoutDisk[dimension] > budget[dimension] {
+					return Incus702PlanModeledExceedsBudget
+				}
+			}
+			return Incus702PlanModeledFit
+		}
 		s.Global = budget
 		s.Hosts[host] = capacitybroker.Host{Budget: budget, AcceptNew: true}
 		plan, err := capacitybroker.Build(s, capacitybroker.Options{Now: modelTime, MaxAge: time.Second, MaxAssignments: int(total)})
@@ -131,10 +154,13 @@ func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanRepor
 	}
 	againstProject, againstHost := compare(projectBudget), compare(netHost)
 	if againstProject == Incus702PlanUnknown || againstHost == Incus702PlanUnknown {
-		return Incus702ProjectPlanReport{}
+		return unknown
 	}
 	ceilingAgainstHost := Incus702PlanModeledFit
 	for i, n := range ceiling {
+		if in.withoutDiskCeiling && i == 2 {
+			continue
+		}
 		if n > netHost[i] {
 			ceilingAgainstHost = Incus702PlanModeledExceedsBudget
 			break
@@ -142,6 +168,7 @@ func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanRepor
 	}
 	out := Incus702ProjectPlanReport{
 		AgainstProject: againstProject, AgainstNetHost: againstHost, ProjectCeilingAgainstNetHost: ceilingAgainstHost,
+		DiskNotEvaluated: in.withoutDiskCeiling,
 	}
 	if in.projectStateResponse != nil {
 		out.SuppliedProjectState = checkIncus702ProjectState(in.projectStateResponse, project)
