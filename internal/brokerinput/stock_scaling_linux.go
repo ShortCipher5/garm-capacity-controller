@@ -161,8 +161,8 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 	return proposals
 }
 
-// The fit result is only explanatory evidence from otherwise eligible growth
-// in the current visible comparison. It is not a capacity or placement result.
+// The diagnostic is only explanatory evidence from repeated visible growth
+// in the matched comparison. It is not a capacity or placement result.
 func compareStockMaximums(previous, current StockScalingSample, now time.Time) ([]StockMaximumProposal, stockMaximumFitResult) {
 	if current.source == "" || previous.source != current.source ||
 		previous.revision != current.revision || previous.sequence > current.sequence ||
@@ -215,7 +215,13 @@ func compareStockMaximums(previous, current StockScalingSample, now time.Time) (
 		considered[id] = true
 		p, visible := current.pools[id]
 		prior, previouslyVisible := previous.pools[id]
-		if !visible || !previouslyVisible || p.target <= p.current || prior.target <= p.current || global >= current.budget || repo[p.repo] >= current.repoCaps[p.repo] {
+		if !visible || !previouslyVisible || p.target <= p.current || prior.target <= p.current {
+			continue
+		}
+		if global >= current.budget || repo[p.repo] >= current.repoCaps[p.repo] {
+			if diagnostic == stockMaximumFitNotChecked {
+				diagnostic = stockMaximumFitRunnerSlotVeto
+			}
 			continue
 		}
 		if outcome := fit.checkGrowth(id); outcome != stockMaximumFitAllowed {

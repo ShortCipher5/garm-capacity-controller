@@ -73,6 +73,7 @@ const previewReasonMessages = Object.freeze({
  incomplete_evidence: ['unavailable', 'The captured stock scaling evidence is incomplete. No maximum suggestions are shown.'],
  evidence_unavailable: ['unavailable', 'Required stock scaling evidence is unavailable. No maximum suggestions are shown.'],
  awaiting_matching_sample: ['no_confirmed_proposals', 'Waiting for another observation with the same effective configuration before comparing maximum suggestions.'],
+ configured_runner_slot_veto: ['no_confirmed_proposals', 'No increase was suggested because the configured global or repository runner-slot ceiling was already counted as full in the comparison. Enabled pool maximums and retained charges can use those slots; a suggested decrease does not free capacity. Review the saved ceilings and charges. This is not a measured host limit.'],
  configured_maximum_fit_veto: ['no_confirmed_proposals', 'No increase was suggested because the modeled runner load would exceed a configured budget in at least one observation. This is a modeled limit, not a measured host limit or a settings change.'],
  configured_maximum_fit_unavailable: ['no_confirmed_proposals', 'The configured maximums could not be compared for an increase. No increase was suggested; this does not establish a capacity limit.'],
  awaiting_cadence_window: ['no_confirmed_proposals', 'Waiting for a longer span of matching observations before comparing a smaller batch.'],
@@ -120,7 +121,8 @@ function stockMaximumView(plan,preview,comparison,now,batch){
  }
  if(expires<=now||captured>now+1000)return {state:"expired",proposals:[]};
  if(comparison!=="linked_at_capture")return {state:"comparison_unavailable",proposals:[]};
- const reason=(batch||preview.reason!=="awaiting_cadence_window")&&typeof preview.reason==="string"&&Object.hasOwn(previewReasonMessages,preview.reason)&&previewReasonMessages[preview.reason][0]===preview.state?preview.reason:null;
+ const reasonMatchesPreview=batch?preview.reason!=="configured_runner_slot_veto":preview.reason!=="awaiting_cadence_window";
+ const reason=reasonMatchesPreview&&typeof preview.reason==="string"&&Object.hasOwn(previewReasonMessages,preview.reason)&&previewReasonMessages[preview.reason][0]===preview.state?preview.reason:null;
  return {state:preview.state,expiresAt:expires,proposals:preview.proposals,...(reason?{reason}:{}),...(preview.host_evidence==="configured_only"?{hostEvidence:"configured_only"}:{})};
 }
 

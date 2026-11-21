@@ -132,6 +132,7 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 	out.Reason = "awaiting_matching_sample"
 	var changes []StockMaximumProposal
 	var fit stockMaximumFitResult
+	var diskWithheldGrowth bool
 	if h.prior.scope == current.scope {
 		if h.prior.source != "" {
 			out.Reason = "no_confirmed_change"
@@ -142,6 +143,7 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 			h.reset()
 			return &StockMaximumPreview{State: "unavailable", Reason: "evidence_unavailable", ExpiresAt: ordinaryExpiry, Proposals: []StockMaximumProposal{}}
 		}
+		diskWithheldGrowth = len(disk.vetoes) != 0
 		changes = disk.proposals
 		if !disk.growthExpiry.IsZero() && disk.growthExpiry.Before(out.ExpiresAt) {
 			out.ExpiresAt = disk.growthExpiry
@@ -157,6 +159,12 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 			out.Reason = "configured_maximum_fit_veto"
 		case stockMaximumFitUnavailable:
 			out.Reason = "configured_maximum_fit_unavailable"
+		case stockMaximumFitRunnerSlotVeto:
+			// A growth can spend the last modeled slot before the disk
+			// brake removes it. Slot accounting alone did not block it.
+			if !diskWithheldGrowth {
+				out.Reason = "configured_runner_slot_veto"
+			}
 		}
 	}
 	if (len(changes) != 0 || fit != stockMaximumFitNotChecked) && h.prior.expires.Before(out.ExpiresAt) {

@@ -263,3 +263,40 @@ func TestStockMaximumDiskPreviewRetainsPendingObligationWithoutGuestOrStockRow(t
 		})
 	}
 }
+
+func TestStockMaximumSlotReasonDoesNotMaskRequiredDiskRefusal(t *testing.T) {
+	start := time.Unix(1700000000, 0).UTC()
+	now := start.Add(20 * time.Second)
+	sample := func(at time.Time) scalingPreviewSample {
+		return scalingPreviewSample{scope: [32]byte{1}, diskRequired: true, StockScalingSample: StockScalingSample{
+			source: "reviewed", revision: 1, sequence: 4, budget: 3,
+			start: at, finish: at, expires: at.Add(time.Minute),
+			pools: map[string]scalingPool{
+				"a": {repo: "repo-a", enabled: true, current: 1, target: 2},
+				"b": {repo: "repo-b", enabled: true, current: 1, target: 2},
+			},
+			repoCaps: map[string]int64{"repo-a": 3, "repo-b": 3},
+			order:    []string{"a", "b"}, configuredMaximumFit: roomyMaximumFit("a", "b"),
+		}}
+	}
+	for _, tc := range []string{"missing required disk", "stale required disk"} {
+		t.Run(tc, func(t *testing.T) {
+			prior, current := sample(start), sample(now)
+			if tc == "stale required disk" {
+				prior.disk, current.disk = diskPreviewSample(t, start), diskPreviewSample(t, now)
+				prior.disk.maxAge, current.disk.maxAge = 20*time.Second, 20*time.Second
+			}
+			before, fit := compareStockMaximums(prior.StockScalingSample, current.StockScalingSample, now)
+			if len(before) != 1 || before[0].PoolID != "a" || before[0].Observed != 1 ||
+				before[0].Suggested != 2 || fit != stockMaximumFitRunnerSlotVeto {
+				t.Fatalf("fixture did not spend the last modeled slot before disk: %+v / %v", before, fit)
+			}
+			history := scalingPreviewHistory{prior: prior}
+			out := history.accept(current, nil, now, current.expires)
+			if out.State != "no_confirmed_proposals" || out.Reason != "no_confirmed_change" ||
+				len(out.Proposals) != 0 || !out.ExpiresAt.Equal(prior.expires) {
+				t.Fatalf("disk refusal cannot be attributed to already full runner slots: %+v", out)
+			}
+		})
+	}
+}
