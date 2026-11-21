@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from "react";
 import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
+import {longestObservedSteps} from "./ci-health-longest-steps.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -143,6 +144,40 @@ function ActiveJobs({attempts}) {
   </section>;
 }
 
+function LongestSteps({attempts}) {
+  const steps = longestObservedSteps(attempts);
+  return <section aria-labelledby="ci-longest-steps">
+    <h3 id="ci-longest-steps">Longest measured steps in this snapshot</h3>
+    <p className="muted" id="ci-longest-steps-key">
+      {steps.measured} of {steps.observed} observed steps have a measured completed duration.
+      {" "}This ranks individual observations only, not typical runtimes or regressions.
+    </p>
+    {steps.measured === 0 ? <p className="muted">No completed step durations were measured in this snapshot.</p> : <>
+      {steps.shown.length < steps.measured && <p className="muted">
+        Showing {steps.shown.length} of {steps.measured} measured steps. All observed steps remain in the attempt details below.
+      </p>}
+      <div className="table-wrap">
+        <table aria-labelledby="ci-longest-steps" aria-describedby="ci-longest-steps-key">
+          <thead><tr>
+            <th scope="col">Job and step</th><th scope="col">Run and attempt</th><th scope="col">Workflow scope</th>
+            <th scope="col">Execution</th><th scope="col">Result</th>
+          </tr></thead>
+          <tbody>{steps.shown.map((row) => <tr key={row.key}>
+            <th scope="row">Job <code>{row.job}</code>, step <code>{row.step}</code></th>
+            <td>Run <code>{row.run}</code>, attempt <code>{row.attempt}</code></td>
+            <td className="ci-health-workflow-key">
+              <span>Workflow <code>{row.workflow}</code></span>
+              <span>Repository <code>{row.repository}</code></span>
+              <span>Source <code>{row.source}</code></span>
+            </td>
+            <td><Timing span={row.execution} /></td><td><Result conclusion={row.conclusion} /></td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+    </>}
+  </section>;
+}
+
 function WorkflowCountCells({counts}) {
   return <>
     <td>{counts.shown}</td><td>{counts.active}</td><td>{counts.success}</td>
@@ -198,6 +233,7 @@ export function CIHealthTiming({snapshot, now = Date.now()}) {
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} />
         <WorkflowCounts groups={groups} />
+        <LongestSteps attempts={attempts} />
         <h3>Active attempts at observation</h3>
         {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
