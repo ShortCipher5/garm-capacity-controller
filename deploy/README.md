@@ -93,6 +93,8 @@ against the builder's Debian libc. Never set CGO to zero to bypass SQLite.
 docker build --target gateway -t capacity-gateway:review .
 # Separate local-only recovery tool image; it does not start a gateway.
 docker build --target ledger-tool -t capacity-ledger:review .
+# Separate CI history first-install tool; gateway and Compose do not start it.
+docker build --target ci-history-init-tool -t capacity-ci-history-init:review .
 # Separate callback experiment only; not a stock-wrapper build requirement.
 # BuildKit exports the provider binary, not an image that can run Garm.
 docker build --target provider-artifact --output type=local,dest=./provider-export .
@@ -107,6 +109,19 @@ and record the source commit, platform, dependency checks and final image digest
 in the private deployment change before publishing or using the image. The local
 review tag above is not a deployment reference. The overlay requires an explicit
 image value; use an immutable digest, never `latest` or a moving review tag.
+
+For an approved first installation of retained CI history, build the
+`ci-history-init-tool` and `gateway` targets from the same reviewed source
+commit, platform and pinned inputs. The separate initializer image inherits
+the gateway's UID/GID 65532 and has no default operation. For a containerized
+initializer, qualify the actual UID mapping and directory device/inode within
+its mount namespace. Run it only with networking off, a read-only rootfs, no
+capabilities and no extra privileges, mounting only the independently
+provisioned empty service-owned history directory read-write. Never mount
+gateway credentials or ledger state into the tool. The gateway image contains
+no initializer; nothing in the default overlay creates or enrolls history.
+See [first installation and separate restart review](../docs/ci-health-timing.md#first-installation-only).
+
 
 For any separately reviewed callback experiment, review the provider binary and
 exact Garm compatibility patch. The stock wrapper does not install either. A

@@ -3,6 +3,8 @@
 This dashboard view is optional and disabled by default. It reports bounded
 GitHub Actions run, attempt, job and step timing observations. It does not
 change workflows, schedule jobs, control GARM, or grant capacity.
+See the [fixture-backed evidence matrix](ci-health-evidence.md) for what
+current sources can prove and what remains unavailable.
 
 The existing owner-wide admin read credential can view enrolled CI repositories
 when this feature is enabled. It is not a per-user repository-sharing mechanism.
@@ -161,7 +163,8 @@ must still independently confirm the service custody, exact snapshot SHA-256
 and exact source/workflow scope with explicit zero starting cursors before
 supplying the gateway review block. Do not copy output into startup authority;
 the utility produces no review metadata, and neither action grants new
-privileges. The gateway remains reopen-only.
+privileges. The gateway remains reopen-only. A separate, optional matching image is
+outlined in the [packaging guide](../deploy/README.md#offline-build-and-artifact-handling).
 
 With that explicit opt-in, the existing owner read can show two rolling
 seven-day buckets, based on last observed time. It considers the newest
@@ -202,3 +205,23 @@ An older binary does not read new snapshots containing results. If enabling
 retained history for a deployment, preserve its data and requalify any
 rollback against the older reader; do not erase or reinitialize history to get
 around an incompatible snapshot.
+
+### Offline test-report format qualification
+
+Use an operator-trusted isolated checkout with an already independently
+reviewed, lockfile-integrity-verified Playwright installation and a trusted Node
+executable. Supply the canonical absolute Node path explicitly:
+
+```sh
+CI_HEALTH_FIXTURE_NODE=/absolute/canonical/path/to/node \
+  go test -tags cihealth_playwright_fixture ./internal/cihealthreport -run TestPinnedPlaywrightJUnitReporter -count=1
+```
+
+The test compares installed version labels to lockfile labels for consistency;
+those labels do not authenticate package bytes or the selected Node executable.
+The fixture runs one pass, one deliberate failure and one skip without a
+browser or server. The bounded parser receives the exact reporter XML in a
+local fixture ZIP; the test verifies normalized outcomes and discarded
+diagnostics. The fixture requests no artifact downloads, but is not a network
+sandbox for the local executables and dependencies. This qualifies report
+format only, not the identity of a live workflow, job, archive, or test case.

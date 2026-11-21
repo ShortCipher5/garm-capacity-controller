@@ -12,6 +12,7 @@ mkdir -p "$results"
 project="capacity-packaging-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
 # Unique to this disposable invocation; never remove shared image tags.
 ingress_tag="capacity-stock-ingress:${project}-${work##*.}"
+history_init_tag="capacity-ci-history-init:${project}-${work##*.}"
 ingress_container="${project}-ingress-${work##*.}"
 export CAPACITY_GATEWAY_IMAGE=capacity-gateway:qualification
 export CAPACITY_PRIVATE_DIR="$work/fixtures/gateway-private"
@@ -32,7 +33,7 @@ cleanup() {
   # Only our generated project. No existing stack/volumes and no global prune.
   "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
   docker rm -f "$ingress_container" >/dev/null 2>&1 || true
-  docker image rm "$ingress_tag" >/dev/null 2>&1 || true
+  docker image rm "$ingress_tag" "$history_init_tag" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
   return "$outcome"
 }
@@ -73,6 +74,7 @@ for target in gateway ledger-tool; do
   docker build -f "$work/locked.Dockerfile" --target "$target" -t "$tag" .
 done
 docker build -f "$work/locked.Dockerfile" --target stock-ingress -t "$ingress_tag" .
+docker build -f "$work/locked.Dockerfile" --target ci-history-init-tool -t "$history_init_tag" .
 docker build -f "$work/locked.Dockerfile" --target provider-artifact --output "type=local,dest=$work/provider" .
 
 restricted=(--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --cpus 1 --memory 512m --user 65532:65532)
@@ -86,6 +88,52 @@ expect_exit() {
 expect_exit 2 docker run "${restricted[@]}" capacity-ledger:qualification restore --source /absent/source.db --destination /absent/restore.db
 expect_exit 2 docker run "${restricted[@]}" capacity-ledger:qualification invalid
 expect_exit 1 docker run "${restricted[@]}" capacity-gateway:qualification
+# First-install CI history is a separate one-shot image with the gateway UID.
+# This fixture mounts only an empty synthetic history slot. No credentials,
+# gateway database, network, root capabilities or gateway startup are involved.
+docker image inspect "$history_init_tag" capacity-gateway:qualification | python3 -c '
+import json,sys
+init,gateway=(i["Config"] for i in json.load(sys.stdin))
+assert init["User"]==gateway["User"]=="65532:65532" and init["WorkingDir"]=="/"
+assert init["Entrypoint"]==["/usr/local/bin/capacity-ci-history-init"]
+assert init.get("Cmd") in (None,[]) and not init.get("Volumes") and not init.get("ExposedPorts")
+'
+expect_exit 2 docker run "${restricted[@]}" "$history_init_tag"
+history_fixture="$work/history-init"
+sudo install -m 0700 -o 65532 -g 65532 -d "$history_fixture"
+history_mount="type=bind,src=$history_fixture,dst=/run/capacity-ci-history"
+docker run "${restricted[@]}" --entrypoint /bin/sh "$history_init_tag" -ec '
+  test "$(id -u):$(id -g)" = 65532:65532
+  grep -Eq "^CapEff:[[:space:]]+0+$" /proc/self/status
+  grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status
+  awk "\$5 == \"/\" { roots++; if (\$6 ~ /(^|,)ro(,|\$)/) readonly++ }
+       END { exit !(roots == 1 && readonly == 1) }" /proc/self/mountinfo
+  test ! -e /usr/local/bin/capacity-gateway
+  test ! -e /usr/local/bin/capacity-ledger
+  test ! -e /usr/local/share/capacity-admin
+'
+# Obtain the disposable backing directory's device/inode from a separate
+# stat container using the same bind mount. The initializer independently
+# revalidates both values and the held path in its own namespace.
+history_identity=$(docker run "${restricted[@]}" --mount "$history_mount,readonly" --entrypoint /usr/bin/stat "$history_init_tag" --format '%d:%i' -- /run/capacity-ci-history)
+[[ $history_identity =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]]
+history_args=(--initialize-empty-store /run/capacity-ci-history "${history_identity%:*}" "${history_identity#*:}")
+expect_exit 1 docker run "${restricted[@]}" --mount "$history_mount,readonly" "$history_init_tag" "${history_args[@]}"
+sudo test ! -e "$history_fixture/ci-health-history-v1.json"
+docker run "${restricted[@]}" --mount "$history_mount" "$history_init_tag" "${history_args[@]}"
+expect_exit 1 docker run "${restricted[@]}" --mount "$history_mount" "$history_init_tag" "${history_args[@]}"
+sudo python3 - "$history_fixture" <<'PYHISTORY'
+import pathlib,stat,sys
+directory=pathlib.Path(sys.argv[1])
+assert sorted(p.name for p in directory.iterdir())==['ci-health-history-v1.json']
+snapshot=directory/'ci-health-history-v1.json'
+info=snapshot.lstat()
+assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode)==0o600
+assert (info.st_uid,info.st_gid,info.st_nlink)==(65532,65532,1)
+assert snapshot.read_bytes()==b'{"Format":"garm-ci-health-history-v1","Checkpoints":[],"Attempts":[]}'
+print('PASS isolated CI history first installation; repeated initialization refused')
+PYHISTORY
+
 # Actual ingress image contract; inspect only public image metadata, print no ENV.
 docker image inspect "$ingress_tag" | python3 -c '
 import json,sys
@@ -107,6 +155,7 @@ docker run "${restricted[@]}" --entrypoint /bin/sh capacity-gateway:qualificatio
   grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status
   ! touch /must-not-be-writable 2>/dev/null
   test ! -e /usr/local/bin/capacity-ledger
+  test ! -e /usr/local/bin/capacity-ci-history-init
   test -f /usr/local/share/capacity-admin/index.html
 '
 python3 deploy/runtime/fixture.py prepare "$work/fixtures"
