@@ -13,3 +13,15 @@ export function focusCIStep(root, id, stillCurrent) {
   row.focus();
   return true;
 }
+
+export function focusCIJob(root, id, stillCurrent) {
+  if (!root?.isConnected || typeof stillCurrent !== "function" || !stillCurrent()) return false;
+  const row = root.ownerDocument.getElementById(id);
+  if (!row?.matches("li[data-ci-job-row]") || !root.contains(row)) return false;
+  const attempt = row.closest("details[data-ci-attempt]");
+  if (!attempt || !root.contains(attempt) || !stillCurrent()) return false;
+
+  attempt.open = true;
+  row.focus();
+  return true;
+}

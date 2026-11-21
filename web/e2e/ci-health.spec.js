@@ -60,6 +60,13 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   const queued = panel.getByRole("table", {name: "Queued jobs (1 observed)"});
   await expect(queued).toContainText("9007199254740997");
   await expect(queued).toContainText("Unknown");
+  const jobButton = queued.getByRole("button", {name: /^View job 9007199254740997, run 9007199254740995, attempt 2,/});
+  const focusJob = page.locator(`[id="${await jobButton.getAttribute("aria-controls")}"]`);
+  await expect(focusJob).toBeHidden(); // unknown attempt starts collapsed
+  await jobButton.press("Enter");
+  await expect(focusJob).toBeFocused();
+  await expect(focusJob).toContainText("Job 9007199254740997");
+  expect(calls).toBe(1);
   const longest = panel.getByRole("table", {name: "Longest measured steps in this snapshot"});
   await expect(longest).toContainText("Job 9007199254740998, step 7");
   await expect(longest).toContainText("2 s");
@@ -77,6 +84,7 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   await expect(queued).toHaveCount(0);
   await expect(longest).toHaveCount(0);
   await expect(focusTarget).toHaveCount(0);
+  await expect(focusJob).toHaveCount(0);
   await expect(page.getByText("9007199254740995", {exact: true})).toHaveCount(0);
   expect(calls).toBe(2);
 });

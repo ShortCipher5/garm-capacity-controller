@@ -167,8 +167,12 @@ export function ciAttemptKey(a) {
   return [a.source, a.repository_id, a.workflow_id, a.run_id, a.attempt].join(":");
 }
 
+export function ciJobKey(attempt, jobID) {
+  return ciAttemptKey(attempt) + ":" + jobID;
+}
+
 export function ciStepKey(attempt, jobID, stepNumber) {
-  return [ciAttemptKey(attempt), jobID, stepNumber].join(":");
+  return ciJobKey(attempt, jobID) + ":" + stepNumber;
 }
 
 export function ciHealthExpiry(value) {

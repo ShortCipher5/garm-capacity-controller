@@ -1,4 +1,4 @@
-import {ciAttemptKey} from "./ci-health-client.js";
+import {ciJobKey} from "./ci-health-client.js";
 
 const maxRowsPerPhase = 12;
 const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -9,11 +9,10 @@ const compareDecimal = (a, b) => a.length - b.length || compareText(a, b);
 export function observedActiveJobs(attempts) {
   const byPhase = {queued: [], running: []};
   for (const attempt of attempts) {
-    const prefix = ciAttemptKey(attempt);
     for (const job of attempt.jobs) {
       if (job.status !== "queued" && job.status !== "running") continue;
       byPhase[job.status].push({
-        key: prefix + ":" + job.id,
+        key: ciJobKey(attempt, job.id),
         source: attempt.source,
         repository: attempt.repository_id,
         workflow: attempt.workflow_id,

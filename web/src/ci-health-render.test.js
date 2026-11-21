@@ -49,6 +49,10 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(html, /Queued jobs \(1 observed\)/);
     assert.match(html, /Running jobs \(0 observed\)/);
     assert.match(html, /<section aria-labelledby="ci-active-jobs-queued">.*At least 7\.000000001 s.*?<\/section>/);
+    const jobControl = html.match(/aria-controls="([^"]+)" aria-label="View job 9007199254741001, run 9223372036854775807, attempt 2, workflow 17, repository 9007199254740993, source fixture_source"/)?.[1];
+    assert.ok(jobControl?.endsWith("-ci-job-fixture_source:9007199254740993:17:9223372036854775807:2:9007199254741001"));
+    assert.ok(html.includes(`<li id="${jobControl}" data-ci-job-row="" tabindex="-1"`));
+    assert.doesNotMatch(html, /aria-label="View job 9007199254741002,/);
     assert.match(html, /Active attempts at observation/);
     assert.match(html, /Other observed attempts/);
     assert.match(html, /9223372036854775807.*attempt <code>2/);
