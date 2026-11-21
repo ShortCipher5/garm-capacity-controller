@@ -98,6 +98,10 @@ export function ciAttemptKey(a) {
   return [a.source, a.repository_id, a.workflow_id, a.run_id, a.attempt].join(":");
 }
 
+export function ciStepKey(attempt, jobID, stepNumber) {
+  return [ciAttemptKey(attempt), jobID, stepNumber].join(":");
+}
+
 export function ciHealthExpiry(value) {
   return value?.state === "observed" ? (timestamp(value.observed_at)?.milliseconds ?? -Infinity) + lifetime : -Infinity;
 }

@@ -69,7 +69,19 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(longSection(html), /Longest measured steps in this snapshot/);
     assert.match(longSection(html), /1 of 2 observed steps have a measured completed duration/);
     assert.match(longSection(html), /Job <code>9007199254741002<\/code>, step <code>2<\/code>.*title="2100000000 nanoseconds">2\.1 s<\/span>.*Unknown/);
+    const stepControl = longSection(html).match(/aria-controls="([^"]+)" aria-label="View step 2, job 9007199254741002, run 9223372036854775807, attempt 2, workflow 17, repository 9007199254740993, source fixture_source"/)?.[1];
+    assert.ok(stepControl?.endsWith("-ci-step-fixture_source:9007199254740993:17:9223372036854775807:2:9007199254741002:2"));
+    assert.ok(html.includes(`id="${stepControl}" data-ci-step-row="" tabindex="-1"`));
     assert.doesNotMatch(longSection(html), /step <code>7<\/code>/);
+    const duplicateStep = render({...snapshot, timing: {attempts: [first,
+      {...previous, jobs: [{...first.jobs[1], id: "9007199254741003"}]},
+    ]}});
+    const controls = [...longSection(duplicateStep).matchAll(/aria-controls="([^"]+)" aria-label="View step 2,/g)].map((m) => m[1]);
+    assert.equal(controls.length, 2);
+    assert.notEqual(controls[0], controls[1]);
+    assert.ok(controls.some((id) => id.endsWith(":1:9007199254741003:2")));
+    assert.ok(controls.some((id) => id.endsWith(":2:9007199254741002:2")));
+    for (const id of controls) assert.ok(duplicateStep.includes(`id="${id}" data-ci-step-row="" tabindex="-1"`));
     assert.match(html, /Observed subset only:.*not workflow totals or outcome rates/);
     assert.match(html, /Workflow <code>17<\/code>/);
     assert.match(html, /Repository <code>9007199254740993<\/code>/);

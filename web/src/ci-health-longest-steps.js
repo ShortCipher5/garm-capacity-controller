@@ -1,4 +1,4 @@
-import {ciAttemptKey} from "./ci-health-client.js";
+import {ciStepKey} from "./ci-health-client.js";
 
 const maxShownSteps = 12;
 const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -11,13 +11,12 @@ export function longestObservedSteps(attempts) {
   let observed = 0;
   const measured = [];
   for (const attempt of attempts) {
-    const attemptKey = ciAttemptKey(attempt);
     for (const job of attempt.jobs) {
       for (const step of job.steps) {
         observed++;
         if (step.status !== "completed" || step.execution?.basis !== "observed_endpoints") continue;
         measured.push({
-          key: attemptKey + ":" + job.id + ":" + step.number,
+          key: ciStepKey(attempt, job.id, step.number),
           source: attempt.source,
           repository: attempt.repository_id,
           workflow: attempt.workflow_id,

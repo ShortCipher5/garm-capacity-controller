@@ -1,8 +1,9 @@
-import React, {useEffect, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
+import React, {useEffect, useId, useRef, useState} from "react";
+import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, ciStepKey, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
+import {focusCIStep} from "./ci-health-step-navigation.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -42,13 +43,13 @@ function Result({conclusion}) {
 }
 function At({value}) { return <time dateTime={value}>{value.slice(0,19).replace("T", " ")} UTC</time>; }
 
-function StepRows({steps}) {
+function StepRows({attempt, job, stepId}) {
   return (
     <div className="table-wrap">
       <table>
         <thead><tr><th scope="col">Step</th><th scope="col">Status</th><th scope="col">Result</th><th scope="col">Execution</th><th scope="col">Elapsed when observed</th></tr></thead>
-        <tbody>{steps.map((step) => (
-          <tr key={step.number}>
+        <tbody>{job.steps.map((step) => (
+          <tr key={step.number} id={stepId(ciStepKey(attempt, job.id, step.number))} data-ci-step-row="" tabIndex={-1}>
             <th scope="row">Step {step.number}</th>
             <td><Phase status={step.status} /></td>
             <td><Result conclusion={step.conclusion} /></td>
@@ -60,7 +61,7 @@ function StepRows({steps}) {
     </div>
   );
 }
-function JobRow({job}) {
+function JobRow({attempt, job, stepId}) {
   const skip = job.status === "skipped";
   return (
     <li>
@@ -77,14 +78,14 @@ function JobRow({job}) {
           : <div><dt>Execution</dt><dd><Timing span={job.execution} skipped={skip} /></dd></div>}
       </dl>
       {job.steps.length > 0
-        ? <details><summary>Numbered steps ({job.steps.length} observed)</summary><StepRows steps={job.steps} /></details>
+        ? <details data-ci-job-steps=""><summary>Numbered steps ({job.steps.length} observed)</summary><StepRows attempt={attempt} job={job} stepId={stepId} /></details>
         : <p className="muted">No step observations in this snapshot.</p>}
     </li>
   );
 }
-function AttemptRow({attempt: a}) {
+function AttemptRow({attempt: a, stepId}) {
   return (
-    <details className="ci-health-attempt" open={activeAttempt(a) || undefined}>
+    <details className="ci-health-attempt" data-ci-attempt="" open={activeAttempt(a) || undefined}>
       <summary><strong>Run <code>{a.run_id}</code>, attempt <code>{a.attempt}</code></strong> <Phase status={a.status} /></summary>
       <dl className="ci-health-facts">
         <div><dt>Repository ID</dt><dd><code>{a.repository_id}</code></dd></div>
@@ -97,7 +98,7 @@ function AttemptRow({attempt: a}) {
           : <div><dt>Attempt wall time</dt><dd><Timing span={a.wall} skipped={a.status === "skipped"} /></dd></div>}
       </dl>
       {a.jobs.length > 0
-        ? <ul className="ci-health-jobs" aria-label="Observed jobs">{a.jobs.map((job) => <JobRow key={job.id} job={job} />)}</ul>
+        ? <ul className="ci-health-jobs" aria-label="Observed jobs">{a.jobs.map((job) => <JobRow key={job.id} attempt={a} job={job} stepId={stepId} />)}</ul>
         : <p className="muted">No job observations in this snapshot.</p>}
     </details>
   );
@@ -144,7 +145,7 @@ function ActiveJobs({attempts}) {
   </section>;
 }
 
-function LongestSteps({attempts}) {
+function LongestSteps({attempts, stepId, viewStep}) {
   const steps = longestObservedSteps(attempts);
   return <section aria-labelledby="ci-longest-steps">
     <h3 id="ci-longest-steps">Longest measured steps in this snapshot</h3>
@@ -160,7 +161,7 @@ function LongestSteps({attempts}) {
         <table aria-labelledby="ci-longest-steps" aria-describedby="ci-longest-steps-key">
           <thead><tr>
             <th scope="col">Job and step</th><th scope="col">Run and attempt</th><th scope="col">Workflow scope</th>
-            <th scope="col">Execution</th><th scope="col">Result</th>
+            <th scope="col">Execution</th><th scope="col">Result</th><th scope="col">Details</th>
           </tr></thead>
           <tbody>{steps.shown.map((row) => <tr key={row.key}>
             <th scope="row">Job <code>{row.job}</code>, step <code>{row.step}</code></th>
@@ -171,6 +172,9 @@ function LongestSteps({attempts}) {
               <span>Source <code>{row.source}</code></span>
             </td>
             <td><Timing span={row.execution} /></td><td><Result conclusion={row.conclusion} /></td>
+            <td><button type="button" aria-controls={stepId(row.key)}
+              aria-label={`View step ${row.step}, job ${row.job}, run ${row.run}, attempt ${row.attempt}, workflow ${row.workflow}, repository ${row.repository}, source ${row.source}`}
+              onClick={() => viewStep(row.key)}>View step</button></td>
           </tr>)}</tbody>
         </table>
       </div>
@@ -214,14 +218,18 @@ function WorkflowCounts({groups}) {
   </section>;
 }
 
-export function CIHealthTiming({snapshot, now = Date.now()}) {
+export function CIHealthTiming({snapshot, now = Date.now(), canViewStep}) {
+  const prefix = useId();
+  const root = useRef(null);
   const groups = ciHealthWorkflowCounts(snapshot, now);
   if (groups === null) return null;
   const attempts = snapshot.timing.attempts;
   const active = attempts.filter(activeAttempt);
   const other = attempts.filter((a) => !activeAttempt(a));
+  const stepId = (key) => prefix + "-ci-step-" + key;
+  const viewStep = (key) => focusCIStep(root.current, stepId(key), canViewStep);
   return (
-    <div className="ci-health-timing">
+    <div className="ci-health-timing" ref={root}>
       <p><strong>Snapshot observed:</strong> <At value={snapshot.observed_at} /></p>
       <p className="muted">
         {snapshot.coverage === "bounded_partial" ? "Partial coverage: not all requested observations were included. "
@@ -233,11 +241,11 @@ export function CIHealthTiming({snapshot, now = Date.now()}) {
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} />
         <WorkflowCounts groups={groups} />
-        <LongestSteps attempts={attempts} />
+        <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
-        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} />) : <p>No active attempts in this snapshot.</p>}
+        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} stepId={stepId} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
-        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} />) : <p>No other attempts in this snapshot.</p>}
+        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} stepId={stepId} />) : <p>No other attempts in this snapshot.</p>}
       </>}
     </div>
   );
@@ -249,6 +257,7 @@ export function CIHealthTiming({snapshot, now = Date.now()}) {
 export function CIHealthPanel({enabled, read}) {
   const [view, setView] = useState(null);
   const request = useRef(null);
+  const refreshGeneration = useRef(0);
   const available = ciHealthNavigationAvailable(enabled, read);
   const current = view?.owner === read ? view : null;
   const snapshot = current?.snapshot;
@@ -283,6 +292,7 @@ export function CIHealthPanel({enabled, read}) {
   async function refresh() {
     if (!available) return;
     request.current?.abort();
+    const generation = ++refreshGeneration.current;
     const controller = new AbortController();
     request.current = controller;
     setView({owner: read, state: "loading"});
@@ -299,7 +309,7 @@ export function CIHealthPanel({enabled, read}) {
         setView({owner: read, state: "unavailable"});
         return;
       }
-      setView({owner: read, state: "observed", snapshot: result, lease});
+      setView({owner: read, state: "observed", snapshot: result, lease, generation});
     } catch {
       if (request.current === controller && !controller.signal.aborted) setView({owner: read, state: "unavailable"});
     } finally {
@@ -320,7 +330,8 @@ export function CIHealthPanel({enabled, read}) {
         {state === "unavailable" && "CI Health timing is unavailable. Try again to read a new snapshot."}
         {state === "expired" && "The snapshot expired. Load a new snapshot to view timing."}
       </div>
-      {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && <CIHealthTiming snapshot={snapshot} />}
+      {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && <CIHealthTiming key={current.generation} snapshot={snapshot}
+        canViewStep={() => refreshGeneration.current === current.generation && ciHealthLeaseRemaining(snapshot, lease) > 0} />}
     </section>
   );
 }

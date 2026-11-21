@@ -63,6 +63,10 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   const longest = panel.getByRole("table", {name: "Longest measured steps in this snapshot"});
   await expect(longest).toContainText("Job 9007199254740998, step 7");
   await expect(longest).toContainText("2 s");
+  const stepButton = longest.getByRole("button", {name: /^View step 7, job 9007199254740998,/});
+  const focusTarget = page.locator(`[id="${await stepButton.getAttribute("aria-controls")}"]`);
+  await stepButton.press("Enter");
+  await expect(focusTarget).toBeFocused();
   expect(calls).toBe(1);
 
   status = 401;
@@ -72,6 +76,7 @@ test("only attached-source marker enables the on-demand view, then loss of read 
   await expect(nav).toHaveCount(0);
   await expect(queued).toHaveCount(0);
   await expect(longest).toHaveCount(0);
+  await expect(focusTarget).toHaveCount(0);
   await expect(page.getByText("9007199254740995", {exact: true})).toHaveCount(0);
   expect(calls).toBe(2);
 });
@@ -107,6 +112,10 @@ test("withdrawing marker fences an in-flight response; accepted view expires des
   await page.getByRole("button", {name: "Refresh snapshot", exact: true}).click();
   await panel.getByRole("button", {name: "Load timing snapshot"}).click();
   await expect(panel).toContainText("9007199254740995");
+  const drill = panel.getByRole("button", {name: /^View step 7, job 9007199254740998,/});
+  const focusedStep = page.locator(`[id="${await drill.getAttribute("aria-controls")}"]`);
+  await drill.click();
+  await expect(focusedStep).toBeFocused();
   // Advance monotonic time, then move the wall clock back without moving the
   // monotonic deadline. The (later) wall-only deadline must not keep rows alive.
   await page.clock.fastForward(60_000);
@@ -114,8 +123,70 @@ test("withdrawing marker fences an in-flight response; accepted view expires des
   await page.clock.fastForward(31_000);
   await expect(panel).toContainText("The snapshot expired");
   await expect(panel).not.toContainText("9007199254740995");
+  await expect(focusedStep).toHaveCount(0);
   expect(calls).toBe(2); // Expiry did not fetch or reschedule a read.
 
   await page.getByRole("button", {name: "Disconnect", exact: true}).click();
   await expect(panel).toHaveCount(0);
+});
+
+test("View step opens only the exact attempt and job, then resets with a replacement", async ({page}) => {
+  let reads = 0;
+  const observedAt = new Date().toISOString();
+  await page.route(overviewRoute, (route) =>
+    route.fulfill({json: {...overview, ci_health_available: true}}));
+  await page.route(timingRoute, (route) => {
+    reads++;
+    const snapshot = timing(observedAt);
+    const [retry] = snapshot.timing.attempts;
+    const sibling = {...retry.jobs[1], id: "9007199254740999"};
+    retry.jobs.push(sibling);
+    snapshot.timing.attempts.unshift({...retry, attempt: "1", status: "completed", jobs: [
+      {...sibling, id: "9007199254741000"},
+    ]});
+    return route.fulfill({json: snapshot});
+  });
+  await page.goto("/");
+  await login(page);
+  const panel = page.getByRole("region", {name: "CI Health", exact: true});
+  await panel.getByRole("button", {name: "Load timing snapshot"}).click();
+  const table = panel.getByRole("table", {name: "Longest measured steps in this snapshot"});
+  const chosen = table.getByRole("button", {name: /^View step 7, job 9007199254740998, run 9007199254740995, attempt 2,/});
+  const sibling = table.getByRole("button", {name: /^View step 7, job 9007199254740999, run 9007199254740995, attempt 2,/});
+  const original = table.getByRole("button", {name: /^View step 7, job 9007199254741000, run 9007199254740995, attempt 1,/});
+  const target = async (button) => page.locator(`[id="${await button.getAttribute("aria-controls")}"]`);
+  const stateOf = (row) => row.evaluate((el) => ({
+    attempt: el.closest("details[data-ci-attempt]").open,
+    job: el.closest("details[data-ci-job-steps]").open,
+  }));
+  const firstChosen = await target(chosen);
+  const firstSibling = await target(sibling);
+  const oldButton = await chosen.elementHandle();
+  const url = page.url();
+  expect(await stateOf(firstChosen)).toEqual({attempt: false, job: false});
+  await chosen.press("Enter");
+  await expect(firstChosen).toBeFocused();
+  await expect(firstChosen.getByRole("rowheader", {name: "Step 7"})).toBeVisible();
+  expect(await stateOf(firstChosen)).toEqual({attempt: true, job: true});
+  expect(await stateOf(firstSibling)).toEqual({attempt: true, job: false});
+  expect(await stateOf(await target(original))).toEqual({attempt: false, job: false});
+  expect(page.url()).toBe(url);
+  expect(reads).toBe(1);
+
+  // A script click at the refresh control doesn't itself move keyboard focus;
+  // the replaced snapshot must discard the old row and its disclosure state.
+  await panel.getByRole("button", {name: "Refresh timing snapshot"}).evaluate((el) => el.click());
+  await expect(firstChosen).toHaveCount(0);
+  const replacement = await target(chosen);
+  expect(await stateOf(replacement)).toEqual({attempt: false, job: false});
+  await expect(replacement).not.toBeFocused();
+  await oldButton.evaluate((el) => el.click());
+  expect(await stateOf(replacement)).toEqual({attempt: false, job: false});
+  expect(reads).toBe(2);
+
+  await chosen.press("Enter");
+  await expect(replacement).toBeFocused();
+  await page.getByRole("button", {name: "Disconnect", exact: true}).click();
+  await expect(replacement).toHaveCount(0);
+  expect(reads).toBe(2);
 });
