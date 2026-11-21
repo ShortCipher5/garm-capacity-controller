@@ -46,11 +46,15 @@ function validConclusion(row) {
 const count = (n, max) => Number.isInteger(n) && n >= 0 && n <= max;
 function validRetainedMetric(metric, max) {
   const fields = ["observed", "success", "failure", "other", "active", "unknown"];
-  if (!exactKeys(metric, fields, ["duration"]) || !fields.every((key) => count(metric[key], max)) ||
+  if (!exactKeys(metric, fields, ["completed", "duration"]) || !fields.every((key) => count(metric[key], max)) ||
       metric.observed !== fields.slice(1).reduce((n, key) => n + metric[key], 0)) return false;
+  const maxCompleted = metric.observed - metric.active;
+  const completed = Object.hasOwn(metric, "completed") ? metric.completed : undefined;
+  if (Object.hasOwn(metric, "completed") &&
+      (!count(completed, maxCompleted) || completed < metric.success + metric.failure)) return false;
   if (!Object.hasOwn(metric, "duration")) return true;
   const d = metric.duration;
-  return exactKeys(d, ["samples", "mean_ns", "p95_ns"]) && count(d.samples, metric.observed - metric.active) &&
+  return exactKeys(d, ["samples", "mean_ns", "p95_ns"]) && count(d.samples, completed ?? maxCompleted) &&
     d.samples > 0 && decimal(d.mean_ns, true) && decimal(d.p95_ns, true);
 }
 

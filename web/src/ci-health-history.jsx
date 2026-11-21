@@ -10,6 +10,12 @@ function FailureFraction({metric}) {
     : <span className="muted">Unavailable</span>;
 }
 
+function DurationCoverage({metric}) {
+  const timed = metric.duration?.samples ?? 0;
+  if (!Object.hasOwn(metric, "completed")) return <>{timed} timed · <span className="muted">Completed count unknown</span></>;
+  return <>{timed} of {metric.completed}</>;
+}
+
 function HistoryWindow({label, value, durationText}) {
   return <div className="table-wrap">
     <table>
@@ -17,7 +23,7 @@ function HistoryWindow({label, value, durationText}) {
       <thead><tr><th scope="col">Attempts</th><th scope="col">Timing level</th><th scope="col">Observed</th>
         <th scope="col">Success</th><th scope="col">Failure</th><th scope="col">Other/skipped</th>
         <th scope="col">Active</th><th scope="col">Unknown</th><th scope="col">Observed failure share</th>
-        <th scope="col">Duration samples</th><th scope="col">Mean</th><th scope="col">P95</th></tr></thead>
+        <th scope="col">Completed rows timed</th><th scope="col">Mean</th><th scope="col">P95</th></tr></thead>
       {[["Initial", value.initial], ["Retries", value.retries]].map(([group, bucket]) => <tbody key={group}>
         {levels.map(([field, name], i) => {
           const m = bucket[field], d = m.duration;
@@ -25,7 +31,7 @@ function HistoryWindow({label, value, durationText}) {
             {i === 0 && <th scope="rowgroup" rowSpan={levels.length}>{group} ({bucket.distinct_runs} distinct runs)</th>}
             <th scope="row">{name}</th><td>{m.observed}</td><td>{m.success}</td><td>{m.failure}</td>
             <td>{m.other}</td><td>{m.active}</td><td>{m.unknown}</td>
-            <td><FailureFraction metric={m} /></td><td>{d?.samples ?? 0}</td>
+            <td><FailureFraction metric={m} /></td><td><DurationCoverage metric={m} /></td>
             <td>{d ? durationText(d.mean_ns) : <span className="muted">Unavailable</span>}</td>
             <td>{d ? durationText(d.p95_ns) : <span className="muted">Unavailable</span>}</td>
           </tr>;
@@ -42,7 +48,8 @@ export function CIHealthHistory({history, durationText}) {
       Windows are based on each attempt’s last observation, not when a job ended.
       Earlier or unavailable observations are not counted. This is not complete workflow history.</p>
     <p className="muted">Failure share is failure divided by recorded success plus failure.
-      Durations use only completed rows with both endpoints; jobs and steps are pooled, not grouped by equivalent definitions.
+      Timing coverage counts only observed completed rows; skipped and active rows are not included.
+      Mean and P95 use only rows with both endpoints. Jobs and steps are pooled, not grouped by equivalent definitions.
       A run can appear in both attempt types. Verified test reports are unavailable.</p>
     {history.workflows.map((w) => <details key={ciWorkflowKey(w)} className="ci-health-attempt">
       <summary>Workflow <code>{w.workflow_id}</code>, repository <code>{w.repository_id}</code>, source <code>{w.source}</code>

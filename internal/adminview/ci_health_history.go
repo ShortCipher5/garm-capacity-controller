@@ -45,13 +45,14 @@ type ciHistoryBucket struct {
 }
 
 type ciHistoryMetric struct {
-	Observed int                `json:"observed"`
-	Success  int                `json:"success"`
-	Failure  int                `json:"failure"`
-	Other    int                `json:"other"`
-	Active   int                `json:"active"`
-	Unknown  int                `json:"unknown"`
-	Duration *ciHistoryDuration `json:"duration,omitempty"`
+	Observed  int                `json:"observed"`
+	Success   int                `json:"success"`
+	Failure   int                `json:"failure"`
+	Other     int                `json:"other"`
+	Active    int                `json:"active"`
+	Unknown   int                `json:"unknown"`
+	Completed int                `json:"completed"`
+	Duration  *ciHistoryDuration `json:"duration,omitempty"`
 }
 
 type ciHistoryDuration struct {
@@ -69,7 +70,7 @@ func ciHistoryBucketView(b cihealth.RetainedTrendBucket) ciHistoryBucket {
 }
 
 func ciHistoryMetricView(m cihealth.RetainedTrendMetric) ciHistoryMetric {
-	out := ciHistoryMetric{Observed: m.Observed, Success: m.Success, Failure: m.Failure, Other: m.Other, Active: m.Active, Unknown: m.Unknown}
+	out := ciHistoryMetric{Observed: m.Observed, Success: m.Success, Failure: m.Failure, Other: m.Other, Active: m.Active, Unknown: m.Unknown, Completed: m.Completed}
 	if d := m.Duration; d != nil {
 		out.Duration = &ciHistoryDuration{Samples: d.Samples, Mean: ciInt(int64(d.Mean)), P95: ciInt(int64(d.P95))}
 	}

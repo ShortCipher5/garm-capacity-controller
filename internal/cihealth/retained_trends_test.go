@@ -74,12 +74,12 @@ func TestRetainedTrendsExactTimingsIndependentOfResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotBucket := got.Current.Initial
-	if gotBucket.Attempts != (RetainedTrendMetric{Observed: 2, Success: 1, Active: 1}) {
+	if gotBucket.Attempts != (RetainedTrendMetric{Observed: 2, Success: 1, Active: 1, Completed: 1}) {
 		t.Fatalf("attempts: %+v", gotBucket.Attempts)
 	}
 	want := []RetainedTrendMetric{
-		{Observed: 3, Success: 1, Failure: 1, Other: 1},
-		{Observed: 4, Success: 1, Failure: 1, Other: 1, Unknown: 1},
+		{Observed: 3, Success: 1, Failure: 1, Other: 1, Completed: 3},
+		{Observed: 4, Success: 1, Failure: 1, Other: 1, Unknown: 1, Completed: 3},
 	}
 	for i, m := range []RetainedTrendMetric{gotBucket.Jobs, gotBucket.Steps} {
 		if m.Duration == nil || *m.Duration != (TrendDurations{Samples: 2, Mean: 2, P95: 4}) {
