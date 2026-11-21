@@ -97,6 +97,26 @@ type History struct {
 // or same-UID external changes. The caller must independently provide
 // dedicated storage, with rename and file/directory fsync on one filesystem.
 func OpenHistory(ctx context.Context, in HistoryInput) (*History, error) {
+	return openHistory(ctx, in, false)
+}
+
+// InitializeReviewedEmptyHistory is a one-shot operator action, separate
+// from gateway startup. It creates no directory and adopts no existing store.
+// The held-directory lock covers the empty check and the atomic publication.
+func InitializeReviewedEmptyHistory(ctx context.Context, review HistoryDirectoryReview) error {
+	root, err := OpenReviewedHistoryDirectory(ctx, review)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	owned, err := openHistory(ctx, HistoryInput{Enabled: true, Root: root, Initialize: true}, true)
+	if err != nil {
+		return err
+	}
+	return owned.Close()
+}
+
+func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*History, error) {
 	if !in.Enabled {
 		return nil, nil
 	}
@@ -150,6 +170,12 @@ func OpenHistory(ctx context.Context, in HistoryInput) (*History, error) {
 		return nil, ErrHistory
 	}
 	if in.Initialize {
+		if requireEmpty {
+			names, err := dir.Readdirnames(1)
+			if len(names) != 0 || !errors.Is(err, io.EOF) {
+				return nil, ErrHistory
+			}
+		}
 		h.state = historyState{Format: historyFormat, Checkpoints: []historyCheckpoint{}, Attempts: []AttemptFacts{}}
 		payload, err := json.Marshal(h.state)
 		if err != nil {
