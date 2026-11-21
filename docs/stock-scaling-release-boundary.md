@@ -94,23 +94,23 @@ can remove the row after provider deletion reports success. In the
 [reviewed Incus provider](https://github.com/cloudbase/garm-provider-incus/tree/13e6dd70f71c7a7a9ae768695556c8b28056266f),
 the ID is the instance name, lookup uses the configured project, and
 instance-not-found can be treated as successful deletion. Therefore a provider
-name repointed to another project, or an existing pool reassigned to a
-different provider, can leave an old runner in its original project while
-the matching GARM row disappears. The same risk applies in
+name repointed to another project can leave an old runner in its original
+project while the matching GARM row disappears. The same risk applies in
 reverse on rollback.
 
 - Keep the old pool-to-provider and provider-to-project mappings intact while
-  any old runner, pending start, or uncertain cleanup can still exist. Before changing a
-  mapping in place, independently confirm the old project inventory, GARM
-  pending and in-flight operations, and current GitHub assignments. A
+  any old runner, pending start, or uncertain cleanup can still exist. Before
+  changing a mapping in place, independently confirm no associated guests
+  remain in the old project, no unresolved GARM rows or start operations
+  remain, and no GitHub runner assignments still depend on the route. A
   disabled pool is not a drain result: stock idle scale-down can skip it,
   while [already-pending creates](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/pool/pool.go#L1709-L1759)
   can still reach the provider.
 - If independently qualified routes coexist, retain both mappings and count
-  both projects against the same physical host budget. Verify the actual
-  expanded profile on the destination. If coexistence cannot respect the
-  host ceiling, leave the mapping unchanged until the original route is
-  independently drained.
+  both projects against the same physical host budget. Verify the destination
+  runner’s expanded flavor profile, root device and resource limits under the
+  exact account and project. If coexistence cannot respect the host ceiling,
+  leave the mapping unchanged until the original route is independently drained.
 - Use the same checks for rollback. A disappeared GARM row, a provider
   success response, or a pool toggle alone does not prove the old Incus
   runner is gone or its capacity is free. If any source is incomplete,
