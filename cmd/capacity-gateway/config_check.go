@@ -343,7 +343,14 @@ func checkStaticConfig(c configuration, provision bool) error {
 		}
 		client.Close()
 	}
-	if a.GarmManagement != nil && !a.GarmManagement.ManagedSupervisor {
+	if a.GarmManagement != nil && !a.GarmManagement.ManagedSupervisor && a.GarmManagement.DiscoveryOnly {
+		// Check only the discovery configuration shape. Do not open
+		// its distinct stock credential or TLS files during preflight.
+		if validateGarmDiscoveryConfiguration(a) != nil {
+			return fail()
+		}
+	}
+	if a.GarmManagement != nil && !a.GarmManagement.ManagedSupervisor && !a.GarmManagement.DiscoveryOnly {
 		m := a.GarmManagement
 		if m.ProxyServerKeyPin != "" || m.ControllerID != "" {
 			return fail()

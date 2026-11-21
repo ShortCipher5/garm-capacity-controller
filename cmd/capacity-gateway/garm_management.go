@@ -72,7 +72,7 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 	if remote.ProxyServerKeyPin != "" || remote.ControllerID != "" {
 		return nil, noop, adminview.ErrConfiguration
 	}
-	if remote.DiscoveryOnly && (config.EnableExperimentalGarmManagement || len(remote.PoolIDs) != 0 || len(remote.RepositoryIDs) != 0 || remote.Journal != "" || remote.JournalLineage != "" || remote.QualifiedAdmissionRouting || remote.ExclusiveSettingsWriter || remote.ExperimentalConditionalSettings) {
+	if remote.DiscoveryOnly && validateGarmDiscoveryConfiguration(config) != nil {
 		return nil, noop, adminview.ErrConfiguration
 	}
 	if !remote.DiscoveryOnly {
@@ -169,6 +169,30 @@ func newGarmControl(config *adminConfiguration, inventoryToken, ledger string) (
 		client.Close()
 		journal.Close()
 	}, nil
+}
+
+// validateGarmDiscoveryConfiguration is the shared static/runtime shape
+// check. It does not open or establish trust in any configured path. Runtime
+// continues to authenticate using its existing protected credential loader.
+func validateGarmDiscoveryConfiguration(config *adminConfiguration) error {
+	if config == nil || config.GarmManagement == nil {
+		return adminview.ErrConfiguration
+	}
+	m := config.GarmManagement
+	if !m.DiscoveryOnly || m.ManagedSupervisor || config.EnableExperimentalGarmManagement ||
+		m.PolicyCapIntervalSeconds != 0 || m.ProxyServerKeyPin != "" || m.ControllerID != "" ||
+		len(m.PoolIDs) != 0 || len(m.RepositoryIDs) != 0 || m.Journal != "" || m.JournalLineage != "" ||
+		m.QualifiedAdmissionRouting || m.ExclusiveSettingsWriter || m.ExperimentalConditionalSettings {
+		return adminview.ErrConfiguration
+	}
+	// Require only the settings runtime already needs to construct its
+	// reader. Endpoint parsing, provider contents and actual file/TLS/token
+	// validation remain in the existing runtime client and loaders.
+	if m.Endpoint == "" || len(m.Providers) == 0 || m.TokenFile == "" ||
+		m.TLS.CA == "" || m.TLS.Certificate == "" || m.TLS.Key == "" {
+		return adminview.ErrConfiguration
+	}
+	return nil
 }
 
 // validateGarmManagementRouting rejects obvious scope/placement mismatches at
