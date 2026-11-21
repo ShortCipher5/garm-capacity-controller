@@ -60,6 +60,14 @@ type HistoryInput struct {
 	// Old snapshots without conclusions remain readable. A binary predating
 	// that optional field will refuse snapshots that contain one.
 	Initialize bool
+	// Review opts into a reopen-only verification of the exact independently
+	// reviewed snapshot while it is owned/flocked. It never initializes.
+	Review *HistoryReopenReview
+}
+
+type HistoryReopenReview struct {
+	SnapshotSHA256 [sha256.Size]byte
+	AllowedScopes  []HistoryScope
 }
 
 type historyCheckpoint struct {
@@ -83,9 +91,10 @@ type History struct {
 	failed    bool
 }
 
-// OpenHistory is opt-in and not connected to startup. Flock excludes a second
-// cooperating opener of the same Linux directory; it is not protection from
-// privileged or same-UID external changes. Startup must independently provide
+// OpenHistory is opt-in. Ordinary startup never opens it; the explicit
+// reviewed path permits reopening only. Flock excludes a second cooperating
+// opener of the same Linux directory; it is not protection from privileged
+// or same-UID external changes. The caller must independently provide
 // dedicated storage, with rename and file/directory fsync on one filesystem.
 func OpenHistory(ctx context.Context, in HistoryInput) (*History, error) {
 	if !in.Enabled {
@@ -93,6 +102,22 @@ func OpenHistory(ctx context.Context, in HistoryInput) (*History, error) {
 	}
 	if !historyActive(ctx) || in.Root == nil {
 		return nil, ErrHistory
+	}
+	var reviewed map[HistoryScope]bool
+	var expected [sha256.Size]byte
+	if in.Review != nil {
+		expected = in.Review.SnapshotSHA256
+		scopes := in.Review.AllowedScopes
+		if in.Initialize || expected == ([sha256.Size]byte{}) || len(scopes) == 0 || len(scopes) > historyMaxScopes {
+			return nil, ErrHistory
+		}
+		reviewed = make(map[HistoryScope]bool, len(scopes))
+		for _, scope := range scopes {
+			if !scope.valid() || reviewed[scope] {
+				return nil, ErrHistory
+			}
+			reviewed[scope] = true
+		}
 	}
 	root, err := in.Root.OpenRoot(".")
 	if err != nil {
@@ -119,6 +144,9 @@ func OpenHistory(ctx context.Context, in HistoryInput) (*History, error) {
 		return nil, ErrHistoryUncertain
 	}
 	if !h.missing(historyStage) {
+		return nil, ErrHistory
+	}
+	if reviewed != nil && !onlyHistorySnapshot(dir) {
 		return nil, ErrHistory
 	}
 	if in.Initialize {
@@ -149,12 +177,31 @@ func OpenHistory(ctx context.Context, in HistoryInput) (*History, error) {
 		if !h.ownsCurrent() || !historyActive(ctx) || !h.missing(historyStage) {
 			return nil, ErrHistory
 		}
+		if reviewed != nil && sha256.Sum256(payload) != expected {
+			return nil, ErrHistory
+		}
 		if h.state, err = decodeHistory(payload); err != nil || !h.available(ctx) {
 			return nil, ErrHistory
+		}
+		if reviewed != nil {
+			// Decoding bound every retained attempt to these checkpoints.
+			// No other source or previously configured scope is adopted.
+			for _, checkpoint := range h.state.Checkpoints {
+				if !reviewed[checkpoint.Scope] {
+					return nil, ErrHistory
+				}
+			}
 		}
 	}
 	ok = true
 	return h, nil
+}
+
+// Exactly one entry is allowed in the independently dedicated startup slot.
+// Do not read unbounded names or clean up an unresolved or unrelated directory.
+func onlyHistorySnapshot(dir *os.File) bool {
+	names, err := dir.Readdirnames(2)
+	return (err == nil || errors.Is(err, io.EOF)) && len(names) == 1 && names[0] == historyFile
 }
 
 func historyActive(ctx context.Context) bool { return ctx != nil && ctx.Err() == nil }

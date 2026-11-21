@@ -23,10 +23,13 @@ import (
 )
 
 type ciHistoryFixture struct {
+	startup  configuration
+	demand   demandobserver.Config
 	runtime  *ciHealthRuntime
 	owned    *cihealthsource.OwnedCycleHistory
 	expect   []cihealthsource.HistoryExpectation
 	root     *os.Root
+	reads    atomic.Int32
 	mode     atomic.Int32
 	notFound atomic.Int32
 	entered  chan struct{}
@@ -47,6 +50,7 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 		return map[string]any{"id": id, "workflow_id": workflow, "run_attempt": 1, "repository": identity, "status": "queued", "created_at": created}
 	}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.reads.Add(1)
 		if r.Method != "GET" || r.Header.Get("Authorization") != "Bearer synthetic-ci-history" {
 			t.Error("unexpected CI request")
 			w.WriteHeader(401)
@@ -126,6 +130,7 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 	cfg := configuration{EnableCIHealth: true, Admin: &adminConfiguration{}, DemandObserverConfigFile: "fixture", CIHealth: &ciHealthConfiguration{Repositories: pins}}
 	dc := demandobserver.Config{Enabled: true, GitHubEndpoint: srv.URL, GitHubAuthority: repo.Host, GitHubTokenFile: key, GitHubCAFile: ca,
 		Repositories: []demandrepair.Repository{repo}, CheckpointPath: "fixture", InitialFrom: created, IntervalSeconds: 60, MaxBackoffSeconds: 60}
+	f.startup, f.demand = cfg, dc
 	var err error
 	f.runtime, err = buildCIHealth(cfg, &dc)
 	if err != nil || f.runtime.activeHistory() != nil {

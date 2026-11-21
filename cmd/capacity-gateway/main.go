@@ -44,6 +44,7 @@ type garmConfiguration struct {
 type configuration struct {
 	CIHealth                      *ciHealthConfiguration                   `json:"ci_health,omitempty"`
 	EnableCIHealth                bool                                     `json:"-"`
+	EnableCIHealthHistory         bool                                     `json:"-"`
 	RemoteRunnerDisk              *remoteRunnerDiskConfiguration           `json:"remote_runner_disk,omitempty"`
 	EnableRemoteRunnerDisk        bool                                     `json:"-"`
 	DemandObserverConfigFile      string                                   `json:"demand_observer_config_file,omitempty"`
@@ -82,6 +83,9 @@ func (redactedConnectionLog) Write(message []byte) (int, error) {
 }
 
 func serve(ctx context.Context, config configuration, provision, monitoring bool) error {
+	if err := validateCIHealthConfiguration(config); err != nil {
+		return err
+	}
 	if err := validateRemoteRunnerDiskConfiguration(config); err != nil {
 		return err
 	}
@@ -111,6 +115,9 @@ func serveOnListener(ctx context.Context, config configuration, provision, monit
 
 func serveOnListeners(ctx context.Context, config configuration, provision, monitoring bool, listener, adminListener net.Listener) error {
 	defer listener.Close()
+	if err := validateCIHealthConfiguration(config); err != nil {
+		return err
+	}
 	if err := validateRemoteRunnerDiskConfiguration(config); err != nil {
 		return err
 	}
@@ -126,6 +133,33 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	}
 	if provision && (config.BootstrapMode != "gateway-owned-default-cloudinit/v1" || len(config.PreparationPools) != len(config.Pools) || len(config.SourceFingerprints) == 0) {
 		return gatewayrpc.ErrConfiguration
+	}
+	var demandConfig *demandobserver.Config
+	var ciHealth *ciHealthRuntime
+	if config.EnableCIHealthHistory {
+		// An explicit stale/ambiguous history review must fail before opening
+		// admission state or starting other configured services. No CI poll
+		// can start here, and supplied listeners must still be loopback.
+		if adminListener != nil {
+			defer adminListener.Close()
+			addr, ok := adminListener.Addr().(*net.TCPAddr)
+			if !ok || !addr.IP.IsLoopback() {
+				return gatewayrpc.ErrConfiguration
+			}
+		}
+		dc, err := demandobserver.Load(config.DemandObserverConfigFile)
+		if err != nil {
+			return err
+		}
+		demandConfig = &dc
+		ciHealth, err = buildCIHealth(config, demandConfig)
+		if err != nil {
+			return err
+		}
+		defer ciHealth.close()
+		if err := attachConfiguredCIHistory(ctx, config, ciHealth); err != nil {
+			return err
+		}
 	}
 	store, err := admission.OpenRuntimeSQLite(config.Database, config.IdentityFile)
 	if err != nil {
@@ -169,29 +203,34 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	}
 
 	var demand *demandobserver.Service
-	var demandConfig *demandobserver.Config
 	if config.DemandObserverConfigFile != "" {
 		if config.Admin == nil {
 			return demandobserver.ErrObserver
 		}
-		dc, e := demandobserver.Load(config.DemandObserverConfigFile)
-		if e != nil {
-			return e
+		if demandConfig == nil {
+			dc, e := demandobserver.Load(config.DemandObserverConfigFile)
+			if e != nil {
+				return e
+			}
+			demandConfig = &dc
 		}
-		demandConfig = &dc
-		demand, e = demandobserver.NewService(dc)
-		if e != nil {
-			return e
+		demand, err = demandobserver.NewService(*demandConfig)
+		if err != nil {
+			return err
 		}
 		config.Admin.demandObserverRuntime = demand
 	}
-	ciHealth, err := buildCIHealth(config, demandConfig)
-	if err != nil {
-		return err
+	if !config.EnableCIHealthHistory {
+		ciHealth, err = buildCIHealth(config, demandConfig)
+		if err != nil {
+			return err
+		}
+		if ciHealth != nil {
+			defer ciHealth.close()
+		}
 	}
 	var ciSnapshot *adminview.CIHealthSnapshot
 	if ciHealth != nil {
-		defer ciHealth.close()
 		ciSnapshot = ciHealth.snapshot
 	}
 	backends := map[string]gateway.Backend{}
@@ -473,6 +512,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 func main() {
 	configPath := flag.String("config", "", "private gateway configuration file")
 	ciHealth := flag.Bool("allow-ci-health-timing", false, "enable explicitly enrolled read-only GitHub Actions timing observations")
+	ciHealthHistory := flag.Bool("allow-ci-health-retained-history", false, "reopen exactly reviewed dedicated CI history for the existing owner dashboard; never initializes or repairs")
 	remoteDisk := flag.Bool("allow-remote-runner-disk-telemetry", false, "display separately reviewed remote runner disk readings; never supplies capacity or changes runners")
 	checkConfig := flag.Bool("check-config", false, "check local configuration only; does not establish runtime or deployment readiness")
 	retirement := flag.Bool("allow-experimental-native-retirement", false, "configure canonical STOP/DELETE orchestration; active runtime still refused, no release")
@@ -590,6 +630,7 @@ func main() {
 	}
 	config.EnableStockProvider = *stockProvider
 	config.EnableCIHealth = *ciHealth
+	config.EnableCIHealthHistory = *ciHealthHistory
 	config.EnableRemoteRunnerDisk = *remoteDisk
 	config.EnableJobObserver = *jobObserver
 	config.EnableNativeRetirement = *retirement
