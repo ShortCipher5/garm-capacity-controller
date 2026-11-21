@@ -68,26 +68,33 @@ if err != nil {
   `provider_fault` (`runner/pool/pool.go:1709-1770`, status set at `:1762`). A
   best-effort `DeleteInstance` of the partial instance is attempted via a deferred
   cleanup in `addInstanceToProvider` (`pool.go:1109-1136`).
-- Retry loop: `retryFailedInstances` runs every `PoolConsilitationInterval = 5s`
-  (`runner/common/pool.go:26`; loop registered at `pool.go:1893`) and requeues each
-  `error` instance to `pending_create` with `CreateAttempt+1`
-  (`pool.go:1417-1479`), capped at `maxCreateAttempts = 5` (`pool.go:70`, skip at
-  `:1420`). So a failed create is retried at roughly 5-second cadence and gives up
-  after ~5 attempts (about 30 s — INFERENCE, timing depends on exec latency).
-- No create-side backoff. The geometric 1.5x backoff (start 5 s, cap 20 min,
-  `locking/local_backoff_locker.go:60-76`, `maxBackoffSeconds = 1200` in
-  `locking/local_locker.go:27`) is applied only to DELETE paths
-  (`deletePendingInstances`, `pool.go:1625-1669`). Create retries have no backoff at
-  all — a persistent provider failure is a tight retry storm. VERIFIED.
-- After the 5th failure the record stays in `error` forever (nothing in the pinned
-  tree reaps `error`-status instances that never reached GitHub; the timeout reaper at
-  `pool.go:652-716` only handles runners GitHub already knows). INFERENCE for
-  "forever": verified that `retryFailedInstancesForOnePool` skips them and no other
-  loop transitions them.
-- Desired count: `ensureIdleRunnersForOnePool` (`pool.go:1346-1398`) counts any
-  instance whose `RunnerStatus` is not `active`/`terminated` — which includes
-  `error`-status records — toward `min_idle_runners`, so a lingering failed record also
-  suppresses backfill. VERIFIED by code reading; effect INFERENCE.
+- The retry loop is scheduled every 5 seconds, and the worker skips rows with
+  `CreateAttempt >= 5` (`runner/common/pool.go:26`; `runner/pool/pool.go:70,1417-1422,1893`).
+  Those are not a recovery schedule. After provider cleanup succeeds, the worker
+  calls ordinary `UpdateInstance` to set `pending_create` and increment the counter
+  (`pool.go:1444-1479`). The SQL store validates before applying or saving the
+  update (`database/sql/instances.go:414-434`); the pinned transition table does
+  not allow `error → pending_create` (`params/params.go:193-198`).
+  **Inference:** a row still in `error` can undergo repeated cleanup attempts
+  without another create or an incremented counter. Cleanup failure also stops
+  that retry before the update. Neither five creates in about 30 seconds nor
+  recovery as soon as capacity returns is guaranteed.
+- The failed-create retry worker does not use the geometric backoff that applies
+  to the separate pending-deletion worker (`pool.go:1625-1669`). Its repeated
+  work on this path can be cleanup rather than repeated creation.
+- A retained row is not necessarily permanent. The separate timeout reaper
+  examines ordinary pool rows whose update age exceeds the pool timeout. If the
+  managed runner is absent from GitHub's runner listing or is offline, and the
+  lock, pool lookup and deletion checks succeed, it can mark the row pending
+  deletion (`pool.go:652-710,1916-1957`). That is not itself provider removal or job assignment.
+- While retained, the row counts toward the pool maximum: the idle-fill check
+  uses the total number of pool rows regardless of status. It also counts toward
+  the idle floor if its separate `RunnerStatus` is neither active nor terminated
+  (`pool.go:1346-1386`).
+- Upstream [#793](https://github.com/cloudbase/garm/issues/793) reports the
+  transition error in v0.2.1. [#795](https://github.com/cloudbase/garm/pull/795)
+  fixes the retry write on upstream main. That doesn't change the pinned v0.2.1
+  behavior or add a special capacity-deferral signal.
 
 ## (d) Any stock "temporarily out of capacity, retry later" signal? — VERIFIED: none
 
@@ -102,18 +109,20 @@ quota, or retry-later kind; grep for tempfail/deferral/no-capacity semantics ove
 
 ## (e) Fate of the queued GitHub job when creation keeps failing — VERIFIED
 
-`consumeQueuedJobs` (`runner/pool/pool.go:2073+`) locks the job
-(`store.LockJob`) and calls `addRunnerToPool` → `AddRunner`, which only writes the
-durable `pending_create` row (`pool.go:936-997`). Once that row exists,
-`runnerCreated = true` (`pool.go:2185`) and the job is considered handled — the
-asynchronous provider failure does not requeue or fail anything job-related. The job
-row then: is retried by creating *another* runner only after it sits queued for
-10 minutes (`pool.go:2110-2120`); is deleted if a scale-down decides it is stale
-(>10 min, `pool.go:1304-1318`); is deleted once GitHub reports it no longer queued,
-checked at most hourly for jobs older than 1 h (`reconcileStaleJobs`,
-`pool.go:1966-2071`); and otherwise lingers until webhook events remove it via
-`DeleteInactionableJobs` (5-min grace, `pool.go:2078`). On the GitHub side the job
-simply stays queued until GitHub itself times it out — outside this repo, INFERENCE.
+`consumeQueuedJobs` locks the local job record, then tries matching pools.
+A synchronous `addRunnerToPool` error can send this pass to the next pool.
+But a successful `AddRunner` only establishes a durable `pending_create` row;
+the loop marks `runnerCreated` and stops trying pools
+(`runner/pool/pool.go:936-997,2152-2199`). A later asynchronous provider
+refusal is not fed back into that pool selection pass and does not cancel
+the GitHub job.
+
+After the local queued record reaches the ten-minute age check, GARM can
+unlock its own record for reconsideration on a later pass
+(`pool.go:2092-2134`). That does not guarantee a fresh runner; eligibility and
+pool limits still apply. The local record can also be cleaned up as stale or
+inactionable (`pool.go:1304-1318,1966-2078`). Neither local record cleanup nor
+a successfully inserted runner row proves GitHub assigned that job.
 
 ## (f) What stock GARM does with our exit-75 signal — VERIFIED + INFERENCE
 
@@ -128,14 +137,17 @@ Two layers, both verified:
    gateway is short of capacity, `client.Create` errors and the binary exits 1
    (`cmd/capacity-provider/main.go:144-156`); even a hypothetical exit 75 lands in the
    same `NewProviderError` path. What breaks (INFERENCE from verified paths):
-   - no deferral: ~5 create attempts at ~5 s cadence, then a permanent `error` record;
-   - the storm hits the gateway/Incus once per attempt, plus one best-effort
-     `DeleteInstance` cleanup per attempt (`pool.go:1109-1125`);
+   - no deferral: the failed row can stay in `error` despite successful
+     cleanup and restored capacity; the separate timeout reaper may later
+     move it toward deletion (see (c));
+   - the initial failed create can cause best-effort `DeleteInstance` cleanup
+     (`pool.go:1109-1125`), and retry ticks can attempt cleanup again without
+     issuing another create;
    - audit/log noise: `InstanceOperationFailedCount` incremented per attempt
      (`external.go:102-106`), error text persisted as `provider_fault`
      (`pool.go:1762`);
-   - the lingering `error` record counts toward `min_idle_runners`, suppressing
-     backfill (see (c));
+   - the retained row occupies a slot under `max_runners` and can suppress
+     backfill under `min_idle_runners` (see (c));
    - the queued job stalls per (e) — the failed attempts are invisible to job handling.
 
 ## (g) Smallest upstreamable change (PROPOSAL — not implemented)
@@ -179,11 +191,24 @@ proposal only; nothing has been sent to or accepted by upstream.
   `retryFailedInstances` for preparation-enabled providers (pool.go hunk at patch
   line 1785). This investigation confirms the patch is load-bearing and matches the
   stock gap it fills; against unpatched GARM the controller's deferral signal is
-  inert and capacity exhaustion degrades to a ~30 s, 5-attempt failure cycle with a
-  lingering charged record.
+  inert and a provider refusal can leave a charged row that does not requeue
+  through the retry worker.
 - Upstream path: if the proposal in (g) were ever accepted, the maintained patch
   could shrink toward config and the admission call site only. Until then, stock-behavior
   claims in this repo must continue to describe (b)-(f) above.
+
+## What the existing full-capacity qualification must demonstrate
+
+For an independently authorized qualification of ordinary pools at the host
+ceiling, keep the same GitHub repository, run, attempt and job identity from
+capacity refusal through restored headroom. Record provider refusal and cleanup,
+GARM row state and attempt counter, and GitHub runner assignment separately. A
+passing recovery observation requires that the exact job starts within the
+predeclared observation window; otherwise record recovery as unproven. Restored
+headroom, a disappeared row or a different job starting is not a pass. Record the
+exact GARM build and pool timeout alongside the observations. A disposable
+offline retry regression must exercise the real SQL state checks or a test store
+that rejects the same transition; a permissive fake can hide this failure.
 
 ## Evidence notes
 
