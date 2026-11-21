@@ -9,13 +9,42 @@ explicitly opted-in policy editor, but this overlay does not enable it.
 Do not replace a working Garm provider: physical retirement and job-safe drain
 are still missing. Packaging cannot make those missing lifecycle features safe.
 
+## Stock GARM wrapper: intended production topology
+
+GitHub queues and assigns jobs. Stock GARM creates, registers and retires
+runners through its existing Incus provider. The separate capacity gateway
+observes demand and pool state, compares them with Incus host capacity, and
+proposes cross-repository allocation. Incus inventory reads are not runner
+lifecycle calls. Any future automated pool limit change goes through GARM
+and requires separate write qualification.
+
+Reuse the `gateway` image target and the existing preview overlay for
+packaging evaluation only if the stack meets the namespace and UID boundaries
+below. The image contains the gateway executable and admin
+UI, not the separately packaged experimental provider or native helpers.
+The executable still contains opt-in functionality: verify the supplied
+command, configuration and runtime behavior, not only the image contents.
+Keep the installed stock provider and do not wire an experimental provider
+callback into this wrapper. The provider RPC and artifacts below describe
+separate experimental interfaces, not a requirement to replace the existing
+provider. The preview still uses the full gateway with its existing initialized
+SQLite state, independent identity and validated loopback RPC TLS configuration.
+
+The joined disposable CI fixture starts a real stock GARM with generated
+uninitialized state. It checks packaging and isolated startup, and explicitly
+records `upstream_inventory_integrated=false`. The separate fixture using a
+synthetic upstream is also not proof of a real scoped inventory connection.
+Before qualifying the wrapper, require positive scoped reads from the intended
+GARM and Incus route and verify the experimental lifecycle path remains off.
+This does not qualify settings writes or authorize deployment.
+
 ## Deployment topology and choice
 
 The gateway accepts only explicit loopback listener addresses. Do not patch that
 check away, add host networking, or expose an unauthenticated forwarding proxy.
 For an existing Compose Garm stack, the candidate overlay shares the **Garm
-service's network namespace only** (`network_mode: service:garm`). Garm's external
-provider can then call `https://127.0.0.1:9443` without any published gateway port.
+service's network namespace only** (`network_mode: service:garm`). In the separate experimental callback setup, the external
+provider can call `https://127.0.0.1:9443` without any published gateway port.
 Provider RPC still requires TLS 1.3, a trusted server certificate, a verified
 client certificate and the exact configured client-leaf fingerprint.
 
@@ -25,7 +54,8 @@ dropped and no Docker/Incus socket, host PID namespace, privileged mode, or acce
 to gateway credentials/state. A root or privileged Garm container and untrusted
 jobs colocated with control-plane credentials do not meet this isolation model.
 Do not mount any gateway private/state directory into Garm or runner guests.
-The read-only provider configuration and client keys belong only to the Garm UID.
+If evaluating the experimental callback, its read-only provider configuration
+and client keys belong only to the Garm UID.
 Separate OS users but one shared secret volume is not isolation.
 
 The exact stack service name, network routes to trusted Garm/Incus APIs, DNS,
@@ -63,6 +93,7 @@ against the builder's Debian libc. Never set CGO to zero to bypass SQLite.
 docker build --target gateway -t capacity-gateway:review .
 # Separate local-only recovery tool image; it does not start a gateway.
 docker build --target ledger-tool -t capacity-ledger:review .
+# Separate callback experiment only; not a stock-wrapper build requirement.
 # BuildKit exports the provider binary, not an image that can run Garm.
 docker build --target provider-artifact --output type=local,dest=./provider-export .
 ```
@@ -77,8 +108,10 @@ in the private deployment change before publishing or using the image. The local
 review tag above is not a deployment reference. The overlay requires an explicit
 image value; use an immutable digest, never `latest` or a moving review tag.
 
-Review the provider binary and exact Garm compatibility patch separately. Export
-and install it only in a reviewed Garm image matching the qualified OS/architecture **and libc/loader** (Debian bookworm in
+For any separately reviewed callback experiment, review the provider binary and
+exact Garm compatibility patch. The stock wrapper does not install either. A
+callback artifact needs a Garm image matching the qualified OS/architecture
+**and libc/loader** (Debian bookworm in
 this candidate). An Alpine/musl or older-glibc Garm image cannot be assumed
 compatible. Qualify the exact artifact inside the intended Garm runtime before
 installation; do not replace that runtime merely to satisfy this packaging.
@@ -131,7 +164,9 @@ key and token files must belong to the running UID, even public CA files.
 Do not use default Compose file-backed `secrets` permissions without verifying
 ownership/mode: common root-owned `0444` mounts are deliberately rejected.
 
-The provider's **separate** private config/key directory belongs to the Garm UID.
+For a separate experimental callback evaluation only, the provider's private
+config/key directory belongs to the Garm UID. The stock wrapper does not install
+this callback or its configuration.
 It contains only controller identity, `https://127.0.0.1:9443` and provider mTLS
 files, not Incus credentials, Garm inventory token, admin read token or ledger.
 Both server certificates must cover the configured IP/hostname. Do not disable
@@ -173,8 +208,9 @@ Before an authorized disposable runtime check, verify:
 2. The gateway uses actual CGO SQLite WAL + FULL durability and preserves state
    across gateway recreation. Refusing a stale/failed inventory leaves admission
    blocked. Never equate a single missing resource with deletion evidence.
-3. Unauthenticated, wrong-leaf and wrong-role calls fail; the provider can reach
-   the loopback mTLS listener; no other network interface exposes either listener.
+3. Unauthenticated, wrong-leaf and wrong-role calls fail. Neither listener is
+   exposed through another network interface. Test experimental provider callback
+   reachability separately; it is not a stock wrapper acceptance requirement.
 4. The optional UI uses the separate read credential and actual ledger; it cannot
    admit/create. For remote access use an approved end-to-end TLS tunnel to this
    namespace, not a new published provider port or public bearer-token URL.
