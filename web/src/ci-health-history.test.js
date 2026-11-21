@@ -74,6 +74,42 @@ test("earlier history expiry does not renew on wall rollback or remove still-cur
   assert.equal(ciHistoryLease(view, wall + 60_000, mono), null);
 });
 
+function retryRecoveryFixture() {
+  const view = fixture();
+  const {previous, current} = view.history.workflows[0];
+  // The first-attempt failure is in the current window. The successful retry
+  // was observed in the other window, before re-observing that older attempt.
+  previous.retries.distinct_runs = 1;
+  previous.retries.attempts = {...none(), observed: 1, success: 1, completed: 1};
+  previous.recovered_initial_failures = 0;
+  current.recovered_initial_failures = 1;
+  return view;
+}
+
+test("retained retry recovery is optional for legacy windows and strictly bounded by both kinds of evidence", () => {
+  const view = retryRecoveryFixture();
+  assert.equal(validateCIHealthSnapshot(view), view);
+  for (const change of [
+    ({current}) => { current.recovered_initial_failures = -1; },
+    ({current}) => { current.recovered_initial_failures = 2; },
+    ({current}) => { current.recovered_initial_failures = "1"; },
+    ({current}) => { delete current.recovered_initial_failures; },
+    ({previous}) => { previous.recovered_initial_failures = 1; },
+    ({previous}) => {
+      previous.retries.attempts.success = 0;
+      previous.retries.attempts.unknown = 1;
+    },
+    ({previous}) => {
+      previous.initial = {distinct_runs: 1, attempts: {...none(), observed: 1, failure: 1, completed: 1}, jobs: none(), steps: none()};
+      previous.recovered_initial_failures = 1;
+    },
+  ]) {
+    const bad = retryRecoveryFixture();
+    change(bad.history.workflows[0]);
+    assert.throws(() => validateCIHealthSnapshot(bad), /CI Health response unavailable/);
+  }
+});
+
 test("retained view labels coverage, actual denominator, unsupported tests and missing rather than zero", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "garm-ci-history-render-"));
   let server;
@@ -98,6 +134,14 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
       assert.match(html, /No attempt was split/);
     }
     assert.match(markup, /Verified test reports are unavailable/);
+    assert.doesNotMatch(markup, /Successful retry observed|No initial failures observed/);
+    const recoveries = retryRecoveryFixture();
+    const retryMarkup = render(recoveries, {showHistory: true});
+    assert.match(retryMarkup, /Most recent 7 days: Successful retry observed for 1 of 1 observed initial failures/);
+    assert.match(retryMarkup, /Previous 7 days: No initial failures observed/);
+    assert.match(retryMarkup, /An unobserved retry does not establish the run’s eventual outcome/);
+    assert.doesNotMatch(render(recoveries), /Successful retry observed/);
+    assert.equal(render(recoveries, {showHistory: true, now: Date.parse(at) + 120_000}), "");
     assert.match(markup, /1\/2 \(50\.0%\)/);
     assert.match(markup, /Jobs \(pooled\).*<td>2 of 3<\/td><td>1 s<\/td><td>2 s<\/td>/);
     assert.match(markup, /Steps \(pooled\).*<td>1 of 1<\/td><td>0 s<\/td><td>0 s<\/td>/);

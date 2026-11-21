@@ -18,6 +18,10 @@ type RetainedTrends struct {
 type RetainedTrendWindow struct {
 	From, To         time.Time
 	Initial, Retries RetainedTrendBucket
+	// RecoveredInitialFailures counts this window's exact attempt-1
+	// failures with an observed success on a higher-numbered attempt of
+	// the same run in either retained window. Unseen retries are unknown.
+	RecoveredInitialFailures int
 }
 
 type RetainedTrendBucket struct {
@@ -61,6 +65,8 @@ func SummarizeRetainedTrends(scope TrendScope, observedAt time.Time, rows []Atte
 	var samples [len(buckets)]retainedTrendSamples
 	var runs [len(buckets)]map[int64]bool
 	seen := make(map[AttemptKey]bool, len(rows))
+	failedInitial := make(map[int64]int)
+	successfulRetry := make(map[int64]bool)
 	for _, row := range rows {
 		key := row.Key
 		if key.Source != scope.Source || key.RepositoryID != scope.RepositoryID || key.WorkflowID != scope.WorkflowID ||
@@ -81,6 +87,11 @@ func SummarizeRetainedTrends(scope TrendScope, observedAt time.Time, rows []Atte
 		}
 		if key.Attempt > 1 {
 			i++
+			if measured.Conclusion == ConclusionSuccess {
+				successfulRetry[key.RunID] = true
+			}
+		} else if measured.Conclusion == ConclusionFailure {
+			failedInitial[key.RunID] = i / 2
 		}
 		b, d := buckets[i], &samples[i]
 		if runs[i] == nil {
@@ -93,6 +104,12 @@ func SummarizeRetainedTrends(scope TrendScope, observedAt time.Time, rows []Atte
 			for _, step := range job.Steps {
 				recordRetainedMetric(&b.Steps, &d.steps, step.Phase, step.Conclusion, step.Duration)
 			}
+		}
+	}
+	windows := [...]*RetainedTrendWindow{&out.Previous, &out.Current}
+	for run, window := range failedInitial {
+		if successfulRetry[run] {
+			windows[window].RecoveredInitialFailures++
 		}
 	}
 	for i, b := range buckets {

@@ -175,9 +175,15 @@ limited. It never splits an attempt or skips past it to fit smaller rows.
 Hitting a selection limit does not change the persisted facts, revisions, or
 future writes. The marker is about the bounded local read, not proof that a
 particular seven-day bucket lost observations. The view separately counts
-initial attempts and retry attempts and their distinct run IDs. Failure share
-uses recorded successes and failures only. Mean and p95 use actual completed
-durations with both endpoints; job and step observations are pooled, not compared by guessed
+initial attempts and retry attempts and their distinct run IDs. It also
+counts initial attempt failures with an observed successful higher-numbered
+attempt for the same exact run, at most once per run. The count is shown in
+the initial failure's last-observed window; the success can be observed in
+either selected window. An unobserved retry or out-of-window observation
+does not establish the eventual run outcome. The reader does not backfill
+missed attempts for this count. Failure share uses recorded successes and
+failures only. Mean and p95 use actual completed durations with both
+endpoints; job and step observations are pooled, not compared by guessed
 definition. Workflow wall duration remains unavailable without an exact
 attempt end. The retained subset is not complete upstream history. No verified
 test reports, job resource measurements or sizing recommendations are

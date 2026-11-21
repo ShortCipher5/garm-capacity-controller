@@ -47,7 +47,14 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 		if f.mode.Load() == 5 && id == baseRun+1 {
 			workflow++
 		}
-		return map[string]any{"id": id, "workflow_id": workflow, "run_attempt": 1, "repository": identity, "status": "queued", "created_at": created}
+		row := map[string]any{"id": id, "workflow_id": workflow, "run_attempt": 1, "repository": identity, "status": "queued", "created_at": created}
+		switch f.mode.Load() {
+		case 7:
+			row["status"], row["conclusion"] = "completed", "failure"
+		case 8:
+			row["run_attempt"], row["status"], row["conclusion"] = 2, "completed", "success"
+		}
+		return row
 	}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.reads.Add(1)
@@ -80,7 +87,11 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 
 			}
 			rows := []any{}
-			if r.URL.Query().Get("status") == "queued" {
+			status := "queued"
+			if mode := f.mode.Load(); mode == 7 || mode == 8 {
+				status = "" // Completed runs are discovered by the bounded recent scan.
+			}
+			if r.URL.Query().Get("status") == status {
 				for i := int64(0); i < want; i++ {
 					rows = append(rows, run(baseRun+i))
 				}
@@ -89,7 +100,11 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 		case strings.HasPrefix(r.URL.Path, path+"/actions/runs/"):
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, path+"/actions/runs/"), "/")
 			id, err := strconv.ParseInt(parts[0], 10, 64)
-			if err != nil || id < baseRun || id >= baseRun+26 || len(parts) < 3 || parts[1] != "attempts" || parts[2] != "1" {
+			attempt := "1"
+			if f.mode.Load() == 8 {
+				attempt = "2"
+			}
+			if err != nil || id < baseRun || id >= baseRun+26 || len(parts) < 3 || parts[1] != "attempts" || parts[2] != attempt {
 				t.Error("unreviewed fixture scope")
 				w.WriteHeader(404)
 				return
