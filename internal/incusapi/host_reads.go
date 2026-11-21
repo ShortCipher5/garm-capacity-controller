@@ -43,6 +43,7 @@ type Guest struct {
 
 type guestInventory struct {
 	Guest
+	container bool
 	// Exact named disk devices described by this inventory row, or nil
 	// when the inventory cannot qualify native disk report coverage.
 	measurableDisks map[string]struct{}
@@ -61,6 +62,32 @@ type UtilizationSample struct {
 	// unavailable metric. Other reported counters still contribute. A
 	// sample with Errors is incomplete, not a zero or a rate baseline.
 	Errors []GuestUtilizationError
+	// GuestCPU is optional in-process diagnostic evidence for detecting
+	// changes, not proof of an immutable counter epoch. Nil means some
+	// listed guest did not qualify; a nonnil empty slice is a read of an
+	// empty project inventory. Never publish or persist guest identities.
+	GuestCPU      []GuestCPUObservation `json:"-"`
+	guestCPUScope guestCPUObservedScope
+}
+
+// GuestCPUObservation is one particular container's reported process and
+// cumulative native CPU counter. Incus reads these fields sequentially;
+// matching observations cannot establish that an epoch stayed unchanged.
+type GuestCPUObservation struct {
+	Name                 string
+	CreatedAt, StartedAt time.Time
+	PID, CPUUsedNanos    int64
+}
+
+type guestCPUObservedScope struct {
+	project, peer string
+}
+
+// GuestCPUObservedScopeChanged detects differing locally observed TLS peers
+// or project scopes. False, including any absent scope, is not a trust or
+// continuity verdict. Hosts remain separately configured by the existing caller.
+func (s UtilizationSample) GuestCPUObservedScopeChanged(other UtilizationSample) bool {
+	return s.guestCPUScope.peer != "" && other.guestCPUScope.peer != "" && s.guestCPUScope != other.guestCPUScope
 }
 
 type GuestUtilizationError struct {
@@ -168,7 +195,7 @@ func (c *Client) HostTotals(ctx context.Context) (HostTotals, error) {
 // means unbounded-from-view, never evidence of absence. Row identity and shape
 // stay strict: malformed rows, duplicate names and invalid attribution fail closed.
 func (c *Client) Guests(ctx context.Context) ([]Guest, error) {
-	inventory, err := c.readGuestInventory(ctx)
+	inventory, _, err := c.readGuestInventory(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -179,36 +206,43 @@ func (c *Client) Guests(ctx context.Context) ([]Guest, error) {
 	return result, nil
 }
 
-func (c *Client) readGuestInventory(ctx context.Context) ([]guestInventory, error) {
-	if err := c.trusted(ctx, false); err != nil {
-		return nil, err
+func (c *Client) readGuestInventory(ctx context.Context) ([]guestInventory, string, error) {
+	root, err := c.trustedRoot(ctx, false)
+	if err != nil {
+		return nil, "", err
 	}
 	response, err := c.request(ctx, http.MethodGet, "/1.0/instances", url.Values{"recursion": {"1"}}, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if response.kind != "sync" {
-		return nil, ErrResponse
+		return nil, "", ErrResponse
 	}
 	var rows []json.RawMessage
 	trimmed := bytes.TrimSpace(response.metadata)
 	if len(trimmed) == 0 || trimmed[0] != '[' || json.Unmarshal(response.metadata, &rows) != nil {
-		return nil, ErrResponse
+		return nil, "", ErrResponse
 	}
 	result := make([]guestInventory, 0, len(rows))
 	seen := map[string]bool{}
 	for _, row := range rows {
 		guest, err := parseGuest(row)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if seen[guest.Name] {
-			return nil, ErrResponse
+			return nil, "", ErrResponse
 		}
 		seen[guest.Name] = true
 		result = append(result, guest)
 	}
-	return result, nil
+	peer := response.serverKeyFingerprint
+	if peer != root.serverKeyFingerprint {
+		// Keep ordinary inventory and display behavior, but this root
+		// did not witness the same origin as the guest inventory.
+		peer = ""
+	}
+	return result, peer, nil
 }
 
 func parseGuest(row json.RawMessage) (guestInventory, error) {
@@ -235,6 +269,7 @@ func parseGuest(row json.RawMessage) (guestInventory, error) {
 			return guestInventory{}, ErrResponse
 		}
 	}
+	result.container = qualifiesGuestCPUContainer(fields)
 	if raw, ok := fields["expanded_config"]; ok {
 		config, err := object(raw)
 		if err != nil {
@@ -341,16 +376,24 @@ func expectedGuestStateDisks(devices map[string]json.RawMessage) map[string]stru
 // that may be shared by guests. Incomplete measurements are marked even if
 // some counters remain available for display.
 func (c *Client) SampleUtilization(ctx context.Context) (UtilizationSample, error) {
-	guests, err := c.readGuestInventory(ctx)
+	guests, peer, err := c.readGuestInventory(ctx)
 	if err != nil {
 		return UtilizationSample{}, err
 	}
 	var result UtilizationSample
+	guestCPU := make([]GuestCPUObservation, 0, len(guests))
+	cpuQualified := peer != ""
 	for _, guest := range guests {
-		usage, err := c.guestUsage(ctx, guest)
+		usage, observed, err := c.guestUsage(ctx, guest, peer)
 		if err != nil {
+			cpuQualified = false
 			result.Errors = append(result.Errors, GuestUtilizationError{Guest: guest.Name, Err: err})
 			continue
+		}
+		if observed == (GuestCPUObservation{}) {
+			cpuQualified = false
+		} else if cpuQualified {
+			guestCPU = append(guestCPU, observed)
 		}
 		if !addGuestCounter(&result.CPUUsedMillis, usage.cpuMillis) ||
 			!addGuestCounter(&result.RAMUsedMiB, usage.ramMiB) ||
@@ -363,6 +406,10 @@ func (c *Client) SampleUtilization(ctx context.Context) (UtilizationSample, erro
 		if !usage.cpuKnown || !usage.ramKnown || !usage.diskComplete {
 			result.Errors = append(result.Errors, GuestUtilizationError{Guest: guest.Name, Err: ErrResponse})
 		}
+	}
+	if cpuQualified && ctx.Err() == nil {
+		result.GuestCPU = guestCPU
+		result.guestCPUScope = guestCPUObservedScope{project: c.project, peer: peer}
 	}
 	return result, nil
 }
@@ -384,18 +431,24 @@ func addGuestCounter(sum *int64, value int64) bool {
 	return true
 }
 
-func (c *Client) guestUsage(ctx context.Context, guest guestInventory) (guestUsage, error) {
+func (c *Client) guestUsage(ctx context.Context, guest guestInventory, inventoryPeer string) (guestUsage, GuestCPUObservation, error) {
+	var observed GuestCPUObservation
 	if !name(guest.Name) {
-		return guestUsage{}, ErrConfiguration
+		return guestUsage{}, observed, ErrConfiguration
 	}
+	bound := time.Now().UTC()
 	response, err := c.request(ctx, http.MethodGet, "/1.0/instances/"+guest.Name+"/state", nil, nil)
 	if err != nil {
-		return guestUsage{}, err
+		return guestUsage{}, observed, err
 	}
 	if response.kind != "sync" {
-		return guestUsage{}, ErrResponse
+		return guestUsage{}, observed, ErrResponse
 	}
-	return parseGuestStateUsage(response.metadata, guest.measurableDisks)
+	usage, err := parseGuestStateUsage(response.metadata, guest.measurableDisks)
+	if err == nil && guest.container && inventoryPeer != "" && response.serverKeyFingerprint == inventoryPeer && usage.cpuKnown {
+		observed = parseGuestCPUObservation(response.metadata, guest, bound)
+	}
+	return usage, observed, err
 }
 
 // Native 6.0/7.0 state can serialize zero both for a genuine zero and when

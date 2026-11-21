@@ -96,10 +96,17 @@ monitoring on this branch:
 - The default sweep interval is 60s (minimum 15s). The collector converts
   cumulative guest CPU time to a project rate over the interval between
   readings. An incomplete sweep cannot become a zero or provide a
-  baseline. A counter reset or a change in the reported guest count
-  starts a new baseline without recording a rate for that interval.
-  Even complete aggregates with the same count do not prove that the
-  same guest processes contributed to both endpoints.
+  baseline. Observed membership, creation time, runtime PID and process
+  start time, and raw CPU counter progression are checked per container
+  before using an aggregate delta. A change or per-container decrease
+  starts a new baseline without recording a rate for that interval, even
+  if the guest count stays the same and the aggregate rises.
+  The existing Incus reads are sequential, not an atomic snapshot.
+  Matching observations do not prove immutable counter continuity.
+  If any project guest lacks usable runtime observations, the whole
+  interval is unavailable. This includes a VM whose host QEMU process
+  does not identify the guest CPU counter. On-demand discovery remains
+  a separate point-in-time view.
 - Samples are appended to the admission usage history with source
   `guest-state-v2` (legacy rows remain `guest-state`) and exposed read-only at
   `GET /admin/api/v1/usage/{host}?since=<RFC3339>&limit=<n>` on the
