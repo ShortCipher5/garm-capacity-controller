@@ -88,7 +88,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     try {
       await applyGarmChange(credential,review.kind,review.change,{signal:controller.signal});
       if(!mounted.current)return;
-      dirty.current=false;setDraftDirty(false);setReview(null);setFormEpoch(value=>value+1);setMessage("Operation recorded as confirmed. Ledger budgets remain independently enforced.");
+      dirty.current=false;setDraftDirty(false);setReview(null);setFormEpoch(value=>value+1);setMessage("Operation recorded as confirmed. This confirms the original settings change, not current settings, host limit enforcement, or released capacity.");
       try {const next=await read();if(mounted.current)setSnapshot(next);}catch{if(mounted.current){setSnapshot(null);setMessage("Operation recorded as confirmed, but current settings could not be refreshed. Refresh Garm settings before another change.");}}
     } catch(error) { if(mounted.current){setMessage(error.message);if(error.message.includes("Garm settings changed or another change is pending")){setNeedsRefresh(true);setReview(null);}if(error.message.includes("outcome")||error.message.includes("confirmation")){uncertain.current=true;setReview(null);}} }
     finally {clearTimeout(timeout);active.current=null;if(mounted.current)setBusy(false);}
@@ -119,7 +119,8 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {!reductionOnly&&<p className="drain-warning">Garm v0.2.1 has no atomic conditional updates. A fresh fingerprint check does not fence other Garm UI/CLI writers. Use only with externally coordinated exclusive settings ownership. Tags affect future runners only. Priority is not a fair scheduler. Disabling does not drain idle runners. Decreasing minimum idle is blocked.</p>}
     <button className="quiet" onClick={()=>load(false)} disabled={busy}>{busy?"Working…":(needsRefresh||draftDirty||review)?"Discard draft and refresh Garm settings":snapshot?"Refresh Garm settings":"Load Garm settings"}</button>
     {snapshot && <button className="quiet" type="button" onClick={()=>load(true)} disabled={busy}>Refresh observations, keep draft</button>}
-    <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. No automatic writes or recreation.</p>
+    <p>Existing Garm settings refresh every 15 seconds while visible and when this window regains focus. These refreshes do not change settings.</p>
+    {snapshot?.policy_cap_reconciler && <p>The separately configured saved-cap reconciler can automatically lower a pool maximum. See its last reported status below.</p>}
     {readChanges && <GarmReadChanges changes={readChanges} stale={syncError} onDismiss={()=>setReadChanges(null)} />}
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
