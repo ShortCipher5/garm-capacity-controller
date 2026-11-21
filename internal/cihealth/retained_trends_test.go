@@ -51,6 +51,51 @@ func TestRetainedTrendsCountsDistinctRunsWithinEachPartition(t *testing.T) {
 	}
 }
 
+func TestRetainedTrendsRecoveryRequiresSameRunAndExplicitAttemptResults(t *testing.T) {
+	end := time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC)
+	boundary := end.Add(-retainedTrendWindow)
+	outside := boundary.Add(-retainedTrendWindow - 1)
+	fact := func(run, attempt int64, at time.Time, conclusion Conclusion) AttemptFacts {
+		r := retainedTestFact(run, attempt, at)
+		r.Clock = Clock{Phase: Completed, Conclusion: conclusion}
+		return r
+	}
+	const previous, current = 9007199254740992, 9007199254740993
+	noRunSuccess := fact(14, 2, end, ConclusionUnknown)
+	noRunSuccess.Jobs = []JobFacts{{Key: JobKey{noRunSuccess.Key, 7}, Clock: Clock{Phase: Completed, Conclusion: ConclusionSuccess}}}
+	rows := []AttemptFacts{
+		fact(previous, 3, end, ConclusionSuccess), // Source observations need not be in attempt order.
+		fact(previous, 1, boundary.Add(-1), ConclusionFailure),
+		fact(previous, 2, boundary, ConclusionSuccess), // Do not count the same run twice.
+		fact(previous, 4, end, ConclusionFailure),      // Observed successful retry does not claim latest outcome.
+		fact(current, 1, boundary, ConclusionFailure),
+		fact(current, 2, boundary.Add(-1), ConclusionSuccess), // Retry seen before a later reread of attempt 1.
+		fact(10, 1, end, ConclusionFailure),
+		fact(11, 2, end, ConclusionSuccess), // A different run cannot recover run 10.
+		fact(12, 1, outside, ConclusionFailure),
+		fact(12, 2, end, ConclusionSuccess), // Out-of-window first attempt creates no cohort member.
+		fact(13, 1, end, ConclusionFailure),
+		fact(13, 2, outside, ConclusionSuccess), // Out-of-window retry is not selected evidence.
+		fact(14, 1, end, ConclusionFailure),
+		noRunSuccess, // A successful child does not prove the attempt result.
+		fact(15, 1, end, ConclusionTimedOut),
+		fact(15, 2, end, ConclusionSuccess),
+		fact(16, 1, end, ConclusionSuccess),
+		fact(16, 2, end, ConclusionSuccess),
+	}
+	got, err := SummarizeRetainedTrends(retainedTestScope, end, rows)
+	if err != nil || got.Previous.RecoveredInitialFailures != 1 || got.Current.RecoveredInitialFailures != 1 ||
+		got.Previous.Initial.Attempts.Failure != 1 || got.Current.Initial.Attempts.Failure != 4 {
+		t.Fatalf("wrong result/resolution cohorts: %+v, %v", got, err)
+	}
+	alien := fact(previous, 5, end, ConclusionSuccess)
+	alien.Key.WorkflowID++
+	got, err = SummarizeRetainedTrends(retainedTestScope, end, []AttemptFacts{rows[1], alien})
+	if err != ErrTrendFacts || got != (RetainedTrends{}) {
+		t.Fatalf("foreign workflow evidence leaked into recovery result: %+v, %v", got, err)
+	}
+}
+
 func TestRetainedTrendsExactTimingsIndependentOfResult(t *testing.T) {
 	end := time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC)
 	r := retainedTestFact(3, 1, end)

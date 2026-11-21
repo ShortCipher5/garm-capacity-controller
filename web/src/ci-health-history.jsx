@@ -17,6 +17,7 @@ function DurationCoverage({metric}) {
 }
 
 function HistoryWindow({label, value, durationText}) {
+  const initialFailures = value.initial.attempts.failure;
   return <div className="table-wrap">
     <table>
       <caption>{label}: {isoTime(value.from)} to {isoTime(value.to)}</caption>
@@ -38,6 +39,11 @@ function HistoryWindow({label, value, durationText}) {
         })}
       </tbody>)}
     </table>
+    {Object.hasOwn(value, "recovered_initial_failures") && <p>
+      {label}: {initialFailures > 0 ?
+        <>Successful retry observed for {value.recovered_initial_failures} of {initialFailures} observed initial failures.</> :
+        <>No initial failures observed.</>}
+    </p>}
   </div>;
 }
 
@@ -51,6 +57,9 @@ export function CIHealthHistory({history, durationText}) {
       Timing coverage counts only observed completed rows; skipped and active rows are not included.
       Mean and P95 use only rows with both endpoints. Jobs and steps are pooled, not grouped by equivalent definitions.
       A run can appear in both attempt types. Verified test reports are unavailable.</p>
+    {history.workflows.some((w) => Object.hasOwn(w.current, "recovered_initial_failures")) &&
+      <p className="muted">A successful retry must belong to the same run and be observed in either retained window.
+        An unobserved retry does not establish the run’s eventual outcome.</p>}
     {history.workflows.map((w) => <details key={ciWorkflowKey(w)} className="ci-health-attempt">
       <summary>Workflow <code>{w.workflow_id}</code>, repository <code>{w.repository_id}</code>, source <code>{w.source}</code>
         {w.selection_limited && <> · Limited selection</>}</summary>
