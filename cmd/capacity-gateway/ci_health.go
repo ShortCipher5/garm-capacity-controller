@@ -46,6 +46,7 @@ type ciHealthRuntime struct {
 	historyMu       sync.Mutex
 	history         *cihealthsource.BackgroundCycleHistory
 	historyDisabled bool
+	historyTrends   bool
 }
 
 func buildCIHealth(c configuration, dc *demandobserver.Config) (*ciHealthRuntime, error) {
@@ -86,17 +87,38 @@ func (c *ciHealthRuntime) close() {
 // startup action. Storage custody and its exact workflow/revision review are
 // independently provided by the caller, not derived from the GARM scope.
 func (c *ciHealthRuntime) attachOwnedHistory(owned *cihealthsource.OwnedCycleHistory, reviewed []cihealthsource.HistoryExpectation) error {
+	return c.attachHistory(owned, reviewed, false)
+}
+
+// attachOwnedHistoryWithTrends is explicit consent to publish scoped
+// aggregates through the same loopback owner endpoint. Startup never calls
+// it from the ordinary timing configuration or opens history by default.
+func (c *ciHealthRuntime) attachOwnedHistoryWithTrends(owned *cihealthsource.OwnedCycleHistory, reviewed []cihealthsource.HistoryExpectation) error {
+	return c.attachHistory(owned, reviewed, true)
+}
+
+func (c *ciHealthRuntime) attachHistory(owned *cihealthsource.OwnedCycleHistory, reviewed []cihealthsource.HistoryExpectation, trends bool) error {
 	c.historyMu.Lock()
 	defer c.historyMu.Unlock()
 	if c.historyDisabled || c.history != nil {
 		return cihealthsource.ErrCycleHistory
 	}
-	history, err := owned.BindBackground(c.source, reviewed)
+	bind := owned.BindBackground
+	if trends {
+		bind = owned.BindBackgroundWithTrends
+	}
+	history, err := bind(c.source, reviewed)
 	if err != nil {
 		return err
 	}
-	c.history = history
+	c.history, c.historyTrends = history, trends
 	return nil
+}
+
+func (c *ciHealthRuntime) hasHistoryTrends() bool {
+	c.historyMu.Lock()
+	defer c.historyMu.Unlock()
+	return !c.historyDisabled && c.historyTrends
 }
 
 func (c *ciHealthRuntime) activeHistory() *cihealthsource.BackgroundCycleHistory {
@@ -156,6 +178,11 @@ func (c *ciHealthRuntime) runCycle(ctx context.Context) bool {
 	if history := c.activeHistory(); history != nil && cycle.State() == cihealthsource.CycleObserved {
 		if _, err := history.PersistCycle(ctx, cycle); err != nil {
 			c.disableHistory()
+		} else if c.hasHistoryTrends() {
+			result, err := history.SummarizeObservedTrends(ctx, cycle)
+			if err != nil || (result.Current() && c.snapshot.PublishRetainedTrends(result) != nil) {
+				c.disableHistory()
+			}
 		}
 	}
 	// Optional storage is not the now-view source. Its failure does not turn

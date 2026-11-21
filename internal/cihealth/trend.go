@@ -61,7 +61,7 @@ type TrendResultCounts struct {
 	Success, Failure, Canceled, TimedOut, OtherTerminal, Unknown int
 }
 
-// TrendDurations summarizes successful attempts with exact wall endpoints.
+// TrendDurations summarizes the caller's exact, bounded duration samples.
 // Mean is truncated to a nanosecond; P95 is the nearest-rank percentile.
 type TrendDurations struct {
 	Samples   int

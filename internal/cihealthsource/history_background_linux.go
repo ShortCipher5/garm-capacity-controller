@@ -7,15 +7,28 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
 )
 
-// BackgroundCycleHistory is a one-way, persistence-only transfer of an
-// already-open owned history into the existing CI timing worker. It cannot
-// open files, mint source observations, or expose persisted rows or proofs.
-type BackgroundCycleHistory struct{ history *OwnedCycleHistory }
+// BackgroundCycleHistory is a one-way transfer of an already-open owned
+// history into the existing timing worker. It never exposes raw stored rows
+// or mints source observations. Explicit opt-in may expose leased aggregates.
+type BackgroundCycleHistory struct {
+	history *OwnedCycleHistory
+	trends  bool
+}
 
 // BindBackground transfers a dormant owner only to the exact reviewed reader
 // and original scoped cursor receipt. The previous handle remains closable,
 // but it cannot persist directly or open a history view after transfer.
 func (s *OwnedCycleHistory) BindBackground(source *demandobserver.CIHealthSource, reviewed []HistoryExpectation) (*BackgroundCycleHistory, error) {
+	return s.bindBackground(source, reviewed, false)
+}
+
+// BindBackgroundWithTrends additionally allows this exact owner's reviewed
+// workflows to be reduced in process; ordinary storage consent does not.
+func (s *OwnedCycleHistory) BindBackgroundWithTrends(source *demandobserver.CIHealthSource, reviewed []HistoryExpectation) (*BackgroundCycleHistory, error) {
+	return s.bindBackground(source, reviewed, true)
+}
+
+func (s *OwnedCycleHistory) bindBackground(source *demandobserver.CIHealthSource, reviewed []HistoryExpectation, trends bool) (*BackgroundCycleHistory, error) {
 	if s == nil || s.cell == nil || !source.LifetimeActive() || len(reviewed) == 0 || len(reviewed) > maxHistoryCycleScopes ||
 		s.cell.closing.Load() || !s.cell.mu.TryLock() {
 		return nil, ErrCycleHistory
@@ -26,7 +39,7 @@ func (s *OwnedCycleHistory) BindBackground(source *demandobserver.CIHealthSource
 		return nil, ErrCycleHistory
 	}
 	cell.background = true
-	return &BackgroundCycleHistory{history: s}, nil
+	return &BackgroundCycleHistory{history: s, trends: trends}, nil
 }
 
 // PersistCycle performs at most one attempt from a non-partial positive
@@ -44,6 +57,7 @@ func (s *BackgroundCycleHistory) PersistCycle(ctx context.Context, cycle Cycle) 
 	if !cell.background || cell.closing.Load() || ctx.Err() != nil || cell.lifetime.Err() != nil {
 		return HistoryCycleReceipt{}, ErrCycleHistory
 	}
+	cell.trendsVersion.Store(nil)
 	if cycle.source != cell.history.owner || !cycle.source.observer.LifetimeActive() || (cycle.State() != CycleObserved && cycle.State() != CyclePartial) {
 		_ = cell.closeLocked()
 		return HistoryCycleReceipt{}, ErrCycleHistory
@@ -94,6 +108,9 @@ func (s *BackgroundCycleHistory) PersistCycle(ctx context.Context, cycle Cycle) 
 	if !guard.active(call) {
 		_ = cell.closeLocked()
 		return receipt, ErrCycleHistory
+	}
+	if s.trends {
+		cell.trendsVersion.Store(&historyTrendVersion{at: cycle.ObservedAt(), sealedAt: cycle.sealedAt})
 	}
 	return receipt, nil
 }

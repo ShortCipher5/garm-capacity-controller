@@ -33,6 +33,8 @@ type CIHealthSnapshot struct {
 	checked    time.Time
 	generation *ciHealthGeneration
 	body       []byte
+	history    ciHistoryResponse
+	workflows  map[cihealth.TrendScope]bool
 }
 
 type ciHealthGeneration struct{ reserved byte }
@@ -94,6 +96,14 @@ func (s *CIHealthSnapshot) PublishTiming(observedAt time.Time, facts []cihealth.
 			return errCIProjection
 		}
 	}
+	var workflows map[cihealth.TrendScope]bool
+	if !boundedPartial {
+		workflows = make(map[cihealth.TrendScope]bool, len(facts))
+		for _, f := range facts {
+			k := f.Key
+			workflows[cihealth.TrendScope{Source: k.Source, RepositoryID: k.RepositoryID, WorkflowID: k.WorkflowID}] = true
+		}
+	}
 	coverage := "observed_subset"
 	if boundedPartial {
 		coverage = "bounded_partial"
@@ -107,7 +117,7 @@ func (s *CIHealthSnapshot) PublishTiming(observedAt time.Time, facts []cihealth.
 	if err != nil || len(wire) > maxCIResponseBytes {
 		return errCIProjection
 	}
-	return s.commit(at, lease, wire)
+	return s.commit(at, lease, wire, workflows)
 }
 
 func (s *CIHealthSnapshot) begin(at time.Time) *ciHealthGeneration {
@@ -119,13 +129,15 @@ func (s *CIHealthSnapshot) begin(at time.Time) *ciHealthGeneration {
 	return s.generation
 }
 
-func (s *CIHealthSnapshot) commit(at time.Time, lease *ciHealthGeneration, wire []byte) error {
+func (s *CIHealthSnapshot) commit(at time.Time, lease *ciHealthGeneration, wire []byte, workflows map[cihealth.TrendScope]bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.validAtLocked(at) || lease != s.generation {
 		return errCIProjection
 	}
 	s.latest, s.body, s.generation = at, wire, &ciHealthGeneration{}
+	s.history = ciHistoryResponse{}
+	s.workflows = workflows
 	return nil
 }
 
@@ -160,6 +172,8 @@ func (s *CIHealthSnapshot) Withdraw() {
 
 func (s *CIHealthSnapshot) fenceLocked() {
 	s.body, s.generation = nil, &ciHealthGeneration{}
+	s.history = ciHistoryResponse{}
+	s.workflows = nil
 	if s.checked.After(s.latest) {
 		s.latest = s.checked
 	}
@@ -171,6 +185,14 @@ func (s *CIHealthSnapshot) read() []byte {
 	now, stable := s.wallLocked()
 	if !stable || now.Before(s.latest) || !now.Before(s.latest.Add(ciDisplayLifetime)) {
 		s.body = nil
+		s.history = ciHistoryResponse{}
+		s.workflows = nil
+	}
+	if s.history.body != nil {
+		if now.Before(s.history.expires) && s.history.source.Current() {
+			return s.history.body
+		}
+		s.history = ciHistoryResponse{}
 	}
 	return s.body
 }

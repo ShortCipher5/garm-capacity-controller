@@ -190,3 +190,51 @@ test("View step opens only the exact attempt and job, then resets with a replace
   await expect(replacement).toHaveCount(0);
   expect(reads).toBe(2);
 });
+
+test("owner history expires independently without polling or losing fresh timing", async ({page}) => {
+  const now = new Date();
+  await page.clock.install({time: now});
+  const at = now.getTime() - 20_000;
+  const iso = (ms) => new Date(ms).toISOString();
+  const week = 7 * 24 * 60 * 60 * 1000;
+  let calls = 0;
+  await page.route(overviewRoute, (route) =>
+    route.fulfill({json: {...overview, ci_health_available: true}}));
+  await page.route(timingRoute, (route) => {
+    calls++;
+    const snapshot = timing(iso(at));
+    const attempt = snapshot.timing.attempts[0];
+    attempt.status = "running";
+    attempt.jobs[1].conclusion = "failure";
+    attempt.jobs[1].steps[0].conclusion = "success";
+    snapshot.coverage = "observed_subset";
+    const {source, repository_id, workflow_id} = attempt;
+    const metric = (outcome) => ({observed: outcome ? 1 : 0, success: Number(outcome === "success"),
+      failure: Number(outcome === "failure"), other: 0, active: Number(outcome === "active"), unknown: 0});
+    const bucket = () => ({distinct_runs: 0, attempts: metric(), jobs: metric(), steps: metric()});
+    snapshot.history = {coverage: "retained_subset", test_results: "unavailable", expires_at: iso(at + 60_000),
+      workflows: [{source, repository_id, workflow_id,
+        previous: {from: iso(at - 2 * week), to: iso(at - week), initial: bucket(), retries: bucket()},
+        current: {from: iso(at - week), to: iso(at), initial: bucket(),
+          retries: {distinct_runs: 1, attempts: metric("active"), jobs: {...metric("failure"), observed: 2, active: 1},
+            steps: {...metric("success"), duration: {samples: 1, mean_ns: "2000000000", p95_ns: "2000000000"}}}},
+      }],
+    };
+    return route.fulfill({json: snapshot});
+  });
+  await page.goto("/");
+  await login(page);
+  const panel = page.getByRole("region", {name: "CI Health", exact: true});
+  await panel.getByRole("button", {name: "Load timing snapshot"}).click();
+  const history = panel.getByRole("region", {name: "Retained workflow timing and results"});
+  await expect(history).toContainText("Verified test reports are unavailable");
+  await history.locator("summary").click();
+  await expect(history.getByRole("row").filter({hasText: "Jobs (pooled)"}).filter({hasText: "1/1 (100.0%)"})).toBeVisible();
+  expect(calls).toBe(1);
+  await page.clock.fastForward(25_000);
+  await page.clock.setSystemTime(now);
+  await page.clock.fastForward(16_000);
+  await expect(history).toHaveCount(0);
+  await expect(panel.getByRole("heading", {name: "Longest measured steps in this snapshot"})).toBeVisible();
+  expect(calls).toBe(1);
+});
