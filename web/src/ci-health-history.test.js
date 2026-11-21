@@ -10,15 +10,15 @@ import {ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, validateCIHealthS
 
 const at = "2026-01-21T00:00:00.123456789Z";
 const scope = {source: "fixture", repository_id: "9007199254740993", workflow_id: "9007199254740995"};
-const none = () => ({observed: 0, success: 0, failure: 0, other: 0, active: 0, unknown: 0});
+const none = () => ({observed: 0, success: 0, failure: 0, other: 0, active: 0, unknown: 0, completed: 0});
 const zeroBucket = () => ({distinct_runs: 0, attempts: none(), jobs: none(), steps: none()});
 function fixture() {
   const initial = zeroBucket();
   initial.distinct_runs = 2;
-  initial.attempts = {...none(), observed: 2, success: 1, failure: 1};
-  initial.jobs = {...none(), observed: 3, success: 1, failure: 1, unknown: 1,
+  initial.attempts = {...none(), observed: 2, success: 1, failure: 1, completed: 2};
+  initial.jobs = {...none(), observed: 3, success: 1, failure: 1, unknown: 1, completed: 3,
     duration: {samples: 2, mean_ns: "1000000000", p95_ns: "2000000000"}};
-  initial.steps = {...none(), observed: 1, success: 1, duration: {samples: 1, mean_ns: "0", p95_ns: "0"}};
+  initial.steps = {...none(), observed: 1, success: 1, completed: 1, duration: {samples: 1, mean_ns: "0", p95_ns: "0"}};
   return {state: "observed", observed_at: at, coverage: "observed_subset",
     timing: {attempts: [{...scope, run_id: "9223372036854775807", attempt: "2", observed_at: at, status: "running", jobs: []}]},
     history: {coverage: "retained_subset", test_results: "unavailable", expires_at: "2026-01-21T00:01:00.123456789Z",
@@ -40,6 +40,12 @@ test("retained history accepts only authorized scope, exact windows, bounded sam
     (v) => { v.history.workflows[0].current.to = "2026-01-21T00:00:00.123456788Z"; },
     (v) => { v.history.workflows[0].current.initial.jobs.success = 3; },
     (v) => { v.history.workflows[0].current.initial.jobs.duration.samples = 4; },
+    (v) => { v.history.workflows[0].current.initial.jobs.completed = 1; },
+    (v) => { v.history.workflows[0].current.initial.jobs.completed = 4; },
+    (v) => { v.history.workflows[0].current.initial.jobs.completed = "3"; },
+    (v) => { v.history.workflows[0].current.initial.jobs.completed = null; },
+    (v) => { const jobs = v.history.workflows[0].current.initial.jobs; jobs.active = 1; jobs.unknown = 0; },
+    (v) => { const jobs = v.history.workflows[0].current.initial.jobs; jobs.completed = 2; jobs.duration.samples = 3; },
     (v) => { v.history.workflows[0].current.initial.jobs.duration.mean_ns = 0; },
     (v) => { v.history.workflows[0].current.initial.distinct_runs = 1; },
     (v) => { v.history.workflows[0].selection_limited = "unknown"; },
@@ -93,9 +99,17 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
     }
     assert.match(markup, /Verified test reports are unavailable/);
     assert.match(markup, /1\/2 \(50\.0%\)/);
-    assert.match(markup, /Jobs \(pooled\).*<td>2<\/td><td>1 s<\/td><td>2 s<\/td>/);
-    assert.match(markup, /Steps \(pooled\).*<td>1<\/td><td>0 s<\/td><td>0 s<\/td>/);
-    assert.match(markup, /<td>0<\/td><td><span class="muted">Unavailable<\/span><\/td>/);
+    assert.match(markup, /Jobs \(pooled\).*<td>2 of 3<\/td><td>1 s<\/td><td>2 s<\/td>/);
+    assert.match(markup, /Steps \(pooled\).*<td>1 of 1<\/td><td>0 s<\/td><td>0 s<\/td>/);
+    assert.match(markup, /<td>0 of 2<\/td><td><span class="muted">Unavailable<\/span><\/td>/);
+    assert.match(markup, /<td>0 of 0<\/td><td><span class="muted">Unavailable<\/span><\/td>/);
+    const old = fixture();
+    delete old.history.workflows[0].current.initial.jobs.completed;
+    assert.equal(validateCIHealthSnapshot(old), old);
+    assert.match(render(old, {showHistory: true}), /2 timed · <span class="muted">Completed count unknown<\/span>/);
+    const bad = fixture();
+    bad.history.workflows[0].current.initial.jobs.completed = 1;
+    assert.equal(render(bad, {showHistory: true}), "");
     assert.doesNotMatch(render(snapshot), /Retained workflow timing and results/);
     assert.equal(render(snapshot, {showHistory: true, now: Date.parse(at) + 120_000}), "");
   } finally {

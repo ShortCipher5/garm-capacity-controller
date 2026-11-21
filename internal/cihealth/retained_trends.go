@@ -31,7 +31,10 @@ type RetainedTrendBucket struct {
 // sample and differs from a measured zero.
 type RetainedTrendMetric struct {
 	Observed, Success, Failure, Other, Active, Unknown int
-	Duration                                           *TrendDurations
+	// Completed is a phase count, not an outcome bucket. Skipped, active
+	// and unknown-phase rows never contribute, even with a known result.
+	Completed int
+	Duration  *TrendDurations
 }
 
 type retainedTrendSamples struct {
@@ -116,7 +119,10 @@ func recordRetainedMetric(m *RetainedTrendMetric, samples *[]time.Duration, phas
 	default:
 		m.Unknown++
 	}
-	if phase == Completed && duration.Basis == ObservedEndpoints {
-		*samples = append(*samples, duration.Duration)
+	if phase == Completed {
+		m.Completed++
+		if duration.Basis == ObservedEndpoints {
+			*samples = append(*samples, duration.Duration)
+		}
 	}
 }
