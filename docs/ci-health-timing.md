@@ -76,6 +76,12 @@ identity order, not by wait or runtime. Additional observed jobs remain in
 the attempt details. The current GitHub reader cannot establish a queue
 arrival or prior queue sighting, so queued wait is unknown.
 
+The longest-steps summary ranks up to twelve individual completed step
+observations from this snapshot, with exact workflow, run, attempt, job,
+and step identifiers. It counts measured versus observed step rows.
+Running, skipped, and untimed steps are not ranked. The order is by measured
+execution duration, not by typical runtime or recent change for a step.
+
 CI Health presents source-confirmed results separately from timing for each
 observed run attempt, job, and step. A completed row without a result is
 unknown; a duration alone does not imply success. The view does not expose
