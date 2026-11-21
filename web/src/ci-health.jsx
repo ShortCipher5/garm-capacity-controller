@@ -1,9 +1,9 @@
 import React, {useEffect, useId, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciStepKey, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
-import {focusCIStep} from "./ci-health-step-navigation.js";
+import {focusCIJob, focusCIStep} from "./ci-health-step-navigation.js";
 import {CIHealthHistory} from "./ci-health-history.jsx";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
@@ -62,10 +62,10 @@ function StepRows({attempt, job, stepId}) {
     </div>
   );
 }
-function JobRow({attempt, job, stepId}) {
+function JobRow({attempt, job, jobId, stepId}) {
   const skip = job.status === "skipped";
   return (
-    <li>
+    <li id={jobId(ciJobKey(attempt, job.id))} data-ci-job-row="" tabIndex={-1}>
       <div className="ci-health-row-head">
         <strong>Job <code>{job.id}</code></strong> <Phase status={job.status} />
       </div>
@@ -86,7 +86,7 @@ function JobRow({attempt, job, stepId}) {
     </li>
   );
 }
-function AttemptRow({attempt: a, stepId}) {
+function AttemptRow({attempt: a, jobId, stepId}) {
   return (
     <details className="ci-health-attempt" data-ci-attempt="" open={activeAttempt(a) || undefined}>
       <summary><strong>Run <code>{a.run_id}</code>, attempt <code>{a.attempt}</code></strong> <Phase status={a.status} /></summary>
@@ -101,13 +101,13 @@ function AttemptRow({attempt: a, stepId}) {
           : <div><dt>Attempt wall time</dt><dd><Timing span={a.wall} skipped={a.status === "skipped"} /></dd></div>}
       </dl>
       {a.jobs.length > 0
-        ? <ul className="ci-health-jobs" aria-label="Observed jobs">{a.jobs.map((job) => <JobRow key={job.id} attempt={a} job={job} stepId={stepId} />)}</ul>
+        ? <ul className="ci-health-jobs" aria-label="Observed jobs">{a.jobs.map((job) => <JobRow key={job.id} attempt={a} job={job} jobId={jobId} stepId={stepId} />)}</ul>
         : <p className="muted">No job observations in this snapshot.</p>}
     </details>
   );
 }
 
-function ActiveJobGroup({phase, group}) {
+function ActiveJobGroup({phase, group, jobId, viewJob}) {
   const title = phase === "queued" ? "Queued jobs" : "Running jobs";
   const heading = "ci-active-jobs-" + phase;
   return <section aria-labelledby={heading}>
@@ -121,6 +121,7 @@ function ActiveJobGroup({phase, group}) {
           <thead><tr>
             <th scope="col">Job ID</th><th scope="col">Run and attempt</th><th scope="col">Workflow scope</th>
             <th scope="col">{phase === "queued" ? "Waiting when observed" : "Execution elapsed when observed"}</th>
+            <th scope="col">Details</th>
           </tr></thead>
           <tbody>{group.shown.map((row) => <tr key={row.key}>
             <th scope="row"><code>{row.job}</code></th>
@@ -131,6 +132,9 @@ function ActiveJobGroup({phase, group}) {
               <span>Source <code>{row.source}</code></span>
             </td>
             <td><Timing span={row.timing} /></td>
+            <td><button type="button" aria-controls={jobId(row.key)}
+              aria-label={`View job ${row.job}, run ${row.run}, attempt ${row.attempt}, workflow ${row.workflow}, repository ${row.repository}, source ${row.source}`}
+              onClick={() => viewJob(row.key)}>View job</button></td>
           </tr>)}</tbody>
         </table>
       </div>
@@ -138,13 +142,13 @@ function ActiveJobGroup({phase, group}) {
   </section>;
 }
 
-function ActiveJobs({attempts}) {
+function ActiveJobs({attempts, jobId, viewJob}) {
   const {queued, running} = observedActiveJobs(attempts);
   return <section aria-labelledby="ci-active-jobs">
     <h3 id="ci-active-jobs">Active jobs in this snapshot</h3>
     <p className="muted">Jobs are grouped by their recorded status. This is not the live queue. Rows are ordered by identity, not by wait or runtime.</p>
-    <ActiveJobGroup phase="queued" group={queued} />
-    <ActiveJobGroup phase="running" group={running} />
+    <ActiveJobGroup phase="queued" group={queued} jobId={jobId} viewJob={viewJob} />
+    <ActiveJobGroup phase="running" group={running} jobId={jobId} viewJob={viewJob} />
   </section>;
 }
 
@@ -221,7 +225,7 @@ function WorkflowCounts({groups}) {
   </section>;
 }
 
-export function CIHealthTiming({snapshot, now = Date.now(), canViewStep, showHistory = false}) {
+export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHistory = false}) {
   const prefix = useId();
   const root = useRef(null);
   const groups = ciHealthWorkflowCounts(snapshot, now);
@@ -229,8 +233,10 @@ export function CIHealthTiming({snapshot, now = Date.now(), canViewStep, showHis
   const attempts = snapshot.timing.attempts;
   const active = attempts.filter(activeAttempt);
   const other = attempts.filter((a) => !activeAttempt(a));
+  const jobId = (key) => prefix + "-ci-job-" + key;
+  const viewJob = (key) => focusCIJob(root.current, jobId(key), canNavigate);
   const stepId = (key) => prefix + "-ci-step-" + key;
-  const viewStep = (key) => focusCIStep(root.current, stepId(key), canViewStep);
+  const viewStep = (key) => focusCIStep(root.current, stepId(key), canNavigate);
   return (
     <div className="ci-health-timing" ref={root}>
       <p><strong>Snapshot observed:</strong> <At value={snapshot.observed_at} /></p>
@@ -244,14 +250,14 @@ export function CIHealthTiming({snapshot, now = Date.now(), canViewStep, showHis
         <p className="muted">Per-job CPU, memory, and disk usage are unavailable. Timing alone cannot show resource use.</p>}
       {attempts.length === 0 && <p>No attempts were included in this snapshot.</p>}
       {attempts.length > 0 && <>
-        <ActiveJobs attempts={attempts} />
+        <ActiveJobs attempts={attempts} jobId={jobId} viewJob={viewJob} />
         <WorkflowCounts groups={groups} />
         {showHistory && snapshot.history && <CIHealthHistory history={snapshot.history} durationText={displayDuration} />}
         <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
-        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} stepId={stepId} />) : <p>No active attempts in this snapshot.</p>}
+        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
-        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} stepId={stepId} />) : <p>No other attempts in this snapshot.</p>}
+        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} />) : <p>No other attempts in this snapshot.</p>}
       </>}
     </div>
   );
@@ -361,7 +367,7 @@ export function CIHealthPanel({enabled, read}) {
       </div>
       {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && <CIHealthTiming key={current.generation} snapshot={snapshot}
         showHistory={ciHealthLeaseRemaining(snapshot, historyLease) > 0}
-        canViewStep={() => refreshGeneration.current === current.generation && ciHealthLeaseRemaining(snapshot, lease) > 0} />}
+        canNavigate={() => refreshGeneration.current === current.generation && ciHealthLeaseRemaining(snapshot, lease) > 0} />}
     </section>
   );
 }
