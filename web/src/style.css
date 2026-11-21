@@ -807,3 +807,4 @@ td {
 .ci-health-jobs > li { padding: .45rem 0 .7rem; }
 .ci-health-row-head { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .ci-health-workflow-key span { display: block; overflow-wrap: anywhere; }
+.ci-health-timing tr[data-ci-step-row]:focus { outline: 2px solid currentColor; outline-offset: -2px; }
