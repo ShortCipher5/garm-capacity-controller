@@ -43,14 +43,15 @@ type ciAttemptView struct {
 }
 
 type ciJobView struct {
-	ID          string              `json:"id"`
-	Status      string              `json:"status"`
-	Conclusion  cihealth.Conclusion `json:"conclusion,omitempty"`
-	Queue       *ciSpanView         `json:"queue,omitempty"`
-	ActiveQueue *ciSpanView         `json:"waiting,omitempty"`
-	Execution   *ciSpanView         `json:"execution,omitempty"`
-	Elapsed     *ciSpanView         `json:"elapsed,omitempty"`
-	Steps       []ciStepView        `json:"steps"`
+	ID              string              `json:"id"`
+	Status          string              `json:"status"`
+	Conclusion      cihealth.Conclusion `json:"conclusion,omitempty"`
+	Queue           *ciSpanView         `json:"queue,omitempty"`
+	ActiveQueue     *ciSpanView         `json:"waiting,omitempty"`
+	CreationToStart *ciSpanView         `json:"creation_to_start,omitempty"`
+	Execution       *ciSpanView         `json:"execution,omitempty"`
+	Elapsed         *ciSpanView         `json:"elapsed,omitempty"`
+	Steps           []ciStepView        `json:"steps"`
 }
 
 type ciStepView struct {
@@ -110,7 +111,7 @@ func projectCIHealthTiming(scopes []ciViewScope, facts []cihealth.AttemptFacts) 
 		for _, j := range timing.Jobs {
 			job := ciJobView{
 				ID: ciInt(j.Key.JobID), Status: ciPhase(j.Phase), Conclusion: j.Conclusion, Queue: ciSpan(j.Queue), ActiveQueue: ciSpan(j.ActiveQueue),
-				Execution: ciSpan(j.Execution), Elapsed: ciSpan(j.Active), Steps: make([]ciStepView, 0, len(j.Steps)),
+				CreationToStart: ciSpan(j.CreationToStart), Execution: ciSpan(j.Execution), Elapsed: ciSpan(j.Active), Steps: make([]ciStepView, 0, len(j.Steps)),
 			}
 			for _, s := range j.Steps {
 				job.Steps = append(job.Steps, ciStepView{Number: ciInt(s.Key.Number), Status: ciPhase(s.Phase), Conclusion: s.Conclusion, Execution: ciSpan(s.Duration), Elapsed: ciSpan(s.Active)})

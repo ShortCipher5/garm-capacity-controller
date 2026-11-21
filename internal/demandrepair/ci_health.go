@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,6 +144,7 @@ type CIJob struct {
 	ID, RunID, RunAttempt    int64
 	Name, Status, Conclusion string
 	StartedAt, CompletedAt   *time.Time
+	CreatedAt                time.Time // optional reported job creation; not a queue transition
 	RunnerID                 int64
 	RunnerName, SourceURL    string
 	Steps                    []CIStep
@@ -352,17 +354,18 @@ type ciJobPageWire struct {
 	Jobs  []ciJobWire `json:"jobs"`
 }
 type ciJobWire struct {
-	ID          int64        `json:"id"`
-	RunID       int64        `json:"run_id"`
-	RunAttempt  *int64       `json:"run_attempt"`
-	Name        string       `json:"name"`
-	Status      string       `json:"status"`
-	Conclusion  string       `json:"conclusion"`
-	StartedAt   *time.Time   `json:"started_at"`
-	CompletedAt *time.Time   `json:"completed_at"`
-	RunnerID    int64        `json:"runner_id"`
-	RunnerName  string       `json:"runner_name"`
-	Steps       []ciStepWire `json:"steps"`
+	ID          int64           `json:"id"`
+	RunID       int64           `json:"run_id"`
+	RunAttempt  *int64          `json:"run_attempt"`
+	CreatedAt   json.RawMessage `json:"created_at"`
+	Name        string          `json:"name"`
+	Status      string          `json:"status"`
+	Conclusion  string          `json:"conclusion"`
+	StartedAt   *time.Time      `json:"started_at"`
+	CompletedAt *time.Time      `json:"completed_at"`
+	RunnerID    int64           `json:"runner_id"`
+	RunnerName  string          `json:"runner_name"`
+	Steps       []ciStepWire    `json:"steps"`
 }
 type ciStepWire struct {
 	Number      int64      `json:"number"`
@@ -379,7 +382,7 @@ func (w ciJobWire) validate(r CIRepository, run CIRun, now time.Time) (CIJob, bo
 		return CIJob{}, false
 	}
 	out := CIJob{ID: w.ID, RunID: run.RunID, RunAttempt: run.Attempt, Name: ciLabel(w.Name, false), Status: w.Status, Conclusion: w.Conclusion,
-		StartedAt: ciUTC(w.StartedAt), CompletedAt: ciUTC(w.CompletedAt), SourceURL: ciSourceURL(r, ciRunPath(run.RunID)+"/job/"+strconv.FormatInt(w.ID, 10)),
+		StartedAt: ciUTC(w.StartedAt), CompletedAt: ciUTC(w.CompletedAt), CreatedAt: ciJobCreation(w.CreatedAt), SourceURL: ciSourceURL(r, ciRunPath(run.RunID)+"/job/"+strconv.FormatInt(w.ID, 10)),
 		Steps: make([]CIStep, 0, len(w.Steps))}
 	if n := ciLabel(w.RunnerName, false); w.RunnerID > 0 && n != "" {
 		out.RunnerID, out.RunnerName = w.RunnerID, n
@@ -395,6 +398,23 @@ func (w ciJobWire) validate(r CIRepository, run CIRun, now time.Time) (CIJob, bo
 	}
 	sort.Slice(out.Steps, func(i, j int) bool { return out.Steps[i].Number < out.Steps[j].Number })
 	return out, true
+}
+
+// Require the full RFC3339 shape and at most nanosecond precision rather
+// than accepting some broader spellings or truncation in time.UnmarshalJSON.
+var ciJobCreationTime = regexp.MustCompile(`^"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])"$`)
+
+// A malformed optional creation timestamp cannot take away the job's existing
+// execution evidence. The strict job object still rejects duplicate/alias keys.
+func ciJobCreation(raw json.RawMessage) time.Time {
+	if len(raw) < 22 || len(raw) > 37 || !ciJobCreationTime.Match(raw) {
+		return time.Time{}
+	}
+	var value time.Time
+	if err := value.UnmarshalJSON(raw); err != nil {
+		return time.Time{}
+	}
+	return value.UTC()
 }
 
 func ciLabel(s string, step bool) string {

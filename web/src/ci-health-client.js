@@ -128,10 +128,11 @@ export function validateCIHealthSnapshot(value) {
     jobCount += a.jobs.length;
     const jobs = new Set();
     for (const j of a.jobs) {
-      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "execution", "elapsed", "conclusion"]) ||
+      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion"]) ||
           !decimal(j.id) || jobs.has(j.id) || !phases.includes(j.status) || !validConclusion(j) ||
           !validSpan(j, "queue", ["running", "completed"].includes(j.status), true) ||
           !validSpan(j, "waiting", j.status === "queued", true) ||
+          !validSpan(j, "creation_to_start", ["running", "completed"].includes(j.status)) ||
           !validSpan(j, "execution", j.status === "completed") ||
           !validSpan(j, "elapsed", j.status === "running") || !Array.isArray(j.steps) ||
           j.steps.length > 1000 - stepCount) fail();

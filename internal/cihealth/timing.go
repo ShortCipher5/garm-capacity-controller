@@ -92,6 +92,9 @@ type AttemptFacts struct {
 type JobFacts struct {
 	Key   JobKey
 	Clock Clock
+	// CreatedAt is the reported job creation time for the live snapshot only.
+	// It is not a queue timestamp and is never written to retained history.
+	CreatedAt time.Time `json:"-"`
 	// QueuedAt is only supplied by a source that actually establishes the
 	// queue transition. FirstQueuedObservedAt is a positive queued sighting
 	// tied to this exact job and attempt, never an inferred run creation time.
@@ -130,14 +133,15 @@ type Timing struct {
 }
 
 type JobTiming struct {
-	Key         JobKey
-	Phase       Phase
-	Conclusion  Conclusion
-	Queue       Span
-	ActiveQueue Span
-	Execution   Span
-	Active      Span
-	Steps       []StepTiming
+	Key             JobKey
+	Phase           Phase
+	Conclusion      Conclusion
+	Queue           Span
+	ActiveQueue     Span
+	CreationToStart Span
+	Execution       Span
+	Active          Span
+	Steps           []StepTiming
 }
 
 type StepTiming struct {
@@ -207,6 +211,14 @@ func measureJob(job JobFacts, attempt Clock, asOf time.Time) (JobTiming, bool) {
 	}
 	if !ok {
 		return JobTiming{}, false
+	}
+	// The same job's sighting (not a later page or the attempt clock)
+	// must confirm the start. Missing or invalid optional creation does
+	// not change execution or either independent queue measurement.
+	if (job.Clock.Phase == Running || job.Clock.Phase == Completed) &&
+		validTime(job.CreatedAt) && !job.Clock.ObservedAt.IsZero() &&
+		!job.Clock.StartedAt.After(job.Clock.ObservedAt) {
+		out.CreationToStart, _ = span(job.CreatedAt, job.Clock.StartedAt, ObservedEndpoints)
 	}
 	seen := make(map[int64]bool, len(job.Steps))
 	for _, step := range job.Steps {

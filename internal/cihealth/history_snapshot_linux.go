@@ -385,6 +385,7 @@ func historyCopyAttempt(in AttemptFacts) (AttemptFacts, error) {
 	out.Jobs = make([]JobFacts, len(in.Jobs))
 	for i, j := range in.Jobs {
 		j.Clock = copyClock(j.Clock)
+		j.CreatedAt = time.Time{} // Live-only; preserve canonical history bytes and equality.
 		j.QueuedAt, j.FirstQueuedObservedAt = j.QueuedAt.UTC(), j.FirstQueuedObservedAt.UTC()
 		j.Steps = append(make([]StepFacts, 0, len(j.Steps)), j.Steps...)
 		for k := range j.Steps {

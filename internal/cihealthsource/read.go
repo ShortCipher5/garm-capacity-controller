@@ -130,7 +130,7 @@ func readAttempt(ctx context.Context, source AttemptSource, owner cycleSourceIns
 			jobKey := cihealth.JobKey{Attempt: key, JobID: row.ID}
 			job := cihealth.JobFacts{
 				Key: jobKey, Clock: sourceClock(row.Status, row.Conclusion, row.StartedAt, row.CompletedAt, rows.ObservedAt),
-				Steps: make([]cihealth.StepFacts, 0, len(row.Steps)),
+				CreatedAt: row.CreatedAt, Steps: make([]cihealth.StepFacts, 0, len(row.Steps)),
 			}
 			// GitHub jobs in these endpoints supply neither a proven queue
 			// transition nor a historical positive queue sighting.

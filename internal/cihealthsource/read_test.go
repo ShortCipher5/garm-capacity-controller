@@ -248,3 +248,71 @@ func TestReadAttemptCarriesOnlyExplicitKnownConclusionsAtEachLevel(t *testing.T)
 		t.Fatalf("step conclusions inferred or lost: %+v", steps)
 	}
 }
+
+func TestReadAttemptOptionalJobCreationToStart(t *testing.T) {
+	const start = "2026-01-19T03:57:21Z"
+	const end = "2026-01-19T04:10:54Z"
+	cases := []struct {
+		name, phase string
+		set         bool
+		created     any
+		basis       cihealth.Basis
+		duration    time.Duration
+	}{
+		{"long before short execution", "completed", true, "2026-01-18T17:48:03+01:00", cihealth.ObservedEndpoints, 11*time.Hour + 9*time.Minute + 18*time.Second},
+		{"measured zero", "completed", true, start, cihealth.ObservedEndpoints, 0},
+		{"already running", "in_progress", true, "2026-01-19T03:57:20.999999999Z", cihealth.ObservedEndpoints, time.Nanosecond},
+		{"missing", "completed", false, nil, cihealth.Unavailable, 0},
+		{"null", "completed", true, nil, cihealth.Unavailable, 0},
+		{"wrong type", "completed", true, map[string]any{"time": start}, cihealth.Unavailable, 0},
+		{"malformed", "completed", true, "not a time", cihealth.Unavailable, 0},
+		{"excess precision", "completed", true, "2026-01-19T03:57:20.1234567890Z", cihealth.Unavailable, 0},
+		{"invalid offset", "completed", true, "2026-01-19T03:57:21+24:00", cihealth.Unavailable, 0},
+		{"reversed", "completed", true, end, cihealth.Unavailable, 0},
+		{"duration overflow", "completed", true, "1200-01-01T00:00:00Z", cihealth.Unavailable, 0},
+		{"queued", "queued", true, "2026-01-18T16:48:03Z", cihealth.Unavailable, 0},
+		{"skipped", "skipped", true, "2026-01-18T16:48:03Z", cihealth.Unavailable, 0},
+		{"unknown", "waiting", true, "2026-01-18T16:48:03Z", cihealth.Unavailable, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case attemptPath:
+					runResponse(w, repoID, "in_progress", "")
+				case attemptPath + "/jobs":
+					row := job(jobID, tc.phase)
+					row["run_attempt"] = 2
+					delete(row, "created_at")
+					row["started_at"] = start
+					if tc.phase == "completed" {
+						row["conclusion"] = "success"
+						row["completed_at"] = end
+					}
+					if tc.phase == "queued" {
+						delete(row, "started_at")
+					}
+					if tc.set {
+						row["created_at"] = tc.created
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "jobs": []any{row}})
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(404)
+				}
+			})
+			o, err := ReadAttempt(t.Context(), s, scope, runID, 2)
+			if err != nil || len(o.Timing.Jobs) != 1 {
+				t.Fatalf("job read: %v", err)
+			}
+			j := o.Timing.Jobs[0]
+			if j.CreationToStart != (cihealth.Span{Basis: tc.basis, Duration: tc.duration}) ||
+				j.Queue.Basis != cihealth.Unavailable || j.ActiveQueue.Basis != cihealth.Unavailable {
+				t.Fatalf("bad separation: %+v", j)
+			}
+			if tc.phase == "completed" && j.Execution != (cihealth.Span{Basis: cihealth.ObservedEndpoints, Duration: 13*time.Minute + 33*time.Second}) {
+				t.Fatalf("changed execution: %+v", j.Execution)
+			}
+		})
+	}
+}
