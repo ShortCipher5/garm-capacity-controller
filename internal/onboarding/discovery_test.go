@@ -211,7 +211,7 @@ func TestDiscoveryAggregatesTotalsGuestsUtilizationAndSuggestsBudget(t *testing.
 	if result.Utilization == nil || result.Utilization.Source != "guest-state" || result.Utilization.Guests != 3 || result.Utilization.CPUUsedMillis != 12500 || result.Utilization.RAMUsedMiB != 6656 || result.Utilization.DiskUsedMiB != 9216 {
 		t.Fatalf("utilization section: %+v", result.Utilization)
 	}
-	if !containsString(result.Warnings, "guest-state cpu usage is cumulative since guest start; a rate needs consecutive samples") {
+	if !containsString(result.Warnings, "guest-state cpu usage is cumulative since guest start; a rate needs complete samples from the same guest counter lifetimes") {
 		t.Fatalf("cumulative cpu note missing: %v", result.Warnings)
 	}
 	if !containsString(result.Warnings, "point-in-time snapshot: observations go stale immediately and are not reconciliation evidence") {

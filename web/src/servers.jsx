@@ -1,3 +1,4 @@
+import { usageScope } from "./usage-client.js";
 import {NativeEnrollment} from "./native-enrollment.jsx";
 import {OverheadCollection} from "./overhead-collection.jsx";
 import { SSHTargetRegistration } from "./ssh-targets.jsx";
@@ -31,14 +32,16 @@ export function UsagePanel({ host, readUsage }) {
   return (
     <div className="usage-panel">
       <div className="usage-panel-heading">
-        <h3>Measured utilization</h3>
+        <h3>Resource observations</h3>
         {samples && samples.length > 0 && (
           <select aria-label="Usage metric" value={dimension} onChange={(event) => setDimension(event.target.value)}>
             {USAGE_DIMENSIONS.map(([key, label, unit]) => <option key={key} value={key}>{label} · {unit}</option>)}
           </select>
         )}
       </div>
-      {samples === undefined && !error && <p className="muted">Loading measured usage history…</p>}
+      {samples === undefined && !error && <p className="muted">Loading resource observations…</p>}
+      <p className="muted">{usageScope(samples)}</p>
+      <p className="muted">Sampling cadence and interval coverage are not supplied. Individual points show recorded observations, not verified continuous telemetry; no line or zero value is inferred between samples.</p>
       {error && <p className="error" role="status">{error}</p>}
       {samples && samples.length === 0 && (
         <p className="empty">Usage history unavailable: no measured samples exist for this host. A monitoring gap is never drawn as zeros.</p>
@@ -47,7 +50,7 @@ export function UsagePanel({ host, readUsage }) {
         <div className="chart">
           <div className="chart-key">
             <span className="dot" aria-hidden="true" />
-            <span>{selected[1]} — measured, not allocated</span>
+            <span>{selected[1]} — recorded, not allocated</span>
             <span className="muted">Last sample {formatSampleAge(new Date(), samples[samples.length - 1].sampled_at)} · source {samples[samples.length - 1].source}</span>
           </div>
           <UsageChart samples={samples} dimension={selected[0]} label={selected[1]} unit={selected[2]} />
@@ -316,7 +319,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh, readOverhead
     <section id="servers">
       <div className="section-heading">
         <h2>Servers <small>{data.hosts.length}</small></h2>
-        <span className="muted">Detected physical totals, measured utilization and explicit enrollment</span>
+        <span className="muted">Detected physical totals, resource observations and explicit enrollment</span>
       </div>
       <SSHTargetRegistration />
       <SSHInventory />

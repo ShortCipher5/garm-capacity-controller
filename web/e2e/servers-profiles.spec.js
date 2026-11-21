@@ -75,16 +75,18 @@ test("read-only discovery, reviewed enrollment and honest duplicate error", asyn
   await expect(discovery.getByText(/host already enrolled/)).toBeVisible();
 });
 
-test("usage chart renders measured history with a real gap and never fabricates missing history", async ({ page }) => {
+test("usage chart renders observations without inventing interval coverage", async ({ page }) => {
   await connect(page);
   await page.getByRole("link", { name: "Servers", exact: true }).click();
   const measured = page.locator('#servers [data-host="host-a"]');
-  await expect(measured.getByText("CPU used — measured, not allocated")).toBeVisible();
-  await expect(measured.locator("polyline.history-line")).toHaveCount(2);
+  await expect(measured.getByText("CPU used — recorded, not allocated")).toBeVisible();
+  await expect(measured.locator("polyline.history-line")).toHaveCount(0);
+  await expect(measured.locator(".usage-panel svg circle")).toHaveCount(5);
+  await expect(measured.getByText(/Sampling cadence and interval coverage are not supplied/)).toBeVisible();
   await expect(measured.getByText(/Last sample .* ago · source fixture-collector/)).toBeVisible();
   await expect(measured.getByText(/CPU fair-use cap: 3,000 millicores/)).toBeVisible();
   await measured.getByLabel(/^Usage metric/).selectOption("ram_used_mib");
-  await expect(measured.getByText("Memory used — measured, not allocated")).toBeVisible();
+  await expect(measured.getByText("Memory used — recorded, not allocated")).toBeVisible();
   const quiet = page.locator('#servers [data-host="host-b"]');
   await expect(quiet.getByText(/Usage history unavailable: no measured samples exist for this host/)).toBeVisible();
   await expect(quiet.locator("polyline.history-line")).toHaveCount(0);

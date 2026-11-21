@@ -2,12 +2,14 @@ package brokerinput
 
 import (
 	"context"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/hostmetrics"
 )
 
 // AdvisoryReader has no grant cycle, writer, or Run method. It exposes only
@@ -81,7 +83,23 @@ func (p *planReader) readPressure(ctx context.Context, state admission.BrokerGra
 			blocked[id] = true
 		}
 		for _, v := range rows {
-			if v.Source != "guest-state" || v.SampledAt.After(now) || now.Sub(v.SampledAt) > pressureAge {
+			if v.SampledAt.After(now) || now.Sub(v.SampledAt) > pressureAge {
+				continue
+			}
+			budget := state.Config.Hosts[id].Budget
+			var high bool
+			switch v.Source {
+			case hostmetrics.GuestStateSource:
+				high = pressureHigh(v, budget)
+			case hostmetrics.GuestStateSourceV2:
+				// V2 disk counters can include shared devices. Use only high CPU
+				// or RAM to veto advice. Low partial readings must not qualify
+				// or renew the existing stock preview's freshness gate.
+				if !cpuOrRAMPressureHigh(v, budget) {
+					continue
+				}
+				high = true
+			default:
 				continue
 			}
 			if status.SampledAt.Before(v.SampledAt) {
@@ -90,7 +108,7 @@ func (p *planReader) readPressure(ctx context.Context, state admission.BrokerGra
 			if status.State == "missing_or_stale_not_headroom" {
 				status.State = "partial_sample_not_headroom"
 			}
-			if pressureHigh(v, state.Config.Hosts[id].Budget) {
+			if high {
 				status.State = "high_partial_pressure_suppressed"
 				blocked[id] = true
 			}
@@ -100,9 +118,16 @@ func (p *planReader) readPressure(ctx context.Context, state admission.BrokerGra
 	return statuses, blocked, nil
 }
 func pressureHigh(v admission.UsageSample, b admission.Resources) bool {
+	return cpuOrRAMPressureHigh(v, b) || atPressureThreshold(v.DiskUsedMiB, b.Disk)
+}
+
+func cpuOrRAMPressureHigh(v admission.UsageSample, b admission.Resources) bool {
+	return atPressureThreshold(v.CPUUsedMillis, b.CPU) || atPressureThreshold(v.RAMUsedMiB, b.RAM)
+}
+
+func atPressureThreshold(used, limit int64) bool {
 	// ceil(90% of budget), calculated without multiplication overflow.
-	high := func(used, limit int64) bool { return limit > 0 && used >= limit-limit/10 }
-	return high(v.CPUUsedMillis, b.CPU) || high(v.RAMUsedMiB, b.RAM) || high(v.DiskUsedMiB, b.Disk)
+	return limit > 0 && used >= limit-limit/10
 }
 
 // advisoryStock avoids vetoed hosts only for NEW placements, after canonical

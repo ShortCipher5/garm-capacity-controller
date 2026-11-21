@@ -14,9 +14,13 @@ admin read token. The separate grant-loop status remains unconfigured/blocked;
 configuration of this reader never implies the grant loop is running.
 `--check-config` validates the same local transport/configuration without polling.
 
-Monitoring is a veto only: any actual `guest-state` sample in the last two minutes
-at or above 90% of a configured CPU/RAM/disk budget suppresses new proposed
-assignments on that host. The advisory planner can instead choose another
+Monitoring is a veto only: any recent `guest-state-v2` CPU/RAM observation
+at or above 90% of a configured budget suppresses new proposed assignments
+on that host. Native guest disk totals are display-only because shared volumes
+can be counted more than once. An observed `guest-state-v2` value that does
+not veto does not refresh or satisfy the prior pressure prerequisite for stock
+pool increases. Legacy `guest-state` rows retain the previous CPU/RAM/disk
+comparison within the same two-minute window. The advisory planner can instead choose another
 already-eligible host using the same canonical budgets and charges. This short high-water window avoids immediately undoing
 a veto after one lower sample. These are partial guest measurements, not physical
 host totals. Missing, stale, foreign-source or low measurements do not establish

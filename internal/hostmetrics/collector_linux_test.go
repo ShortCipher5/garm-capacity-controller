@@ -90,6 +90,31 @@ func (f *fakeRecorder) recorded() []recorded {
 
 var errFixture = errors.New("private fixture failure")
 
+func TestCollectorRebaselinesOnReportedGuestCountChange(t *testing.T) {
+	start := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
+	source := &fakeSource{}
+	recorder := &fakeRecorder{}
+	collector, err := New(map[string]Source{"host-a": source}, recorder, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, input := range []struct {
+		guests int
+		cpu    int64
+	}{
+		{1, 60_000}, {2, 361_000}, {2, 362_000},
+		{1, 363_000}, {1, 364_000},
+	} {
+		source.sample = incusapi.UtilizationSample{Guests: input.guests, CPUUsedMillis: input.cpu}
+		collector.collect(context.Background(), start.Add(time.Duration(i)*time.Minute))
+	}
+	rows := recorder.recorded()
+	if len(rows) != 2 || rows[0].cpuUsedMillis != 16 || rows[1].cpuUsedMillis != 16 ||
+		!rows[0].at.Equal(start.Add(2*time.Minute)) || !rows[1].at.Equal(start.Add(4*time.Minute)) {
+		t.Fatalf("expected a gap on both count changes, then rates of 16 millicores: %+v", rows)
+	}
+}
+
 func TestNewValidatesConfiguration(t *testing.T) {
 	source := &fakeSource{}
 	recorder := &fakeRecorder{}
@@ -139,7 +164,7 @@ func TestCollectorFirstReadingBaselinesThenDerivesRate(t *testing.T) {
 		t.Fatalf("expected one derived sample, got %+v", got)
 	}
 	sample := got[0]
-	if sample.host != "host-a" || sample.at != clock.now() || sample.source != GuestStateSource {
+	if sample.host != "host-a" || sample.at != clock.now() || sample.source != GuestStateSourceV2 {
 		t.Fatalf("sample identity wrong %+v", sample)
 	}
 	if sample.cpuUsedMillis != 1000 {
@@ -278,7 +303,7 @@ func (s *baselineCancelSource) HostTotals(ctx context.Context) (incusapi.HostTot
 	return totals, err
 }
 
-func TestRunStopsWithContextAndRecordsBaselineFirst(t *testing.T) {
+func TestRunStopsWithoutBaseliningCanceledWitness(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	source := &baselineCancelSource{fakeSource: &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000}}, cancel: cancel}
@@ -296,8 +321,8 @@ func TestRunStopsWithContextAndRecordsBaselineFirst(t *testing.T) {
 		t.Fatal("collector did not stop")
 	}
 	calls, totals := source.calls()
-	if calls != 1 || totals != 1 || !collector.states["host-a"].hasBaseline {
-		t.Fatal("initial complete sweep/baseline missing", calls, totals)
+	if calls != 1 || totals != 1 || collector.states["host-a"].hasBaseline {
+		t.Fatal("canceled initial sweep should not establish a baseline", calls, totals)
 	}
 	time.Sleep(50 * time.Millisecond)
 	if later, _ := source.calls(); later != calls {
@@ -345,7 +370,7 @@ func TestCollectorRecordsGuestStateSamplesIntoAdmissionStore(t *testing.T) {
 		t.Fatalf("expected one stored sample, got %+v", history)
 	}
 	sample := history[0]
-	if sample.Source != GuestStateSource || sample.CPUUsedMillis != 1000 || sample.RAMUsedMiB != 3072 || sample.DiskUsedMiB != 4096 {
+	if sample.Source != GuestStateSourceV2 || sample.CPUUsedMillis != 1000 || sample.RAMUsedMiB != 3072 || sample.DiskUsedMiB != 4096 {
 		t.Fatalf("stored sample mismatch %+v", sample)
 	}
 	if sample.SampledAt != clock.now() {
@@ -353,5 +378,81 @@ func TestCollectorRecordsGuestStateSamplesIntoAdmissionStore(t *testing.T) {
 	}
 	if fake.ResourceReads.Load() == 0 || fake.StateReads.Load() == 0 {
 		t.Fatal("collector did not exercise totals or state reads")
+	}
+}
+
+// A one-sweep state failure must not turn a returning cumulative counter
+// into recorded utilization or expose partial RAM/disk as known usage.
+func TestCollectorDoesNotRecordOrBridgePartialGuestState(t *testing.T) {
+	start := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+	source := &fakeSource{}
+	recorder := &fakeRecorder{}
+	c, err := New(map[string]Source{"fixture": source}, recorder, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, sample := range []incusapi.UtilizationSample{
+		{CPUUsedMillis: 360000, RAMUsedMiB: 512, DiskUsedMiB: 50, Guests: 2},
+		{CPUUsedMillis: 61000, RAMUsedMiB: 256, DiskUsedMiB: 25, Guests: 1,
+			Errors: []incusapi.GuestUtilizationError{{Guest: "omitted", Err: errFixture}}},
+		{CPUUsedMillis: 362000, RAMUsedMiB: 512, DiskUsedMiB: 50, Guests: 2},
+		{CPUUsedMillis: 363000, RAMUsedMiB: 640, DiskUsedMiB: 55, Guests: 2},
+	} {
+		source.sample = sample
+		// Call the host boundary directly so the regression is independent
+		// of the retry backoff policy and simulates consecutive minute polls.
+		c.collectHost(t.Context(), "fixture", source, start.Add(time.Duration(i)*time.Minute))
+		if i < 3 && len(recorder.recorded()) != 0 {
+			t.Fatalf("recorded an incomplete or unbracketed sample at poll %d", i)
+		}
+	}
+	got := recorder.recorded()
+	if len(got) != 1 || got[0].cpuUsedMillis != 16 || got[0].ramUsedMiB != 640 || got[0].diskUsedMiB != 55 || got[0].source != GuestStateSourceV2 {
+		t.Fatalf("unexpected recovered history: %+v", got)
+	}
+}
+
+func TestCollectorFailedUtilizationOrTotalsReadFencesBaseline(t *testing.T) {
+	for _, which := range []string{"utilization", "totals", "rising subtotal", "invalid memory", "invalid disk"} {
+		t.Run(which, func(t *testing.T) {
+			start := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+			source, recorder := &fakeSource{}, &fakeRecorder{}
+			collector, err := New(map[string]Source{"fixture": source}, recorder, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			source.sample.CPUUsedMillis = 100000
+			collector.collectHost(t.Context(), "fixture", source, start)
+
+			source.sample.CPUUsedMillis = 101000
+			switch which {
+			case "utilization":
+				source.sampleErr = errFixture
+			case "totals":
+				source.totalsErr = errFixture
+			case "rising subtotal":
+				source.sample.Errors = []incusapi.GuestUtilizationError{{Guest: "omitted", Err: errFixture}}
+			case "invalid memory":
+				source.sample.RAMUsedMiB = -1
+			case "invalid disk":
+				source.sample.DiskUsedMiB = -1
+			}
+			collector.collectHost(t.Context(), "fixture", source, start.Add(time.Minute))
+			if collector.states["fixture"].hasBaseline {
+				t.Fatal("failed observation kept a CPU baseline")
+			}
+
+			source.sampleErr, source.totalsErr = nil, nil
+			source.sample = incusapi.UtilizationSample{CPUUsedMillis: 500000}
+			collector.collectHost(t.Context(), "fixture", source, start.Add(2*time.Minute))
+			if got := recorder.recorded(); len(got) != 0 {
+				t.Fatalf("an unknown interval became a row: %+v", got)
+			}
+			source.sample.CPUUsedMillis += 60000
+			collector.collectHost(t.Context(), "fixture", source, start.Add(3*time.Minute))
+			if got := recorder.recorded(); len(got) != 1 || got[0].cpuUsedMillis != 1000 || got[0].source != GuestStateSourceV2 {
+				t.Fatalf("new consecutive observations failed: %+v", got)
+			}
+		})
 	}
 }

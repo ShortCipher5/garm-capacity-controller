@@ -62,16 +62,16 @@ type GuestView struct {
 
 // DiscoveryUtilization is MEASURED guest usage aggregated over one sweep,
 // reported as-is with source=guest-state. Instance-state CPU is cumulative
-// time since guest start, not a rate: deriving usage rates requires two
-// consecutive samples; a single sweep is a snapshot of cumulative time.
+// time since guest start, not a rate. A single sweep is a snapshot of
+// cumulative time; separate snapshots are not necessarily comparable.
 type DiscoveryUtilization struct {
 	Source string `json:"source"`
 	// CPUUsedMillis is the SUM of per-guest instance-state CPU usage over the
 	// sweep, rendered in milliseconds. Every guest contribution is CUMULATIVE
 	// CPU time since that guest started (Incus instance state reports
 	// nanoseconds). This field is NOT a rate, NOT a percentage and NOT
-	// per-second: only the DELTA between two consecutive discoveries divided
-	// by the wall clock between them yields a usage rate. The JSON key is
+	// per-second. Deriving a rate requires matching guest counter lifetimes
+	// across complete samples. The JSON key is
 	// cpu_cumulative_millis so a single sweep cannot be misread as a rate.
 	CPUUsedMillis int64    `json:"cpu_cumulative_millis"`
 	RAMUsedMiB    int64    `json:"ram_used_mib"`
@@ -338,8 +338,8 @@ func (m *Manager) discoverUtilization(ctx context.Context, source DiscoverySourc
 		view.Errors = append(view.Errors, failure.Guest)
 	}
 	if len(sample.Errors) > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("utilization incomplete: %d guest(s) state unavailable; their usage is unknown, not zero", len(sample.Errors)))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("utilization incomplete: %d guest(s) have missing or incomplete measurements; missing usage is unknown, not zero", len(sample.Errors)))
 	}
-	result.Warnings = append(result.Warnings, "guest-state cpu usage is cumulative since guest start; a rate needs consecutive samples")
+	result.Warnings = append(result.Warnings, "guest-state cpu usage is cumulative since guest start; a rate needs complete samples from the same guest counter lifetimes")
 	return view
 }
