@@ -240,6 +240,8 @@ export function CIHealthTiming({snapshot, now = Date.now(), canViewStep, showHis
           : "Coverage is unknown. "}
         This is a bounded observation, not the full GitHub queue or history. “At least” is a lower bound from a queue observation. Missing timing is unknown, not zero. Job creation to start does not measure queue wait.
       </p>
+      {attempts.some((attempt) => attempt.jobs.length > 0) &&
+        <p className="muted">Per-job CPU, memory, and disk usage are unavailable. Timing alone cannot show resource use.</p>}
       {attempts.length === 0 && <p>No attempts were included in this snapshot.</p>}
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} />

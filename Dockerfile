@@ -78,6 +78,15 @@ COPY --from=go-build --chmod=0555 /out/capacity-ledger /usr/local/bin/capacity-l
 ENTRYPOINT ["/usr/local/bin/capacity-ledger"]
 CMD ["--help"]
 
+# Explicit first-install tool only. Inherits the gateway UID, but doesn't
+# ship in the gateway or receive credentials, config, or a default operation.
+FROM go-build AS ci-history-init-build
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/capacity-ci-history-init ./cmd/capacity-ci-history-init
+FROM runtime-base AS ci-history-init-tool
+COPY --from=ci-history-init-build --chmod=0555 /out/capacity-ci-history-init /usr/local/bin/capacity-ci-history-init
+ENTRYPOINT ["/usr/local/bin/capacity-ci-history-init"]
+CMD []
+
 # Separate offline runtime-asset preparation helper. This does not expand the
 # existing native-owner flat bundle or install any system tool/runtime image.
 FROM go-build AS native-runtime-assets-build

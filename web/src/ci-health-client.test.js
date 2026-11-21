@@ -79,6 +79,7 @@ test("malformed, unsafe, unqualified or oversized timing is rejected", () => {
     (x, a, j) => { j.waiting = {...lower, nanoseconds: "-1"}; },
     (x, a, j) => { j.waiting = {...lower, basis: "estimated"}; },
     (x, a, j) => { j.execution = {basis: "observed_endpoints", nanoseconds: "0"}; },
+    (x, a, j) => { j.resources = {cpu_nanoseconds: "1000", memory_bytes: "2000", disk_bytes: "3000"}; },
     (x, a, j) => { j.steps = [j.steps[0], j.steps[0]]; },
     (x, a, j) => { a.jobs = [j, j]; },
     (x, a) => { x.timing.attempts = [a, a]; },
