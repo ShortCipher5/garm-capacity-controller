@@ -47,11 +47,23 @@ test('optional maximum advice renders in the existing panel with no apply contro
   assert.match(vetoHTML,/would exceed a configured budget/);assert.match(vetoHTML,/not a measured host limit or a settings change/);
   assert.doesNotMatch(vetoHTML,/<button|<form/);
   assert.match(render({plan:fit('configured_maximum_fit_unavailable')}),/could not be compared/);
+  const slots=fit('configured_runner_slot_veto');
+  const slotsHTML=render({plan:slots});
+  assert.match(slotsHTML,/configured global or repository runner-slot ceiling/);
+  assert.match(slotsHTML,/retained charges can use those slots/);
+  assert.match(slotsHTML,/a suggested decrease does not free capacity/);
+  assert.doesNotMatch(slotsHTML,/<button|<form|<table/);
+  assert.doesNotMatch(render({plan:fit('configured_runner_slot_veto','unavailable')}),/runner-slot ceiling/);
+  assert.doesNotMatch(render({plan:slots,now:now+10000}),/runner-slot ceiling/);
+  assert.doesNotMatch(render({plan:slots,comparison:'preview_superseded'}),/runner-slot ceiling/);
+
   assert.doesNotMatch(render({plan:fit('configured_maximum_fit_veto','unavailable')}),/would exceed a configured budget/);
   assert.doesNotMatch(render({plan:veto,now:now+10000}),/would exceed a configured budget/);
   assert.doesNotMatch(render({plan:veto,comparison:'preview_superseded'}),/would exceed a configured budget/);
   const renderBatch=(delta={})=>renderToStaticMarkup(React.createElement(StockMaximumBatchSuggestions,{plan:{...withIdle,stock_maximum_batch_preview:withIdle.stock_maximum_preview},comparison:'linked_at_capture',now,...delta}));
   assert.equal(renderBatch({plan}),"");
+  const slotsBatch={...slots.stock_maximum_preview,host_evidence:"configured_only"};
+  assert.doesNotMatch(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:slotsBatch}}),/runner-slot ceiling/);
   assert.match(renderBatch(),/does not monitor applied changes, enforce a cooldown, or queue any action/);
   assert.match(renderBatch(),/Minimum idle: 0/);
   assert.doesNotMatch(renderBatch(),/<button|<form/);

@@ -73,6 +73,8 @@ const (
 	stockMaximumFitAllowed
 	stockMaximumFitVeto
 	stockMaximumFitUnavailable
+	// Compare-only: the configured runner-slot precheck blocked growth before fit.
+	stockMaximumFitRunnerSlotVeto
 )
 
 func (v *stockMaximumFitComparison) tryGrowth(id string) bool {

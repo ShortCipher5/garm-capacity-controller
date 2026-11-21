@@ -202,6 +202,22 @@ func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
 			},
 		}
 	}
+	usingSlots := func(a, b *scalingPreviewSample, sameRepository bool) {
+		for _, captured := range []*scalingPreviewSample{a, b} {
+			p := captured.pools["visible-pool"]
+			p.used = 1
+			captured.pools["visible-pool"] = p
+			repo := "another-visible-repo"
+			if sameRepository {
+				repo = p.repo
+				captured.repoCaps[repo] = 2
+			} else {
+				captured.repoCaps[repo] = 3
+				captured.budget = 2
+			}
+			captured.pools["another-visible-pool"] = scalingPool{repo: repo, enabled: true, current: 1, target: 1}
+		}
+	}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*scalingPreviewSample, *scalingPreviewSample)
@@ -210,6 +226,23 @@ func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
 	}{
 		{"veto", func(a, b *scalingPreviewSample) {}, "configured_maximum_fit_veto", true},
 		{"fit unavailable", func(a, b *scalingPreviewSample) { b.configuredMaximumFit = nil }, "configured_maximum_fit_unavailable", true},
+		{"global runner slots", func(a, b *scalingPreviewSample) { usingSlots(a, b, false) }, "configured_runner_slot_veto", true},
+		{"repository runner slots", func(a, b *scalingPreviewSample) { usingSlots(a, b, true) }, "configured_runner_slot_veto", true},
+		{"prior retained occupancy still uses slots", func(a, b *scalingPreviewSample) {
+			usingSlots(a, b, false)
+			for _, captured := range []*scalingPreviewSample{a, b} {
+				p := captured.pools["another-visible-pool"]
+				p.enabled = false
+				captured.pools["another-visible-pool"] = p
+			}
+			a.outside = 1
+		}, "configured_runner_slot_veto", true},
+		{"full slots without repeated visible demand", func(a, b *scalingPreviewSample) {
+			usingSlots(a, b, false)
+			p := b.pools["visible-pool"]
+			p.target = p.current
+			b.pools["visible-pool"] = p
+		}, "no_confirmed_change", false},
 		{"no demand", func(a, b *scalingPreviewSample) {
 			p := b.pools["visible-pool"]
 			p.target = p.current
@@ -221,6 +254,7 @@ func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
 		{"incomplete current", func(a, b *scalingPreviewSample) { b.incomplete = true }, "incomplete_evidence", false},
 		{"hidden assignment", func(a, b *scalingPreviewSample) {
 			const hidden = "private-other-pool"
+			usingSlots(a, b, false)
 			p := b.pools["visible-pool"]
 			p.target = p.current
 			b.pools["visible-pool"] = p
@@ -244,10 +278,35 @@ func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
 			}
 			if tc.both {
 				wire, err := json.Marshal(preview)
-				if err != nil || strings.Contains(string(wire), "visible-pool") || strings.Contains(string(wire), "visible-repo") || strings.Contains(string(wire), "private-other-pool") || strings.Contains(string(wire), "999") {
+				if err != nil || strings.Contains(string(wire), "visible-pool") || strings.Contains(string(wire), "visible-repo") || strings.Contains(string(wire), "private-other-pool") || strings.Contains(string(wire), "another-visible-") || strings.Contains(string(wire), "999") {
 					t.Fatalf("private fit details escaped: %s", wire)
 				}
 			}
 		})
+	}
+}
+
+func TestStockMaximumRunnerSlotDiagnosticDoesNotSpendAnUnappliedCut(t *testing.T) {
+	start := time.Unix(1700000000, 0).UTC()
+	now := start.Add(20 * time.Second)
+	sample := func(at time.Time) scalingPreviewSample {
+		return scalingPreviewSample{scope: [32]byte{1}, StockScalingSample: StockScalingSample{
+			source: "reviewed", revision: 1, sequence: 4, budget: 3,
+			start: at, finish: at, expires: at.Add(time.Minute),
+			pools: map[string]scalingPool{
+				"growth-pool": {repo: "growth-repo", enabled: true, current: 1, target: 2, used: 1},
+				"cut-pool":    {repo: "cut-repo", enabled: true, current: 2, target: 1},
+			},
+			repoCaps: map[string]int64{"growth-repo": 3, "cut-repo": 3},
+			order:    []string{"growth-pool"}, configuredMaximumFit: roomyMaximumFit("growth-pool"),
+		}}
+	}
+	prior, current := sample(start), sample(now)
+	history := scalingPreviewHistory{prior: prior}
+	out := history.accept(current, nil, now, now.Add(time.Minute))
+	if out.State != "proposed" || out.Reason != "" || len(out.Proposals) != 1 ||
+		out.Proposals[0].PoolID != "cut-pool" || out.Proposals[0].Observed != 2 || out.Proposals[0].Suggested != 1 ||
+		!out.ExpiresAt.Equal(prior.expires) {
+		t.Fatalf("slot diagnosis spent a cut or changed a valid recommendation: %+v", out)
 	}
 }
