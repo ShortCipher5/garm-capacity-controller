@@ -33,7 +33,8 @@ cleanup() {
   # Only our generated project. No existing stack/volumes and no global prune.
   "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
   docker rm -f "$ingress_container" >/dev/null 2>&1 || true
-  docker image rm "$ingress_tag" "$history_init_tag" >/dev/null 2>&1 || true
+  docker image rm "$ingress_tag" >/dev/null 2>&1 || true
+  docker image rm "$history_init_tag" >/dev/null 2>&1 || true
   sudo rm -rf -- "$work"
   return "$outcome"
 }
