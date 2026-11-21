@@ -1,7 +1,8 @@
-// Package hostmetrics periodically samples host utilization from the same
+// Package hostmetrics periodically samples project guest utilization from the same
 // verified Incus backends the gateway provisions through and appends the
 // observations to the admission usage history. Samples are monitoring data
-// only: they never gate admission, fits, charges or retirement.
+// only: they cannot establish host headroom, admission or retirement.
+// Recent high observations may separately withhold allocator proposals.
 package hostmetrics
 
 import (
@@ -24,8 +25,12 @@ const (
 	DefaultInterval = time.Minute
 	// MinInterval bounds collection frequency; shorter intervals are rejected.
 	MinInterval = time.Second * 15
-	// GuestStateSource labels samples derived from per-guest instance state.
+	// GuestStateSource identifies rows from the legacy collector.
 	GuestStateSource = "guest-state"
+	// GuestStateSourceV2 identifies project observations with incomplete
+	// sweeps excluded and native disk reports included. Its disk totals
+	// cannot establish backing-store pressure.
+	GuestStateSourceV2 = "guest-state-v2"
 
 	defaultSweepTimeout = 20 * time.Second
 	minSweepElapsed     = time.Millisecond
@@ -62,6 +67,7 @@ type Options struct {
 type hostState struct {
 	baselineMillis int64
 	baselineAt     time.Time
+	baselineGuests int
 	hasBaseline    bool
 	skipUntil      time.Time
 }
@@ -174,11 +180,13 @@ func (c *Collector) collect(ctx context.Context, at time.Time) {
 }
 
 // collectHost samples exactly one host at `at`. A failed utilization read,
-// a failed host-totals witness or a failed record backs the host off without
-// touching its baseline; a counter reset (daemon restart) re-baselines
-// silently. The recorded cpu_used_millis rate is derived from consecutive
-// cumulative readings over the actual elapsed wall clock, so collection
-// gaps dilute the rate instead of fabricating one.
+// a failed host-totals witness clears the baseline and backs the host off;
+// a failed record backs the host off without discarding its valid baseline.
+// A counter reset or a change in the reported guest count re-baselines.
+// The recorded cpu_used_millis rate is derived from consecutive
+// cumulative readings over elapsed wall time. Two error-free aggregate
+// reads do not prove that the guest membership or counter epochs match;
+// this is project guest telemetry, not an immutable per-guest rate.
 func (c *Collector) collectHost(ctx context.Context, host string, source Source, at time.Time) {
 	c.mu.Lock()
 	state := c.states[host]
@@ -186,28 +194,35 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	sweep, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	usage, err := source.SampleUtilization(sweep)
-	if err != nil {
-		c.backOff(host, at, "utilization sample unavailable")
+	if err != nil || sweep.Err() != nil || len(usage.Errors) > 0 {
+		state.hasBaseline = false
+		c.backOff(host, at, "complete utilization sample unavailable")
 		return
 	}
 	// HostTotals witnesses the host capacity in the same sweep; a complete
 	// sample requires it, but the durable usage row carries guest-state
 	// utilization only because that is what the history schema records.
-	if _, err := source.HostTotals(sweep); err != nil {
+	if _, err := source.HostTotals(sweep); err != nil || sweep.Err() != nil {
+		state.hasBaseline = false
 		c.backOff(host, at, "host totals witness unavailable")
 		return
 	}
-	if usage.CPUUsedMillis < 0 {
-		c.backOff(host, at, "invalid cumulative CPU observation")
+	if usage.CPUUsedMillis < 0 || usage.RAMUsedMiB < 0 || usage.DiskUsedMiB < 0 || usage.Guests < 0 {
+		state.hasBaseline = false
+		c.backOff(host, at, "invalid guest utilization observation")
 		return
 	}
 	delta := usage.CPUUsedMillis - state.baselineMillis
 	elapsed := at.Sub(state.baselineAt)
+	countChanged := state.baselineGuests != usage.Guests
 	state.baselineMillis = usage.CPUUsedMillis
 	state.baselineAt = at
+	state.baselineGuests = usage.Guests
 	switch {
 	case !state.hasBaseline:
 		state.hasBaseline = true
+		return
+	case countChanged:
 		return
 	case delta < 0:
 		// Cumulative counters reset on daemon restart: never derive a
@@ -222,7 +237,7 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 		c.backOff(host, at, "CPU observation rate out of range")
 		return
 	}
-	if err := c.recorder.RecordUsageSample(sweep, host, at, rate, usage.RAMUsedMiB, usage.DiskUsedMiB, GuestStateSource); err != nil {
+	if err := c.recorder.RecordUsageSample(sweep, host, at, rate, usage.RAMUsedMiB, usage.DiskUsedMiB, GuestStateSourceV2); err != nil {
 		c.backOff(host, at, "usage sample record unavailable")
 	}
 }

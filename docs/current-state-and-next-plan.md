@@ -78,7 +78,7 @@ The full provisional contract (revision 10) is attached in this PR as
 comparison document: it does not publish an interface, grant authority,
 or assert deployability.
 
-## Host utilization monitoring (experimental offline slice)
+## Incus project guest history (experimental)
 
 An experimental, flag-disabled slice adds historical resource
 monitoring on this branch:
@@ -87,22 +87,33 @@ monitoring on this branch:
   collector inside the gateway, sharing the reconcile loop's lifecycle
   and the same verified per-host Incus clients the gateway provisions
   through. It is off by default.
-- Every interval (default 60s, minimum 15s) the collector samples each
-  host's guest-state utilization (`SampleUtilization`: cumulative CPU
-  nanoseconds, RAM MiB, disk MiB) plus `HostTotals`. The recorded
-  `cpu_used_millis` is a rate derived from consecutive cumulative
-  readings over the actual elapsed wall clock; the first reading per
-  host is a baseline only, and a counter reset (daemon restart)
-  re-baselines silently instead of producing a negative sample.
+- Enrollment for this collector is from static gateway host configuration.
+  Approving a dynamic connection in Servers does not start historical
+  collection. Each sweep samples the visible Incus project guests.
+  A successful `HostTotals` read is a witness, not the source of a
+  history row. These numbers do not measure whole-server CPU, available
+  RAM, a backing filesystem, or resource use for an individual CI job.
+- The default sweep interval is 60s (minimum 15s). The collector converts
+  cumulative guest CPU time to a project rate over the interval between
+  readings. An incomplete sweep cannot become a zero or provide a
+  baseline. A counter reset or a change in the reported guest count
+  starts a new baseline without recording a rate for that interval.
+  Even complete aggregates with the same count do not prove that the
+  same guest processes contributed to both endpoints.
 - Samples are appended to the admission usage history with source
-  `guest-state` and are exposed read-only at
+  `guest-state-v2` (legacy rows remain `guest-state`) and exposed read-only at
   `GET /admin/api/v1/usage/{host}?since=<RFC3339>&limit=<n>` on the
   separately authorized admin surface. One failing host backs off
   independently and never blocks the others.
-- Samples are monitoring data only: they never gate admission, fits,
-  charges or retirement. A host without samples returns an empty array
-  with 200 — monitoring absence means unavailable, never fabricated
-  zeros, so UI history gaps stay visibly gaps.
+- Recent high project CPU/RAM observations can suppress new *advisory*
+  placement proposals. Native guest disk reports may include the same
+  shared volume multiple times and cannot trigger that veto. A new
+  observation does not qualify positive pressure evidence for a stock
+  pool increase. Legacy rows keep their existing short-window treatment.
+  Missing, stale or low readings are not evidence of headroom.
+  No observation changes physical admission, budget accounting
+  or retirement. An empty history means unavailable. Previously recorded
+  rows are not reclassified as qualified measurements.
 
 ## Ordered next work
 

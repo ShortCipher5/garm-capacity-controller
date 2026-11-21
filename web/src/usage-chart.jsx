@@ -1,5 +1,4 @@
 import React from "react";
-import { splitUsageSegments } from "./usage-client.js";
 
 const fmt = (n) => n.toLocaleString();
 export const USAGE_DIMENSIONS = [
@@ -16,10 +15,8 @@ export function formatSampleAge(now, sampledAt) {
   if (hours < 48) return `${hours} hours ago`;
   return `${Math.round(hours / 24)} days ago`;
 }
-// UsageChart draws measured samples as one polyline per contiguous monitoring
-// segment. A sampling gap breaks the line instead of bridging it, and single
-// sample points render as dots; absence is handled by the panel, never as a
-// zero-filled series here.
+// Only recorded points are shown. The wire does not establish coverage between
+// observations, so no line implies uninterrupted monitoring or source continuity.
 export function UsageChart({ samples, dimension = "cpu_used_millis", label = "CPU used", unit = "millicores", now = new Date() }) {
   if (!Array.isArray(samples) || samples.length === 0) return null;
   const width = 640,
@@ -34,7 +31,6 @@ export function UsageChart({ samples, dimension = "cpu_used_millis", label = "CP
   const max = Math.max(1, ...ordered.map((sample) => sample[dimension]));
   const x = (sample) => padX + ((Date.parse(sample.sampled_at) - start) / span) * (width - padX - 10);
   const y = (value) => padTop + (1 - value / max) * (height - padTop - padBottom);
-  const segments = splitUsageSegments(ordered);
   const gridSteps = [0, 0.5, 1];
   return (
     <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} history chart`}>
@@ -46,16 +42,8 @@ export function UsageChart({ samples, dimension = "cpu_used_millis", label = "CP
           </text>
         </g>
       ))}
-      {segments.map((segment, index) => (
-        <polyline
-          key={index}
-          className="history-line"
-          data-segment={index}
-          points={segment.map((sample) => `${x(sample).toFixed(1)},${y(sample[dimension]).toFixed(1)}`).join(" ")}
-        />
-      ))}
-      {ordered.map((sample) => (
-        <circle key={sample.sampled_at} cx={x(sample)} cy={y(sample[dimension])} r="2.4" />
+      {ordered.map((sample, index) => (
+        <circle key={`${sample.source}:${sample.sampled_at}:${index}`} cx={x(sample)} cy={y(sample[dimension])} r="2.4" />
       ))}
       <text x={padX} y={height - 6}>
         {new Date(start).toLocaleString()}

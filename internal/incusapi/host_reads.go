@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/url"
 	"time"
@@ -40,6 +41,13 @@ type Guest struct {
 	Reservation string
 }
 
+type guestInventory struct {
+	Guest
+	// Exact named disk devices described by this inventory row, or nil
+	// when the inventory cannot qualify native disk report coverage.
+	measurableDisks map[string]struct{}
+}
+
 // UtilizationSample aggregates MEASURED utilization from guest state across
 // one sweep. It is distinct from budget accounting: these values are observed
 // usage, not allocated or reserved capacity.
@@ -49,8 +57,9 @@ type UtilizationSample struct {
 	DiskUsedMiB   int64
 	// Guests counts only guests whose state contributed to the totals.
 	Guests int
-	// Errors lists guests whose state fetch failed; their contribution is
-	// unknown and excluded instead of failing the whole sample.
+	// Errors lists guests with an unreadable state or at least one
+	// unavailable metric. Other reported counters still contribute. A
+	// sample with Errors is incomplete, not a zero or a rate baseline.
 	Errors []GuestUtilizationError
 }
 
@@ -159,6 +168,18 @@ func (c *Client) HostTotals(ctx context.Context) (HostTotals, error) {
 // means unbounded-from-view, never evidence of absence. Row identity and shape
 // stay strict: malformed rows, duplicate names and invalid attribution fail closed.
 func (c *Client) Guests(ctx context.Context) ([]Guest, error) {
+	inventory, err := c.readGuestInventory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Guest, 0, len(inventory))
+	for _, guest := range inventory {
+		result = append(result, guest.Guest)
+	}
+	return result, nil
+}
+
+func (c *Client) readGuestInventory(ctx context.Context) ([]guestInventory, error) {
 	if err := c.trusted(ctx, false); err != nil {
 		return nil, err
 	}
@@ -174,7 +195,7 @@ func (c *Client) Guests(ctx context.Context) ([]Guest, error) {
 	if len(trimmed) == 0 || trimmed[0] != '[' || json.Unmarshal(response.metadata, &rows) != nil {
 		return nil, ErrResponse
 	}
-	result := make([]Guest, 0, len(rows))
+	result := make([]guestInventory, 0, len(rows))
 	seen := map[string]bool{}
 	for _, row := range rows {
 		guest, err := parseGuest(row)
@@ -190,33 +211,34 @@ func (c *Client) Guests(ctx context.Context) ([]Guest, error) {
 	return result, nil
 }
 
-func parseGuest(row json.RawMessage) (Guest, error) {
+func parseGuest(row json.RawMessage) (guestInventory, error) {
 	fields, err := object(row)
 	if err != nil {
-		return Guest{}, err
+		return guestInventory{}, err
 	}
-	guest := Guest{}
+	var result guestInventory
+	guest := &result.Guest
 	guest.Name, err = field[string](fields, "name")
 	if err != nil || !name(guest.Name) {
-		return Guest{}, ErrResponse
+		return guestInventory{}, ErrResponse
 	}
 	guest.Status, err = field[string](fields, "status")
 	if err != nil || !label(guest.Status) {
-		return Guest{}, ErrResponse
+		return guestInventory{}, ErrResponse
 	}
 	created, err := field[string](fields, "created_at")
 	if err != nil || !label(created) {
-		return Guest{}, ErrResponse
+		return guestInventory{}, ErrResponse
 	}
 	if guest.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
 		if guest.CreatedAt, err = time.Parse(time.RFC3339, created); err != nil {
-			return Guest{}, ErrResponse
+			return guestInventory{}, ErrResponse
 		}
 	}
 	if raw, ok := fields["expanded_config"]; ok {
 		config, err := object(raw)
 		if err != nil {
-			return Guest{}, err
+			return guestInventory{}, err
 		}
 		if cpuRaw, ok := config["limits.cpu"]; ok {
 			var value string
@@ -237,7 +259,7 @@ func parseGuest(row json.RawMessage) (Guest, error) {
 		for key, target := range map[string]*string{"user.runner-controller-id": &guest.Controller, "user.runner-pool-id": &guest.Pool, "user.garm-capacity.reservation": &guest.Reservation} {
 			if raw, ok := config[key]; ok {
 				if json.Unmarshal(raw, target) != nil || !label(*target) {
-					return Guest{}, ErrResponse
+					return guestInventory{}, ErrResponse
 				}
 			}
 		}
@@ -245,12 +267,13 @@ func parseGuest(row json.RawMessage) (Guest, error) {
 	if raw, ok := fields["expanded_devices"]; ok {
 		devices, err := object(raw)
 		if err != nil {
-			return Guest{}, err
+			return guestInventory{}, err
 		}
+		result.measurableDisks = expectedGuestStateDisks(devices)
 		if rootRaw, ok := devices["root"]; ok {
 			root, err := object(rootRaw)
 			if err != nil {
-				return Guest{}, err
+				return guestInventory{}, err
 			}
 			if sizeRaw, ok := root["size"]; ok {
 				var value string
@@ -262,91 +285,207 @@ func parseGuest(row json.RawMessage) (Guest, error) {
 			}
 		}
 	}
-	return guest, nil
+	return result, nil
 }
 
-// SampleUtilization measures current utilization from every guest's instance
-// state and aggregates it. One guest failing (transport, response or parse)
-// marks only that guest's contribution unknown; the sweep still returns the
-// summed utilization of the remaining guests with a per-guest error entry.
+// expectedGuestStateDisks identifies the root and pool-backed devices that
+// can appear in native Incus disk state. Mounts without a pool, such as host
+// paths, are not measured by that API. Missing or ambiguous device inventory
+// cannot qualify complete native reports.
+func expectedGuestStateDisks(devices map[string]json.RawMessage) map[string]struct{} {
+	result := make(map[string]struct{})
+	roots := 0
+	for deviceName, raw := range devices {
+		device, err := object(raw)
+		if err != nil || !label(deviceName) {
+			return nil
+		}
+		kind, err := field[string](device, "type")
+		if err != nil || kind == "" {
+			return nil
+		}
+		if kind != "disk" {
+			continue
+		}
+		var path, pool string
+		if _, present := device["path"]; present {
+			path, err = field[string](device, "path")
+			if err != nil {
+				return nil
+			}
+		}
+		if _, present := device["pool"]; present {
+			pool, err = field[string](device, "pool")
+			if err != nil {
+				return nil
+			}
+		}
+		if path == "/" {
+			roots++
+			if pool == "" {
+				return nil
+			}
+		}
+		if pool != "" {
+			result[deviceName] = struct{}{}
+		}
+	}
+	if roots != 1 {
+		return nil
+	}
+	return result
+}
+
+// SampleUtilization sums reported usage from project guests. It does not
+// report physical host usage, prove runtime continuity or deduplicate storage
+// that may be shared by guests. Incomplete measurements are marked even if
+// some counters remain available for display.
 func (c *Client) SampleUtilization(ctx context.Context) (UtilizationSample, error) {
-	guests, err := c.Guests(ctx)
+	guests, err := c.readGuestInventory(ctx)
 	if err != nil {
 		return UtilizationSample{}, err
 	}
 	var result UtilizationSample
 	for _, guest := range guests {
-		usage, err := c.guestUsage(ctx, guest.Name)
+		usage, err := c.guestUsage(ctx, guest)
 		if err != nil {
 			result.Errors = append(result.Errors, GuestUtilizationError{Guest: guest.Name, Err: err})
 			continue
 		}
-		result.CPUUsedMillis += usage.cpuMillis
-		result.RAMUsedMiB += usage.ramMiB
-		result.DiskUsedMiB += usage.diskMiB
-		result.Guests++
+		if !addGuestCounter(&result.CPUUsedMillis, usage.cpuMillis) ||
+			!addGuestCounter(&result.RAMUsedMiB, usage.ramMiB) ||
+			!addGuestCounter(&result.DiskUsedMiB, usage.diskMiB) {
+			return UtilizationSample{}, ErrResponse
+		}
+		if usage.cpuKnown || usage.ramKnown || usage.diskMiB > 0 {
+			result.Guests++
+		}
+		if !usage.cpuKnown || !usage.ramKnown || !usage.diskComplete {
+			result.Errors = append(result.Errors, GuestUtilizationError{Guest: guest.Name, Err: ErrResponse})
+		}
 	}
 	return result, nil
 }
 
 type guestUsage struct {
-	cpuMillis int64
-	ramMiB    int64
-	diskMiB   int64
+	cpuMillis    int64
+	ramMiB       int64
+	diskMiB      int64
+	cpuKnown     bool
+	ramKnown     bool
+	diskComplete bool
 }
 
-func (c *Client) guestUsage(ctx context.Context, guestName string) (guestUsage, error) {
-	if !name(guestName) {
+func addGuestCounter(sum *int64, value int64) bool {
+	if value < 0 || value > math.MaxInt64-*sum {
+		return false
+	}
+	*sum += value
+	return true
+}
+
+func (c *Client) guestUsage(ctx context.Context, guest guestInventory) (guestUsage, error) {
+	if !name(guest.Name) {
 		return guestUsage{}, ErrConfiguration
 	}
-	response, err := c.request(ctx, http.MethodGet, "/1.0/instances/"+guestName+"/state", nil, nil)
+	response, err := c.request(ctx, http.MethodGet, "/1.0/instances/"+guest.Name+"/state", nil, nil)
 	if err != nil {
 		return guestUsage{}, err
 	}
 	if response.kind != "sync" {
 		return guestUsage{}, ErrResponse
 	}
-	fields, err := object(response.metadata)
+	return parseGuestStateUsage(response.metadata, guest.measurableDisks)
+}
+
+// Native 6.0/7.0 state can serialize zero both for a genuine zero and when
+// stopped, unsupported, or unable to collect the counter. It also uses
+// negative CPU sentinels, and can omit unsupported disk devices. Only
+// positive values qualify. Positive sub-millisecond CPU may round to zero
+// with known coverage; it is not the same as an ambiguous wire zero.
+func parseGuestStateUsage(raw json.RawMessage, expectedDisks map[string]struct{}) (guestUsage, error) {
+	fields, err := object(raw)
 	if err != nil {
 		return guestUsage{}, err
 	}
-	var result guestUsage
-	if raw, ok := fields["cpu"]; ok {
-		if cpu, err := object(raw); err == nil {
-			if usage, err := field[int64](cpu, "usage"); err == nil && usage >= 0 {
-				// Instance state reports cumulative CPU time in nanoseconds.
-				result.cpuMillis = usage / int64(time.Millisecond)
+	cpu, cpuKnown := positiveGuestCounter(fields["cpu"], "usage")
+	memory, ramKnown := positiveGuestCounter(fields["memory"], "usage")
+	disk, diskComplete := readGuestStateDisk(fields["disk"], expectedDisks)
+	return guestUsage{
+		cpuMillis: cpu / int64(time.Millisecond), cpuKnown: cpuKnown,
+		ramMiB: bytesToMiB(memory), ramKnown: ramKnown, diskMiB: disk, diskComplete: diskComplete,
+	}, nil
+}
+
+func positiveGuestCounter(raw json.RawMessage, key string) (int64, bool) {
+	fields, err := object(raw)
+	if err != nil {
+		return 0, false
+	}
+	value, err := field[int64](fields, key)
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+func readGuestStateDisk(raw json.RawMessage, expected map[string]struct{}) (int64, bool) {
+	data := bytes.TrimSpace(raw)
+	if len(data) == 0 {
+		return 0, false
+	}
+	switch data[0] {
+	case '{':
+		devices, err := object(data)
+		if err != nil || len(devices) == 0 {
+			return 0, false
+		}
+		complete := len(expected) > 0 && len(expected) == len(devices)
+		var sum int64
+		for device, counter := range devices {
+			if _, matched := expected[device]; len(expected) != 0 && !matched {
+				complete = false
+				continue
+			}
+			value, known := positiveGuestCounter(counter, "usage")
+			if !label(device) || !known {
+				complete = false
+				continue
+			}
+			if !addGuestCounter(&sum, value) {
+				return 0, false
 			}
 		}
-	}
-	if raw, ok := fields["memory"]; ok {
-		if memory, err := object(raw); err == nil {
-			if usage, err := field[int64](memory, "usage"); err == nil {
-				result.ramMiB = bytesToMiB(usage)
-			}
-		}
-	}
-	if raw, ok := fields["disk"]; ok {
+		return bytesToMiB(sum), complete
+	case '[':
+		// Retain the previous array-shaped compatibility input. This is
+		// not the native Incus disk-state schema. It has no device keys
+		// that could qualify coverage against native device inventory.
 		var entries []json.RawMessage
-		if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '[' && json.Unmarshal(raw, &entries) == nil {
-			for _, entryRaw := range entries {
-				entry, err := object(entryRaw)
-				if err != nil {
-					continue
-				}
-				usageRaw, ok := entry["usage"]
-				if !ok {
-					continue
-				}
-				usage, err := object(usageRaw)
-				if err != nil {
-					continue
-				}
-				if used, err := field[int64](usage, "usage_bytes"); err == nil {
-					result.diskMiB += bytesToMiB(used)
-				}
+		if json.Unmarshal(data, &entries) != nil || len(entries) == 0 {
+			return 0, false
+		}
+		complete := true
+		var mib int64
+		for _, raw := range entries {
+			entry, err := object(raw)
+			if err != nil {
+				complete = false
+				continue
+			}
+			used, known := positiveGuestCounter(entry["usage"], "usage_bytes")
+			if !known {
+				complete = false
+				continue
+			}
+			if !addGuestCounter(&mib, bytesToMiB(used)) {
+				return 0, false
 			}
 		}
+		// A partial native inventory cannot be satisfied by unnamed
+		// array values; older fixtures have no native device inventory.
+		return mib, complete && len(expected) == 0
+	default:
+		return 0, false
 	}
-	return result, nil
 }

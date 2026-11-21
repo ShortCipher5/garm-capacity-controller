@@ -38,6 +38,9 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     const readUsage = async () => [];
     const html = renderToStaticMarkup(React.createElement(ServerCard, { host: host(), readUsage }));
     assert.match(html, /Detected physical totals/);
+    assert.match(html, /Resource observations/);
+    assert.match(html, /Sampling cadence and interval coverage are not supplied/);
+    assert.doesNotMatch(html, /Measured utilization/);
     assert.match(html, /CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB · Runners not measured by discovery/);
     assert.match(html, /CPU fair-use cap: 3,000 millicores/);
     assert.match(html, /Ledger policy management/);

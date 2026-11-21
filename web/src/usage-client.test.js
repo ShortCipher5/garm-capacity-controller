@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateUsageHistory, fetchUsageHistory, splitUsageSegments, UsageResponseError } from "./usage-client.js";
+import { validateUsageHistory, fetchUsageHistory, usageScope, UsageResponseError } from "./usage-client.js";
 
 const token = "a".repeat(64);
 const sample = (at, cpu, ram = 1024, disk = 2048) => ({ host: "host-a", sampled_at: at, cpu_used_millis: cpu, ram_used_mib: ram, disk_used_mib: disk, source: "fixture-collector" });
@@ -17,18 +17,6 @@ test("usage history validation accepts the wire shape and rejects inventions", (
     [{ ...sample("2026-01-01T00:00:00Z", 100), source: "" }],
     [{ ...sample("2026-01-01T00:00:00Z", 100), host: "" }],
   ]) assert.throws(() => validateUsageHistory(bad), UsageResponseError);
-});
-test("usage segments split only on real monitoring gaps", () => {
-  const contiguous = [0, 5, 10, 15, 20].map((minute) => sample(`2026-01-01T00:${String(minute).padStart(2, "0")}:00Z`, 100));
-  assert.equal(splitUsageSegments(contiguous).length, 1);
-  const gap = [0, 5, 20, 25].map((minute) => sample(`2026-01-01T00:${String(minute).padStart(2, "0")}:00Z`, 100));
-  const segments = splitUsageSegments(gap);
-  assert.equal(segments.length, 2);
-  assert.deepEqual(segments.map((segment) => segment.length), [2, 2]);
-  const unsorted = [sample("2026-01-01T00:20:00Z", 4), sample("2026-01-01T00:00:00Z", 1), sample("2026-01-01T00:05:00Z", 2), sample("2026-01-01T00:25:00Z", 5)];
-  assert.deepEqual(splitUsageSegments(unsorted).map((segment) => segment.length), [2, 2]);
-  assert.deepEqual(splitUsageSegments([sample("2026-01-01T00:00:00Z", 1)]), [[sample("2026-01-01T00:00:00Z", 1)]]);
-  assert.deepEqual(splitUsageSegments([]), []);
 });
 test("fetchUsageHistory issues the exact same-origin read request", async () => {
   const calls = [];
@@ -61,4 +49,17 @@ test("fetchUsageHistory renders auth and server errors honestly", async () => {
   await assert.rejects(fetchUsageHistory(token, "host-a", { fetcher: async () => { throw new Error("down"); } }), /No automatic retry/);
   await assert.rejects(fetchUsageHistory(token, "host-a", { fetcher: async () => ({ ok: true, status: 200, json: async () => ({}) }) }), /Unsupported usage history/);
   await assert.rejects(fetchUsageHistory("nope", "host-a"), UsageResponseError);
+});
+
+test("guest-state scope is project guest observations, never host load", () => {
+  const guest = {...sample("2026-01-01T00:00:00Z", 100), source: "guest-state"};
+  assert.match(usageScope([guest]), /Project guest observations, not whole-host load/);
+  assert.match(usageScope([guest]), /do not establish physical host pressure or headroom/);
+  assert.match(usageScope([guest]), /stored zero in legacy history is not proof of zero usage/);
+  const current = {...guest, source: "guest-state-v2"};
+  assert.match(usageScope([current]), /Project guest observations, not whole-host load/);
+  assert.doesNotMatch(usageScope([current]), /legacy/);
+  assert.match(usageScope([guest, current]), /stored zero in legacy history/);
+  assert.match(usageScope([guest, {...guest, source:"other"}]), /Source-specific/);
+  assert.match(usageScope([]), /unavailable/);
 });

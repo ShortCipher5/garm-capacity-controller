@@ -434,11 +434,6 @@ svg {
   stroke-width: 1;
   stroke-dasharray: 4 4;
 }
-.history-line {
-  fill: none;
-  stroke: #d7b275;
-  stroke-width: 2;
-}
 circle {
   fill: #d7b275;
 }
