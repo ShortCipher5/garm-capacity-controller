@@ -3,6 +3,7 @@ package hostmetrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -58,6 +59,26 @@ func (f *fakeSource) calls() (int, int) {
 	return f.sampleCalls, f.totalsCalls
 }
 
+// fixtureUsage emits a typed synthetic container contribution, not a runtime
+// identity. Extra inventory/history cases shape the members explicitly.
+func fixtureUsage(cpu, ram, disk int64, guests int) incusapi.UtilizationSample {
+	sample := incusapi.UtilizationSample{CPUUsedMillis: cpu, RAMUsedMiB: ram, DiskUsedMiB: disk, Guests: guests}
+	sample.GuestCPU = make([]incusapi.GuestCPUObservation, guests)
+	for i := range sample.GuestCPU {
+		member := &sample.GuestCPU[i]
+		member.Name = fmt.Sprintf("fixture-%d", i)
+		member.CreatedAt = time.Unix(1, 0)
+		member.StartedAt = time.Unix(2, 0)
+		member.PID = int64(i + 3)
+		// Give every member a positive raw counter, even with zero whole milliseconds.
+		member.CPUUsedNanos = int64(time.Millisecond)*(cpu/int64(guests)) + 1
+		if i == 0 {
+			member.CPUUsedNanos += int64(time.Millisecond) * (cpu % int64(guests))
+		}
+	}
+	return sample
+}
+
 type recorded struct {
 	host          string
 	at            time.Time
@@ -105,7 +126,7 @@ func TestCollectorRebaselinesOnReportedGuestCountChange(t *testing.T) {
 		{1, 60_000}, {2, 361_000}, {2, 362_000},
 		{1, 363_000}, {1, 364_000},
 	} {
-		source.sample = incusapi.UtilizationSample{Guests: input.guests, CPUUsedMillis: input.cpu}
+		source.sample = fixtureUsage(input.cpu, 0, 0, input.guests)
 		collector.collect(context.Background(), start.Add(time.Duration(i)*time.Minute))
 	}
 	rows := recorder.recorded()
@@ -144,7 +165,7 @@ func TestNewValidatesConfiguration(t *testing.T) {
 
 func TestCollectorFirstReadingBaselinesThenDerivesRate(t *testing.T) {
 	clock := &fakeClock{at: time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)}
-	source := &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000, RAMUsedMiB: 512, DiskUsedMiB: 256, Guests: 1}, totals: incusapi.HostTotals{CPUMillisTotal: 8000}}
+	source := &fakeSource{sample: fixtureUsage(1000, 512, 256, 1), totals: incusapi.HostTotals{CPUMillisTotal: 8000}}
 	recorder := &fakeRecorder{}
 	collector, err := New(map[string]Source{"host-a": source}, recorder, Options{Interval: time.Minute, Now: clock.now})
 	if err != nil {
@@ -156,7 +177,7 @@ func TestCollectorFirstReadingBaselinesThenDerivesRate(t *testing.T) {
 	}
 	clock.advance(time.Minute)
 	source.mu.Lock()
-	source.sample = incusapi.UtilizationSample{CPUUsedMillis: 61000, RAMUsedMiB: 768, DiskUsedMiB: 300, Guests: 1}
+	source.sample = fixtureUsage(61000, 768, 300, 1)
 	source.mu.Unlock()
 	collector.collect(context.Background(), clock.now())
 	got := recorder.recorded()
@@ -180,7 +201,7 @@ func TestCollectorFirstReadingBaselinesThenDerivesRate(t *testing.T) {
 
 func TestCollectorCounterResetRebaselinesWithoutNegativeSample(t *testing.T) {
 	clock := &fakeClock{at: time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)}
-	source := &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 90000}}
+	source := &fakeSource{sample: fixtureUsage(90000, 0, 0, 1)}
 	recorder := &fakeRecorder{}
 	collector, err := New(map[string]Source{"host-a": source}, recorder, Options{Interval: time.Minute, Now: clock.now})
 	if err != nil {
@@ -189,7 +210,7 @@ func TestCollectorCounterResetRebaselinesWithoutNegativeSample(t *testing.T) {
 	collector.collect(context.Background(), clock.now())
 	clock.advance(time.Minute)
 	source.mu.Lock()
-	source.sample = incusapi.UtilizationSample{CPUUsedMillis: 5000}
+	source.sample = fixtureUsage(5000, 0, 0, 1)
 	source.mu.Unlock()
 	collector.collect(context.Background(), clock.now())
 	if got := recorder.recorded(); len(got) != 0 {
@@ -197,7 +218,7 @@ func TestCollectorCounterResetRebaselinesWithoutNegativeSample(t *testing.T) {
 	}
 	clock.advance(30 * time.Second)
 	source.mu.Lock()
-	source.sample = incusapi.UtilizationSample{CPUUsedMillis: 35000}
+	source.sample = fixtureUsage(35000, 0, 0, 1)
 	source.mu.Unlock()
 	collector.collect(context.Background(), clock.now())
 	got := recorder.recorded()
@@ -209,7 +230,7 @@ func TestCollectorCounterResetRebaselinesWithoutNegativeSample(t *testing.T) {
 func TestCollectorFailingHostNeverBlocksOthers(t *testing.T) {
 	clock := &fakeClock{at: time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)}
 	failing := &fakeSource{sampleErr: errFixture}
-	healthy := &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000, RAMUsedMiB: 64, DiskUsedMiB: 32}}
+	healthy := &fakeSource{sample: fixtureUsage(1000, 64, 32, 1)}
 	totalsFailing := &fakeSource{totalsErr: errFixture}
 	recorder := &fakeRecorder{}
 	collector, err := New(map[string]Source{"failing": failing, "healthy": healthy, "no-totals": totalsFailing}, recorder, Options{Interval: time.Minute, Now: clock.now})
@@ -222,10 +243,10 @@ func TestCollectorFailingHostNeverBlocksOthers(t *testing.T) {
 	}
 	clock.advance(time.Minute)
 	healthy.mu.Lock()
-	healthy.sample = incusapi.UtilizationSample{CPUUsedMillis: 3000, RAMUsedMiB: 128, DiskUsedMiB: 64}
+	healthy.sample = fixtureUsage(3000, 128, 64, 1)
 	healthy.mu.Unlock()
 	totalsFailing.mu.Lock()
-	totalsFailing.sample = incusapi.UtilizationSample{CPUUsedMillis: 7000}
+	totalsFailing.sample = fixtureUsage(7000, 0, 0, 1)
 	totalsFailing.mu.Unlock()
 	collector.collect(context.Background(), clock.now())
 	got := recorder.recorded()
@@ -258,7 +279,7 @@ func TestCollectorFailingHostNeverBlocksOthers(t *testing.T) {
 
 func TestCollectorRecordFailureBacksOffHostOnly(t *testing.T) {
 	clock := &fakeClock{at: time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)}
-	source := &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000}}
+	source := &fakeSource{sample: fixtureUsage(1000, 0, 0, 1)}
 	recorder := &fakeRecorder{err: errFixture}
 	collector, err := New(map[string]Source{"host-a": source}, recorder, Options{Interval: time.Minute, Now: clock.now})
 	if err != nil {
@@ -275,7 +296,7 @@ func TestCollectorRecordFailureBacksOffHostOnly(t *testing.T) {
 	recorder.mu.Unlock()
 	clock.advance(2 * time.Minute)
 	source.mu.Lock()
-	source.sample = incusapi.UtilizationSample{CPUUsedMillis: 61000}
+	source.sample = fixtureUsage(61000, 0, 0, 1)
 	source.mu.Unlock()
 	collector.collect(context.Background(), clock.now())
 	recovered := recorder.recorded()
@@ -306,7 +327,7 @@ func (s *baselineCancelSource) HostTotals(ctx context.Context) (incusapi.HostTot
 func TestRunStopsWithoutBaseliningCanceledWitness(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	source := &baselineCancelSource{fakeSource: &fakeSource{sample: incusapi.UtilizationSample{CPUUsedMillis: 1000}}, cancel: cancel}
+	source := &baselineCancelSource{fakeSource: &fakeSource{sample: fixtureUsage(1000, 0, 0, 1)}, cancel: cancel}
 	recorder := &fakeRecorder{}
 	collector, err := New(map[string]Source{"host-a": source}, recorder, Options{Interval: MinInterval})
 	if err != nil {
@@ -321,7 +342,7 @@ func TestRunStopsWithoutBaseliningCanceledWitness(t *testing.T) {
 		t.Fatal("collector did not stop")
 	}
 	calls, totals := source.calls()
-	if calls != 1 || totals != 1 || collector.states["host-a"].hasBaseline {
+	if calls != 1 || totals != 1 || collector.states["host-a"].baseline != nil {
 		t.Fatal("canceled initial sweep should not establish a baseline", calls, totals)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -333,7 +354,7 @@ func TestRunStopsWithoutBaseliningCanceledWitness(t *testing.T) {
 	}
 }
 
-func TestCollectorRecordsGuestStateSamplesIntoAdmissionStore(t *testing.T) {
+func TestCollectorDoesNotRecordIncusSamplesWithoutGuestContinuity(t *testing.T) {
 	fake := testsupport.NewFakeIncus(t, "metrics-incus")
 	ctx := context.Background()
 	spec := incusapi.InstanceSpec{Name: "runner-1", Type: "container", Profiles: []string{"runner-base"}, ImageFingerprint: strings.Repeat("a", 64), CPUMillis: 2000, RAMMiB: 2048, UserData: "#cloud-config\nmetrics-fixture", ControllerID: "controller-1", PoolID: "pool-1", ReservationKey: strings.Repeat("b", 64)}
@@ -366,18 +387,41 @@ func TestCollectorRecordsGuestStateSamplesIntoAdmissionStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 {
-		t.Fatalf("expected one stored sample, got %+v", history)
-	}
-	sample := history[0]
-	if sample.Source != GuestStateSourceV2 || sample.CPUUsedMillis != 1000 || sample.RAMUsedMiB != 3072 || sample.DiskUsedMiB != 4096 {
-		t.Fatalf("stored sample mismatch %+v", sample)
-	}
-	if sample.SampledAt != clock.now() {
-		t.Fatalf("sampled_at not the second sweep instant: %v", sample.SampledAt)
+	if len(history) != 0 {
+		t.Fatalf("native rows without runtime continuity yielded durable samples: %+v", history)
 	}
 	if fake.ResourceReads.Load() == 0 || fake.StateReads.Load() == 0 {
 		t.Fatal("collector did not exercise totals or state reads")
+	}
+}
+
+func TestCollectorRecordsMatchingGuestStateIntoAdmissionStore(t *testing.T) {
+	ctx := t.Context()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	budget := admission.Resources{CPU: 4000, RAM: 8192, Runners: 4}
+	policy := admission.Config{Global: budget, Hosts: map[string]admission.Host{"host-a": {Budget: budget, Mode: "enabled", Healthy: true, ObservedAt: at}}, Pools: map[string]admission.Pool{"pool-a": {Budget: budget, Hosts: []string{"host-a"}}}, MaxObservationAge: time.Minute}
+	store, err := admission.OpenSQLite(filepath.Join(t.TempDir(), "ledger.db"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	source := &fakeSource{}
+	collector, err := New(map[string]Source{"host-a": source}, store, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.sample = fixtureUsage(1000, 2048, 3072, 1)
+	collector.collect(ctx, at)
+	source.sample = fixtureUsage(61000, 3072, 4096, 1)
+	at = at.Add(time.Minute)
+	collector.collect(ctx, at)
+	history, err := store.UsageHistory(ctx, "host-a", time.Time{}, 0)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("expected one stored sample, got %+v (err=%v)", history, err)
+	}
+	sample := history[0]
+	if sample.Source != GuestStateSourceV2 || sample.CPUUsedMillis != 1000 || sample.RAMUsedMiB != 3072 || sample.DiskUsedMiB != 4096 || !sample.SampledAt.Equal(at) {
+		t.Fatalf("stored sample mismatch %+v", sample)
 	}
 }
 
@@ -392,11 +436,11 @@ func TestCollectorDoesNotRecordOrBridgePartialGuestState(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, sample := range []incusapi.UtilizationSample{
-		{CPUUsedMillis: 360000, RAMUsedMiB: 512, DiskUsedMiB: 50, Guests: 2},
+		fixtureUsage(360000, 512, 50, 2),
 		{CPUUsedMillis: 61000, RAMUsedMiB: 256, DiskUsedMiB: 25, Guests: 1,
 			Errors: []incusapi.GuestUtilizationError{{Guest: "omitted", Err: errFixture}}},
-		{CPUUsedMillis: 362000, RAMUsedMiB: 512, DiskUsedMiB: 50, Guests: 2},
-		{CPUUsedMillis: 363000, RAMUsedMiB: 640, DiskUsedMiB: 55, Guests: 2},
+		fixtureUsage(362000, 512, 50, 2),
+		fixtureUsage(363000, 640, 55, 2),
 	} {
 		source.sample = sample
 		// Call the host boundary directly so the regression is independent
@@ -421,10 +465,10 @@ func TestCollectorFailedUtilizationOrTotalsReadFencesBaseline(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			source.sample.CPUUsedMillis = 100000
+			source.sample = fixtureUsage(100000, 0, 0, 1)
 			collector.collectHost(t.Context(), "fixture", source, start)
 
-			source.sample.CPUUsedMillis = 101000
+			source.sample = fixtureUsage(101000, 0, 0, 1)
 			switch which {
 			case "utilization":
 				source.sampleErr = errFixture
@@ -438,17 +482,17 @@ func TestCollectorFailedUtilizationOrTotalsReadFencesBaseline(t *testing.T) {
 				source.sample.DiskUsedMiB = -1
 			}
 			collector.collectHost(t.Context(), "fixture", source, start.Add(time.Minute))
-			if collector.states["fixture"].hasBaseline {
+			if collector.states["fixture"].baseline != nil {
 				t.Fatal("failed observation kept a CPU baseline")
 			}
 
 			source.sampleErr, source.totalsErr = nil, nil
-			source.sample = incusapi.UtilizationSample{CPUUsedMillis: 500000}
+			source.sample = fixtureUsage(500000, 0, 0, 1)
 			collector.collectHost(t.Context(), "fixture", source, start.Add(2*time.Minute))
 			if got := recorder.recorded(); len(got) != 0 {
 				t.Fatalf("an unknown interval became a row: %+v", got)
 			}
-			source.sample.CPUUsedMillis += 60000
+			source.sample = fixtureUsage(560000, 0, 0, 1)
 			collector.collectHost(t.Context(), "fixture", source, start.Add(3*time.Minute))
 			if got := recorder.recorded(); len(got) != 1 || got[0].cpuUsedMillis != 1000 || got[0].source != GuestStateSourceV2 {
 				t.Fatalf("new consecutive observations failed: %+v", got)

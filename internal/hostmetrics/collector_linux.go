@@ -65,11 +65,15 @@ type Options struct {
 }
 
 type hostState struct {
-	baselineMillis int64
-	baselineAt     time.Time
-	baselineGuests int
-	hasBaseline    bool
-	skipUntil      time.Time
+	baseline  *guestCPUBaseline
+	skipUntil time.Time
+}
+
+type guestCPUBaseline struct {
+	at     time.Time
+	millis int64
+	guests map[string]incusapi.GuestCPUObservation
+	scope  incusapi.UtilizationSample
 }
 
 // Collector samples every configured host independently: one host failing
@@ -182,11 +186,11 @@ func (c *Collector) collect(ctx context.Context, at time.Time) {
 // collectHost samples exactly one host at `at`. A failed utilization read,
 // a failed host-totals witness clears the baseline and backs the host off;
 // a failed record backs the host off without discarding its valid baseline.
-// A counter reset or a change in the reported guest count re-baselines.
+// A counter reset or a change in observed guest membership or runtime
+// re-baselines. A complete sweep without continuity data cannot bridge rates.
 // The recorded cpu_used_millis rate is derived from consecutive
-// cumulative readings over elapsed wall time. Two error-free aggregate
-// reads do not prove that the guest membership or counter epochs match;
-// this is project guest telemetry, not an immutable per-guest rate.
+// cumulative readings over elapsed wall time. Matching observed runtime
+// fields are not proof of immutable guest identity or a physical host rate.
 func (c *Collector) collectHost(ctx context.Context, host string, source Source, at time.Time) {
 	c.mu.Lock()
 	state := c.states[host]
@@ -195,7 +199,7 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	defer cancel()
 	usage, err := source.SampleUtilization(sweep)
 	if err != nil || sweep.Err() != nil || len(usage.Errors) > 0 {
-		state.hasBaseline = false
+		state.baseline = nil
 		c.backOff(host, at, "complete utilization sample unavailable")
 		return
 	}
@@ -203,36 +207,30 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	// sample requires it, but the durable usage row carries guest-state
 	// utilization only because that is what the history schema records.
 	if _, err := source.HostTotals(sweep); err != nil || sweep.Err() != nil {
-		state.hasBaseline = false
+		state.baseline = nil
 		c.backOff(host, at, "host totals witness unavailable")
 		return
 	}
 	if usage.CPUUsedMillis < 0 || usage.RAMUsedMiB < 0 || usage.DiskUsedMiB < 0 || usage.Guests < 0 {
-		state.hasBaseline = false
+		state.baseline = nil
 		c.backOff(host, at, "invalid guest utilization observation")
 		return
 	}
-	delta := usage.CPUUsedMillis - state.baselineMillis
-	elapsed := at.Sub(state.baselineAt)
-	countChanged := state.baselineGuests != usage.Guests
-	state.baselineMillis = usage.CPUUsedMillis
-	state.baselineAt = at
-	state.baselineGuests = usage.Guests
-	switch {
-	case !state.hasBaseline:
-		state.hasBaseline = true
-		return
-	case countChanged:
-		return
-	case delta < 0:
-		// Cumulative counters reset on daemon restart: never derive a
-		// negative rate; the fresh reading above is the new baseline.
-		c.log("host metrics counter reset re-baselined " + host)
-		return
-	case elapsed < minSweepElapsed:
+	previous := state.baseline
+	current := newGuestCPUBaseline(usage, at)
+	if sweep.Err() != nil {
+		state.baseline = nil
 		return
 	}
-	rate, ok := cpuRate(delta, elapsed)
+	state.baseline = current
+	if previous == nil || current == nil || !current.continues(previous) {
+		return
+	}
+	elapsed := at.Sub(previous.at)
+	if elapsed < minSweepElapsed {
+		return
+	}
+	rate, ok := cpuRate(current.millis-previous.millis, elapsed)
 	if !ok {
 		c.backOff(host, at, "CPU observation rate out of range")
 		return
@@ -240,6 +238,59 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	if err := c.recorder.RecordUsageSample(sweep, host, at, rate, usage.RAMUsedMiB, usage.DiskUsedMiB, GuestStateSourceV2); err != nil {
 		c.backOff(host, at, "usage sample record unavailable")
 	}
+}
+
+func newGuestCPUBaseline(usage incusapi.UtilizationSample, at time.Time) *guestCPUBaseline {
+	if usage.GuestCPU == nil || len(usage.GuestCPU) != usage.Guests ||
+		(usage.Guests == 0 && (usage.RAMUsedMiB != 0 || usage.DiskUsedMiB != 0)) {
+		return nil
+	}
+	// Copy observations into owned storage. Do not keep a producer's slice
+	// as the baseline for the next sweep.
+	guests := make(map[string]incusapi.GuestCPUObservation, len(usage.GuestCPU))
+	pids := make(map[int64]struct{}, len(usage.GuestCPU))
+	var millis int64
+	for _, guest := range usage.GuestCPU {
+		if !validHost(guest.Name) || guest.PID <= 0 || guest.CreatedAt.IsZero() || guest.StartedAt.IsZero() ||
+			guest.StartedAt.Before(guest.CreatedAt) || guest.CPUUsedNanos <= 0 {
+			return nil
+		}
+		if _, duplicate := guests[guest.Name]; duplicate {
+			return nil
+		}
+		if _, duplicate := pids[guest.PID]; duplicate {
+			// One Linux host PID cannot identify two concurrent container
+			// processes. Sequential reads may have crossed PID reuse.
+			return nil
+		}
+		pids[guest.PID] = struct{}{}
+		counterMillis := guest.CPUUsedNanos / int64(time.Millisecond)
+		if counterMillis > math.MaxInt64-millis {
+			return nil
+		}
+		millis += counterMillis
+		guests[guest.Name] = guest
+	}
+	if millis != usage.CPUUsedMillis {
+		return nil
+	}
+	// Retain the producer's private sweep identity without its mutable slices.
+	usage.GuestCPU, usage.Errors = nil, nil
+	return &guestCPUBaseline{at: at, millis: millis, guests: guests, scope: usage}
+}
+
+func (b *guestCPUBaseline) continues(previous *guestCPUBaseline) bool {
+	if len(b.guests) != len(previous.guests) || b.scope.GuestCPUObservedScopeChanged(previous.scope) {
+		return false
+	}
+	for name, current := range b.guests {
+		prior, exists := previous.guests[name]
+		if !exists || current.PID != prior.PID || !current.CreatedAt.Equal(prior.CreatedAt) ||
+			!current.StartedAt.Equal(prior.StartedAt) || current.CPUUsedNanos < prior.CPUUsedNanos {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Collector) backOff(host string, at time.Time, reason string) {

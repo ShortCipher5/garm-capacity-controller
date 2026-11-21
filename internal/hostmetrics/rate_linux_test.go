@@ -30,8 +30,8 @@ func TestCPURateCannotWrapToLowPressure(t *testing.T) {
 }
 
 func TestCollectorRejectsUnrepresentableRateAndInvalidCounter(t *testing.T) {
-	for _, value := range []int64{-1, math.MaxInt64} {
-		source := &fakeSource{}
+	for _, value := range []int64{-1, math.MaxInt64 / 500} {
+		source := &fakeSource{sample: fixtureUsage(0, 0, 0, 3000)}
 		recorder := &fakeRecorder{}
 		c, err := New(map[string]Source{"synthetic": source}, recorder, Options{})
 		if err != nil {
@@ -39,7 +39,11 @@ func TestCollectorRejectsUnrepresentableRateAndInvalidCounter(t *testing.T) {
 		}
 		at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		c.collectHost(context.Background(), "synthetic", source, at)
-		source.sample.CPUUsedMillis = value
+		if value < 0 {
+			source.sample.CPUUsedMillis = value
+		} else {
+			source.sample = fixtureUsage(value, 0, 0, 3000)
+		}
 		c.collectHost(context.Background(), "synthetic", source, at.Add(time.Millisecond))
 		if len(recorder.recorded()) != 0 {
 			t.Fatal("invalid rate recorded as usage")
@@ -51,7 +55,7 @@ func TestCollectorRejectsUnrepresentableRateAndInvalidCounter(t *testing.T) {
 }
 
 func TestCollectorPreservesHighRateWithoutMultiplicationWrap(t *testing.T) {
-	source := &fakeSource{}
+	source := &fakeSource{sample: fixtureUsage(0, 0, 0, 3000)}
 	recorder := &fakeRecorder{}
 	c, err := New(map[string]Source{"synthetic": source}, recorder, Options{})
 	if err != nil {
@@ -59,7 +63,7 @@ func TestCollectorPreservesHighRateWithoutMultiplicationWrap(t *testing.T) {
 	}
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	c.collectHost(context.Background(), "synthetic", source, at)
-	source.sample.CPUUsedMillis = math.MaxInt64/500 + 1
+	source.sample = fixtureUsage(math.MaxInt64/500+1, 0, 0, 3000)
 	c.collectHost(context.Background(), "synthetic", source, at.Add(time.Second))
 	got := recorder.recorded()
 	if len(got) != 1 || got[0].cpuUsedMillis != source.sample.CPUUsedMillis {

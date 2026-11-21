@@ -258,16 +258,22 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 }
 
 func (c *Client) trusted(ctx context.Context, requireCreate bool) error {
+	_, err := c.trustedRoot(ctx, requireCreate)
+	return err
+}
+
+func (c *Client) trustedRoot(ctx context.Context, requireCreate bool) (envelope, error) {
 	response, err := c.request(ctx, http.MethodGet, "/1.0", nil, nil)
 	if err != nil {
-		return err
+		return envelope{}, err
 	}
-
 	if err := validateTrustedRoot(response, requireCreate); err != nil {
-		return err
+		return envelope{}, err
 	}
-	return c.checkPinnedRoot(response)
-
+	if err := c.checkPinnedRoot(response); err != nil {
+		return envelope{}, err
+	}
+	return response, nil
 }
 
 func validateTrustedRoot(response envelope, requireCreate bool) error {
