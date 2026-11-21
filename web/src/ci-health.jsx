@@ -74,6 +74,8 @@ function JobRow({attempt, job, stepId}) {
         {job.status === "queued"
           ? <div><dt>Waiting when observed</dt><dd><Timing span={job.waiting} /></dd></div>
           : <div><dt>Queue wait</dt><dd><Timing span={job.queue} skipped={skip} /></dd></div>}
+        {(job.status === "running" || job.status === "completed") &&
+          <div><dt>Job creation to start</dt><dd><Timing span={job.creation_to_start} /></dd></div>}
         {job.status === "running"
           ? <div><dt>Execution elapsed when observed</dt><dd><Timing span={job.elapsed} /></dd></div>
           : <div><dt>Execution</dt><dd><Timing span={job.execution} skipped={skip} /></dd></div>}
@@ -236,7 +238,7 @@ export function CIHealthTiming({snapshot, now = Date.now(), canViewStep, showHis
         {snapshot.coverage === "bounded_partial" ? "Partial coverage: not all requested observations were included. "
           : snapshot.coverage === "observed_subset" ? "Only selected observations are shown. "
           : "Coverage is unknown. "}
-        This is a bounded observation, not the full GitHub queue or history. “At least” is a lower bound from a queue observation. Missing timing is unknown, not zero.
+        This is a bounded observation, not the full GitHub queue or history. “At least” is a lower bound from a queue observation. Missing timing is unknown, not zero. Job creation to start does not measure queue wait.
       </p>
       {attempts.length === 0 && <p>No attempts were included in this snapshot.</p>}
       {attempts.length > 0 && <>

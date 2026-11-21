@@ -76,6 +76,14 @@ identity order, not by wait or runtime. Additional observed jobs remain in
 the attempt details. The current GitHub reader cannot establish a queue
 arrival or prior queue sighting, so queued wait is unknown.
 
+For running or completed jobs, **Job creation to start** is shown separately
+when GitHub reports valid creation and start timestamps for the same exact
+job. It is elapsed time between those reported timestamps, not queue entry
+or evidence of runner saturation, provisioning delay, or any particular cause.
+Missing or invalid creation evidence leaves this field unknown without changing
+execution or queue measurements. The value is only in the current owner
+snapshot and is not persisted, backfilled, or used in retained trends.
+
 The longest-steps summary ranks up to twelve individual completed step
 observations from this snapshot, with exact workflow, run, attempt, job,
 and step identifiers. It counts measured versus observed step rows.

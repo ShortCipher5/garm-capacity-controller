@@ -583,3 +583,27 @@ func TestSnapshotHistoryCompatibleResultsDoNotFillMissingIdentity(t *testing.T) 
 		t.Fatalf("known result moved scope or missing child was filled: %+v / %v", rows, err)
 	}
 }
+
+func TestHistoryIgnoresLiveJobCreationClock(t *testing.T) {
+	now := time.Now().UTC()
+	jobKey := JobKey{Attempt: AttemptKey{Source: "fixture", RepositoryID: 1, WorkflowID: 2, RunID: 3, Attempt: 1}, JobID: 4}
+	a := AttemptFacts{Key: jobKey.Attempt, AsOf: now, Clock: Clock{Phase: Completed}, Jobs: []JobFacts{{
+		Key: jobKey, Clock: Clock{Phase: Completed, StartedAt: now.Add(-time.Minute), CompletedAt: now, ObservedAt: now},
+	}}}
+	legacy, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Jobs[0].CreatedAt = now.Add(-time.Hour)
+	changed, err := json.Marshal(a)
+	if err != nil || !bytes.Equal(legacy, changed) {
+		t.Fatalf("changed retained encoding: %v", err)
+	}
+	out, err := historyCopyAttempt(a)
+	if err != nil || !out.Jobs[0].CreatedAt.IsZero() {
+		t.Fatalf("retained live-only time: %v", err)
+	}
+	if a.Jobs[0].CreatedAt.IsZero() {
+		t.Fatal("history normalization mutated the live snapshot")
+	}
+}

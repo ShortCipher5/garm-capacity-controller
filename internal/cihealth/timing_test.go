@@ -229,3 +229,29 @@ func TestMeasureConclusionsRemainExplicitAndPhaseBound(t *testing.T) {
 		}
 	}
 }
+
+func TestCreationToStartUsesJobClockNotParentOrOtherPage(t *testing.T) {
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	k := AttemptKey{Source: "fixture", RepositoryID: 1, WorkflowID: 2, RunID: 3, Attempt: 1}
+	a := AttemptFacts{
+		Key: k, AsOf: now, Clock: Clock{Phase: Completed, StartedAt: now.Add(-2 * time.Hour)},
+		Jobs: []JobFacts{{
+			Key: JobKey{Attempt: k, JobID: 4}, CreatedAt: now.Add(-3 * time.Hour),
+			Clock: Clock{Phase: Completed, StartedAt: now.Add(-time.Hour), CompletedAt: now.Add(-time.Minute)},
+		}},
+	}
+	got, err := Measure(a)
+	if err != nil || got.Jobs[0].CreationToStart.Basis != Unavailable || got.Jobs[0].Execution.Basis != ObservedEndpoints {
+		t.Fatalf("another page or attempt cannot stand in for the job's sighting: %+v, %v", got, err)
+	}
+	a.Jobs[0].Clock.ObservedAt = now.Add(-time.Minute)
+	got, err = Measure(a)
+	if err != nil || got.Jobs[0].CreationToStart != (Span{ObservedEndpoints, 2 * time.Hour}) {
+		t.Fatalf("job creation can precede workflow execution: %+v, %v", got, err)
+	}
+	a.Jobs[0].CreatedAt = now.Add(time.Second)
+	got, err = Measure(a)
+	if err != nil || got.Jobs[0].CreationToStart.Basis != Unavailable || got.Jobs[0].Execution.Basis != ObservedEndpoints {
+		t.Fatalf("future optional creation must lose only this metric: %+v, %v", got, err)
+	}
+}

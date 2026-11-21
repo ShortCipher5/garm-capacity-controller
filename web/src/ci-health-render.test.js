@@ -36,7 +36,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     const common = {source: "fixture_source", repository_id: "9007199254740993", workflow_id: "17", run_id: "9223372036854775807", observed_at: observed};
     const first = {...common, attempt: "2", status: "running", elapsed: exact("3000000000"), jobs: [
       {id: "9007199254741001", status: "queued", waiting: lower, steps: []},
-      {id: "9007199254741002", status: "completed", execution: exact("0"), steps: [
+      {id: "9007199254741002", status: "completed", creation_to_start: exact("1800000000000"), execution: exact("0"), steps: [
         {number: "2", status: "completed", execution: exact("2100000000")},
         {number: "7", status: "skipped"},
       ]},
@@ -59,6 +59,12 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(html, /At least 7\.000000001 s/);
     assert.match(html, /Unknown/);
     assert.match(html, /title="0 nanoseconds">0 s/);
+    assert.match(html, /<dt>Queue wait<\/dt><dd><span class="muted">Unknown<\/span><\/dd><\/div><div><dt>Job creation to start<\/dt><dd><span title="1800000000000 nanoseconds">30 min<\/span>/);
+    const olderJob = {...first.jobs[1]};
+    delete olderJob.creation_to_start;
+    const older = render({...snapshot, timing: {attempts: [{...first, jobs: [olderJob]}, previous]}});
+    assert.match(older, /<dt>Job creation to start<\/dt><dd><span class="muted">Unknown<\/span><\/dd>/);
+
     assert.match(html, /Step 2/);
     assert.match(html, /Step 7/);
     assert.match(html, /Not applicable \(skipped\)/);

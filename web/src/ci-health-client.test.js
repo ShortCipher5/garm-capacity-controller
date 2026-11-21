@@ -196,3 +196,24 @@ test("caller cancellation aborts a pending body without waiting for its producer
   controller.abort();
   await assert.rejects(pending, SessionEnded);
 });
+
+test("optional creation-to-start is an independent exact duration for started jobs", () => {
+  const exact = {basis: "observed_endpoints", nanoseconds: "0"};
+  for (const status of ["running", "completed", "queued", "skipped", "unknown"]) {
+    const view = snapshot();
+    const [a] = view.timing.attempts;
+    a.jobs = [{id: "9007199254740995", status, steps: []}];
+    assert.doesNotThrow(() => validateCIHealthSnapshot(view));
+    a.jobs[0].creation_to_start = exact;
+    if (status === "running" || status === "completed") {
+      assert.equal(validateCIHealthSnapshot(view).timing.attempts[0].jobs[0].creation_to_start.nanoseconds, "0");
+      assert.equal(a.jobs[0].queue, undefined);
+      for (const invalid of [null, lower, {...exact, nanoseconds: "9223372036854775808"}]) {
+        a.jobs[0].creation_to_start = invalid;
+        assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+      }
+    } else {
+      assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+    }
+  }
+});
