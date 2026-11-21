@@ -131,9 +131,37 @@ longer authorize the opted-in startup. The gateway rejects that invocation
 before opening the admission database or starting services. Quiesce the
 writer, independently review unchanged custody and the new exact bytes and
 cursor for every approved workflow, then reissue the private review. This
-does not support unattended history restarts. There is no automatic initializer or
-migration. The timings-only path remains available without this flag and
-block; do not erase history to get past a refusal.
+does not support unattended history restarts. The timings-only path remains
+available without this flag and block; do not erase history to get past a
+refusal.
+
+### First installation only
+
+For a genuinely new installation, build the separate Linux operator utility
+from this source with `go build ./cmd/capacity-ci-history-init`. Run it as the
+existing service UID, against an already provisioned, independently reviewed,
+empty directory:
+
+```text
+capacity-ci-history-init --initialize-empty-store DIRECTORY DIRECTORY_DEVICE DIRECTORY_INODE
+```
+
+The positive device and inode values are decimal Linux stat values for that
+exact directory. The tool applies the same trusted-ancestor and private
+directory checks as startup. It refuses a nonempty directory or competing
+writer while holding the directory lock throughout publication. It does not
+create directories, read configuration or credentials, use the network, run
+the gateway, or initialize twice. A failed or unacknowledged initialization
+requires inspecting the existing slot; the tool does not repair or clean up an
+unresolved attempt.
+
+Review the resulting private snapshot separately after the initializer exits.
+Initialization records no observed jobs or approved repositories. The operator
+must still independently confirm the service custody, exact snapshot SHA-256
+and exact source/workflow scope with explicit zero starting cursors before
+supplying the gateway review block. Do not copy output into startup authority;
+the utility produces no review metadata, and neither action grants new
+privileges. The gateway remains reopen-only.
 
 With that explicit opt-in, the existing owner read can show two rolling
 seven-day buckets, based on last observed time. It considers the newest
