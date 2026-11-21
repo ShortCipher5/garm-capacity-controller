@@ -21,6 +21,7 @@ type output struct {
 	RouteVerified           bool   `json:"route_verified"`
 	EnforcementVerified     bool   `json:"enforcement_verified"`
 	SuppliedProjectState    string `json:"supplied_project_state,omitempty"`
+	DiskAssessment          string `json:"disk_assessment,omitempty"`
 }
 
 func comparison(code incusapi.Incus702PlanComparison) string {
@@ -53,6 +54,10 @@ func run(args []string, input io.Reader, stdout, stderr io.Writer) int {
 		PlanAgainstProject:      comparison(report.AgainstProject),
 		PlanAgainstNetHost:      comparison(report.AgainstNetHost),
 		ProjectCeilingVsNetHost: comparison(report.ProjectCeilingAgainstNetHost),
+	}
+	if report.DiskNotEvaluated {
+		out.Schema = "incus-project-plan-report/v3"
+		out.DiskAssessment = "not_evaluated"
 	}
 	if report.SuppliedProjectState != incusapi.Incus702ProjectStateNotSupplied {
 		out.Schema = "incus-project-plan-report/v2"

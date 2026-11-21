@@ -187,3 +187,37 @@ func TestIncus702ProjectDeclarationNumericSubset(t *testing.T) {
 		}
 	}
 }
+
+func TestIncus702WithoutDiskCeilingRejectsPinnedSizeDeclarations(t *testing.T) {
+	const projectWithoutDiskPin = "76c70481b50095a85d351e65bc654a68455aa15c81bf8284d88e9007920a663e"
+	const profileWithoutDiskPin = "6c49fad81fa8424aa73efd62fd3b7e56e699f4c7f5751d298e97f2e284d4542b"
+	projectWithoutDisk := strings.Replace(projectDeclarationBody, `,"limits.disk":"120GiB"`, "", 1)
+	profileWithoutDisk := strings.Replace(profileDeclarationBody, `,"size":"12GiB"`, "", 1)
+	for _, tc := range []struct {
+		name, project, profile, projectPin, profilePin string
+	}{
+		{
+			"project disk limit", projectDeclarationBody, profileWithoutDisk,
+			declarationReviewFixture().projectSHA256, profileWithoutDiskPin,
+		},
+		{
+			"profile root size", projectWithoutDisk, profileDeclarationBody,
+			projectWithoutDiskPin, declarationReviewFixture().profileSHA256,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			review := declarationReviewFixture()
+			review.projectSHA256, review.profileSHA256 = tc.projectPin, tc.profilePin
+			review.withoutDiskCeiling = true
+			if got, err := compareIncus702ProjectDeclaration([]byte(tc.project), []byte(tc.profile), review); got != (incus702ProjectDeclaration{}) || err != ErrResponse {
+				t.Fatalf("accepted a disk-sized model in v3: %+v, %v", got, err)
+			}
+		})
+	}
+	review := declarationReviewFixture()
+	review.projectSHA256, review.profileSHA256 = projectWithoutDiskPin, profileWithoutDiskPin
+	review.withoutDiskCeiling = true
+	if got, err := compareIncus702ProjectDeclaration([]byte(projectWithoutDisk), []byte(profileWithoutDisk), review); err != nil || got != (incus702ProjectDeclaration{6, 5, 12, 24 << 30, 0, 2, 2 << 30, 0}) {
+		t.Fatalf("did not accept the independently pinned unsized declaration: %+v, %v", got, err)
+	}
+}

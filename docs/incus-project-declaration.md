@@ -135,3 +135,27 @@ inputs do not prove the same daemon, snapshot freshness, complete coverage,
 an empty physical project, route, verified enforcement, or safe runner
 starts. Do not add these figures to a proposed full mix, treat them as free
 capacity, or use them to settle a charge.
+
+### Optional count/CPU/RAM model without sized disk declarations
+
+Use the separate capture schema `incus-project-plan-capture/v3` only when
+the modeled plan deliberately has no declared aggregate or per-profile root
+disk size. Start with the
+[fictional v3 capture](../cmd/capacity-incus-project-plan/testdata/sanitized-capture-without-disk.json).
+This schema uses the v1 top-level keys but omits `disk_mib` from the closed
+net-host-budget and pool-size objects. The reviewed project must omit
+`limits.disk` and all `limits.disk.pool.*` keys, and the reviewed profile must
+omit the root device's `size` field. V3 does not accept `project_state`.
+All existing single-profile, root-device/pool, project ownership and exact
+review-digest checks are retained; v1 and v2 remain unchanged.
+
+The v3 report explicitly says `disk_assessment: "not_evaluated"`. Its three
+fit results and exit status compare only runner count, whole CPU and hard
+absolute RAM declarations. The complete planned mix is compared to both the
+project declarations and the modeled net host envelope, with the declared
+project ceiling compared separately to that envelope. There is no resource
+assignment or interpretation of a missing disk value as a size or ceiling of
+zero, and neither route nor enforcement is verified. This report does not
+evaluate backing storage, quotas or live disk pressure. Check disk reserve,
+pressure and any provider/storage defaults separately before qualification;
+a modeled fit is not permission to start runners.

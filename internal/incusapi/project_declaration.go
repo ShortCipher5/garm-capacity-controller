@@ -16,6 +16,7 @@ import (
 type incus702DeclarationReview struct {
 	project, profile, pool       string
 	projectSHA256, profileSHA256 string
+	withoutDiskCeiling           bool
 }
 
 // Only configured declarations. These are not usage, headroom, live enforcement,
@@ -78,6 +79,15 @@ func compareIncus702ProjectDeclaration(projectRaw, profileRaw []byte, reviewed i
 	if projectHash != reviewed.projectSHA256 || profileHash != reviewed.profileSHA256 {
 		return none, ErrResponse
 	}
+	// The alternate model requires an explicitly disk-unqualified declaration.
+	// Do not silently ignore a declared aggregate or profile sizing policy.
+	if reviewed.withoutDiskCeiling {
+		_, projectSizesDisk := projectConfig["limits.disk"]
+		_, profileSizesRoot := devices["root"]["size"]
+		if projectSizesDisk || profileSizesRoot {
+			return none, ErrResponse
+		}
+	}
 	out := incus702ProjectDeclaration{
 		instances:          incus702PositiveDecimal(projectConfig["limits.instances"], 32),
 		containers:         incus702PositiveDecimal(projectConfig["limits.containers"], 32),
@@ -88,9 +98,10 @@ func compareIncus702ProjectDeclaration(projectRaw, profileRaw []byte, reviewed i
 		profileMemoryBytes: incus702DeclarationBytes(profileConfig["limits.memory"]),
 		profileRootBytes:   incus702DeclarationBytes(devices["root"]["size"]),
 	}
-	if out.instances == 0 || out.containers == 0 || out.cpu == 0 || out.memoryBytes == 0 || out.diskBytes == 0 ||
-		out.profileCPU == 0 || out.profileMemoryBytes == 0 || out.profileRootBytes == 0 ||
-		out.profileCPU > out.cpu || out.profileMemoryBytes > out.memoryBytes || out.profileRootBytes > out.diskBytes {
+	if out.instances == 0 || out.containers == 0 || out.cpu == 0 || out.memoryBytes == 0 ||
+		out.profileCPU == 0 || out.profileMemoryBytes == 0 ||
+		out.profileCPU > out.cpu || out.profileMemoryBytes > out.memoryBytes ||
+		(!reviewed.withoutDiskCeiling && (out.diskBytes == 0 || out.profileRootBytes == 0 || out.profileRootBytes > out.diskBytes)) {
 		return none, ErrResponse
 	}
 	return out, nil
