@@ -1,9 +1,10 @@
 import React, {useEffect, useId, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, ciStepKey, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciStepKey, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
 import {focusCIStep} from "./ci-health-step-navigation.js";
+import {CIHealthHistory} from "./ci-health-history.jsx";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -218,7 +219,7 @@ function WorkflowCounts({groups}) {
   </section>;
 }
 
-export function CIHealthTiming({snapshot, now = Date.now(), canViewStep}) {
+export function CIHealthTiming({snapshot, now = Date.now(), canViewStep, showHistory = false}) {
   const prefix = useId();
   const root = useRef(null);
   const groups = ciHealthWorkflowCounts(snapshot, now);
@@ -241,6 +242,7 @@ export function CIHealthTiming({snapshot, now = Date.now(), canViewStep}) {
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} />
         <WorkflowCounts groups={groups} />
+        {showHistory && snapshot.history && <CIHealthHistory history={snapshot.history} durationText={displayDuration} />}
         <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
         {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} stepId={stepId} />) : <p>No active attempts in this snapshot.</p>}
@@ -262,6 +264,7 @@ export function CIHealthPanel({enabled, read}) {
   const current = view?.owner === read ? view : null;
   const snapshot = current?.snapshot;
   const lease = current?.lease;
+  const historyLease = current?.historyLease;
   const state = current?.state ?? "idle";
 
   useEffect(() => () => {
@@ -289,6 +292,26 @@ export function CIHealthPanel({enabled, read}) {
     };
   }, [snapshot, lease]);
 
+  useEffect(() => {
+    if (!snapshot || !historyLease) return;
+    let timeout;
+    const expire = () => {
+      clearTimeout(timeout);
+      const remaining = ciHealthLeaseRemaining(snapshot, historyLease);
+      if (remaining < 1) {
+        setView((current) => current?.historyLease === historyLease ? {...current, historyLease: null} : current);
+      } else {
+        timeout = setTimeout(expire, Math.floor(remaining));
+      }
+    };
+    expire();
+    document.addEventListener("visibilitychange", expire);
+    return () => {
+      clearTimeout(timeout);
+      document.removeEventListener("visibilitychange", expire);
+    };
+  }, [snapshot, historyLease]);
+
   async function refresh() {
     if (!available) return;
     request.current?.abort();
@@ -304,12 +327,14 @@ export function CIHealthPanel({enabled, read}) {
         return;
       }
       validateCIHealthSnapshot(result);
-      const lease = ciHealthLease(result);
+      const wall = Date.now(), monotonic = performance.now();
+      const lease = ciHealthLease(result, wall, monotonic);
       if (!lease) {
         setView({owner: read, state: "unavailable"});
         return;
       }
-      setView({owner: read, state: "observed", snapshot: result, lease, generation});
+      const historyLease = ciHistoryLease(result, wall, monotonic);
+      setView({owner: read, state: "observed", snapshot: result, lease, historyLease, generation});
     } catch {
       if (request.current === controller && !controller.signal.aborted) setView({owner: read, state: "unavailable"});
     } finally {
@@ -331,6 +356,7 @@ export function CIHealthPanel({enabled, read}) {
         {state === "expired" && "The snapshot expired. Load a new snapshot to view timing."}
       </div>
       {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && <CIHealthTiming key={current.generation} snapshot={snapshot}
+        showHistory={ciHealthLeaseRemaining(snapshot, historyLease) > 0}
         canViewStep={() => refreshGeneration.current === current.generation && ciHealthLeaseRemaining(snapshot, lease) > 0} />}
     </section>
   );

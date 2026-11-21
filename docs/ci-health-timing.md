@@ -89,10 +89,29 @@ observed run attempt, job, and step. A completed row without a result is
 unknown; a duration alone does not imply success. The view does not expose
 raw source result strings or individual test case outcomes.
 
-This release provides current timing and result visibility only. Durable
-history, comparative trends, per-test results, and verified per-job CPU, RAM,
-and disk attribution are not enabled. Looking at this view never changes runner
-capacity or approves a proposed size.
+Ordinary gateway configuration still provides current timing and result
+visibility only. A separately constructed loopback owner may opt into retained
+workflow summaries by injecting an independently held private history store
+with its exact reviewed workflow scope and starting revisions. This path is
+not activated by the timing flag or default configuration. Confirm custody
+and revision review before wiring any deployment activation.
+
+With that explicit opt-in, the existing owner read can show two rolling
+seven-day buckets, based on last observed time, across up to 64 retained
+attempts per workflow. It separately counts initial attempts and retry
+attempts and their distinct run IDs. Failure share uses recorded successes
+and failures only. Mean and p95 use actual completed durations with both
+endpoints; job and step observations are pooled, not compared by guessed
+definition. Workflow wall duration remains unavailable without an exact
+attempt end. The retained subset is not complete upstream history. No verified
+test reports, job resource measurements or sizing recommendations are
+provided by this path.
+
+Each included workflow needs a fresh positive exact attempt observation.
+The aggregate expires by the earliest selected observation lease and
+withdraws server-side when its local owner or source closes. A browser
+already displaying the result hides it on expiry or when the owner session
+ends; it does not poll for remote revocation.
 
 GitHub can remove runs before this reader sees them. An attempt that is
 missing from a listing or returns HTTP 404 does not establish why the source

@@ -122,7 +122,7 @@ func TestCIHealthPublisherWithdrawInvalidatesInFlightLease(t *testing.T) {
 		t.Fatal("publication not reserved")
 	}
 	s.Withdraw()
-	if s.commit(at, lease, []byte("old data")) == nil || s.read() != nil {
+	if s.commit(at, lease, []byte("old data"), nil) == nil || s.read() != nil {
 		t.Fatal("withdrawal allowed older in-flight data")
 	}
 	now = now.Add(time.Second)

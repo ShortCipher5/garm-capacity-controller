@@ -38,6 +38,7 @@ type ownedCycleHistoryCell struct {
 	startup                   []HistoryExpectation
 	background                bool
 	lastBackgroundObservation time.Time
+	trendsVersion             atomic.Pointer[historyTrendVersion]
 	lifetime                  context.Context
 	cancel                    context.CancelFunc
 }

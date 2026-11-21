@@ -4,6 +4,7 @@ const phases = ["queued", "running", "completed", "skipped", "unknown"];
 const terminalConclusions = ["success", "failure", "cancelled", "timed_out", "other_terminal"];
 export const ciHealthEndpoint = "/admin/api/v1/ci-health";
 const lifetime = 120_000; // Same display lifetime as the owner API.
+const trendWeek = 7 * 24 * 60 * 60 * 1000;
 
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function exactKeys(value, required, optional = []) {
@@ -42,13 +43,59 @@ function validConclusion(row) {
     (row.status === "skipped" && row.conclusion === "other_terminal");
 }
 
+const count = (n, max) => Number.isInteger(n) && n >= 0 && n <= max;
+function validRetainedMetric(metric, max) {
+  const fields = ["observed", "success", "failure", "other", "active", "unknown"];
+  if (!exactKeys(metric, fields, ["duration"]) || !fields.every((key) => count(metric[key], max)) ||
+      metric.observed !== fields.slice(1).reduce((n, key) => n + metric[key], 0)) return false;
+  if (!Object.hasOwn(metric, "duration")) return true;
+  const d = metric.duration;
+  return exactKeys(d, ["samples", "mean_ns", "p95_ns"]) && count(d.samples, metric.observed - metric.active) &&
+    d.samples > 0 && decimal(d.mean_ns, true) && decimal(d.p95_ns, true);
+}
+
+function validRetainedHistory(history, observed, scopes) {
+  if (!exactKeys(history, ["expires_at", "coverage", "test_results", "workflows"]) ||
+      history.coverage !== "retained_subset" || history.test_results !== "unavailable" ||
+      !Array.isArray(history.workflows) || !history.workflows.length || history.workflows.length > scopes.size) return false;
+  const expiry = timestamp(history.expires_at);
+  if (!expiry || expiry.exact <= observed.exact || expiry.milliseconds > observed.milliseconds + lifetime) return false;
+  const seen = new Set();
+  for (const w of history.workflows) {
+    if (!exactKeys(w, ["source", "repository_id", "workflow_id", "previous", "current"]) ||
+        typeof w.source !== "string" || !decimal(w.repository_id) || !decimal(w.workflow_id)) return false;
+    const key = [w.source, w.repository_id, w.workflow_id].join(":");
+    if (seen.has(key) || !scopes.has(key)) return false;
+    seen.add(key);
+    let retainedAttempts = 0;
+    let end = null;
+    for (const window of [w.previous, w.current]) {
+      if (!exactKeys(window, ["from", "to", "initial", "retries"])) return false;
+      const from = timestamp(window.from), to = timestamp(window.to);
+      if (!from || !to || to.milliseconds - from.milliseconds !== trendWeek ||
+          from.exact.slice(20) !== to.exact.slice(20) || (end && from.exact !== end.exact)) return false;
+      end = to;
+      for (const [bucket, initial] of [[window.initial, true], [window.retries, false]]) {
+        if (!exactKeys(bucket, ["distinct_runs", "attempts", "jobs", "steps"]) ||
+            !validRetainedMetric(bucket.attempts, 64) || !validRetainedMetric(bucket.jobs, 64000) ||
+            !validRetainedMetric(bucket.steps, 640000) || !count(bucket.distinct_runs, bucket.attempts.observed) ||
+            (initial && bucket.distinct_runs !== bucket.attempts.observed) ||
+            (!bucket.distinct_runs && (bucket.attempts.observed || bucket.jobs.observed || bucket.steps.observed))) return false;
+        retainedAttempts += bucket.attempts.observed;
+      }
+    }
+    if (end.exact !== observed.exact || retainedAttempts > 64) return false;
+  }
+  return true;
+}
+
 export function validateCIHealthSnapshot(value) {
   const fail = () => { throw new Error("CI Health response unavailable."); };
-  if (!exactKeys(value, ["state", "timing"], ["observed_at", "coverage"]) ||
+  if (!exactKeys(value, ["state", "timing"], ["observed_at", "coverage", "history"]) ||
       !exactKeys(value.timing, ["attempts"]) || !Array.isArray(value.timing.attempts) ||
       value.timing.attempts.length > 25) fail();
   if (value.state === "unavailable") {
-    if (Object.hasOwn(value, "observed_at") || Object.hasOwn(value, "coverage") || value.timing.attempts.length !== 0) fail();
+    if (Object.hasOwn(value, "observed_at") || Object.hasOwn(value, "coverage") || Object.hasOwn(value, "history") || value.timing.attempts.length !== 0) fail();
     return value;
   }
   const observed = timestamp(value.observed_at);
@@ -56,6 +103,7 @@ export function validateCIHealthSnapshot(value) {
       (Object.hasOwn(value, "coverage") && !["observed_subset", "bounded_partial"].includes(value.coverage))) fail();
 
   const attempts = new Set();
+  const scopes = new Set();
   let jobCount = 0;
   let stepCount = 0;
   for (const a of value.timing.attempts) {
@@ -69,6 +117,7 @@ export function validateCIHealthSnapshot(value) {
     const id = ciAttemptKey(a);
     if (!at || at.exact > observed.exact || attempts.has(id)) fail();
     attempts.add(id);
+    scopes.add([a.source, a.repository_id, a.workflow_id].join(":"));
     jobCount += a.jobs.length;
     const jobs = new Set();
     for (const j of a.jobs) {
@@ -91,6 +140,8 @@ export function validateCIHealthSnapshot(value) {
       }
     }
   }
+  if (Object.hasOwn(value, "history") &&
+      (value.coverage !== "observed_subset" || !validRetainedHistory(value.history, observed, scopes))) fail();
   return value;
 }
 
@@ -125,6 +176,14 @@ export function ciHealthLease(value, wall = Date.now(), monotonic = performance.
 export function ciHealthLeaseRemaining(value, lease, wall = Date.now(), monotonic = performance.now()) {
   if (!lease || !ciHealthFresh(value, wall) || !Number.isFinite(monotonic) || monotonic < lease.accepted) return 0;
   return Math.max(0, Math.min(lease.wallDeadline - wall, lease.monotonicDeadline - monotonic));
+}
+
+export function ciHistoryLease(value, wall = Date.now(), monotonic = performance.now()) {
+  const expires = timestamp(value?.history?.expires_at);
+  const timing = ciHealthLease(value, wall, monotonic);
+  if (!expires || !timing || expires.milliseconds <= wall || expires.milliseconds > timing.wallDeadline) return null;
+  const wallDeadline = expires.milliseconds;
+  return Object.freeze({wallDeadline, accepted: monotonic, monotonicDeadline: monotonic + (wallDeadline - wall)});
 }
 
 export async function readCIHealthBody(response, signal) {
