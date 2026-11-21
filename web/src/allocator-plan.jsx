@@ -1,14 +1,33 @@
 import {StockIdleSuggestions} from './stock-idle-preview.jsx';
 import React,{useEffect,useRef,useState} from 'react';
-import {allocatorComparisonState,allocatorComparisonMessage,allocatorFailureMessage,stockMaximumPreviewMessage,stockMaximumPreviewView,stockMaximumBatchPreviewView} from './allocator-plan.js';
+import {allocatorComparisonState,allocatorComparisonMessage,allocatorFailureMessage,allocatorPlanDisplayClock,validateAllocatorPlan,stockMaximumPreviewMessage,stockMaximumPreviewView,stockMaximumBatchPreviewView} from './allocator-plan.js';
+// The clock carries across panel remounts in this page, but holds no plan or
+// authentication state. A new read cannot reset its prior high-water time.
+const displayNow=allocatorPlanDisplayClock();
 export function AllocatorPlan({readPlan,policyRevision,ledgerSequence,policyStale}){
- const [view,setView]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[now,setNow]=useState(Date.now());
+ const [view,setView]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[now,setNow]=useState(()=>displayNow());
  const active=useRef(null),alive=useRef(true);
- useEffect(()=>{alive.current=true;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>{alive.current=false;clearInterval(timer);active.current?.abort();};},[]);
+ useEffect(()=>{
+  alive.current=true;
+  const updateTime=()=>setNow(displayNow());
+  const timer=setInterval(updateTime,1000);
+  document.addEventListener('visibilitychange',updateTime);
+  window.addEventListener('focus',updateTime);
+  return()=>{alive.current=false;clearInterval(timer);document.removeEventListener('visibilitychange',updateTime);window.removeEventListener('focus',updateTime);active.current?.abort();};
+ },[]);
  async function load(){
   if(!readPlan||active.current)return;
   const control=new AbortController();active.current=control;setBusy(true);setView(null);setError('');
-  try{const v=await readPlan({signal:control.signal});if(alive.current&&!control.signal.aborted){setView(v);setNow(Date.now());}}
+  try{
+  const v=await readPlan({signal:control.signal});
+  if(alive.current&&!control.signal.aborted){
+   const received=displayNow();
+   // A successful GET may repeat a cached capture. Revalidate it against
+   // the same nonextending clock rather than giving it a new display lease.
+   setView(validateAllocatorPlan(v,received));
+   setNow(received);
+  }
+ }
   catch(error){if(alive.current)setError(allocatorFailureMessage(error));}
   finally{active.current=null;if(alive.current)setBusy(false);}
  }

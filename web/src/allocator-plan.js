@@ -20,6 +20,25 @@ export function validateAllocatorPlan(v,now=Date.now()){
  }
  return v;
 }
+// A display clock for this page's lifetime (not persisted across full page
+// reloads). A panel remount or new read cannot re-admit an expired capture.
+// Advance from the last effective time, including any earlier forward jump,
+// so a subsequent wall rollback does not pause an already-shortened lease.
+export function allocatorPlanDisplayClock(wall=Date.now(),monotonic=globalThis.performance?.now()){
+ const expired=Number.MAX_SAFE_INTEGER; // greater than every valid JS Date
+ let latest=wall,lastMonotonic=monotonic;
+ return (nextWall=Date.now(),nextMonotonic=globalThis.performance?.now())=>{
+  if(![wall,latest,lastMonotonic,nextWall,nextMonotonic].every(Number.isFinite)||
+     lastMonotonic<0||nextMonotonic<lastMonotonic){
+   latest=expired;
+   return latest;
+  }
+  const elapsed=nextMonotonic-lastMonotonic;
+  lastMonotonic=nextMonotonic;
+  latest=Math.min(expired,Math.max(latest+elapsed,nextWall));
+  return latest;
+ };
+}
 export function allocatorPlanStale(v,now=Date.now()){return !v||Date.parse(v.expires_at)<=now;}
 
 // Both sequences come from the controller's saved-ledger snapshot. An equal

@@ -1,5 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {validateAllocatorPlan,allocatorPlanStale,allocatorComparisonState,allocatorComparisonMessage,stockMaximumPreviewMessage,stockMaximumPreviewView,AllocatorReadinessError,allocatorFailureMessage} from './allocator-plan.js';
+import {validateAllocatorPlan,allocatorPlanDisplayClock,allocatorPlanStale,allocatorComparisonState,allocatorComparisonMessage,stockMaximumPreviewMessage,stockMaximumPreviewView,stockMaximumBatchPreviewView,AllocatorReadinessError,allocatorFailureMessage} from './allocator-plan.js';
+import {stockIdlePreviewView} from './stock-idle-preview.js';
 const n=Date.parse('2026-11-18T10:00:00Z'),pool='11111111-1111-1111-1111-111111111111';
 const view=()=>({source:'scoped-stock-and-coherent-ledger',source_identity:'a'.repeat(64),demand_digest:'b'.repeat(64),ledger_sequence:3,policy_revision:2,started_at:new Date(n-1000).toISOString(),finished_at:new Date(n-500).toISOString(),captured_at:new Date(n).toISOString(),expires_at:new Date(n+59000).toISOString(),atomic:false,remaining_jobs:1,pools:[{pool,repository:pool,supply:null,charged:{cpu_millis:1,ram_mib:1,disk_mib:1,runners:1},cap:2,warm_idle:0,additional:1,additional_warm:0,covered_by_idle:0,covered_by_grant:0,deferred_by_inflight:1}]});
 test('plan preserves unknown supply and explicit non-atomic provenance',()=>{const v=validateAllocatorPlan(view(),n);assert.equal(v.pools[0].supply,null);assert.equal(allocatorPlanStale(v,n),false);assert.equal(allocatorPlanStale(v,n+60000),true);});
@@ -141,4 +142,50 @@ test("optional host evidence is exact, advisory and hidden when stale",()=>{
  }
  assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",n+10000).hostEvidence,undefined);
  assert.equal(stockMaximumPreviewView(plan,"preview_superseded",n).hostEvidence,undefined);
+});
+
+test("display clock does not extend or revive linked MAX, batch or idle evidence after wall rollback",()=>{
+ const plan=withMaximumPreview();
+ plan.stock_maximum_preview.host_evidence="configured_only";
+ plan.stock_maximum_batch_preview={...plan.stock_maximum_preview};
+ plan.stock_idle_decision_preview={pool_id:pool,repository_id:pool,observed_min_idle:0,suggested_min_idle:1,
+  unchanged_maximum:2,direction:"increase",host_evidence:"configured_only",expires_at:new Date(n+5000).toISOString()};
+ const clock=allocatorPlanDisplayClock(n,100);
+ const remembered={policyRevision:plan.policy_revision,ledgerSequence:plan.ledger_sequence};
+ const inspect=(wall,monotonic)=>{
+  const now=clock(wall,monotonic),comparison=allocatorComparisonState(plan,{...remembered,now});
+  return [comparison,...[stockMaximumPreviewView,stockMaximumBatchPreviewView,stockIdlePreviewView].map(view=>view(plan,comparison,now).state)];
+ };
+ assert.deepEqual(inspect(n,100),["linked_at_capture","proposed","proposed","proposed"]);
+ assert.deepEqual(inspect(n-1000,5100),["linked_at_capture","proposed","proposed","expired"]);
+ assert.deepEqual(inspect(n-1000,10100),["linked_at_capture","expired","expired","expired"]);
+ assert.deepEqual(inspect(n+59000,10200),["preview_expired","expired","expired","expired"]);
+ assert.deepEqual(inspect(n+10,10300),["preview_expired","expired","expired","expired"]);
+ // Re-reading the same cached capture cannot reset the cutoff. A genuinely
+ // newer validated snapshot can be shown without resetting the clock.
+ assert.throws(()=>validateAllocatorPlan(plan,clock(n+10,10400)));
+ const fresh=view();
+ for(const k of ["started_at","finished_at","captured_at","expires_at"]) fresh[k]=new Date(Date.parse(fresh[k])+59000).toISOString();
+ assert.equal(validateAllocatorPlan(fresh,clock(n+10,10500)),fresh);
+});
+
+test("a forward jump shortens the lease permanently even if wall time then rolls back",()=>{
+ const plan=withMaximumPreview();
+ const clock=allocatorPlanDisplayClock(n,100);
+ assert.equal(clock(n+7000,1100),n+7000);
+ const before=clock(n+1000,4099);
+ assert.equal(before,n+9999);
+ assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",before).state,"proposed");
+ const expired=clock(n+1000,4100);
+ assert.equal(expired,n+10000);
+ assert.equal(stockMaximumPreviewView(plan,"linked_at_capture",expired).state,"expired");
+ assert.equal(clock(n,5000),n+10900);
+});
+
+test("lost or reversed monotonic time fails closed for the page preview",()=>{
+ for(const [initial,sample] of [[10,9],[10,NaN],[NaN,10]]){
+  const clock=allocatorPlanDisplayClock(n,initial);
+  assert.equal(allocatorPlanStale(view(),clock(n,sample)),true);
+  assert.equal(allocatorPlanStale(view(),clock(n,15)),true);
+ }
 });
