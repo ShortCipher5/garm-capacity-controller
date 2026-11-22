@@ -138,6 +138,56 @@ func TestObservedWorkflowRunLinkUsesExactLiveCycleWithoutRenewingAttempt(t *test
 		}
 	}
 	diagnostics(link)
+	original := key
+	original.Attempt = 1
+	firstJob := cihealth.JobKey{Attempt: original, JobID: math.MaxInt64 - 2}
+	retryJob := cihealth.JobKey{Attempt: key, JobID: math.MaxInt64 - 1}
+	clock := c.facts[0].Clock
+	c.facts[0].Jobs = []cihealth.JobFacts{{Key: retryJob, Clock: clock}}
+	c.facts = append(c.facts, cihealth.AttemptFacts{
+		Key: original, AsOf: sealed.UTC(), Clock: clock,
+		Jobs: []cihealth.JobFacts{{Key: firstJob, Clock: clock}},
+	})
+	c.runLinks[original] = locator
+	var observedJob ObservedJobLink
+	for _, wanted := range []cihealth.JobKey{firstJob, retryJob} {
+		jobLink, exists := c.ObservedJobLink(owner, wanted)
+		expected := fmt.Sprintf("https://github.com/unlogged-fixture/unlogged-repository/actions/runs/%d/job/%d", wanted.Attempt.RunID, wanted.JobID)
+		if got, active := jobLink.URL(); !exists || !active || got != expected {
+			t.Fatal("exact job for the numbered attempt did not project")
+		}
+		raw, err := json.Marshal(jobLink)
+		if err != nil || strings.Contains(string(raw), "unlogged-repository") ||
+			strings.Contains(fmt.Sprintf("%+v %#v", jobLink, &jobLink), "unlogged-repository") {
+			t.Fatal("job link leaked into diagnostics")
+		}
+		observedJob = jobLink
+	}
+	assertJobRefused := func(c Cycle, s *demandobserver.CIHealthSource, k cihealth.JobKey) {
+		t.Helper()
+		if got, ok := c.ObservedJobLink(s, k); ok || got != (ObservedJobLink{}) {
+			t.Fatal("unproved job observation yielded a link")
+		}
+	}
+	assertJobRefused(c, owner, cihealth.JobKey{Attempt: key, JobID: firstJob.JobID})
+	assertJobRefused(c, shadow, retryJob)
+	assertJobRefused(c, nil, retryJob)
+	noLocator := c
+	noLocator.runLinks = nil
+	assertJobRefused(noLocator, owner, retryJob)
+	staleJob := c
+	staleJob.facts = c.Facts()
+	staleJob.facts[0].Clock.ObservedAt = sealed.UTC().Add(-historyCycleFreshness)
+	assertJobRefused(staleJob, owner, retryJob)
+	badJobClock := c
+	badJobClock.facts = c.Facts()
+	badJobClock.facts[0].Jobs[0].Clock.ObservedAt = sealed.UTC().Add(time.Nanosecond)
+	assertJobRefused(badJobClock, owner, retryJob)
+	ambiguous := c
+	ambiguous.facts = c.Facts()
+	ambiguous.facts[1].Jobs[0].Key.JobID = retryJob.JobID
+	assertJobRefused(ambiguous, owner, retryJob)
+
 	fence := *link.resolver
 	fence.proof.deadline = sealed.Add(-time.Nanosecond)
 	staleProof := ObservedWorkflowRunLink{resolver: &fence}
@@ -145,10 +195,18 @@ func TestObservedWorkflowRunLinkUsesExactLiveCycleWithoutRenewingAttempt(t *test
 		t.Fatal("expired handle exposed address")
 	}
 	diagnostics(staleProof)
+	staleJobHandle := ObservedJobLink{run: staleProof, jobID: retryJob.JobID}
+	if href, ok := staleJobHandle.URL(); ok || href != "" {
+		t.Fatal("expired job handle exposed address")
+	}
 	owner.Close()
 	diagnostics(link)
 	assertRefused(c, owner, key)
 	if href, ok := link.URL(); ok || href != "" {
 		t.Fatal("previous handle escaped reader shutdown")
 	}
+	if href, ok := observedJob.URL(); ok || href != "" {
+		t.Fatal("previous job handle escaped reader shutdown")
+	}
+
 }
