@@ -1,12 +1,15 @@
 package brokerinput
 
 import (
-	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 )
 
 const repo = "11111111-1111-4111-8111-111111111111"
@@ -78,5 +81,75 @@ func TestStockDoesNotHideFutureCapacityTimestamp(t *testing.T) {
 	s.ObservedAt = time.Time{}
 	if _, e := Stock(s, p, d, o); e == nil {
 		t.Fatal("accepted unknown snapshot time")
+	}
+}
+
+func TestStockEnrolledSupplyReconciliationPreservesChargeScope(t *testing.T) {
+	const second = "33333333-3333-4333-8333-333333333333"
+	const unmanaged = "44444444-4444-4444-8444-444444444444"
+	for _, tc := range []struct {
+		name                string
+		first, split, other int64
+		invalid             bool
+	}{
+		{name: "inclusive per-pool limit", first: 99999, split: 1, other: 1},
+		{name: "cannot borrow observed supply from a different pool", first: 99999, split: 1, invalid: true},
+		{name: "enrolled total exceeds limit", first: 100000, split: 1, other: 1, invalid: true},
+		{name: "enrolled single charge exceeds limit", first: 100001, other: 1, invalid: true},
+		{name: "negative enrolled charge", first: 2, split: -1, other: 1, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p, d, opt := fixture()
+			s.Pools[second], s.Pools[unmanaged] = s.Pools[pool], s.Pools[pool]
+			p.Repositories[0].Pools = append(p.Repositories[0].Pools, admission.BrokerPoolPolicy{ID: second, MaxRunners: 2})
+			other := d.Pools[0]
+			other.ID = second
+			other.Enabled = false
+			d.Pools = append(d.Pools, other)
+			d.Supply = append(d.Supply, garmapi.RunnerSupply{PoolID: second, Busy: 1})
+			s.Charges = []capacitybroker.Charge{
+				{ID: "enrolled", Host: "host", Pool: pool, Resources: capacitybroker.Resources{0, 0, 0, tc.first}},
+				{ID: "other", Host: "host", Pool: second, Resources: capacitybroker.Resources{0, 0, 0, tc.other}},
+				{ID: "split", Host: "host", Pool: pool, Resources: capacitybroker.Resources{0, 0, 0, tc.split}},
+				{ID: "unmanaged", Host: "host", Pool: unmanaged, Resources: capacitybroker.Resources{0, 0, 0, 100001}},
+				{ID: "unassigned", Host: "host", Resources: capacitybroker.Resources{0, 0, 0, 100001}},
+			}
+			got, err := Stock(s, p, d, opt)
+			if tc.invalid {
+				if !errors.Is(err, capacitybroker.ErrSnapshot) {
+					t.Fatalf("inconsistent supply or invalid subtotal accepted: %+v (%v)", got, err)
+				}
+			} else if err != nil || len(got.Assignments) != 0 || len(got.RemainingJobs) != 1 {
+				t.Fatalf("valid charges were rejected or freed: %+v (%v)", got, err)
+			}
+		})
+	}
+}
+
+func BenchmarkStockChargeJoin(b *testing.B) {
+	for _, pools := range []int{25, 250} {
+		b.Run(fmt.Sprintf("pools_%d_charges_20000", pools), func(b *testing.B) {
+			s, policy, observed, opt := fixture()
+			for i := 1; i < pools; i++ {
+				id := fmt.Sprintf("22222222-2222-4222-8222-%012x", i)
+				s.Pools[id] = s.Pools[pool]
+				policy.Repositories[0].Pools = append(policy.Repositories[0].Pools, admission.BrokerPoolPolicy{ID: id, MaxRunners: 2})
+				p := observed.Pools[0]
+				p.ID = id
+				observed.Pools = append(observed.Pools, p)
+				observed.Supply = append(observed.Supply, garmapi.RunnerSupply{PoolID: id})
+			}
+			s.Charges = make([]capacitybroker.Charge, 20000)
+			for i := range s.Charges {
+				s.Charges[i] = capacitybroker.Charge{ID: fmt.Sprintf("charge-%d", i), Host: "host", Resources: capacitybroker.Resources{0, 0, 0, 1}}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := Stock(s, policy, observed, opt); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

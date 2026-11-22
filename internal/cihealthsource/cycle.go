@@ -256,8 +256,9 @@ discovery:
 				break discovery
 			}
 			q.Page = page
+			q.PreviousTotal = max(0, reportedTotal)
 			rows, err := r.source.ListCIRuns(ctx, repo.GarmID, q)
-			if err != nil || rows.ObservedAt.IsZero() || rows.ObservedAt.Before(r.latest) || !validDiscoveryPage(page, rows) {
+			if err != nil || rows.ObservedAt.IsZero() || rows.ObservedAt.Before(r.latest) || !validDiscoveryPage(page, reportedTotal, rows) {
 				return repoScan{}, ErrCycleObservation
 			}
 			for _, row := range rows.Runs {
@@ -328,12 +329,17 @@ discovery:
 // Check the bounded typed page envelope before interpreting changed totals as
 // ordinary discovery movement. The original source also verifies the
 // repository identity and query membership of every row.
-func validDiscoveryPage(page int, rows demandrepair.CIRunPage) bool {
+func validDiscoveryPage(page, previousTotal int, rows demandrepair.CIRunPage) bool {
 	total, count := rows.TotalCount, len(rows.Runs)
+	first := (page - 1) * demandrepair.CIPerPage
+	if page > 1 && count == 0 && total >= 0 && total <= first {
+		// A preceding page proved there was a next page under the old
+		// total; an exhausted tail can only transition to partial.
+		return previousTotal > first && previousTotal < demandrepair.CIPerPage*demandrepair.CIMaxPages && rows.NextPage == 0
+	}
 	if total == 0 {
 		return page == 1 && count == 0 && rows.NextPage == 0
 	}
-	first := (page - 1) * demandrepair.CIPerPage
 	if total <= first || total >= demandrepair.CIPerPage*demandrepair.CIMaxPages ||
 		count != min(demandrepair.CIPerPage, total-first) {
 		return false
