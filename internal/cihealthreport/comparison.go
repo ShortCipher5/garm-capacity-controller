@@ -94,6 +94,19 @@ type executionSlot struct {
 	retry        uint16
 }
 
+// Within one source/repository category the numeric job ID identifies one
+// GitHub job, not one job per run or attempt. Distinct framework retries and
+// case occurrences in that same job still share its original attempt key.
+type reviewedJobAttempts map[int64]cihealth.AttemptKey
+
+func (jobs reviewedJobAttempts) accept(job cihealth.JobKey) bool {
+	if attempt, seen := jobs[job.JobID]; seen && attempt != job.Attempt {
+		return false
+	}
+	jobs[job.JobID] = job.Attempt
+	return true
+}
+
 // CompareReviewedCase validates the supplied review against the opaque report
 // projection's exact independently supplied binding. It does not fetch,
 // authenticate, or discover such reviews: GitHub artifact metadata alone is
@@ -107,6 +120,7 @@ func CompareReviewedCase(cohort ReviewedCaseCohort, observations []ReviewedCaseO
 	}
 	slots := make(map[executionSlot]bool, len(observations))
 	artifacts := make(map[int64]bool, len(observations))
+	jobs := make(reviewedJobAttempts, len(observations))
 	runs := make(map[int64]comparisonRun, len(observations))
 	var all, first, repeat comparisonBatch
 	for _, input := range observations {
@@ -114,7 +128,7 @@ func CompareReviewedCase(cohort ReviewedCaseCohort, observations []ReviewedCaseO
 		// One canonical occurrence per positively identified shard and
 		// attempt/retry slot. An artifact cannot assign two records to
 		// this canonical case; there is no silent coalescing or ordering.
-		if !ok || slots[slot] || artifacts[artifact] {
+		if !ok || slots[slot] || artifacts[artifact] || !jobs.accept(input.Review.Job) {
 			return CaseComparison{}, ErrCaseComparison
 		}
 		slots[slot], artifacts[artifact] = true, true

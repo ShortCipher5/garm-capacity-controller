@@ -56,6 +56,7 @@ func RankReviewedCaseImpact(inputs []ReviewedCaseImpactInput) ([]RankedCaseImpac
 	shardLabels, shardIDs := make(map[int64]string), make(map[string]int64)
 	artifacts := make(map[int64]rankedArtifact)
 	entries := make(map[rankedEntry]bool)
+	jobs := make(reviewedJobAttempts)
 	out := make([]RankedCaseImpact, 0, len(inputs))
 	category := impactCategory(inputs[0].Cohort)
 	for _, input := range inputs {
@@ -82,7 +83,7 @@ func RankReviewedCaseImpact(inputs []ReviewedCaseImpactInput) ([]RankedCaseImpac
 			r := observation.Review
 			entry := rankedEntry{r.ArtifactID, r.Occurrence}
 			proof := rankedArtifact{r.Job, c.ShardKey, r.Retry, r.ExpectedReportSHA256}
-			if prior, exists := artifacts[r.ArtifactID]; (exists && prior != proof) || entries[entry] {
+			if prior, exists := artifacts[r.ArtifactID]; (exists && prior != proof) || entries[entry] || !jobs.accept(r.Job) {
 				return nil, ErrCaseComparison
 			}
 			artifacts[r.ArtifactID], entries[entry] = proof, true
