@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"regexp"
@@ -28,6 +29,12 @@ const (
 	ciMaxLookback     = 31 * 24 * time.Hour
 	ciMaxClockSkew    = time.Minute
 )
+
+// ErrCIRunWindowAtCap denotes a valid, repository-scoped creation-filtered
+// run page reporting exactly the search ceiling. Exactly that many legitimate
+// rows cannot be distinguished from saturation. No rows or claim of coverage
+// are returned. It wraps ErrObservation; no retry or splitting is performed.
+var ErrCIRunWindowAtCap = fmt.Errorf("%w: filtered CI run window at search ceiling", ErrObservation)
 
 // CIRepository is an explicit operator-enrolled subset of the existing
 // authenticated read allowlist. GarmID is a locator, not proof of GitHub repo ID.
@@ -206,9 +213,8 @@ func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q CIRunQ
 		return CIRunPage{}, ErrObservation
 	}
 	next, valid := ciNextPage(q.Page, wire.Total, len(wire.Runs))
-	if !valid || *wire.Total >= CIPerPage*CIMaxPages {
-		// Run search may advertise a capped total. A later worker can split
-		// a historical window; an active cap remains explicitly incomplete.
+	if !valid || q.Status != "" && *wire.Total == CIPerPage*CIMaxPages {
+		// Active scans still fail closed without a historical split signal.
 		return CIRunPage{}, ErrObservation
 	}
 	if len(wire.Runs) == 0 {
@@ -229,6 +235,12 @@ func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q CIRunQ
 		}
 		seen[run.RunID] = true
 		out.Runs = append(out.Runs, run)
+	}
+	if *wire.Total == CIPerPage*CIMaxPages {
+		if ctx.Err() != nil {
+			return CIRunPage{}, ErrObservation
+		}
+		return CIRunPage{}, ErrCIRunWindowAtCap
 	}
 	return out, nil
 }
