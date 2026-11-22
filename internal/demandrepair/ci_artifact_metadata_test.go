@@ -2,6 +2,7 @@ package demandrepair
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ const ciArtifactFixturePath = "/repos/owner/repo/actions/runs/9007199254740995/a
 
 func TestCIArtifactMetadataOnlyReportsExactRunWithoutProducer(t *testing.T) {
 	ctx := context.Background()
+	digest := sha256.Sum256([]byte("fixture archive"))
 	now := time.Now().UTC().Truncate(time.Second)
 	past, future := now.Add(-time.Hour), now.Add(time.Hour)
 	calls := 0
@@ -39,10 +41,10 @@ func TestCIArtifactMetadataOnlyReportsExactRunWithoutProducer(t *testing.T) {
 				{"id": int64(ciFirstJobID), "workflow_run": run, "size_in_bytes": int64(9_007_199_254_740_999),
 					"expired": false, "created_at": past, "expires_at": future, "name": "private-junit-original-name",
 					"archive_download_url": "https://invalid.example/archive-secret", "url": "https://invalid.example/metadata-secret",
-					"job_id": 42, "run_attempt": 2},
-				{"id": 2, "workflow_run": run, "size_in_bytes": 0, "expired": false, "expires_at": past},
+					"job_id": 42, "run_attempt": 2, "digest": fmt.Sprintf("sha256:%x", digest)},
+				{"id": 2, "workflow_run": run, "size_in_bytes": 0, "expired": false, "expires_at": past, "digest": nil},
 				{"id": 3, "workflow_run": run, "expired": false},
-				{"id": 4, "workflow_run": run, "expired": true},
+				{"id": 4, "workflow_run": run, "expired": true, "digest": "unknown-algorithm:unretained-digest"},
 			}})
 		default:
 			t.Error("unexpected artifact/other request", r.URL.Path)
@@ -60,12 +62,20 @@ func TestCIArtifactMetadataOnlyReportsExactRunWithoutProducer(t *testing.T) {
 			t.Fatalf("invalid run metadata: %+v %v", page, err)
 		}
 		rendered := fmt.Sprintf("%+v", page)
-		for _, ignored := range []string{"private-junit-original-name", "archive-secret", "metadata-secret", "JobID", "Attempt"} {
+		for _, ignored := range []string{"private-junit-original-name", "archive-secret", "metadata-secret", "unretained-digest", "JobID", "Attempt"} {
 			if strings.Contains(rendered, ignored) {
 				t.Fatal("retained unsupported provenance or untrusted metadata")
 			}
 		}
 		rows = page.Artifacts
+		if !rows[0].AdvertisedSHA256Known || rows[0].AdvertisedSHA256 != digest {
+			t.Fatal("valid run-level advertisement was not pinned")
+		}
+		for _, row := range rows[1:] {
+			if row.AdvertisedSHA256Known || row.AdvertisedSHA256 != ([sha256.Size]byte{}) {
+				t.Fatal("unsupported or missing advertisement became a usable pin")
+			}
+		}
 	}
 	if calls != 2 || rows[0].ID != ciFirstJobID || rows[0].SizeInBytes != 9007199254740999 || !rows[0].SizeKnown ||
 		!rows[0].CreatedAt.Equal(past) || !rows[0].ExpiresAt.Equal(future) || rows[0].Availability != CIArtifactListedUnexpired ||
@@ -236,6 +246,10 @@ func TestCIArtifactMetadataRejectsUnverifiedRowsPartialPageAndRedirect(t *testin
 	ctx := context.Background()
 	run := fmt.Sprintf(`"workflow_run":{"id":%d,"repository_id":%d}`, ciRunID, ciRepoID)
 	got := fmt.Sprintf(`{"id":1,%s}`, run)
+	withDigest := func(fields string) string {
+		return fmt.Sprintf(`{"total_count":1,"artifacts":[{"id":1,%s,%s}]}`, run, fields)
+	}
+	validDigest := fmt.Sprintf(`"sha256:%x"`, sha256.Sum256([]byte("fixture archive")))
 	for _, tc := range []struct {
 		name, body string
 		code       int
@@ -248,6 +262,14 @@ func TestCIArtifactMetadataRejectsUnverifiedRowsPartialPageAndRedirect(t *testin
 		{name: "partial page", body: fmt.Sprintf(`{"total_count":2,"artifacts":[%s]}`, got)},
 		{name: "duplicate artifact", body: fmt.Sprintf(`{"total_count":2,"artifacts":[%s,%s]}`, got, got)},
 		{name: "Unicode case-alias", body: fmt.Sprintf(`{"total_count":1,"artifacts":[{"id":1,"ſize_in_bytes":5,%s}]}`, run)},
+		{name: "duplicate digest", body: withDigest(`"digest":` + validDigest + `,"digest":null`)},
+		{name: "digest case alias", body: withDigest(`"DIGEST":` + validDigest)},
+		{name: "wrong digest type", body: withDigest(`"digest":23`)},
+		{name: "wrong digest length", body: withDigest(`"digest":"sha256:aa"`)},
+		{name: "nonhex digest", body: withDigest(`"digest":"sha256:` + strings.Repeat("xx", sha256.Size) + `"`)},
+		{name: "uppercase digest", body: withDigest(`"digest":"sha256:` + strings.Repeat("AA", sha256.Size) + `"`)},
+		{name: "missing digest separator", body: withDigest(`"digest":"sha256"`)},
+		{name: "reserved zero digest", body: withDigest(`"digest":"sha256:` + strings.Repeat("00", sha256.Size) + `"`)},
 		{name: "negative size", body: fmt.Sprintf(`{"total_count":1,"artifacts":[{"id":1,"size_in_bytes":-5,%s}]}`, run)},
 		{name: "inverted time", body: fmt.Sprintf(`{"total_count":1,"artifacts":[{"id":1,"created_at":"2026-01-05T00:00:00Z","expires_at":"2026-01-01T00:00:00Z",%s}]}`, run)},
 		{name: "excessive response", body: strings.Repeat(" ", (4<<20)+1)},
