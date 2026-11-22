@@ -10,6 +10,14 @@ export function writerRecoveryState({ conflict = false, unavailable = false, unc
 
 const pendingState = value => value === "pending" || value === "unknown" ? value : "";
 
+// This reference is display-only. Never retain the journal row or a settings snapshot.
+export function historicalPendingReference(snapshot) {
+  if (snapshot?.write_blocked !== true) return null;
+  const {request_id, state} = snapshot.pending || {};
+  if (typeof request_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(request_id)) return null;
+  return { requestId: request_id, state: pendingState(state) || "unclassified" };
+}
+
 const managedClientWriteHold = snapshot => snapshot?.managed_client_write_hold === true && snapshot.pending === undefined;
 
 // Report the evidence basis separately from the existing write-block state.
