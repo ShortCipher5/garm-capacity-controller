@@ -26,6 +26,46 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm test
+      - name: Verify the pinned synthetic JUnit reporter
+        id: synthetic_report
+        working-directory: .
+        shell: bash
+        run: |
+          export CI_HEALTH_FIXTURE_NODE
+          CI_HEALTH_FIXTURE_NODE="$(realpath "$(command -v node)")"
+          dir="$(mktemp -d "${RUNNER_TEMP}/ci-health-synthetic.XXXXXX")"
+          export CI_HEALTH_SYNTHETIC_REPORT="$dir/synthetic.xml"
+          go test -tags cihealth_playwright_fixture ./internal/cihealthreport -run '^TestPinnedPlaywrightJUnitReporter$' -count=1
+          test -s "$CI_HEALTH_SYNTHETIC_REPORT"
+          digest="$(sha256sum "$CI_HEALTH_SYNTHETIC_REPORT")"
+          printf 'path=%s\nxml_sha256=%s\n' "$CI_HEALTH_SYNTHETIC_REPORT" "${digest%% *}" >> "$GITHUB_OUTPUT"
+      # PRs check reporter format without publishing report XML from PR code.
+      - name: Upload one synthetic report on main
+        id: synthetic_upload
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-health-junit-synthetic-attempt-${{ github.run_attempt }}
+          path: ${{ steps.synthetic_report.outputs.path }}
+          retention-days: 1
+          if-no-files-found: error
+      - name: Record synthetic artifact upload evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          XML_SHA256: ${{ steps.synthetic_report.outputs.xml_sha256 }}
+          ARCHIVE_SHA256: ${{ steps.synthetic_upload.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.synthetic_upload.outputs.artifact-id }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$XML_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            printf 'Synthetic JUnit fixture only. No production producer verification.\n\n'
+            printf -- '- Artifact ID: `%s`\n' "$ARTIFACT_ID"
+            printf -- '- Uploaded archive SHA-256: `%s`\n' "$ARCHIVE_SHA256"
+            printf -- '- Local fixture XML SHA-256: `%s`\n' "$XML_SHA256"
+          } >> "$GITHUB_STEP_SUMMARY"
       - run: npx playwright install --with-deps chromium
       - run: npm run test:ui
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
