@@ -119,10 +119,15 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			sample.Shape != in.Shape || sample.Outcome > TrendOutcomeOtherTerminal || sample.Risks&^knownJobSizingRisks != 0 || !sample.RiskKnown && sample.Risks != 0 {
 			return fail()
 		}
+		cadence, ok := jobSizingSamplingCeiling(r)
+		if !ok {
+			return fail()
+		}
 		cpu, ram := r.CPU, r.RAMMean
-		if cpu != nil && (cpu.AverageMilliCPU > cpu.PeakIntervalMilliCPU || !sizingCoverageValid(cpu.Coverage, r.Window, r.Scope.MaxGap, r.Samples)) ||
-			r.RAM != nil && (r.RAM.Samples < 1 || r.RAM.Samples > r.Samples || r.RAM.Latest > r.RAM.SampleMax || r.RAM.LatestAt.Before(start) || r.RAM.LatestAt.After(end)) ||
-			ram != nil && (r.RAM == nil || ram.Bytes > r.RAM.SampleMax || !sizingCoverageValid(ram.Coverage, r.Window, r.Scope.MaxGap, r.RAM.Samples)) {
+		if cpu != nil && (cpu.AverageMilliCPU > cpu.PeakIntervalMilliCPU || !sizingCoverageValid(cpu.Coverage, r.Window, r.Scope.MaxGap, r.Samples, cadence)) ||
+			r.RAM != nil && (r.RAM.Samples < 1 || r.RAM.Samples > r.Samples || r.RAM.Latest > r.RAM.SampleMax ||
+				r.RAM.LatestAt.Before(start.Add(r.Sampling.BeforeFirstSample)) || r.RAM.LatestAt.After(end.Add(-r.Sampling.AfterLastSample))) ||
+			ram != nil && (r.RAM == nil || ram.Bytes > r.RAM.SampleMax || !sizingCoverageValid(ram.Coverage, r.Window, r.Scope.MaxGap, r.RAM.Samples, cadence)) {
 			return fail()
 		}
 		seen[key] = true // One slot per source/run/attempt, even if job IDs differ.
@@ -174,10 +179,47 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 	return out, nil
 }
 
-func sizingCoverageValid(c ResourceCoverage, window, maxGap time.Duration, samples int) bool {
+// jobSizingSamplingCeiling checks that the diagnostic is possible for the
+// bounded sample sequence, then computes the most any metric could cover.
+// It cannot establish that a metric was measured or authenticate a summary.
+func jobSizingSamplingCeiling(r JobResourceSummary) (ResourceCoverage, bool) {
+	s := r.Sampling
+	if r.Samples == 0 {
+		return ResourceCoverage{}, s == (ResourceSamplingCoverage{NoSamples: r.Window})
+	}
+	if s.NoSamples != 0 || s.BeforeFirstSample < 0 || s.BeforeFirstSample > r.Window ||
+		s.AfterLastSample < 0 || s.AfterLastSample > r.Window-s.BeforeFirstSample ||
+		s.CadenceGaps < 0 || s.CadenceGaps >= r.Samples {
+		return ResourceCoverage{}, false
+	}
+	sampleSpan := r.Window - s.BeforeFirstSample - s.AfterLastSample
+	if s.CadenceGapDuration < 0 || s.CadenceGapDuration > sampleSpan ||
+		s.CadenceGaps == 0 && s.CadenceGapDuration != 0 ||
+		s.CadenceGapDuration < time.Duration(s.CadenceGaps)*(r.Scope.MaxGap+time.Nanosecond) {
+		return ResourceCoverage{}, false
+	}
+	pairs := r.Samples - 1 - s.CadenceGaps
+	duration := sampleSpan - s.CadenceGapDuration
+	// Strictly ordered sample times require at least 1 ns per pair; pairs
+	// within cadence are each at most MaxGap. Inputs have already been bounded.
+	if duration < time.Duration(pairs)*time.Nanosecond || duration > time.Duration(pairs)*r.Scope.MaxGap {
+		return ResourceCoverage{}, false
+	}
+	return ResourceCoverage{Intervals: pairs, Duration: duration}, true
+}
+
+func sizingCoverageValid(c ResourceCoverage, window, maxGap time.Duration, samples int, ceiling ResourceCoverage) bool {
 	// The caller bounded samples and maxGap, so this product cannot overflow.
-	return c.Intervals > 0 && c.Intervals < samples && c.Duration > 0 && c.Duration <= window &&
-		c.Duration <= time.Duration(c.Intervals)*maxGap && c.Complete == (c.Duration == window)
+	if c.Intervals <= 0 || c.Intervals >= samples || c.Intervals > ceiling.Intervals ||
+		c.Duration < time.Duration(c.Intervals)*time.Nanosecond || c.Duration > ceiling.Duration ||
+		c.Duration > time.Duration(c.Intervals)*maxGap || c.Complete != (c.Duration == window) {
+		return false
+	}
+	// Pairs missing this metric still account for a positive share of the
+	// aggregate cadence span. Do not let credited pairs consume their time.
+	uncounted := time.Duration(ceiling.Intervals - c.Intervals)
+	remaining := ceiling.Duration - c.Duration
+	return remaining >= uncounted*time.Nanosecond && remaining <= uncounted*maxGap
 }
 
 func sizingCoverageSufficient(covered, window time.Duration) bool {
