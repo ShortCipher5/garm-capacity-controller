@@ -231,3 +231,10 @@ local fixture ZIP; the test verifies normalized outcomes and discarded
 diagnostics. The fixture requests no artifact downloads, but is not a network
 sandbox for the local executables and dependencies. This qualifies report
 format only, not the identity of a live workflow, job, archive, or test case.
+
+In the hosted read-only admin workflow, the same fixture checks the pinned
+reporter without starting a browser or publishing XML from PR code. On a push
+to `main`, it uploads only this synthetic report for one day. Its job summary
+records the raw XML digest separately from the uploaded archive digest and
+artifact ID. This verifies the hosted synthetic export and upload path, not
+downloaded bytes, production report ingestion or exact producer identity.

@@ -118,4 +118,21 @@ test.skip("fixture-case-skip", () => {});
 	}
 	review.EntrySHA256[0] ^= 1
 	expectJUnitZIPRefusal(t, archive, review)
+
+	// Export only the known synthetic fixture, after the compatibility and
+	// diagnostic-redaction assertions pass. The default local test exports nothing.
+	if output := os.Getenv("CI_HEALTH_SYNTHETIC_REPORT"); output != "" {
+		if !filepath.IsAbs(output) || filepath.Clean(output) != output || filepath.Base(output) != "synthetic.xml" {
+			t.Fatal("synthetic export must be a clean absolute path ending in synthetic.xml")
+		}
+		out, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			t.Fatal("cannot create a new synthetic report export")
+		}
+		_, writeErr := out.Write(raw)
+		closeErr := out.Close()
+		if writeErr != nil || closeErr != nil {
+			t.Fatal("cannot complete the synthetic report export")
+		}
+	}
 }
