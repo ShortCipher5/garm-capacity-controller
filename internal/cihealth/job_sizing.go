@@ -116,6 +116,9 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 		return out, nil
 	}
 	seen := make(map[AttemptKey]bool, len(in.Samples))
+	// The cohort has one source and repository. Each numeric job ID
+	// identifies one execution there, not a new job in each run or retry.
+	seenJobIDs := make(map[int64]bool, len(in.Samples))
 	windows := make([]jobSizingRunnerWindow, 0, len(in.Samples))
 	var first, last time.Time
 	var highestCPU, highestRAM uint64
@@ -125,7 +128,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 		key := job.Attempt
 		start, end := r.Scope.StartedAt.UTC(), r.Scope.EndAt.UTC()
 		if !validKey(key) || key.Source != in.Scope.Source || key.RepositoryID != in.Scope.RepositoryID || key.WorkflowID != in.Scope.WorkflowID ||
-			job.JobID <= 0 || seen[key] || !validSource(r.Scope.RunnerIncarnation) ||
+			job.JobID <= 0 || seen[key] || seenJobIDs[job.JobID] || !validSource(r.Scope.RunnerIncarnation) ||
 			!validTime(start) || !validTime(end) || !validTime(r.Scope.AsOf.UTC()) || end.After(r.Scope.AsOf.UTC()) ||
 			r.Window != end.Sub(start) || r.Window <= 0 || r.Window > MaxJobResourceWindow || r.Samples < 0 || r.Samples > MaxJobResourceSamples ||
 			r.Scope.MaxGap <= 0 || r.Scope.MaxGap > MaxJobResourceGap ||
@@ -146,6 +149,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			return fail()
 		}
 		seen[key] = true // One slot per source/run/attempt, even if job IDs differ.
+		seenJobIDs[job.JobID] = true
 		// A positively confirmed job is present through its true end, even
 		// if its own resource samples stop early. It can overlap another job.
 		windowEnd := end

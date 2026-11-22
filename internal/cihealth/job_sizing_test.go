@@ -21,6 +21,7 @@ func jobSizingFixture(t *testing.T, primary int, span, covered time.Duration) Jo
 	for i := range primary {
 		w := resourceScopeFixture(10*time.Second, 9*time.Second)
 		w.Job.Attempt.RunID = int64(i + 1)
+		w.Job.JobID = int64(i + 100)
 		w.Job.Attempt.Attempt = 1
 		w.RunnerIncarnation = fmt.Sprintf("fixture-incarnation-%d", i)
 		offset := time.Duration(i) * span / time.Duration(max(1, primary-1))
@@ -53,6 +54,7 @@ func TestJobSizingVerifiesExactPrimaryHistoryAndCoverageThresholds(t *testing.T)
 			in := jobSizingFixture(t, tc.primary, tc.span, tc.cover)
 			retry := in.Samples[0]
 			retry.Resources.Scope.Job.Attempt.Attempt = 2
+			retry.Resources.Scope.Job.JobID = 1000
 			retry.Resources.Scope.RunnerIncarnation = "fixture-retry-incarnation"
 			retry.Completion.Job = retry.Resources.Scope.Job
 			in.Samples = append(in.Samples, retry)
@@ -147,7 +149,6 @@ func TestJobSizingRefusesDuplicateRunAndForeignOrContradictoryEvidence(t *testin
 	} {
 		t.Run(name, func(t *testing.T) {
 			in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
-			in.Samples[1].Resources.Scope.Job.JobID++
 			in.Samples[1].Completion.Job = in.Samples[1].Resources.Scope.Job
 			mutate(&in)
 			if got, err := SummarizeJobSizing(in); err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
@@ -224,6 +225,7 @@ func TestJobSizingRejectsOverlappingWindowsOnOneRunnerIncarnation(t *testing.T) 
 		in.Samples[1].Resources = jobSizingFixture(t, 1, 0, 9*time.Second).Samples[0].Resources
 		r := &in.Samples[1].Resources
 		r.Scope.Job.Attempt.RunID = 2
+		r.Scope.Job.JobID = 101
 		r.Scope.RunnerIncarnation = first.RunnerIncarnation
 		r.Scope.StartedAt, r.Scope.EndAt, r.Scope.AsOf = r.Scope.StartedAt.Add(offset), r.Scope.EndAt.Add(offset), r.Scope.AsOf.Add(offset)
 		r.RAM.LatestAt = r.RAM.LatestAt.Add(offset)
@@ -363,6 +365,7 @@ func TestJobSizingRejectsUnconfirmedRetryBeforeLaterJobOnSameRunner(t *testing.T
 	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
 	retry := in.Samples[0]
 	retry.Resources.Scope.Job.Attempt.Attempt = 2
+	retry.Resources.Scope.Job.JobID = 1000
 	completion := sizingCompletionFixture(retry.Resources.Scope)
 	retry.Completion = JobSizingCompletion{}
 	retry.Outcome = TrendOutcomeUnknown
@@ -382,5 +385,28 @@ func TestJobSizingRejectsUnconfirmedRetryBeforeLaterJobOnSameRunner(t *testing.T
 	got, err = SummarizeJobSizing(in)
 	if err != nil || got.CPU.State != JobSizingIncreaseAdvised || got.Retried != 1 {
 		t.Fatalf("confirmed non-overlap should restore advice: %+v, %v", got, err)
+	}
+}
+
+func TestJobSizingRejectsJobIDReusedAcrossAttempts(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		run, attempt int64
+	}{
+		{"distinct primary runs", 2, 1},
+		{"same run, different attempt", 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := jobSizingFixture(t, MinJobSizingPrimaryAttempts, MinJobSizingHistory, 9*time.Second)
+			a, b := in.Samples[0].Resources.Scope.Job, &in.Samples[1]
+			b.Resources.Scope.Job.Attempt.RunID = tc.run
+			b.Resources.Scope.Job.Attempt.Attempt = tc.attempt
+			b.Resources.Scope.Job.JobID = a.JobID
+			b.Completion.Job = b.Resources.Scope.Job
+			got, err := SummarizeJobSizing(in)
+			if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+				t.Fatalf("reused numeric job ID returned a result: %+v, %v", got, err)
+			}
+		})
 	}
 }

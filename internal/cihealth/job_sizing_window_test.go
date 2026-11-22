@@ -24,6 +24,7 @@ func TestReviewJobSizingWindowWithholdsStaleAdviceDespiteFreshRetry(t *testing.T
 	retry := jobSizingFixture(t, 1, 0, 9*time.Second).Samples[0]
 	r := &retry.Resources.Scope
 	r.Job.Attempt.Attempt = 2
+	r.Job.JobID = 1000
 	offset := window.AsOf.Sub(r.EndAt)
 	r.StartedAt, r.EndAt, r.AsOf = r.StartedAt.Add(offset), r.EndAt.Add(offset), window.AsOf
 	retry.Resources.RAM.LatestAt = retry.Resources.RAM.LatestAt.Add(offset)
