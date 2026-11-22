@@ -3,6 +3,24 @@ const maxSize = 1 << 20;
 const phases = ["queued", "running", "completed", "skipped", "unknown"];
 const terminalConclusions = ["success", "failure", "cancelled", "timed_out", "other_terminal"];
 export const ciHealthEndpoint = "/admin/api/v1/ci-health";
+export const ciJobHandleHeader = "X-GARM-CI-Job-Handle";
+export const validCIJobHandle = (handle) => typeof handle === "string" &&
+  /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(handle);
+
+export function validateCIJobDestination(value, selection) {
+  const fields = ["source", "repository_id", "workflow_id", "run_id", "attempt", "job_id"];
+  if (!exactKeys(value, ["url", ...fields]) || !selection || !validCIJobHandle(selection.handle) ||
+      !fields.every(key => Object.hasOwn(selection, key) && value[key] === selection[key]) ||
+      typeof value.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value.source) ||
+      !fields.slice(1).every(key => decimal(value[key])) || typeof value.url !== "string") return null;
+  return qualifiedCIJobURL(value.url, value.run_id, value.job_id);
+}
+
+export function qualifiedCIJobURL(url, run, job) {
+  if (typeof url !== "string" || !decimal(run) || !decimal(job)) return null;
+  const match = /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/actions\/runs\/([1-9][0-9]{0,18})\/job\/([1-9][0-9]{0,18})$/.exec(url);
+  return match && match[0] === url && match[1] === run && match[2] === job ? url : null;
+}
 const lifetime = 120_000; // Same display lifetime as the owner API.
 const trendWeek = 7 * 24 * 60 * 60 * 1000;
 
@@ -123,6 +141,7 @@ export function validateCIHealthSnapshot(value) {
   const scopes = new Set();
   let jobCount = 0;
   let stepCount = 0;
+  const handles = new Set();
   for (const a of value.timing.attempts) {
     if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed", "conclusion"]) ||
         typeof a.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(a.source) || a.source.trim() !== a.source ||
@@ -138,7 +157,8 @@ export function validateCIHealthSnapshot(value) {
     jobCount += a.jobs.length;
     const jobs = new Set();
     for (const j of a.jobs) {
-      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion"]) ||
+      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion", "job_link_handle"]) ||
+          (Object.hasOwn(j, "job_link_handle") && (!validCIJobHandle(j.job_link_handle) || handles.has(j.job_link_handle))) ||
           !decimal(j.id) || jobs.has(j.id) || !phases.includes(j.status) || !validConclusion(j) ||
           !validSpan(j, "queue", ["running", "completed"].includes(j.status), true) ||
           !validSpan(j, "waiting", j.status === "queued", true) ||
@@ -147,6 +167,7 @@ export function validateCIHealthSnapshot(value) {
           !validSpan(j, "elapsed", j.status === "running") || !Array.isArray(j.steps) ||
           j.steps.length > 1000 - stepCount) fail();
       jobs.add(j.id);
+      if (j.job_link_handle) handles.add(j.job_link_handle);
       stepCount += j.steps.length;
       const steps = new Set();
       for (const s of j.steps) {
@@ -209,6 +230,14 @@ export function ciHistoryLease(value, wall = Date.now(), monotonic = performance
 }
 
 export async function readCIHealthBody(response, signal) {
+  return validateCIHealthSnapshot(await readCIHealthJSON(response, signal, maxSize));
+}
+
+export async function readCIJobDestinationBody(response, signal, selection) {
+  return validateCIJobDestination(await readCIHealthJSON(response, signal, 1024), selection);
+}
+
+async function readCIHealthJSON(response, signal, limit) {
   if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? "") || !response.body) {
     throw new Error("CI Health response unavailable.");
   }
@@ -221,9 +250,9 @@ export async function readCIHealthBody(response, signal) {
     while (!signal.aborted) {
       const {done, value} = await reader.read();
       if (signal.aborted) break;
-      if (done) return validateCIHealthSnapshot(JSON.parse(text + decoder.decode()));
+      if (done) return JSON.parse(text + decoder.decode());
       length += value.byteLength;
-      if (length > maxSize) break;
+      if (length > limit) break;
       text += decoder.decode(value, { stream: true });
     }
     throw new Error("CI Health response unavailable.");

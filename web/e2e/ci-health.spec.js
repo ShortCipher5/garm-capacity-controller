@@ -246,3 +246,60 @@ test("owner history expires independently without polling or losing fresh timing
   await expect(panel.getByRole("heading", {name: "Longest measured steps in this snapshot"})).toBeVisible();
   expect(calls).toBe(1);
 });
+
+test("resolves the exact job only on click, and discards a late destination after refresh", async ({page}) => {
+  const handle = "A".repeat(43);
+  const href = "https://github.com/synthetic/private-fixture/actions/runs/9007199254740995/job/9007199254740997";
+  let requests = 0, external = 0, hold = true, release, mark;
+  const pending = new Promise(resolve => { mark = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route(overviewRoute, (route) => route.fulfill({json: {...overview, ci_health_available: true}}));
+  await page.route(timingRoute, async (route) => {
+    const supplied = route.request().headers()["x-garm-ci-job-handle"];
+    const payload = timing(new Date().toISOString());
+    if (!supplied) {
+      payload.timing.attempts[0].jobs[0].job_link_handle = handle;
+      return route.fulfill({json: payload});
+    }
+    requests++;
+    expect(supplied).toBe(handle);
+    expect(route.request().headers().authorization).toBe("Bearer " + token);
+    expect(route.request().url()).not.toContain("?");
+    if (hold) {
+      mark();
+      await gate;
+    }
+    return route.fulfill({json: {url: href, source: "fixture", repository_id: "9007199254740993", workflow_id: "7",
+      run_id: "9007199254740995", attempt: "2", job_id: "9007199254740997"}}).catch(() => {});
+  });
+  await page.route("https://github.com/**", (route) => {
+    external++;
+    expect(route.request().url()).toBe(href);
+    expect(route.request().headers().authorization).toBeUndefined();
+    expect(route.request().headers().referer).toBeUndefined();
+    return route.fulfill({contentType: "text/html", body: "<p>Synthetic GitHub destination</p>"});
+  });
+  await page.goto("/");
+  await login(page);
+  const panel = page.getByRole("region", {name: "CI Health", exact: true});
+  await panel.getByRole("button", {name: "Load timing snapshot"}).click();
+  const reveal = panel.getByRole("button", {name: /^View job 9007199254740997,/});
+  await reveal.click();
+  const open = panel.getByRole("button", {name: "Open exact job on GitHub"});
+  await expect(open).toBeVisible();
+  await expect(panel.locator('a[href^="https://github.com/"]')).toHaveCount(0);
+  expect(requests).toBe(0);
+  await open.click();
+  await pending;
+  await panel.getByRole("button", {name: "Refresh timing snapshot"}).click();
+  await reveal.click();
+  hold = false;
+  release();
+  await expect(open).toBeVisible();
+  expect(external).toBe(0);
+  expect(requests).toBe(1);
+  await open.click();
+  await expect(page.getByText("Synthetic GitHub destination")).toBeVisible();
+  expect(requests).toBe(2);
+  expect(external).toBe(1);
+});

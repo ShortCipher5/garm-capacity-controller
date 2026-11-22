@@ -44,6 +44,7 @@ type ciAttemptView struct {
 
 type ciJobView struct {
 	ID              string              `json:"id"`
+	LinkHandle      string              `json:"job_link_handle,omitempty"`
 	Status          string              `json:"status"`
 	Conclusion      cihealth.Conclusion `json:"conclusion,omitempty"`
 	Queue           *ciSpanView         `json:"queue,omitempty"`

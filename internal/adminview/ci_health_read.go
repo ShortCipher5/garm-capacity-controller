@@ -34,6 +34,8 @@ type CIHealthSnapshot struct {
 	generation *ciHealthGeneration
 	body       []byte
 	history    ciHistoryResponse
+	jobLinks   map[string]ciJobLinkTarget
+	stopped    bool
 	workflows  map[cihealth.TrendScope]bool
 }
 
@@ -79,6 +81,10 @@ func (s *CIHealthSnapshot) Publish(observedAt time.Time, facts []cihealth.Attemp
 // PublishTiming distinguishes local bounds from an ordinary observed subset.
 // Neither mode establishes complete or atomic GitHub history.
 func (s *CIHealthSnapshot) PublishTiming(observedAt time.Time, facts []cihealth.AttemptFacts, boundedPartial bool) error {
+	return s.publishTiming(observedAt, facts, boundedPartial, nil)
+}
+
+func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.AttemptFacts, boundedPartial bool, selectLink ciJobLinkSelector) error {
 	if s == nil || len(s.scopes) == 0 {
 		return ErrConfiguration
 	}
@@ -95,6 +101,10 @@ func (s *CIHealthSnapshot) PublishTiming(observedAt time.Time, facts []cihealth.
 		if f.AsOf.UTC().After(at) {
 			return errCIProjection
 		}
+	}
+	jobLinks, err := attachCIJobHandles(&view, facts, selectLink)
+	if err != nil {
+		return err
 	}
 	var workflows map[cihealth.TrendScope]bool
 	if !boundedPartial {
@@ -117,7 +127,7 @@ func (s *CIHealthSnapshot) PublishTiming(observedAt time.Time, facts []cihealth.
 	if err != nil || len(wire) > maxCIResponseBytes {
 		return errCIProjection
 	}
-	return s.commit(at, lease, wire, workflows)
+	return s.commitTiming(at, lease, wire, workflows, jobLinks)
 }
 
 func (s *CIHealthSnapshot) begin(at time.Time) *ciHealthGeneration {
@@ -130,6 +140,10 @@ func (s *CIHealthSnapshot) begin(at time.Time) *ciHealthGeneration {
 }
 
 func (s *CIHealthSnapshot) commit(at time.Time, lease *ciHealthGeneration, wire []byte, workflows map[cihealth.TrendScope]bool) error {
+	return s.commitTiming(at, lease, wire, workflows, nil)
+}
+
+func (s *CIHealthSnapshot) commitTiming(at time.Time, lease *ciHealthGeneration, wire []byte, workflows map[cihealth.TrendScope]bool, jobLinks map[string]ciJobLinkTarget) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.validAtLocked(at) || lease != s.generation {
@@ -137,13 +151,13 @@ func (s *CIHealthSnapshot) commit(at time.Time, lease *ciHealthGeneration, wire 
 	}
 	s.latest, s.body, s.generation = at, wire, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
-	s.workflows = workflows
+	s.workflows, s.jobLinks = workflows, jobLinks
 	return nil
 }
 
 func (s *CIHealthSnapshot) validAtLocked(at time.Time) bool {
 	now, stable := s.wallLocked()
-	return stable && !at.IsZero() && at.After(s.latest) && !at.After(now) && now.Before(at.Add(ciDisplayLifetime))
+	return stable && !s.stopped && !at.IsZero() && at.After(s.latest) && !at.After(now) && now.Before(at.Add(ciDisplayLifetime))
 }
 
 // wallLocked samples the clock after acquiring the lock. An observed wall
@@ -170,10 +184,22 @@ func (s *CIHealthSnapshot) Withdraw() {
 	s.fenceLocked()
 }
 
+// Stop permanently fences publications before the owned CI reader closes.
+// Do not call source close, history, or socket methods under the snapshot lock.
+func (s *CIHealthSnapshot) Stop() {
+	if s == nil || s.clock == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = true
+	s.fenceLocked()
+}
+
 func (s *CIHealthSnapshot) fenceLocked() {
 	s.body, s.generation = nil, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
-	s.workflows = nil
+	s.workflows, s.jobLinks = nil, nil
 	if s.checked.After(s.latest) {
 		s.latest = s.checked
 	}
@@ -186,7 +212,7 @@ func (s *CIHealthSnapshot) read() []byte {
 	if !stable || now.Before(s.latest) || !now.Before(s.latest.Add(ciDisplayLifetime)) {
 		s.body = nil
 		s.history = ciHistoryResponse{}
-		s.workflows = nil
+		s.workflows, s.jobLinks = nil, nil
 	}
 	if s.history.body != nil {
 		if now.Before(s.history.expires) && s.history.source.Current() {
@@ -215,6 +241,10 @@ func (h *Handler) serveCIHealth(w http.ResponseWriter, r *http.Request, source *
 	}
 	if !adminAuthenticated(r, h.tokenHash) {
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if handles := r.Header.Values(ciJobHandleHeader); len(handles) != 0 {
+		serveCIJobLink(w, r, source, handles)
 		return
 	}
 	body := source.read()
