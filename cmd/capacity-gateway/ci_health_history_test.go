@@ -26,17 +26,18 @@ import (
 )
 
 type ciHistoryFixture struct {
-	startup  configuration
-	demand   demandobserver.Config
-	runtime  *ciHealthRuntime
-	owned    *cihealthsource.OwnedCycleHistory
-	expect   []cihealthsource.HistoryExpectation
-	root     *os.Root
-	reads    atomic.Int32
-	mode     atomic.Int32
-	notFound atomic.Int32
-	capReads atomic.Int32
-	entered  chan struct{}
+	startup    configuration
+	demand     demandobserver.Config
+	runtime    *ciHealthRuntime
+	owned      *cihealthsource.OwnedCycleHistory
+	expect     []cihealthsource.HistoryExpectation
+	root       *os.Root
+	reads      atomic.Int32
+	mode       atomic.Int32
+	notFound   atomic.Int32
+	capReads   atomic.Int32
+	emptyReads atomic.Int32
+	entered    chan struct{}
 }
 
 func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
@@ -79,6 +80,12 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 				want = 26 // True partial capture: exceeds the attempt cap.
 			case 2:
 				want = 0
+				if r.URL.Query().Get("created") != "" {
+					if r.URL.Query().Get("page") != "1" || r.URL.Query().Get("per_page") != strconv.Itoa(demandrepair.CIPerPage) {
+						t.Error("unexpected empty bounded discovery page")
+					}
+					f.emptyReads.Add(1)
+				}
 			case 3:
 				w.WriteHeader(503)
 				return
@@ -395,6 +402,104 @@ func TestCIHistoryBackgroundScopedCapPreservesReviewedCheckpoint(t *testing.T) {
 	assertView("observed")
 	if !bytes.Equal(readSnapshot(), persisted) {
 		t.Fatal("timing recovery changed the retained snapshot")
+	}
+}
+
+func TestCIHistoryBackgroundEmptyBoundedScanPreservesReviewedCheckpoint(t *testing.T) {
+	f := newCIHistoryFixture(t)
+	ctx := t.Context()
+	if err := f.owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := cihealth.OpenHistory(ctx, cihealth.HistoryInput{Enabled: true, Root: f.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := append([]cihealthsource.HistoryExpectation(nil), f.expect...)
+	resume[0].Cursor = cihealth.HistoryCursor{Revision: 1, Checkpoint: 42}
+	if err := seed.Apply(ctx, resume[0].Scope, cihealth.HistoryCursor{}, resume[0].Cursor, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readSnapshot := func() []byte {
+		t.Helper()
+		b, err := f.root.ReadFile(testHistorySnapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	before := readSnapshot()
+	owned, expected, err := cihealthsource.ReopenReviewedCycleHistory(ctx, f.runtime.source, f.root, sha256.Sum256(before), resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owned.Close() })
+	if err := f.runtime.attachOwnedHistoryWithTrends(owned, expected); err != nil {
+		t.Fatal(err)
+	}
+
+	budget := admission.Resources{CPU: 1, RAM: 1, Runners: 1}
+	policy := admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}},
+		Pools: map[string]admission.Pool{"pool": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}
+	store, err := admission.OpenSQLite(filepath.Join(t.TempDir(), "local.db"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const ownerToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	handler, err := adminview.New(store, ownerToken, nil, false)
+	if err != nil || handler.SetCIHealthSnapshot(f.runtime.snapshot) != nil {
+		t.Fatal("could not attach local owner endpoint", err)
+	}
+	assertView := func(positive bool) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "https://127.0.0.1/admin/api/v1/ci-health", nil)
+		req.Header.Set("Authorization", "Bearer "+ownerToken)
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, req)
+		var response struct {
+			State, Coverage string
+			Timing          struct{ Attempts []json.RawMessage }
+			History         json.RawMessage
+		}
+		if err := json.Unmarshal(out.Body.Bytes(), &response); err != nil || out.Code != http.StatusOK || response.State != "observed" || response.Coverage != "observed_subset" {
+			t.Fatalf("expected authenticated observed subset, got %d: %s", out.Code, out.Body.String())
+		}
+		if positive && (len(response.Timing.Attempts) != 1 || len(response.History) == 0) {
+			t.Fatalf("missing positive setup observation or enabled retained history: %s", out.Body.String())
+		}
+		if !positive && (len(response.Timing.Attempts) != 0 || len(response.History) != 0) {
+			t.Fatalf("empty subset supplied attempts or a retained history projection: %s", out.Body.String())
+		}
+	}
+	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() == nil {
+		t.Fatal("initial complete cycle did not persist")
+	}
+	assertView(true)
+	persisted := readSnapshot()
+	if bytes.Equal(before, persisted) {
+		t.Fatal("complete cycle did not change the reviewed snapshot")
+	}
+
+	f.mode.Store(2)
+	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() == nil || f.emptyReads.Load() != 1 {
+		t.Fatal("uncapped empty bounded scan failed, detached history, or did not stop after its first page")
+	}
+	assertView(false)
+	if !bytes.Equal(readSnapshot(), persisted) {
+		t.Fatal("empty window modified independently retained facts")
+	}
+	f.runtime.disableHistory()
+	resume[0].Cursor.Revision = 2
+	reopened, _, err := cihealthsource.ReopenReviewedCycleHistory(ctx, f.runtime.source, f.root, sha256.Sum256(persisted), resume)
+	if err != nil {
+		t.Fatal("exact reviewed checkpoint or snapshot did not survive empty observations", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
