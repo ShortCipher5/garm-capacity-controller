@@ -20,6 +20,9 @@ supplies the review clock and maximum age. An out-of-window observation
 invalidates the entire review rather than being silently dropped from a
 supposedly complete cohort. Retries do not refresh primary evidence. This
 consumer has no gateway or UI wiring and does not verify the data source.
+A sizing cohort with overlapping job windows on the same runner incarnation
+is rejected, including a retry overlapping a primary job. Touching windows
+and simultaneous jobs on distinct incarnations are not overlaps.
 
 ## What remains unavailable
 

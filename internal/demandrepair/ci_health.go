@@ -97,6 +97,11 @@ type CIRunQuery struct {
 	Status   string
 	From, To time.Time
 	Page     int
+	// PreviousTotal is the verified immediately preceding nonempty page's
+	// total for this same query. It is not sent upstream. Only callers that
+	// observe count drift may supply it; it permits an exhausted empty tail
+	// to be distinguished from an arbitrary out-of-range page request.
+	PreviousTotal int
 }
 
 type CIRunPage struct {
@@ -189,6 +194,10 @@ func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q CIRunQ
 	if !ok || !ciPage(q.Page) {
 		return CIRunPage{}, ErrObservation
 	}
+	first := (q.Page - 1) * CIPerPage
+	if q.PreviousTotal != 0 && (q.Page == 1 || q.PreviousTotal <= first || q.PreviousTotal >= CIPerPage*CIMaxPages) {
+		return CIRunPage{}, ErrObservation
+	}
 	params := ciPageQuery(q.Page)
 	var from, to time.Time
 	switch q.Status {
@@ -213,7 +222,9 @@ func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q CIRunQ
 		return CIRunPage{}, ErrObservation
 	}
 	next, valid := ciNextPage(q.Page, wire.Total, len(wire.Runs))
-	if !valid || q.Status != "" && *wire.Total == CIPerPage*CIMaxPages {
+	exhaustedTail := q.PreviousTotal != 0 && len(wire.Runs) == 0 && wire.Total != nil &&
+		*wire.Total >= 0 && *wire.Total <= first
+	if (!valid && !exhaustedTail) || q.Status != "" && *wire.Total == CIPerPage*CIMaxPages {
 		// Active scans still fail closed without a historical split signal.
 		return CIRunPage{}, ErrObservation
 	}
@@ -330,25 +341,50 @@ type ciRunPageWire struct {
 	Runs  []ciRunWire `json:"workflow_runs"`
 }
 type ciRunWire struct {
-	ID         int64      `json:"id"`
-	WorkflowID int64      `json:"workflow_id"`
-	Attempt    int64      `json:"run_attempt"`
-	Repo       ciRepoWire `json:"repository"`
-	Name       string     `json:"name"`
-	Status     string     `json:"status"`
-	Conclusion string     `json:"conclusion"`
-	CreatedAt  *time.Time `json:"created_at"`
-	StartedAt  *time.Time `json:"run_started_at"`
+	ID         int64          `json:"id"`
+	WorkflowID int64          `json:"workflow_id"`
+	Attempt    int64          `json:"run_attempt"`
+	Repo       ciRepoWire     `json:"repository"`
+	Name       string         `json:"name"`
+	Status     string         `json:"status"`
+	Conclusion string         `json:"conclusion"`
+	CreatedAt  *ciRunCreation `json:"created_at"`
+	StartedAt  *time.Time     `json:"run_started_at"`
+}
+
+// ciRunCreation preserves decoding for status-only and exact-attempt reads.
+// A historical window additionally needs a valid numeric timezone offset to
+// place the original run in an inclusive UTC-second bucket. Go time parsing
+// can normalize out-of-range offset hours/minutes instead of rejecting them.
+type ciRunCreation struct {
+	at              time.Time
+	validZoneOffset bool
+}
+
+func (c *ciRunCreation) UnmarshalJSON(raw []byte) error {
+	if err := c.at.UnmarshalJSON(raw); err != nil {
+		return err
+	}
+	c.validZoneOffset = true
+	// The decoder above already validated the timestamp structure. A numeric
+	// zone ends in ±hh:mm before the closing JSON quote.
+	if len(raw) >= 7 {
+		zone := raw[len(raw)-7 : len(raw)-1]
+		if zone[0] == '+' || zone[0] == '-' {
+			c.validZoneOffset = string(zone[1:3]) <= "23" && string(zone[4:6]) <= "59"
+		}
+	}
+	return nil
 }
 
 func (w ciRunWire) matchesQuery(status string, from, to, now time.Time) bool {
 	if status != "" {
 		return w.Status == status
 	}
-	if w.CreatedAt == nil || !ciClocks(w.CreatedAt, nil, now) {
+	if w.CreatedAt == nil || !w.CreatedAt.validZoneOffset || !ciClocks(&w.CreatedAt.at, nil, now) {
 		return false
 	}
-	created := w.CreatedAt.UTC().Truncate(time.Second)
+	created := w.CreatedAt.at.UTC().Truncate(time.Second)
 	return !created.Before(from) && !created.After(to)
 }
 
