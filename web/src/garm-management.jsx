@@ -123,7 +123,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {snapshot?.policy_cap_reconciler && <p>The separately configured saved-cap reconciler can automatically lower a pool maximum. See its last reported status below.</p>}
     {readChanges && <GarmReadChanges changes={readChanges} stale={syncError} onDismiss={()=>setReadChanges(null)} />}
     {needsRefresh && <p role="alert" className="error">Garm settings changed elsewhere. Your draft is preserved, but applying it is blocked. Discard the draft and refresh before reviewing a new change.</p>}
-    {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} />}
+    {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} stale={syncError} />}
     {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings and journal details may be stale; pool and scaleset inventories are unavailable. Editing is blocked until a successful refresh.</p>}
     <GarmRecoveryPanel snapshot={snapshot} conflict={needsRefresh} unavailable={syncError} uncertain={uncertain.current} />
     <PolicyCapStatus value={snapshot?.policy_cap_reconciler} stale={syncError}/>
