@@ -8,7 +8,7 @@ test('idle recommendations are passive, configured-only and disappear when stale
  const plan={captured_at:new Date(now).toISOString(),expires_at:new Date(now+20000).toISOString(),pools:[{pool:id,repository:id}],stock_idle_preview:{state:'proposed',host_evidence:'configured_only',expires_at:new Date(now+10000).toISOString(),proposals:[{pool_id:id,repository_id:id,observed_min_idle:1,suggested_min_idle:0,unchanged_maximum:3}]}};
  const render=(extra={})=>renderToStaticMarkup(React.createElement(StockIdleSuggestions,{plan,comparison:'linked_at_capture',now,...extra}));
  assert.equal(render({plan:{}}),'');const html=render();
- assert.match(html,/Observed minimum idle/);assert.match(html,/Suggested minimum idle/);assert.match(html,/Maximum \(unchanged\)/);assert.match(html,/<td>1<\/td><td>0<\/td><td>3<\/td>/);
+ assert.match(html,/Minimum idle at capture/);assert.match(html,/Suggested minimum idle \(not applied here\)/);assert.match(html,/Maximum at capture \(not part of this suggestion\)/);assert.match(html,/<td>1<\/td><td>0<\/td><td>3<\/td>/);
  assert.match(html,/provider destination is not verified/);assert.match(html,/not applied settings/);assert.doesNotMatch(html,/<button|<form/);
  for(const extra of [{now:now+10000},{comparison:'preview_superseded'}])assert.doesNotMatch(render(extra),/<table|provider destination/);
  const increase={...plan,stock_idle_decision_preview:{...plan.stock_idle_preview.proposals[0],direction:'increase',host_evidence:'configured_only',expires_at:new Date(now+5000).toISOString(),observed_min_idle:0,suggested_min_idle:1}};

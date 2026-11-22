@@ -11,6 +11,9 @@ import (
 
 const MaxComparisonObservations = 2000
 
+// Refuse a limit change that would let a fully timed cohort overflow Duration.
+const _ time.Duration = MaxComparisonObservations * MaxDuration
+
 var ErrCaseComparison = errors.New("case comparison lacks bounded comparable evidence")
 
 // ReviewedCaseCohort contains out-of-band canonical identifiers. All IDs
@@ -59,6 +62,9 @@ type Frequency struct {
 
 type CaseComparisonStats struct {
 	Summary
+	// TotalTimedDuration is the exact sum of timed occurrences. It is
+	// unavailable when Timed is zero, and is not elapsed workflow time.
+	TotalTimedDuration      time.Duration
 	FailureAmongPassFail    Frequency
 	ErrorAmongPassFailError Frequency
 	SlowAmongTimed          Frequency // populated only for a supplied positive threshold
@@ -190,13 +196,17 @@ type comparisonBatch struct {
 	totals Totals
 	cases  []Case
 	slow   int
+	total  time.Duration
 }
 
 func (b *comparisonBatch) add(c Case, threshold time.Duration) {
 	b.cases = append(b.cases, c)
 	b.totals.addCase(c.Outcome)
-	if threshold > 0 && c.Timed && c.Duration >= threshold {
-		b.slow++
+	if c.Timed {
+		b.total += c.Duration
+		if threshold > 0 && c.Duration >= threshold {
+			b.slow++
+		}
 	}
 }
 
@@ -205,6 +215,7 @@ func (b comparisonBatch) stats(threshold time.Duration) CaseComparisonStats {
 	decisive := s.Passed + s.Failed
 	out := CaseComparisonStats{
 		Summary:                 s,
+		TotalTimedDuration:      b.total,
 		FailureAmongPassFail:    Frequency{s.Failed, decisive},
 		ErrorAmongPassFailError: Frequency{s.Errors, decisive + s.Errors},
 	}
