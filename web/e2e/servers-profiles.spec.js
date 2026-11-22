@@ -76,7 +76,13 @@ test("read-only discovery, reviewed enrollment and honest duplicate error", asyn
 });
 
 test("usage chart renders observations without inventing interval coverage", async ({ page }) => {
+  const recent = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === "/admin/api/v1/usage/host-a" &&
+      url.search === "?limit=500&order=recent" && response.request().method() === "GET";
+  });
   await connect(page);
+  expect((await recent).status()).toBe(200);
   await page.getByRole("link", { name: "Servers", exact: true }).click();
   const measured = page.locator('#servers [data-host="host-a"]');
   await expect(measured.getByText("CPU used — recorded, not allocated")).toBeVisible();

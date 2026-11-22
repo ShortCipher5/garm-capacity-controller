@@ -110,7 +110,10 @@ monitoring on this branch:
 - Samples are appended to the admission usage history with source
   `guest-state-v2` (legacy rows remain `guest-state`) and exposed read-only at
   `GET /admin/api/v1/usage/{host}?since=<RFC3339>&limit=<n>` on the
-  separately authorized admin surface. One failing host backs off
+  separately authorized admin surface. Default reads select the oldest
+  matching page. The Servers card requests `limit=500&order=recent` to
+  select the newest bounded page, returned in chronological order. The
+  optional cutoff stays inclusive for both modes. One failing host backs off
   independently and never blocks the others.
 - Recent high project CPU/RAM observations can suppress new *advisory*
   placement proposals. Native guest disk reports may include the same
