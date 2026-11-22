@@ -35,7 +35,7 @@ func TestCIHealthTimingProjectionPreservesPrecisionAndUnknown(t *testing.T) {
 		`"run_id":"9223372036854775807"`, `"attempt":"2"`, `"id":"9223372036854775806"`,
 		`"queue":{"basis":"observed_lower_bound","nanoseconds":"1000000000"}`,
 		`"creation_to_start":{"basis":"observed_endpoints","nanoseconds":"1000000000"}`,
-		`"status":"completed","conclusion":"failure"`, `"status":"completed","conclusion":"timed_out"`,
+		`"status":"completed","conclusion":"failure"`, `"status":"completed","status_observed_at":"2026-01-01T00:00:02Z","conclusion":"timed_out"`,
 		`{"number":"1","status":"skipped","conclusion":"other_terminal"}`, `{"number":"2","status":"completed","execution":{"basis":"observed_endpoints","nanoseconds":"0"}}`,
 	} {
 		if !strings.Contains(string(got), needle) {
@@ -70,5 +70,28 @@ func TestCIHealthTimingProjectionRefusesForeignOrOverflowingBatch(t *testing.T) 
 	got, err := projectCIHealthTiming(nil, nil)
 	if err != nil || got.Attempts == nil || len(got.Attempts) != 0 {
 		t.Fatalf("empty result: %+v %v", got, err)
+	}
+}
+
+func TestCIHealthProjectionDistinguishesStatusObservationFromLastJobPage(t *testing.T) {
+	at := time.Date(2026, 1, 18, 16, 48, 3, 123, time.UTC)
+	key := cihealth.AttemptKey{Source: "github", RepositoryID: 3, WorkflowID: 8, RunID: 9, Attempt: 2}
+	facts := cihealth.AttemptFacts{Key: key, AsOf: at.Add(4 * time.Second),
+		Clock: cihealth.Clock{Phase: cihealth.Running, ObservedAt: at}, Jobs: []cihealth.JobFacts{
+			{Key: cihealth.JobKey{Attempt: key, JobID: 1}, Clock: cihealth.Clock{Phase: cihealth.Running, ObservedAt: at.Add(time.Second)}},
+			{Key: cihealth.JobKey{Attempt: key, JobID: 2}, Clock: cihealth.Clock{Phase: cihealth.Running, ObservedAt: at.Add(4 * time.Second)}},
+			{Key: cihealth.JobKey{Attempt: key, JobID: 3}, Clock: cihealth.Clock{Phase: cihealth.Running}},
+		}}
+	view, err := projectCIHealthTiming([]ciViewScope{{"github", 3}}, []cihealth.AttemptFacts{facts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"attempts":[{"source":"github","repository_id":"3","workflow_id":"8","run_id":"9","attempt":"2","observed_at":"2026-01-18T16:48:07.000000123Z","status_observed_at":"2026-01-18T16:48:03.000000123Z","status":"running","jobs":[{"id":"1","status":"running","status_observed_at":"2026-01-18T16:48:04.000000123Z","steps":[]},{"id":"2","status":"running","status_observed_at":"2026-01-18T16:48:07.000000123Z","steps":[]},{"id":"3","status":"running","steps":[]}]}]}`
+	if string(wire) != want {
+		t.Fatalf("observation timestamps were not independently attributed: %s", wire)
 	}
 }

@@ -65,6 +65,19 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(html, /Unknown/);
     assert.match(html, /title="0 nanoseconds">0 s/);
     assert.match(html, /<dt>Queue wait<\/dt><dd><span class="muted">Unknown<\/span><\/dd><\/div><div><dt>Job creation to start<\/dt><dd><span title="1800000000000 nanoseconds">30 min<\/span>/);
+
+    // An attempt's initial status and the separate job reads are non-atomic;
+    // the last job page must never stand in for another row's status time.
+    const phaseAt = "2025-12-31T23:59:56.000000123Z";
+    const jobAt = "2025-12-31T23:59:58.000000456Z";
+    const f = {...first, status_observed_at: phaseAt, jobs: [
+      {...first.jobs[0], status_observed_at: jobAt}, first.jobs[1],
+    ]};
+    const clocks = render({...snapshot, timing: {attempts: [f, previous]}});
+    assert.match(clocks, /<dt>Status observed<\/dt><dd><time dateTime="2025-12-31T23:59:56\.000000123Z">2025-12-31 23:59:56\.000000123 UTC<\/time><\/dd>/i);
+    assert.match(clocks, /<dt>Status observed<\/dt><dd><time dateTime="2025-12-31T23:59:58\.000000456Z">2025-12-31 23:59:58\.000000456 UTC<\/time><\/dd>/i);
+    assert.match(clocks, /<dt>Latest included read<\/dt><dd><time dateTime="2026-01-01T00:00:00Z">2026-01-01 00:00:00 UTC<\/time><\/dd>/i);
+    assert.match(clocks, /<dt>Status observed<\/dt><dd><span class="muted">Unknown<\/span><\/dd>/);
     const olderJob = {...first.jobs[1]};
     delete olderJob.creation_to_start;
     const older = render({...snapshot, timing: {attempts: [{...first, jobs: [olderJob]}, previous]}});
