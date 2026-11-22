@@ -2,8 +2,9 @@ const safe = (value, maximum = 256) => typeof value === "string" && value.length
 
 export function writerRecoveryState({ conflict = false, unavailable = false, uncertain = false, snapshot = null } = {}) {
   if (uncertain || snapshot?.write_blocked === true) return "unknown-write";
-  if (conflict) return "external-change";
+  // A retained conflict explains the draft block, not the latest read.
   if (unavailable) return "unavailable";
+  if (conflict) return "external-change";
   return null;
 }
 
