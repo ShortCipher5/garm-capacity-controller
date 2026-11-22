@@ -133,11 +133,12 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 	var changes []StockMaximumProposal
 	var fit stockMaximumFitResult
 	var diskWithheldGrowth bool
-	if h.prior.scope == current.scope {
-		if h.prior.source != "" {
-			out.Reason = "no_confirmed_change"
+	if h.prior.scope == current.scope && stockMaximumPairEligible(h.prior.StockScalingSample, current.StockScalingSample, now) {
+		out.Reason = "no_confirmed_change"
+		if h.prior.expires.Before(out.ExpiresAt) {
+			out.ExpiresAt = h.prior.expires
 		}
-		changes, fit = compareStockMaximums(h.prior.StockScalingSample, current.StockScalingSample, now)
+		changes, fit = compareEligibleStockMaximums(h.prior.StockScalingSample, current.StockScalingSample)
 		disk := filterStockMaximumPreviewDisk(changes, h.prior, current, now)
 		if disk.invalidBatch {
 			h.reset()
@@ -166,9 +167,6 @@ func (h *scalingPreviewHistory) accept(current scalingPreviewSample, err error, 
 				out.Reason = "configured_runner_slot_veto"
 			}
 		}
-	}
-	if (len(changes) != 0 || fit != stockMaximumFitNotChecked) && h.prior.expires.Before(out.ExpiresAt) {
-		out.ExpiresAt = h.prior.expires
 	}
 	if current.expires.Before(out.ExpiresAt) {
 		out.ExpiresAt = current.expires

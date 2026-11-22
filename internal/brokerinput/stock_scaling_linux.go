@@ -161,19 +161,26 @@ func ProposeStockMaximums(previous, current StockScalingSample, now time.Time) [
 	return proposals
 }
 
+// stockMaximumPairEligible is the shared confirmation rule for proposals
+// and neutral outcomes. A prior capture is not necessarily a usable pair.
+func stockMaximumPairEligible(previous, current StockScalingSample, now time.Time) bool {
+	return current.source != "" && previous.source == current.source &&
+		previous.revision == current.revision && previous.sequence <= current.sequence &&
+		previous.budget == current.budget && previous.expires.After(now) && current.expires.After(now) &&
+		!current.start.Before(previous.finish.Add(15*time.Second)) && !current.finish.After(now) &&
+		!previous.incomplete && !current.incomplete && sameStockMaximumSettings(previous, current)
+}
+
 // The diagnostic is only explanatory evidence from repeated visible growth
 // in the matched comparison. It is not a capacity or placement result.
 func compareStockMaximums(previous, current StockScalingSample, now time.Time) ([]StockMaximumProposal, stockMaximumFitResult) {
-	if current.source == "" || previous.source != current.source ||
-		previous.revision != current.revision || previous.sequence > current.sequence ||
-		previous.budget != current.budget || !previous.expires.After(now) || !current.expires.After(now) ||
-		current.start.Before(previous.finish.Add(15*time.Second)) || current.finish.After(now) ||
-		previous.incomplete || current.incomplete {
+	if !stockMaximumPairEligible(previous, current, now) {
 		return nil, stockMaximumFitNotChecked
 	}
-	if !sameStockMaximumSettings(previous, current) {
-		return nil, stockMaximumFitNotChecked
-	}
+	return compareEligibleStockMaximums(previous, current)
+}
+
+func compareEligibleStockMaximums(previous, current StockScalingSample) ([]StockMaximumProposal, stockMaximumFitResult) {
 	var out []StockMaximumProposal
 	var diagnostic stockMaximumFitResult
 	// A recommendation must fit both captures, not only their matching demand

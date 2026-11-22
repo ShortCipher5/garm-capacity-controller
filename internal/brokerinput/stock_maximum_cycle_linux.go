@@ -56,13 +56,14 @@ func planStockMaximumCycle(samples []scalingPreviewSample, opt stockMaximumCycle
 	if !previous.expires.After(now) || !current.expires.After(now) {
 		return fail()
 	}
-	if current.start.Sub(stableSince) < opt.StableFor {
+	if current.start.Sub(stableSince) < opt.StableFor ||
+		!stockMaximumPairEligible(previous.StockScalingSample, current.StockScalingSample, now) {
 		return stockMaximumCycle{}, nil
 	}
 	// Reuse the ordinary two-sample rule and all configured cap accounting.
 	// Prefer confirmed increases in existing weighted order over reductions
 	// when truncating. This cannot spend headroom from a proposed reduction.
-	proposed := ProposeStockMaximums(previous.StockScalingSample, current.StockScalingSample, now)
+	proposed, _ := compareEligibleStockMaximums(previous.StockScalingSample, current.StockScalingSample)
 	disk := filterStockMaximumPreviewDisk(proposed, previous, current, now)
 	if disk.invalidBatch {
 		return fail()
