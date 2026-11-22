@@ -254,7 +254,8 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	if err != nil || low.Pressure[0].State != "partial_sample_not_headroom" || low.Pools[0].Additional != 1 {
 		t.Fatalf("low partial sample %+v %v", low, err)
 	}
-	if err = store.RecordUsageSample(ctx, "host", time.Now().Add(-time.Second), beforePreview.Config.Hosts["host"].Budget.CPU, 0, 0, "guest-state"); err != nil {
+	highAt := time.Now().UTC().Truncate(time.Second).Add(-pressureAge + 15*time.Second)
+	if err = store.RecordUsageSample(ctx, "host", highAt, beforePreview.Config.Hosts["host"].Budget.CPU, 0, 0, "guest-state"); err != nil {
 		t.Fatal(err)
 	}
 	chargedBefore, err := store.ReadBrokerGrantState(ctx)
@@ -264,6 +265,9 @@ func publicCycleTransport(t *testing.T, managed bool) {
 	suppressed, err := advisory.ReadPlan(ctx)
 	if err != nil || suppressed.Pools[0].Additional != 0 || suppressed.Pools[0].SuppressedByPressure != 1 || suppressed.RemainingJobs != 1 || suppressed.Pressure[0].State != "high_partial_pressure_suppressed" || suppressed.Pools[0].Charged != preview.Pools[0].Charged {
 		t.Fatalf("pressure projection %+v %v", suppressed, err)
+	}
+	if !suppressed.Pressure[0].SampledAt.Equal(highAt) || !suppressed.ExpiresAt.Equal(highAt.Add(pressureAge)) {
+		t.Fatalf("pressure veto timestamp/expiry outlived the triggering sample: %+v", suppressed)
 	}
 	chargedAfter, err := store.ReadBrokerGrantState(ctx)
 	if err != nil || chargedAfter.Sequence != chargedBefore.Sequence || len(chargedAfter.Grants) != 0 {

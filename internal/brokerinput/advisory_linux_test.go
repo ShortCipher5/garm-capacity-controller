@@ -94,6 +94,64 @@ func TestAdvisoryPressureGuestStateV2VetoOnly(t *testing.T) {
 	}
 }
 
+func TestPressureVetoUsesHighSampleAndExclusiveDeadline(t *testing.T) {
+	ctx := context.Background()
+	state, _, _ := ledgerFixture()
+	store, err := admission.OpenSQLite(filepath.Join(t.TempDir(), "ledger.db"), state.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 11, 22, 17, 0, 0, 0, time.UTC)
+	highAt, lowAt := now.Add(-pressureAge+time.Second), now.Add(-time.Second)
+	for _, sample := range []struct {
+		at     time.Time
+		cpu    int64
+		source string
+	}{
+		{highAt.Add(-time.Second), 3600, "guest-state"},
+		{highAt, 3600, "guest-state-v2"},
+		{lowAt, 0, "guest-state"},
+	} {
+		if err := store.RecordUsageSample(ctx, "host", sample.at, sample.cpu, 0, 0, sample.source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &planReader{store: store}
+	for _, tc := range []struct {
+		now     time.Time
+		state   string
+		at      time.Time
+		blocked bool
+	}{
+		{now, "high_partial_pressure_suppressed", highAt, true},
+		{highAt.Add(pressureAge).Add(-time.Nanosecond), "high_partial_pressure_suppressed", highAt, true},
+		{highAt.Add(pressureAge), "partial_sample_not_headroom", lowAt, false},
+	} {
+		status, blocked, err := p.readPressure(ctx, state, tc.now)
+		want := PressureStatus{Host: "host", State: tc.state, SampledAt: tc.at}
+		if err != nil || len(status) != 1 || status[0] != want || blocked["host"] != tc.blocked {
+			t.Fatalf("at %v: status %+v blocked %+v err %v; want %+v blocked=%v", tc.now, status, blocked, err, want, tc.blocked)
+		}
+	}
+}
+
+func TestPressureVetoExpiryKeepsEarliestBound(t *testing.T) {
+	now := time.Date(2026, 11, 22, 17, 0, 0, 0, time.UTC)
+	statuses := []PressureStatus{
+		{Host: "older-low", State: "partial_sample_not_headroom", SampledAt: now.Add(-pressureAge)},
+		{Host: "newer-high", State: "high_partial_pressure_suppressed", SampledAt: now.Add(-pressureAge + 20*time.Second)},
+		{Host: "older-high", State: "high_partial_pressure_suppressed", SampledAt: now.Add(-pressureAge + 10*time.Second)},
+	}
+	if got := pressureVetoExpiry(now.Add(time.Minute), statuses); !got.Equal(now.Add(10 * time.Second)) {
+		t.Fatalf("expiry=%v; want earliest still active high deadline", got)
+	}
+	ordinary := now.Add(time.Second)
+	if got := pressureVetoExpiry(ordinary, statuses); !got.Equal(ordinary) {
+		t.Fatalf("high veto extended existing ordinary deadline: %v", got)
+	}
+}
+
 func TestAdvisoryLoopReadOnlyCacheOwnershipAndClose(t *testing.T) {
 	entered := make(chan struct{})
 	released := make(chan struct{})
