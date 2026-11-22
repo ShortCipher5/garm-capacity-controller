@@ -102,6 +102,10 @@ func (c *Client) ObserveInstanceIdentity(ctx context.Context, expected IdentityE
 	if response.kind != "sync" || response.serverKeyFingerprint != physical.ServerKeyFingerprint() {
 		return VerifiedInstanceIdentity{}, ErrResponse
 	}
+	fields, config, err := exactInstanceEvidenceFields(response.metadata)
+	if err != nil {
+		return VerifiedInstanceIdentity{}, err
+	}
 	instance, err := parseInstance(response.metadata)
 	if err != nil {
 		return VerifiedInstanceIdentity{}, err
@@ -109,15 +113,7 @@ func (c *Client) ObserveInstanceIdentity(ctx context.Context, expected IdentityE
 	if instance.Name != expected.Name || instance.ControllerID != expected.ControllerID || instance.PoolID != expected.PoolID || instance.ReservationKey != expected.ReservationKey || instance.CPUMillis != expected.CPUMillis || instance.RAMMiB != expected.RAMMiB {
 		return VerifiedInstanceIdentity{}, ErrResponse
 	}
-	fields, err := object(response.metadata)
-	if err != nil {
-		return VerifiedInstanceIdentity{}, err
-	}
 	createdAt, err := identityTime(fields, "created_at")
-	if err != nil {
-		return VerifiedInstanceIdentity{}, err
-	}
-	config, err := object(fields["expanded_config"])
 	if err != nil {
 		return VerifiedInstanceIdentity{}, err
 	}
@@ -136,6 +132,32 @@ func (c *Client) ObserveInstanceIdentity(ctx context.Context, expected IdentityE
 	}
 	sum := sha256.Sum256(encoded)
 	return VerifiedInstanceIdentity{physical: physical, data: InstanceIdentityObservation{Subject: subject, SubjectFingerprint: fmt.Sprintf("%x", sum), ObservedAt: time.Now().UTC(), InstanceStatus: instance.Status}, verified: true}, nil
+}
+
+// Exact named and inventory reads reject alternate spellings of the fields
+// that determine the instance identity, resource bounds, or state.
+func exactInstanceEvidenceFields(raw json.RawMessage) (map[string]json.RawMessage, map[string]json.RawMessage, error) {
+	fields, err := object(raw)
+	if err != nil || rejectFolded(fields, "name", "status_code", "created_at", "expanded_config") != nil {
+		return nil, nil, ErrResponse
+	}
+	rawConfig, present := fields["expanded_config"]
+	if !present {
+		return nil, nil, ErrUnbounded
+	}
+	config, err := object(rawConfig)
+	if err != nil || rejectFolded(config, "volatile.uuid", "volatile.uuid.generation", "user.runner-controller-id", "user.runner-pool-id", "user.garm-capacity.reservation", "limits.cpu", "limits.memory", "limits.memory.enforce") != nil {
+		return nil, nil, ErrResponse
+	}
+	return fields, config, nil
+}
+
+func exactTerminalOperationFields(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	fields, err := object(raw)
+	if err != nil || rejectFolded(fields, "id", "class", "description", "status_code", "status", "err", "resources", "created_at", "updated_at") != nil {
+		return nil, ErrResponse
+	}
+	return fields, nil
 }
 
 type RecoveryOperationKind string
@@ -234,7 +256,7 @@ func (c *Client) CaptureTerminalOperation(ctx context.Context, prior VerifiedIns
 	if response.kind != "sync" || response.serverKeyFingerprint != physical.ServerKeyFingerprint() {
 		return TerminalOperationObservation{}, ErrResponse
 	}
-	fields, err := object(response.metadata)
+	fields, err := exactTerminalOperationFields(response.metadata)
 	if err != nil {
 		return TerminalOperationObservation{}, err
 	}
