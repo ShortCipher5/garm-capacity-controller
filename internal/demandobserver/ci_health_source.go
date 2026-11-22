@@ -155,6 +155,10 @@ func (s *CIHealthSource) BindLocalLifetime(caller context.Context) (context.Cont
 }
 
 func ciHealthRead[T any](s *CIHealthSource, caller context.Context, read func(context.Context, *demandrepair.CIHealthSource) (T, error)) (T, error) {
+	return ciHealthReadClassified(s, caller, read, nil)
+}
+
+func ciHealthReadClassified[T any](s *CIHealthSource, caller context.Context, read func(context.Context, *demandrepair.CIHealthSource) (T, error), preserve error) (T, error) {
 	var empty T
 	ctx, release, err := s.BindLocalLifetime(caller)
 	if err != nil {
@@ -165,16 +169,24 @@ func ciHealthRead[T any](s *CIHealthSource, caller context.Context, read func(co
 		return empty, ErrObserver
 	}
 	out, err := read(ctx, s.source)
-	if err != nil || ctx.Err() != nil || caller.Err() != nil {
+	if ctx.Err() != nil || caller.Err() != nil {
+		return empty, ErrObserver
+	}
+	if err != nil {
+		// Keep only the one explicitly allowed, validated classification.
+		// Errors never carry rows or any other transport detail.
+		if err == preserve {
+			return empty, preserve
+		}
 		return empty, ErrObserver
 	}
 	return out, nil
 }
 
 func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q demandrepair.CIRunQuery) (demandrepair.CIRunPage, error) {
-	return ciHealthRead(s, ctx, func(ctx context.Context, source *demandrepair.CIHealthSource) (demandrepair.CIRunPage, error) {
+	return ciHealthReadClassified(s, ctx, func(ctx context.Context, source *demandrepair.CIHealthSource) (demandrepair.CIRunPage, error) {
 		return source.ListCIRuns(ctx, garmID, q)
-	})
+	}, demandrepair.ErrCIRunWindowAtCap)
 }
 
 func (s *CIHealthSource) ReadCIAttempt(ctx context.Context, garmID string, runID, attempt int64) (demandrepair.CIAttempt, error) {
