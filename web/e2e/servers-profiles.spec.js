@@ -19,7 +19,7 @@ test("read-only discovery, reviewed enrollment and honest duplicate error", asyn
   await expect(discovery.getByText("candidate-discover", { exact: true })).toBeVisible();
   await discovery.getByLabel("Discovery management token", { exact: true }).fill(write);
   await discovery.getByRole("button", { name: "Discover candidate-discover", exact: true }).click();
-  await expect(discovery.getByText(/Physical totals \(complete\): CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB \(131,072 MiB used\)/)).toBeVisible();
+  await expect(discovery.getByText(/Backend-reported totals \(complete\): CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB \(131,072 MiB used\)/)).toBeVisible();
   const suggestion = discovery.getByRole("table", { name: "Workload-aware suggested budget", exact: true });
   for (const [resource, reserve, budget] of [
     ["CPU", "1,000 millicores", "4,500 millicores"],

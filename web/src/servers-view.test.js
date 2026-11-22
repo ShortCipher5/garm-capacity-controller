@@ -37,7 +37,9 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     const { ServerCard, DiscoveryResultView } = await server.ssrLoadModule("/src/servers.jsx");
     const readUsage = async () => [];
     const html = renderToStaticMarkup(React.createElement(ServerCard, { host: host(), readUsage }));
-    assert.match(html, /Detected physical totals/);
+    assert.match(html, /Backend-reported totals from last discovery/);
+    assert.match(html, /These totals do not verify whole-host capacity or current headroom/);
+    assert.doesNotMatch(html, /Detected physical totals/);
     assert.match(html, /Resource observations/);
     assert.match(html, /Sampling cadence and interval coverage are not supplied/);
     assert.doesNotMatch(html, /Measured utilization/);
@@ -52,6 +54,11 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.match(stale, /Stale or unavailable observation/);
     const view = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: discovery }));
     assert.match(view, /Discovery observation · candidate-discover/);
+    assert.match(view, /Backend-reported totals \(complete\): CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB/);
+    assert.match(view, /do not verify whole-host capacity, current headroom or runner limits/);
+    assert.doesNotMatch(view, /Physical totals/);
+    const noTotals = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: {...discovery, totals: undefined} }));
+    assert.match(noTotals, /Backend totals unknown/);
     assert.match(view, /Workload-aware suggested budget/);
     assert.match(view, /<th scope="row">CPU<\/th><td>Not estimated<\/td><td>Not suggested<\/td>/);
     assert.doesNotMatch(view, /6,000 millicores|30,720 MiB|471,860 MiB/);
