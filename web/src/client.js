@@ -558,7 +558,7 @@ export class ReadSession {
       if (!response.ok) throw new Error("Usage history is unavailable. No automatic retry was made.");
       const body = await response.json();
       if (controller.signal.aborted) throw new SessionEnded();
-      return validateUsageHistory(body);
+      return validateUsageHistory(body, host);
     } catch (error) {
       if (error instanceof SessionEnded) throw error;
       if (controller.signal.aborted) throw new SessionEnded();
