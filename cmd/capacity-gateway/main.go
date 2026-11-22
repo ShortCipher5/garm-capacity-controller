@@ -652,7 +652,17 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	if err := serve(ctx, config, *provision, *monitoring); err != nil {
-		fmt.Fprintln(os.Stderr, "gateway unavailable; no automatic recovery or deployment attempted")
+		fmt.Fprintln(os.Stderr, gatewayStartupFailureMessage(err))
 		os.Exit(1)
 	}
+}
+
+// Keep unrelated serve errors private. Only fixed history refusal messages
+// from the existing reviewed reopen path are operator-visible.
+func gatewayStartupFailureMessage(err error) string {
+	var historyRefusal historyStartupRefusalKind
+	if errors.As(err, &historyRefusal) && historyRefusal.message() != "" {
+		return "CI Health history startup refused: " + historyRefusal.message()
+	}
+	return "gateway unavailable; no automatic recovery or deployment attempted"
 }
