@@ -4,7 +4,7 @@
 export class UsageResponseError extends Error {}
 const object = (value) => value && typeof value === "object" && !Array.isArray(value);
 const integer = (value) => Number.isSafeInteger(value) && value >= 0;
-export function validateUsageHistory(value) {
+export function validateUsageHistory(value, expectedHost) {
   if (
     !Array.isArray(value) ||
     !value.every(
@@ -12,6 +12,7 @@ export function validateUsageHistory(value) {
         object(sample) &&
         typeof sample.host === "string" &&
         sample.host.length > 0 &&
+        (expectedHost === undefined || sample.host === expectedHost) &&
         Number.isFinite(Date.parse(sample.sampled_at)) &&
         integer(sample.cpu_used_millis) &&
         integer(sample.ram_used_mib) &&
@@ -54,7 +55,7 @@ export async function fetchUsageHistory(token, host, { since, limit, signal, fet
   if (response.status === 400) throw new UsageResponseError(await serverError(response, "Invalid usage history request."));
   if (!response.ok) throw new UsageResponseError(await serverError(response, "Usage history is unavailable. No automatic retry was made."));
   try {
-    return validateUsageHistory(await response.json());
+    return validateUsageHistory(await response.json(), host);
   } catch {
     throw new UsageResponseError("Unsupported usage history. No chart was drawn from invented values.");
   }
