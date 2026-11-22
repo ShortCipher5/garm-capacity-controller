@@ -118,3 +118,19 @@ for (const stop of ["caller abort", "disconnect"]) {
     await assert.rejects(pending, SessionEnded);
   });
 }
+
+test("usageHistory rejects an otherwise valid response containing another host", async () => {
+  const mine = {host: "host-a", sampled_at: "2026-01-01T00:00:00Z", source: "guest-state-v2",
+    cpu_used_millis: 100, ram_used_mib: 200, disk_used_mib: 300};
+  const other = {...mine, host: "host-b"};
+  const session = new ReadSession(async (url) => {
+    if (url === "/admin/api/v1/overview") return overviewResponse();
+    if (url === "/admin/api/v1/usage/host-b") return {ok: true, status: 200, json: async () => [other]};
+    assert.equal(url, "/admin/api/v1/usage/host-a");
+    return {ok: true, status: 200, json: async () => [mine, other]};
+  });
+  await session.connect(token);
+  const rejected = assert.rejects(session.usageHistory("host-a"), /could not be read/);
+  assert.deepEqual(await session.usageHistory("host-b"), [other]);
+  await rejected;
+});
