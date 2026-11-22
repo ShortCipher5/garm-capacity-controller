@@ -18,7 +18,8 @@ test('freshness is supplementary and never makes unresolved history current',()=
 test('optional capacity reuse uses only bounded labels and never interprets counts as free',()=>{
  const base=report();base.freshness='within_cycle_window';
  assert.equal(retirementReuseView(base),null);
- const value={availability:'last_cycle_diagnostics',reuse_authorized:false,reasons:['retained_diagnostics_are_not_release_proof','physical_capacity_reuse_not_established']};
+ Object.assign(base.status.Result,{RetainedDiagnosticsAvailable:1,RetainedDiagnosticsUnavailable:0});
+ const value={availability:'last_cycle_diagnostics',reuse_authorized:false,reasons:['canonical_root_fence_missing','outside_configured_owner_scope','retained_diagnostics_are_not_release_proof','physical_capacity_reuse_not_established']};
  const view={...base,capacity_reuse:value};
  assert.match(retirementReuseView(view).labels.join(' '),/do not prove physical release/);
  for(const patch of [{reuse_authorized:true},{reasons:['PRIVATE']},{reasons:[['physical_capacity_reuse_not_established']]},{reasons:[]},{reasons:['cycle_stale']},{availability:'verified'},{extra:'private'}]){
@@ -30,4 +31,34 @@ test('optional capacity reuse uses only bounded labels and never interprets coun
  }
  assert.match(retirementReuseView({...base,freshness:'stale',capacity_reuse:{availability:'historical_only',reuse_authorized:false,reasons:['cycle_stale']}}).labels[0],/overdue/);
  assert.equal(validateNativeRetirementStatus(view),view);
+});
+
+test('reuse explanations require supporting data from the same recorded cycle',()=>{
+ const base=report();
+ base.freshness='within_cycle_window';
+ const r=base.status.Result;
+ Object.assign(r,{RetainedDiagnosticsAvailable:1,RetainedDiagnosticsUnavailable:0});
+ const reasons=['canonical_root_fence_missing','outside_configured_owner_scope','retained_diagnostics_are_not_release_proof','physical_capacity_reuse_not_established'];
+ base.capacity_reuse={availability:'last_cycle_diagnostics',reuse_authorized:false,reasons};
+ assert.match(retirementReuseView(base).labels.join(' '),/Recorded retained diagnostics/);
+ const rejected=(v)=>assert.match(retirementReuseView(v).labels.join(' '),/unavailable or unsupported/);
+ for(const invalidReasons of [[...reasons,'operation_outcome_unresolved'],[...reasons,'cycle_incomplete'],reasons.filter(r=>r!=='outside_configured_owner_scope'),[...reasons,'retained_diagnostics_not_recorded']]){
+  const v={...base,capacity_reuse:{...base.capacity_reuse,reasons:invalidReasons}};
+  assert.equal(validateNativeRetirementStatus(v),v);
+  rejected(v);
+ }
+ for(const invalid of [{RetainedDiagnosticsAvailable:2},{RetainedDiagnosticsUnavailable:undefined},{RetainedDiagnosticsUnavailable:0.5}]){
+  const v={...base,status:{...base.status,Result:{...r,...invalid}}};
+  assert.equal(validateNativeRetirementStatus(v),v);
+  rejected(v);
+ }
+ const legacyResult={...r};
+ delete legacyResult.RetainedDiagnosticsAvailable;
+ delete legacyResult.RetainedDiagnosticsUnavailable;
+ const legacy={...base,status:{...base.status,Result:legacyResult}};
+ rejected(legacy);
+ const legacyConsistent={...legacy,capacity_reuse:{...base.capacity_reuse,reasons:reasons.filter(r=>r!=='retained_diagnostics_are_not_release_proof')}};
+ assert.match(retirementReuseView(legacyConsistent).labels.join(' '),/Physical capacity reuse was not established/);
+ const stale={...legacy,freshness:'stale',capacity_reuse:{availability:'historical_only',reuse_authorized:false,reasons:['cycle_stale']}};
+ assert.match(retirementReuseView(stale).labels[0],/overdue/);
 });
