@@ -223,19 +223,28 @@ discovery:
 			}
 			q.Page = page
 			rows, err := r.source.ListCIRuns(ctx, repo.GarmID, q)
-			if err != nil || rows.ObservedAt.IsZero() || rows.ObservedAt.Before(r.latest) ||
-				(reportedTotal >= 0 && rows.TotalCount != reportedTotal) ||
-				(rows.NextPage != 0 && rows.NextPage != page+1) {
+			if err != nil || rows.ObservedAt.IsZero() || rows.ObservedAt.Before(r.latest) || !validDiscoveryPage(page, rows) {
 				return repoScan{}, ErrCycleObservation
 			}
-			r.latest = rows.ObservedAt
-			reportedTotal = rows.TotalCount // Equal totals cannot prove atomic pagination.
 			for _, row := range rows.Runs {
 				known, seenRun := workflows[row.RunID]
 				if row.RunID <= 0 || row.Attempt <= 0 || row.WorkflowID <= 0 || seenQuery[row.RunID] || (seenRun && known != row.WorkflowID) {
 					return repoScan{}, ErrCycleObservation
 				}
-				seenQuery[row.RunID], workflows[row.RunID] = true, row.WorkflowID
+				seenQuery[row.RunID] = true
+			}
+			r.latest = rows.ObservedAt
+			if reportedTotal >= 0 && rows.TotalCount != reportedTotal {
+				// The source and identities were valid, but the page no
+				// longer belongs to a stable reported result size. Keep
+				// only the earlier candidate prefix, read its exact details,
+				// and continue independent queries. Never persist this cycle.
+				r.partial = true
+				break
+			}
+			reportedTotal = rows.TotalCount // Equal totals cannot prove atomic pagination.
+			for _, row := range rows.Runs {
+				workflows[row.RunID] = row.WorkflowID
 				id := attemptLocator{row.RunID, row.Attempt}
 				candidate := runCandidate{row.RunID, row.Attempt, row.WorkflowID}
 				if status == "in_progress" {
@@ -280,4 +289,24 @@ discovery:
 		}
 	}
 	return out, nil
+}
+
+// Check the bounded typed page envelope before interpreting changed totals as
+// ordinary discovery movement. The original source also verifies the
+// repository identity and query membership of every row.
+func validDiscoveryPage(page int, rows demandrepair.CIRunPage) bool {
+	total, count := rows.TotalCount, len(rows.Runs)
+	if total == 0 {
+		return page == 1 && count == 0 && rows.NextPage == 0
+	}
+	first := (page - 1) * demandrepair.CIPerPage
+	if total <= first || total >= demandrepair.CIPerPage*demandrepair.CIMaxPages ||
+		count != min(demandrepair.CIPerPage, total-first) {
+		return false
+	}
+	next := 0
+	if first+count < total {
+		next = page + 1
+	}
+	return rows.NextPage == next
 }

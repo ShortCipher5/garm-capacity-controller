@@ -91,12 +91,29 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 			if mode := f.mode.Load(); mode == 7 || mode == 8 {
 				status = "" // Completed runs are discovered by the bounded recent scan.
 			}
+			total := 0
 			if r.URL.Query().Get("status") == status {
-				for i := int64(0); i < want; i++ {
+				first := int64(0)
+				total = int(want)
+				if f.mode.Load() == 9 {
+					// Both pages are valid, but totals differ. Do not keep
+					// the second page or persist this bounded partial cycle.
+					switch r.URL.Query().Get("page") {
+					case "1":
+						want, total = demandrepair.CIPerPage, demandrepair.CIPerPage+2
+					case "2":
+						first, want, total = demandrepair.CIPerPage, demandrepair.CIPerPage+1, demandrepair.CIPerPage+1
+					default:
+						t.Error("unexpected discovery page")
+						w.WriteHeader(404)
+						return
+					}
+				}
+				for i := first; i < want; i++ {
 					rows = append(rows, run(baseRun+i))
 				}
 			}
-			out = map[string]any{"total_count": len(rows), "workflow_runs": rows}
+			out = map[string]any{"total_count": total, "workflow_runs": rows}
 		case strings.HasPrefix(r.URL.Path, path+"/actions/runs/"):
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, path+"/actions/runs/"), "/")
 			id, err := strconv.ParseInt(parts[0], 10, 64)
@@ -225,6 +242,23 @@ func TestCIHistoryBackgroundPersistsOnlyCleanObservedGroupsAndClosesViews(t *tes
 		t.Fatal("timing recovery reopened optional history")
 	}
 	f.ensureHistory(t, 1)
+}
+
+func TestCIHistoryBackgroundDiscoveryDriftKeepsAttachmentWithoutPersistingPartial(t *testing.T) {
+	f := newCIHistoryFixture(t)
+	if err := f.runtime.attachOwnedHistory(f.owned, f.expect); err != nil {
+		t.Fatal(err)
+	}
+	f.mode.Store(9)
+	if !f.runtime.runCycle(t.Context()) || f.runtime.activeHistory() == nil {
+		t.Fatal("valid page drift failed timing or disabled history")
+	}
+	f.mode.Store(0)
+	if !f.runtime.runCycle(t.Context()) || f.runtime.activeHistory() == nil {
+		t.Fatal("clean cycle did not recover history persistence")
+	}
+	f.runtime.disableHistory()
+	f.ensureHistory(t, 1) // Only the clean observation was persisted.
 }
 
 func TestCIHistoryBackgroundExactAttemptNotFoundLeavesRetainedRevision(t *testing.T) {
