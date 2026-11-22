@@ -1,5 +1,31 @@
 # Current platform state and next plan
 
+## Current release checkpoint (2026-11-22 UTC)
+
+Verified repository `main`: `421ba1bab214941ccee19f8fe8e01d72e16d225d`
+(tree `2b4f642a701a83de1558ee045a46e4e3dc9fc832`). The target uses unmodified
+GARM with normal repository pools. GitHub queues the jobs, GARM manages runner
+creation, assignment and retirement, and this controller compares demand and
+capacity across pools. Source on `main` and disposable CI checks do not
+establish a live deployment.
+
+| Area | Merged source | Remaining release evidence |
+|---|---|---|
+| Stock GARM capacity | Bounded read-only demand observations, advisory allocation and optional settings previews. The offline Incus declaration model compares count, CPU and RAM with disk explicitly unevaluated ([#308](https://github.com/ShortCipher5/garm-capacity-controller/pull/308)). | Verify each installed provider route and effective Incus limits. Qualify sole writer ownership and authoritative completion for uncertain settings changes. The model and previews grant no write authority or physical quota. |
+| Runner retirement | GARM owns the lifecycle. Unknown or failed resources stay charged in the controller model; a lowered pool limit or missing GARM row is not evidence of release. | Verify teardown for the exact runner before reclaiming capacity. Demonstrate recovery, rollback and behavior across restart before a bounded rollout. |
+| CI Health | Opt-in GitHub timing and exact active-job drill-down ([#307](https://github.com/ShortCipher5/garm-capacity-controller/pull/307)). Optional Incus history and server discovery describe project guests, not the host or individual jobs. Discovery labels incomplete observations as unknown or partial rather than measured zero ([#310](https://github.com/ShortCipher5/garm-capacity-controller/pull/310)). | Verify the exact job-to-runner binding and measurement window. Per-test reports require trusted producing job, attempt and artifact evidence. Verify the deployed scope separately. |
+
+Use the [stock scaling release boundary](stock-scaling-release-boundary.md)
+and [CI Health evidence matrix](ci-health-evidence.md) for the operative
+qualification gates. Live autoscaling and full smart monitoring are not
+established by this checkpoint.
+
+## Historical record (2026-11-16 to 2026-11-17)
+
+> Everything below is retained as historical evidence. The verified tree,
+> PR state and ordered work below describe that snapshot, not the current
+> release queue or a plan to resume the old native settings experiment.
+
 Status date: 2026-11-17 (UTC). Verified `main`:
 `fc2fa3ed` (conditional client hardening and settings wiring atop
 `0daa398b`, which merged #84 and the conditional settings client; that
@@ -8,10 +34,9 @@ workflow evidence belongs to its tested PR heads; it must not be
 described as a separate verification of the merge tree without
 exact-tree evidence.
 
-This document is the current status ledger for the project. It
-supersedes the stale snapshot sections of issue #53 (use #53 for
-architecture and safety background only) and replaces the intent of
-#22, which is closed in favor of this file.
+At the time, this snapshot superseded the status sections of issue #53
+(use #53 for architecture and safety background only) and replaced the
+intent of #22, which was closed in favor of this file.
 
 ## What `main` provides today (verified)
 
