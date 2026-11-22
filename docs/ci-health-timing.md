@@ -224,7 +224,15 @@ ends; it does not poll for remote revocation.
 GitHub can remove runs before this reader sees them. An attempt that is
 missing from a listing or returns HTTP 404 does not establish why the source
 is unavailable. Do not count it as passed, failed, skipped, or covered by
-historical backfill.
+historical backfill. A successful, uncapped empty list also supplies no
+coverage proof: the current bounded observer can show an empty observed
+subset while retaining prior positive observations and their reviewed
+checkpoint. An empty read does not authorize a retained-history projection.
+
+On GitHub.com, the [Actions retention setting](https://github.blog/changelog/2026-10-01-actions-retention-now-covers-checks-runs-and-statuses/)
+has also covered workflow runs, checks and statuses since October 1, 2026.
+A repository's current setting cannot prove historical coverage or restore
+removed records. This is not an older-run backfill adapter.
 
 Before enabling any future durable history view, qualify the case where an
 already observed exact attempt becomes unavailable: previously observed
