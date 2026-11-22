@@ -8,3 +8,21 @@ test('unavailable states cannot retain counts or claim allocation authority',()=
 const overview={mode:'experimental-ledger',management_enabled:false,policy_revision:'a'.repeat(64),experimental_provisioning_enabled:false,admission_ready:false,epoch:0,immutable_execution_plans:0,legacy_unplanned_reservations:0,legacy_source_preparations:0,observed_at:new Date(at).toISOString(),global:{budget:{cpu_millis:0,ram_mib:0,runners:0},allocated:{cpu_millis:0,ram_mib:0,runners:0}},hosts:[],pools:[],states:{},events:[]};
 test('fixed read route strips no authority and disconnect fences delayed JSON',async()=>{let done;const calls=[];const s=new ReadSession(async(url,opt)=>{calls.push([url,opt]);return url.endsWith('/overview')?{ok:true,json:async()=>overview}:{ok:true,json:()=>new Promise(r=>done=r)};});await s.connect('a'.repeat(64));const pending=s.demandObserverStatusSnapshot();await new Promise(r=>setImmediate(r));s.disconnect();done(view());await assert.rejects(pending,SessionEnded);assert.equal(calls[1][0],'/admin/api/v1/demand-observer-status');assert.equal(calls[1][1].method,'GET');assert.equal(calls[1][1].credentials,'omit');assert.equal(calls[1][1].signal.aborted,true);});
 test('authorization loss and explicit abort cannot restore demand state',async()=>{const s=new ReadSession(async url=>url.endsWith('/overview')?{ok:true,json:async()=>overview}:{status:401,ok:false});await s.connect('a'.repeat(64));await assert.rejects(s.demandObserverStatusSnapshot(),/authorization ended/);await assert.rejects(s.demandObserverStatusSnapshot(),SessionEnded);const c=new AbortController();c.abort();const t=new ReadSession(async url=>({ok:true,json:async()=>url.endsWith('/overview')?overview:view()}));await t.connect('a'.repeat(64));await assert.rejects(t.demandObserverStatusSnapshot({signal:c.signal}),SessionEnded);});
+test('a completed observation is current only from the read time through its exclusive deadline',()=>{
+ const v=validateDemandObserverStatus(view());
+ for(const early of [at-1,at+499,at+500,at+999,NaN]) {
+  assert.equal(demandDisplayState(v,early),'unavailable');
+  assert.equal(currentDemandCounts(v,early),null);
+ }
+ assert.equal(currentDemandCounts(v,at+1000)?.stock_queued,3);
+ assert.equal(currentDemandCounts(v,at+120000),null);
+});
+test('an observed payload must describe evidence completed at read time and not yet expired',()=>{
+ for(const change of [
+  v=>v.observed_at=new Date(at+499).toISOString(),
+  v=>v.observed_at=v.expires_at,
+  v=>v.observed_at=new Date(at+120001).toISOString(),
+ ]) {
+  const v=view();change(v);assert.throws(()=>validateDemandObserverStatus(v));
+ }
+});
