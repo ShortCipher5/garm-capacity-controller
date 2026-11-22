@@ -1,4 +1,5 @@
 import { GarmRecoveryPanel } from "./garm-recovery.jsx";
+import { historicalPendingReference } from "./garm-recovery.js";
 import {PolicyCapStatus} from "./policy-cap-status.jsx";
 import { maximumReductionOnly, maximumReduction, reviewedReductionAllowed } from "./garm-reduction.js";
 import { reconcileGarmRead } from "./garm-read-reconciliation.js";
@@ -18,6 +19,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
   const [conflictLatest,setConflictLatest] = useState(null);
   const [needsRefresh,setNeedsRefresh] = useState(false), [syncError,setSyncError] = useState(false);
   const [readChanges,setReadChanges] = useState(null);
+  const [historicalPending,setHistoricalPending] = useState(null);
   const lastObservation = useRef(null);
   const dirty = useRef(false), latestLoad = useRef(null);
   const resolutionToken = useRef(null);
@@ -32,6 +34,7 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
       const next=await read();
       if(mounted.current && generation===readGeneration.current){
         setSyncError(false);
+        setHistoricalPending(null);
         const changes=reconcileGarmRead(lastObservation.current,next);
         lastObservation.current=next;
         if(changes)setReadChanges(changes);
@@ -49,7 +52,10 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     } catch(error) {
       if(mounted.current && generation===readGeneration.current){
         setSyncError(true);if(background)setSnapshot(invalidateGarmInventories);if(token.current)token.current.value="";
-        if(!background){setSnapshot(null);setReview(null);setMessage(error.message || "Garm settings unavailable.");}
+        if(!background){
+          if(snapshot)setHistoricalPending(historicalPendingReference(snapshot));
+          setSnapshot(null);setReview(null);setMessage(error.message || "Garm settings unavailable.");
+        }
       }
     } finally {if(mounted.current && generation===readGeneration.current)setBusy(false);}
   }
@@ -126,6 +132,10 @@ export function GarmManagement({ read, readEntities, readEntityPools }) {
     {needsRefresh && conflictLatest && <GarmConflictDetails previous={snapshot} latest={conflictLatest} stale={syncError} />}
     {syncError && <p role="alert" className="error">Fresh Garm settings could not be checked. Displayed settings and journal details may be stale; pool and scaleset inventories are unavailable. Editing is blocked until a successful refresh.</p>}
     <GarmRecoveryPanel snapshot={snapshot} conflict={needsRefresh} unavailable={syncError} uncertain={uncertain.current} />
+    {!snapshot && syncError && historicalPending && <aside className="drain-warning" aria-label="Historical unresolved Garm request">
+      <p>Historical unresolved request <code>{historicalPending.requestId}</code> (last observed: {historicalPending.state}). The current status could not be checked.</p>
+      <button className="quiet" type="button" onClick={()=>setHistoricalPending(null)}>Dismiss historical request</button>
+    </aside>}
     <PolicyCapStatus value={snapshot?.policy_cap_reconciler} stale={syncError}/>
     {snapshot && <GarmPoolInventory inventory={snapshot.pool_inventory} />}
     {snapshot && <GarmScaleSetInventory inventory={snapshot.scaleset_inventory} />}
