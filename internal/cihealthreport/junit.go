@@ -33,7 +33,10 @@ const (
 )
 
 var ErrReport = errors.New("invalid or unsupported JUnit report")
-var xmlDeclaration = regexp.MustCompile(`^version[ \t]*=[ \t]*(?:"1\.0"|'1\.0')(?:[ \t]+encoding[ \t]*=[ \t]*(?:"(?i:utf-8)"|'(?i:utf-8)'))?(?:[ \t]+standalone[ \t]*=[ \t]*(?:"(?:yes|no)"|'(?:yes|no)'))?[ \t]*$`)
+
+// XML 1.0 permits space, tab, carriage return and line feed between the
+// declaration components. Keep encoding and version restricted.
+var xmlDeclaration = regexp.MustCompile(`^version[ \t\r\n]*=[ \t\r\n]*(?:"1\.0"|'1\.0')(?:[ \t\r\n]+encoding[ \t\r\n]*=[ \t\r\n]*(?:"(?i:utf-8)"|'(?i:utf-8)'))?(?:[ \t\r\n]+standalone[ \t\r\n]*=[ \t\r\n]*(?:"(?:yes|no)"|'(?:yes|no)'))?[ \t\r\n]*$`)
 
 // ArtifactBinding belongs to the authorized caller, not to the report. Callers
 // must independently verify the exact artifact and run attempt before parsing.
