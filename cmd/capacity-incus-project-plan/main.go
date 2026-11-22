@@ -61,13 +61,22 @@ func run(args []string, input io.Reader, stdout, stderr io.Writer) int {
 	}
 	if report.SuppliedProjectState != incusapi.Incus702ProjectStateNotSupplied {
 		out.Schema = "incus-project-plan-report/v2"
+		if report.DiskNotEvaluated {
+			out.Schema = "incus-project-plan-report/v4"
+		}
 		switch report.SuppliedProjectState {
 		case incusapi.Incus702ProjectStateConflicting:
 			out.SuppliedProjectState = "conflicting"
 		case incusapi.Incus702ProjectStateReportedAllocationsNonzero:
 			out.SuppliedProjectState = "reported_allocations_nonzero"
+			if report.DiskNotEvaluated {
+				out.SuppliedProjectState = "reported_count_cpu_ram_allocations_nonzero"
+			}
 		case incusapi.Incus702ProjectStateReportedAllocationsZero:
 			out.SuppliedProjectState = "reported_allocations_zero"
+			if report.DiskNotEvaluated {
+				out.SuppliedProjectState = "reported_count_cpu_ram_allocations_zero"
+			}
 		default:
 			out.SuppliedProjectState = "unknown"
 		}
@@ -85,7 +94,7 @@ func run(args []string, input io.Reader, stdout, stderr io.Writer) int {
 	if out.SuppliedProjectState == "unknown" {
 		return 2
 	}
-	if out.SuppliedProjectState == "conflicting" || out.SuppliedProjectState == "reported_allocations_nonzero" {
+	if report.SuppliedProjectState == incusapi.Incus702ProjectStateConflicting || report.SuppliedProjectState == incusapi.Incus702ProjectStateReportedAllocationsNonzero {
 		return 1
 	}
 	for _, part := range parts {
