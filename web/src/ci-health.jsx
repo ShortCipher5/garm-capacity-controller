@@ -42,7 +42,13 @@ function Phase({status}) { return <span className="pill">{statuses[status]}</spa
 function Result({conclusion}) {
   return Object.hasOwn(results, conclusion) ? <span>{results[conclusion]}</span> : <span className="muted">Unknown</span>;
 }
-function At({value}) { return <time dateTime={value}>{value.slice(0,19).replace("T", " ")} UTC</time>; }
+function At({value, precise = false}) {
+  const shown = precise ? value.slice(0, -1) : value.slice(0, 19);
+  return <time dateTime={value}>{shown.replace("T", " ")} UTC</time>;
+}
+function StatusObserved({at}) {
+  return <div><dt>Status observed</dt><dd>{at ? <At value={at} precise /> : <span className="muted">Unknown</span>}</dd></div>;
+}
 function Cutoff({label, deadline}) {
   const value = new Date(deadline).toISOString();
   return <p className="muted"><strong>{label}: </strong><time dateTime={value}>{value.replace("T", " ").replace("Z", " UTC")}</time></p>;
@@ -75,6 +81,7 @@ function JobRow({attempt, job, jobId, stepId, openJob}) {
         {job.job_link_handle && openJob && <button type="button" onClick={() => openJob(attempt, job)}>Open exact job on GitHub</button>}
       </div>
       <dl className="ci-health-facts">
+        <StatusObserved at={job.status_observed_at} />
         <div><dt>Result</dt><dd><Result conclusion={job.conclusion} /></dd></div>
         {job.status === "queued"
           ? <div><dt>Waiting when observed</dt><dd><Timing span={job.waiting} /></dd></div>
@@ -99,7 +106,8 @@ function AttemptRow({attempt: a, jobId, stepId, openJob}) {
         <div><dt>Repository ID</dt><dd><code>{a.repository_id}</code></dd></div>
         <div><dt>Workflow ID</dt><dd><code>{a.workflow_id}</code></dd></div>
         <div><dt>Source ID</dt><dd><code>{a.source}</code></dd></div>
-        <div><dt>Last observed</dt><dd><At value={a.observed_at} /></dd></div>
+        <StatusObserved at={a.status_observed_at} />
+        <div><dt>Latest included read</dt><dd><At value={a.observed_at} precise /></dd></div>
         <div><dt>Result</dt><dd><Result conclusion={a.conclusion} /></dd></div>
         {a.status === "running"
           ? <div><dt>Attempt elapsed when observed</dt><dd><Timing span={a.elapsed} /></dd></div>
