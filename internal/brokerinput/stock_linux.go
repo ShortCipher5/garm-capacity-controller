@@ -55,6 +55,10 @@ func stockPlan(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, 
 		}
 		supply[p.PoolID] = p
 	}
+	chargedSlots, ok := stockEnrolledRunnerSlots(policy, capacity.Charges)
+	if !ok {
+		return fail()
+	}
 	// Freeze copied policy inputs. Never mutate a shared ledger snapshot.
 	cp := map[string]capacitybroker.Pool{}
 	cr := map[string]capacitybroker.Repository{}
@@ -94,16 +98,7 @@ func stockPlan(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, 
 			if !ok {
 				return fail()
 			}
-			charged := int64(0)
-			for _, c := range capacity.Charges {
-				if c.Pool == desired.ID {
-					if c.Resources[3] < 0 || c.Resources[3] > 100000 || charged > 100000-c.Resources[3] {
-						return fail()
-					}
-					charged += c.Resources[3]
-				}
-			}
-			if current.Idle+current.Creating+current.Busy+current.Other > charged {
+			if current.Idle+current.Creating+current.Busy+current.Other > chargedSlots[desired.ID] {
 				return fail()
 			}
 			if observed.Enabled {
@@ -187,4 +182,32 @@ func stockPlan(capacity capacitybroker.Snapshot, policy admission.BrokerPolicy, 
 		return capacitybroker.BuildForJobsWithIdleOnly(capacity, opt, jobs, idleOnly)
 	}
 	return capacitybroker.BuildForJobs(capacity, opt, jobs)
+}
+
+// stockEnrolledRunnerSlots subtotals each enrolled pool once for the stock
+// supply join. Charges outside policy stay in the canonical planner inputs;
+// they are not subject to this additional per-enrolled-pool observation bound.
+func stockEnrolledRunnerSlots(policy admission.BrokerPolicy, charges []capacitybroker.Charge) (map[string]int64, bool) {
+	slots := make(map[string]int64)
+	for _, repo := range policy.Repositories {
+		for _, pool := range repo.Pools {
+			slots[pool.ID] = 0
+		}
+	}
+	if len(slots) == 0 {
+		return slots, true
+	}
+	const maxStockSlots = 100000
+	for _, c := range charges {
+		total, tracked := slots[c.Pool]
+		if !tracked {
+			continue
+		}
+		n := c.Resources[3]
+		if n < 0 || n > maxStockSlots || total > maxStockSlots-n {
+			return nil, false
+		}
+		slots[c.Pool] = total + n
+	}
+	return slots, true
 }

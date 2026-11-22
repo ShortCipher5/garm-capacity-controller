@@ -35,6 +35,7 @@ type ciAttemptView struct {
 	Run        string              `json:"run_id"`
 	Attempt    string              `json:"attempt"`
 	AsOf       string              `json:"observed_at"`
+	StatusAt   string              `json:"status_observed_at,omitempty"`
 	Status     string              `json:"status"`
 	Conclusion cihealth.Conclusion `json:"conclusion,omitempty"`
 	Wall       *ciSpanView         `json:"wall,omitempty"`
@@ -46,6 +47,7 @@ type ciJobView struct {
 	ID              string              `json:"id"`
 	LinkHandle      string              `json:"job_link_handle,omitempty"`
 	Status          string              `json:"status"`
+	StatusAt        string              `json:"status_observed_at,omitempty"`
 	Conclusion      cihealth.Conclusion `json:"conclusion,omitempty"`
 	Queue           *ciSpanView         `json:"queue,omitempty"`
 	ActiveQueue     *ciSpanView         `json:"waiting,omitempty"`
@@ -106,12 +108,12 @@ func projectCIHealthTiming(scopes []ciViewScope, facts []cihealth.AttemptFacts) 
 		}
 		row := ciAttemptView{
 			Source: k.Source, RepoID: ciInt(k.RepositoryID), Workflow: ciInt(k.WorkflowID), Run: ciInt(k.RunID), Attempt: ciInt(k.Attempt),
-			AsOf: timing.AsOf.UTC().Format(time.RFC3339Nano), Status: ciPhase(timing.Phase), Conclusion: timing.Conclusion, Wall: ciSpan(timing.Wall), Elapsed: ciSpan(timing.Active),
+			AsOf: ciObservationTime(timing.AsOf), StatusAt: ciObservationTime(a.Clock.ObservedAt), Status: ciPhase(timing.Phase), Conclusion: timing.Conclusion, Wall: ciSpan(timing.Wall), Elapsed: ciSpan(timing.Active),
 			Jobs: make([]ciJobView, 0, len(timing.Jobs)),
 		}
-		for _, j := range timing.Jobs {
+		for i, j := range timing.Jobs {
 			job := ciJobView{
-				ID: ciInt(j.Key.JobID), Status: ciPhase(j.Phase), Conclusion: j.Conclusion, Queue: ciSpan(j.Queue), ActiveQueue: ciSpan(j.ActiveQueue),
+				ID: ciInt(j.Key.JobID), Status: ciPhase(j.Phase), StatusAt: ciObservationTime(a.Jobs[i].Clock.ObservedAt), Conclusion: j.Conclusion, Queue: ciSpan(j.Queue), ActiveQueue: ciSpan(j.ActiveQueue),
 				CreationToStart: ciSpan(j.CreationToStart), Execution: ciSpan(j.Execution), Elapsed: ciSpan(j.Active), Steps: make([]ciStepView, 0, len(j.Steps)),
 			}
 			for _, s := range j.Steps {
@@ -122,6 +124,13 @@ func projectCIHealthTiming(scopes []ciViewScope, facts []cihealth.AttemptFacts) 
 		out.Attempts = append(out.Attempts, row)
 	}
 	return out, nil
+}
+
+func ciObservationTime(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return at.UTC().Format(time.RFC3339Nano)
 }
 
 func ciInt(n int64) string { return strconv.FormatInt(n, 10) }

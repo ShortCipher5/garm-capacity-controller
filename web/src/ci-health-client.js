@@ -47,6 +47,12 @@ function timestamp(value) {
   return {exact: m[1] + "." + fraction, milliseconds: seconds + Number(fraction.slice(0,3))};
 }
 
+function validStatusObservation(row, through) {
+  if (!Object.hasOwn(row, "status_observed_at")) return true;
+  const status = timestamp(row.status_observed_at);
+  return status !== null && status.exact <= through.exact;
+}
+
 function validSpan(row, key, permitted, lowerBound = false) {
   if (!Object.hasOwn(row, key)) return true;
   const span = row[key];
@@ -143,7 +149,7 @@ export function validateCIHealthSnapshot(value) {
   let stepCount = 0;
   const handles = new Set();
   for (const a of value.timing.attempts) {
-    if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed", "conclusion"]) ||
+    if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed", "conclusion", "status_observed_at"]) ||
         typeof a.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(a.source) || a.source.trim() !== a.source ||
         ![a.repository_id, a.workflow_id, a.run_id, a.attempt].every((id) => decimal(id)) ||
         !phases.includes(a.status) || !validConclusion(a) || !validSpan(a, "wall", a.status === "completed") ||
@@ -151,13 +157,14 @@ export function validateCIHealthSnapshot(value) {
         a.jobs.length > 250 - jobCount) fail();
     const at = timestamp(a.observed_at);
     const id = ciAttemptKey(a);
-    if (!at || at.exact > observed.exact || attempts.has(id)) fail();
+    if (!at || at.exact > observed.exact || !validStatusObservation(a, at) || attempts.has(id)) fail();
     attempts.add(id);
     scopes.add([a.source, a.repository_id, a.workflow_id].join(":"));
     jobCount += a.jobs.length;
     const jobs = new Set();
     for (const j of a.jobs) {
-      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion", "job_link_handle"]) ||
+      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion", "job_link_handle", "status_observed_at"]) ||
+          !validStatusObservation(j, at) ||
           (Object.hasOwn(j, "job_link_handle") && (!validCIJobHandle(j.job_link_handle) || handles.has(j.job_link_handle))) ||
           !decimal(j.id) || jobs.has(j.id) || !phases.includes(j.status) || !validConclusion(j) ||
           !validSpan(j, "queue", ["running", "completed"].includes(j.status), true) ||
