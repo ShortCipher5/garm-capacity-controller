@@ -46,11 +46,12 @@ func ReviewJobSizingWindow(in JobSizingCohort, w JobSizingReviewWindow) (JobSizi
 	out.Installed = in.Shape
 	for _, sample := range in.Samples {
 		s := sample.Resources.Scope
-		if s.StartedAt.Before(w.From) || s.EndAt.After(w.AsOf) || s.AsOf.After(w.AsOf) {
+		if s.StartedAt.Before(w.From) || s.EndAt.After(w.AsOf) || s.AsOf.After(w.AsOf) ||
+			sample.Completion.ObservedAt.After(w.AsOf) {
 			return JobSizingReview{}, ErrJobSizingFacts
 		}
-		if s.Job.Attempt.Attempt == 1 && s.EndAt.After(out.LatestPrimaryCompletion) {
-			out.LatestPrimaryCompletion = s.EndAt.UTC()
+		if s.Job.Attempt.Attempt == 1 && sample.Completion.EndedAt.After(out.LatestPrimaryCompletion) {
+			out.LatestPrimaryCompletion = sample.Completion.EndedAt.UTC()
 		}
 	}
 	out.FreshPrimaryCompletion = !out.LatestPrimaryCompletion.IsZero() &&

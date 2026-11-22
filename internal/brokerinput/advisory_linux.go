@@ -82,8 +82,9 @@ func (p *planReader) readPressure(ctx context.Context, state admission.BrokerGra
 			status.State = "window_overflow_suppressed"
 			blocked[id] = true
 		}
+		var latestHigh time.Time
 		for _, v := range rows {
-			if v.SampledAt.After(now) || now.Sub(v.SampledAt) > pressureAge {
+			if v.SampledAt.After(now) || !v.SampledAt.Add(pressureAge).After(now) {
 				continue
 			}
 			budget := state.Config.Hosts[id].Budget
@@ -108,15 +109,37 @@ func (p *planReader) readPressure(ctx context.Context, state admission.BrokerGra
 			if status.State == "missing_or_stale_not_headroom" {
 				status.State = "partial_sample_not_headroom"
 			}
-			if high {
-				status.State = "high_partial_pressure_suppressed"
-				blocked[id] = true
+			if high && v.SampledAt.After(latestHigh) {
+				latestHigh = v.SampledAt
 			}
+		}
+		if !latestHigh.IsZero() {
+			status.State = "high_partial_pressure_suppressed"
+			// A newer low sample does not cancel an otherwise fresh veto or
+			// extend its life. Report the high sample that still supports it.
+			status.SampledAt = latestHigh
+			blocked[id] = true
 		}
 		statuses = append(statuses, status)
 	}
 	return statuses, blocked, nil
 }
+
+// Bound the complete captured projection by its earliest expiring high veto.
+// At or beyond this deadline a new poll may yield a different plan; this helper
+// does not implicitly lift the veto or return unchecked placements.
+func pressureVetoExpiry(expiry time.Time, statuses []PressureStatus) time.Time {
+	for _, status := range statuses {
+		if status.State == "high_partial_pressure_suppressed" {
+			deadline := status.SampledAt.Add(pressureAge)
+			if deadline.Before(expiry) {
+				expiry = deadline
+			}
+		}
+	}
+	return expiry
+}
+
 func pressureHigh(v admission.UsageSample, b admission.Resources) bool {
 	return cpuOrRAMPressureHigh(v, b) || atPressureThreshold(v.DiskUsedMiB, b.Disk)
 }

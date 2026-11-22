@@ -158,6 +158,7 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	result := projectReadPlan(state, observed, plan, now, opt.MaxAge)
 	result.Pressure = pressure
 	if p.pressure {
+		result.ExpiresAt = pressureVetoExpiry(result.ExpiresAt, pressure)
 		// Net additional proposals withheld compared with the same snapshot without
 		// the monitoring veto, per pool. Same-pool alternate-host placements are
 		// not counted as suppressed; this is not physical runner relocation.

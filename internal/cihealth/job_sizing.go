@@ -38,15 +38,24 @@ type JobSizingShape struct {
 	CPUMilli, RAMBytes uint64
 }
 
+// JobSizingCompletion is separately observed terminal evidence for the exact job,
+// not inferred from metric coverage or a resource-window cutoff. The caller
+// must independently verify this observation; the reducer checks consistency.
+type JobSizingCompletion struct {
+	Job                            JobKey
+	StartedAt, EndedAt, ObservedAt time.Time
+}
+
 // JobSizingSample carries already verified, attributable telemetry from the
 // existing reducer plus the independently observed exact job outcome, risks
 // and installed limits. Missing risk evidence is not an absence of risk.
 type JobSizingSample struct {
-	Resources JobResourceSummary
-	Shape     JobSizingShape
-	Outcome   TrendOutcome
-	RiskKnown bool
-	Risks     JobSizingRisk
+	Resources  JobResourceSummary
+	Completion JobSizingCompletion // zero means no confirmed completion
+	Shape      JobSizingShape
+	Outcome    TrendOutcome
+	RiskKnown  bool
+	Risks      JobSizingRisk
 }
 
 type JobSizingCohort struct {
@@ -123,6 +132,10 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			sample.Shape != in.Shape || sample.Outcome > TrendOutcomeOtherTerminal || sample.Risks&^knownJobSizingRisks != 0 || !sample.RiskKnown && sample.Risks != 0 {
 			return fail()
 		}
+		completion, ok := sizingCompletionEnd(r.Scope, sample.Completion)
+		if !ok {
+			return fail()
+		}
 		cadence, ok := jobSizingSamplingCeiling(r)
 		if !ok {
 			return fail()
@@ -133,7 +146,13 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			return fail()
 		}
 		seen[key] = true // One slot per source/run/attempt, even if job IDs differ.
-		windows = append(windows, jobSizingRunnerWindow{r.Scope.RunnerIncarnation, start, end})
+		// A positively confirmed job is present through its true end, even
+		// if its own resource samples stop early. It can overlap another job.
+		windowEnd := end
+		if completion.After(end) {
+			windowEnd = completion
+		}
+		windows = append(windows, jobSizingRunnerWindow{r.Scope.RunnerIncarnation, start, windowEnd, !completion.IsZero()})
 		if key.Attempt != 1 {
 			out.Retried++
 			continue
@@ -143,17 +162,22 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 		case sample.Risks != 0:
 			out.AtRisk++
 			countJobSizingRisks(&out, sample.Risks)
-		case !sample.RiskKnown || sample.Outcome == TrendOutcomeUnknown:
+		case completion.IsZero() || !sample.RiskKnown || sample.Outcome == TrendOutcomeUnknown:
 			out.Unknown++
 		case sample.Outcome != TrendOutcomeSuccess:
 			out.Unsuccessful++
 		default:
 			out.Successful++
-			if first.IsZero() || end.Before(first) {
-				first = end
+			if first.IsZero() || completion.Before(first) {
+				first = completion
 			}
-			if end.After(last) {
-				last = end
+			if completion.After(last) {
+				last = completion
+			}
+			// Scope.EndAt may be a report cutoff rather than the actual job
+			// end. Preserve the summary but never use a prefix for sizing.
+			if !end.Equal(completion) {
+				continue
 			}
 			if cpu != nil && sizingCoverageSufficient(cpu.Coverage.Duration, r.Window) {
 				out.CPU.QualifyingSamples++
@@ -165,7 +189,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			}
 		}
 	}
-	if overlappingJobSizingWindows(windows) {
+	if ambiguousJobSizingWindows(windows) {
 		return fail()
 	}
 	if out.AtRisk != 0 || out.Unknown != 0 || out.Unsuccessful != 0 {
@@ -185,16 +209,35 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 	return out, nil
 }
 
+// sizingCompletionEnd distinguishes missing evidence from a contradictory
+// supplied observation. A later terminal observation can report a later end
+// than Scope.EndAt, but resources cannot extend past the observed job end.
+func sizingCompletionEnd(s JobResourceScope, c JobSizingCompletion) (time.Time, bool) {
+	if c.Job == (JobKey{}) && c.StartedAt.IsZero() && c.EndedAt.IsZero() && c.ObservedAt.IsZero() {
+		return time.Time{}, true
+	}
+	start, end, observed := c.StartedAt.UTC(), c.EndedAt.UTC(), c.ObservedAt.UTC()
+	if c.Job != s.Job || !validTime(start) || !start.Equal(s.StartedAt) ||
+		!validTime(end) || !end.After(start) || end.Before(s.EndAt) ||
+		!validTime(observed) || observed.Before(end) {
+		return time.Time{}, false
+	}
+	return end, true
+}
+
 type jobSizingRunnerWindow struct {
 	incarnation string
 	start, end  time.Time
+	endKnown    bool
 }
 
 // A runner-wide resource observation cannot independently describe two jobs
 // executing on the same incarnation at the same time. Reject ambiguity even
 // for retries: their samples are not counted, but their execution may affect
-// a primary job's counters. Touching boundaries share no elapsed time.
-func overlappingJobSizingWindows(windows []jobSizingRunnerWindow) bool {
+// a primary job's counters. Touching boundaries share no elapsed time
+// only when the earlier end is confirmed; a sample cutoff alone cannot
+// exclude overlap with a later job on the same incarnation.
+func ambiguousJobSizingWindows(windows []jobSizingRunnerWindow) bool {
 	sort.Slice(windows, func(i, j int) bool {
 		a, b := windows[i], windows[j]
 		if a.incarnation != b.incarnation {
@@ -204,7 +247,7 @@ func overlappingJobSizingWindows(windows []jobSizingRunnerWindow) bool {
 	})
 	for i := 1; i < len(windows); i++ {
 		a, b := windows[i-1], windows[i]
-		if a.incarnation == b.incarnation && b.start.Before(a.end) {
+		if a.incarnation == b.incarnation && (!a.endKnown || b.start.Before(a.end)) {
 			return true
 		}
 	}

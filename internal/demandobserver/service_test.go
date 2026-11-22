@@ -96,3 +96,41 @@ func TestServiceRunsActualPollAndCancels(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestStatusSuppressesCountsBeforeObservationFinishes(t *testing.T) {
+	start := time.Date(2026, 11, 22, 17, 0, 0, 0, time.UTC)
+	finish := start.Add(time.Second)
+	s := &Service{state: "observed", maxAge: time.Minute, event: &Event{
+		Status: "observed", StartedAt: start, FinishedAt: finish, Counts: &Counts{StockQueued: 2},
+	}}
+	early := s.snapshot(finish.Add(-time.Nanosecond))
+	if early.State != "unavailable" || early.Event.Counts != nil || early.AllocationAuthorized {
+		t.Fatalf("future evidence exposed: %+v, event: %+v", early, early.Event)
+	}
+	onTime := s.snapshot(finish)
+	if onTime.State != "observed" || onTime.Event.Counts == nil || onTime.Event.Counts.StockQueued != 2 {
+		t.Fatalf("completed observation lost: %+v", onTime)
+	}
+}
+
+func TestStatusSuppressesCountsForInvalidObservationTimes(t *testing.T) {
+	start := time.Date(2026, 11, 22, 17, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		start, finish time.Time
+	}{
+		{"inverted poll", start, start.Add(-time.Second)},
+		{"missing start", time.Time{}, start},
+		{"missing finish", start, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Service{state: "observed", maxAge: time.Minute, event: &Event{
+				Status: "observed", StartedAt: tc.start, FinishedAt: tc.finish, Counts: &Counts{StockQueued: 2},
+			}}
+			got := s.snapshot(start)
+			if got.State != "unavailable" || got.Event.Counts != nil || got.AllocationAuthorized {
+				t.Fatalf("invalid evidence exposed: %+v, event: %+v", got, got.Event)
+			}
+		})
+	}
+}
