@@ -69,3 +69,30 @@ test("fetchUsageHistory rejects a host mismatch instead of presenting it as the 
     fetcher: async () => ({ok: true, status: 200, json: async () => [sample("2026-01-01T00:00:00Z", 100)]}),
   }), UsageResponseError);
 });
+
+test("usage history rejects coerced, non-Go, and impossible wire timestamps", () => {
+  for (const at of [
+    undefined, null, 0, 2026, ["2026-01-01T00:00:00Z"], {}, true,
+    "2026", "2026-01-01", "2026-01-01 00:00:00Z", "2026-01-01T00:00:00",
+    "2026-01-01T00:00:00+0800", "2026-01-01T00:00:00z", "2026-01-01t00:00:00Z",
+    "2026-01-01T00:00:00Z\n", " 2026-01-01T00:00:00Z",
+    "2026-02-29T00:00:00Z", "1900-02-29T00:00:00Z", "2026-04-31T12:00:00+08:00",
+    "2026-00-01T00:00:00Z", "2026-13-01T00:00:00Z", "2026-01-00T00:00:00Z",
+    "2026-01-01T24:00:00Z", "2026-01-01T23:60:00Z", "2026-01-01T23:59:60Z",
+    "2026-01-01T00:00:00+24:00", "2026-01-01T00:00:00-01:60",
+    "2026-01-01T00:00:00.1234567890Z", "2026-01-01T00:00:00.Z",
+  ]) {
+    assert.throws(() => validateUsageHistory([sample(at, 100)], "host-a"), UsageResponseError, JSON.stringify(at));
+  }
+});
+
+test("usage history preserves Go RFC3339Nano strings, offsets and empty samples", () => {
+  const dates = [
+    "2024-02-29T00:00:00Z", "2000-02-29T23:59:59.123456789-03:30",
+    "0000-02-29T00:00:00+00:00", "9999-12-31T00:00:00-00:00",
+    ...Array.from({length: 9}, (_, i) => `2026-01-01T00:00:00.${"123456789".slice(0, i + 1)}+08:00`),
+  ];
+  const history = dates.map(at => sample(at, 100));
+  assert.strictEqual(validateUsageHistory(history, "host-a"), history);
+  assert.deepEqual(validateUsageHistory([], "host-a"), []);
+});

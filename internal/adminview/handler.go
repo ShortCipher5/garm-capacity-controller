@@ -178,10 +178,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest)
 		return
 	}
-	if r.URL.RawQuery != "" {
+	usagePath := strings.HasPrefix(r.URL.Path, "/admin/api/v1/usage/")
+	// Only the usage GET handler accepts a strict allowlist of query parameters.
+	// Credentials are never accepted in URLs.
+	if r.URL.RawQuery != "" && !(usagePath && r.Method == http.MethodGet) {
 		fail(http.StatusBadRequest)
 		return
-	} // Never accept tokens in URLs.
+	}
 	select {
 	case h.inFlight <- struct{}{}:
 		defer func() { <-h.inFlight }()
@@ -311,7 +314,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveProfiles(w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/admin/api/v1/usage/") {
+	if usagePath {
 		h.serveUsage(w, r)
 		return
 	}

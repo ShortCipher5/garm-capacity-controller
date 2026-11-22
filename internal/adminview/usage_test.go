@@ -135,7 +135,7 @@ func TestUsageHistoryRecentSelectsNewestBoundedPage(t *testing.T) {
 	const endpoint = "/admin/api/v1/usage/host-a"
 	check := func(query string, count, first, last int) {
 		t.Helper()
-		res := usageRequest(t, h, "GET", endpoint+query, token)
+		res := request(t, h, "GET", endpoint+query, token)
 		if res.Code != 200 {
 			t.Fatalf("%s returned %d: %s", query, res.Code, res.Body)
 		}
@@ -158,13 +158,36 @@ func TestUsageHistoryRecentSelectsNewestBoundedPage(t *testing.T) {
 	check("?since="+cutoff+"&order=recent", 2, 500, 501)
 	check("?since="+cutoff+"&limit=1&order=recent", 1, 501, 501)
 	check("?since="+cutoff+"&limit=1", 1, 500, 500)
-	empty := usageRequest(t, h, "GET", "/admin/api/v1/usage/unused?order=recent", token)
+	empty := request(t, h, "GET", "/admin/api/v1/usage/unused?order=recent", token)
 	if empty.Code != 200 || strings.TrimSpace(empty.Body.String()) != "[]" {
 		t.Fatalf("empty recent history: %d %s", empty.Code, empty.Body)
 	}
-	noAuth := usageRequest(t, h, "GET", endpoint+"?order=recent", "")
+	noAuth := request(t, h, "GET", endpoint+"?order=recent", "")
 	if noAuth.Code != 401 {
 		t.Fatalf("recent not authenticated: %d", noAuth.Code)
+	}
+}
+
+func TestUsageQueryExceptionIsLimitedToAuthenticatedUsageReads(t *testing.T) {
+	h, _, token := fixture(t)
+	for _, tc := range []struct {
+		method string
+		target string
+		token  string
+	}{
+		{"GET", "/admin/api/v1/overview?limit=1", token},
+		{"GET", "/admin/api/v1/usage/host-a?token=" + token, token},
+		{"GET", "/admin/api/v1/usage/host-a?order=recent&token=" + token, token},
+		{"GET", "/admin/api/v1/usage/host-a?order=recent&order=recent", token},
+		{"GET", "/admin/api/v1/usage/host-a?order=%ZZ", token},
+		{"POST", "/admin/api/v1/usage/host-a?order=recent", token},
+	} {
+		if w := request(t, h, tc.method, tc.target, tc.token); w.Code != 400 {
+			t.Errorf("unexpected response %d for %s %s", w.Code, tc.method, strings.SplitN(tc.target, "?", 2)[0])
+		}
+	}
+	if w := request(t, h, "GET", "/admin/api/v1/usage/host-a?token="+token, ""); w.Code != 401 {
+		t.Errorf("query-only credential did not remain unauthorized: %d", w.Code)
 	}
 }
 
