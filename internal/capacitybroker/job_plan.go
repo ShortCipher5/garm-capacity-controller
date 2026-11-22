@@ -43,22 +43,23 @@ type jobQueue struct {
 // including creating, unknown and outstanding grants. This does NOT issue grants.
 // Pool.Waiting/OldestWaiting are derived here and must be empty in the input.
 func BuildForJobs(s Snapshot, opt Options, jobs []QueuedDemand) (JobPlan, error) {
-	return buildForJobs(s, opt, jobs, nil, false)
+	return buildForJobs(s, opt, jobs, nil, legacyDemand)
 }
 
 // BuildForJobsWithIdleOnly adds advisory existing-idle edges for stopped pools.
 // These edges never enter grant/inflight matching or new/warm placement.
 func BuildForJobsWithIdleOnly(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
-	return buildForJobs(s, opt, jobs, idleOnly, false)
+	return buildForJobs(s, opt, jobs, idleOnly, stockDemandByID)
 }
 
 // BuildForStockScaling compares demand by age for offline maximum proposals
 // only. It preserves charge and supply semantics, and never binds jobs.
 func BuildForStockScaling(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string) (JobPlan, error) {
-	return buildForJobs(s, opt, jobs, idleOnly, true)
+	return buildForJobs(s, opt, jobs, idleOnly, stockDemandChronological)
 }
 
-func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string, chronological bool) (JobPlan, error) {
+func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[string][]string, matchMode demandMatchMode) (JobPlan, error) {
+	chronological := matchMode == stockDemandChronological
 	if len(idleOnly) > 1000 {
 		return JobPlan{}, ErrSnapshot
 	}
@@ -155,7 +156,7 @@ func buildForJobs(s Snapshot, opt Options, jobs []QueuedDemand, idleOnly map[str
 		}
 		sort.Slice(matchJobs, func(i, j int) bool { return rank[matchJobs[i].ID] < rank[matchJobs[j].ID] })
 	}
-	match, e := matchDemand(matchJobs, idle, chronological)
+	match, e := matchDemand(matchJobs, idle, matchMode)
 	if e != nil {
 		return JobPlan{}, e
 	}

@@ -205,3 +205,65 @@ func TestStockMaximumGrowthNeedsHeadroomInBothSamples(t *testing.T) {
 		})
 	}
 }
+
+func TestStockAdvisoryBaseAndMaximumPreviewAcceptLargeSinglePoolQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		creating bool
+	}{
+		{"idle", false}, {"creating", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, _, _ := ledgerFixture()
+			snapshot, _, observed, opt := fixture()
+			const slots = 32
+			snapshot.Global = capacitybroker.Resources{32000, 32000, 32000, slots}
+			snapshot.Hosts["host"] = capacitybroker.Host{Budget: snapshot.Global, AcceptNew: true}
+			p := snapshot.Pools[pool]
+			p.Budget = &snapshot.Global
+			total := admission.Resources{CPU: 32000, RAM: 32000, Disk: 32000, Runners: slots}
+			state.Allocated = admission.Allocations{Global: total, Hosts: map[string]admission.Resources{"host": total}, Pools: map[string]admission.Resources{pool: total}}
+			state.Config.Global = total
+			h := state.Config.Hosts["host"]
+			h.Budget = total
+			state.Config.Hosts["host"] = h
+			configured := state.Config.Pools[pool]
+			configured.Budget = total
+			state.Config.Pools[pool] = configured
+			state.Policy.Repositories[0].MaxRunners = slots
+			state.Policy.Repositories[0].Pools[0].MaxRunners = slots
+			snapshot.Charges = []capacitybroker.Charge{{ID: "retained", Host: "host", Pool: pool, Resources: snapshot.Global}}
+			observed.Pools[0].MaxRunners = slots
+			observed.Pools[0].DiscoveryFingerprint = "reviewed-settings"
+			if tc.creating {
+				p.Inflight, p.PendingWarm = slots, slots
+				observed.Supply[0].Creating = slots
+			} else {
+				observed.Supply[0].Idle = slots
+			}
+			snapshot.Pools[pool] = p
+			observed.Jobs = make([]garmapi.QueuedJob, 1000)
+			for i := range observed.Jobs {
+				observed.Jobs[i] = garmapi.QueuedJob{
+					WorkflowJobID: int64(i + 1), RepositoryID: repo,
+					CreatedAt: opt.Now.Add(-time.Duration(i) * time.Second), CandidatePoolIDs: []string{pool},
+				}
+			}
+
+			// These are the two actual pure stock planning calls in
+			// planReader.read, without opening a store/network connection.
+			base, err := stock(snapshot, state.Policy, observed, opt, true)
+			if err != nil || len(base.Assignments) != 0 || len(base.RemainingJobs) != 968 ||
+				len(base.CoveredByIdle)+len(base.DeferredByInflight) != slots ||
+				(tc.creating && len(base.DeferredByInflight) != slots) {
+				t.Fatalf("base stock planning: idle=%d inflight=%d remaining=%d assigned=%d err=%v",
+					len(base.CoveredByIdle), len(base.DeferredByInflight), len(base.RemainingJobs), len(base.Assignments), err)
+			}
+			pressure := []PressureStatus{{Host: "host", State: "partial_sample_not_headroom", SampledAt: opt.Now}}
+			preview, err := sampleStockMaximumPreview(state, snapshot, observed, "fixture-source", opt, pressure)
+			if err != nil || preview.incomplete || preview.pools[pool].used != slots || preview.pools[pool].target != slots {
+				t.Fatalf("chronological maximum preview did not retain full charge: %+v, %v", preview, err)
+			}
+		})
+	}
+}
