@@ -79,7 +79,7 @@ func buildCIHealth(c configuration, dc *demandobserver.Config) (*ciHealthRuntime
 }
 
 func (c *ciHealthRuntime) close() {
-	c.snapshot.Withdraw()
+	c.snapshot.Stop()
 	c.source.Close()
 	c.disableHistory()
 }
@@ -181,7 +181,7 @@ func (c *ciHealthRuntime) runCycleContinuing(ctx context.Context, next **cihealt
 	to := time.Now().UTC().Truncate(time.Second)
 	cycle, err := cihealthsource.ReadCycleContinuing(ctx, c.source, c.repos, to.Add(-ciHealthRecentWindow), to, prior)
 	if err != nil || ctx.Err() != nil || cycle.State() == cihealthsource.CycleUnavailable ||
-		c.snapshot.PublishTiming(cycle.ObservedAt(), cycle.Facts(), cycle.State() == cihealthsource.CyclePartial) != nil {
+		c.snapshot.PublishLiveTiming(cycle, c.source) != nil {
 		c.snapshot.Withdraw()
 		c.disableHistory()
 		return false

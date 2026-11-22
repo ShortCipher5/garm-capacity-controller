@@ -304,7 +304,11 @@ export function App() {
   const readAllocatorStatus=useCallback(async(options)=>{try{return await session.current.allocatorStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   const readRetirementStatus=useCallback(async(options)=>{try{return await session.current.nativeRetirementStatusSnapshot(options);}catch(error){if(error instanceof SessionEnded&&error.message){disconnect();setError(error.message);}throw error;}},[disconnect]);
   const readCIHealth = useCallback(async (options) => {
-    try { return await session.current.ciHealthSnapshot(options); }
+    try {
+      return options?.jobLink
+        ? await session.current.ciHealthJobDestination(options.jobLink, options)
+        : await session.current.ciHealthSnapshot(options);
+    }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
   // Refresh measured history once per committed overview snapshot, not on busy
