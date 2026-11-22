@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+func sizingCompletionFixture(w JobResourceScope) JobSizingCompletion {
+	return JobSizingCompletion{Job: w.Job, StartedAt: w.StartedAt, EndedAt: w.EndAt, ObservedAt: w.AsOf}
+}
+
 func jobSizingFixture(t *testing.T, primary int, span, covered time.Duration) JobSizingCohort {
 	t.Helper()
 	shape := JobSizingShape{1000, 100}
@@ -28,7 +32,7 @@ func jobSizingFixture(t *testing.T, primary int, span, covered time.Duration) Jo
 		if err != nil {
 			t.Fatal(err)
 		}
-		in.Samples = append(in.Samples, JobSizingSample{Resources: resources, Shape: shape, Outcome: TrendOutcomeSuccess, RiskKnown: true})
+		in.Samples = append(in.Samples, JobSizingSample{Resources: resources, Completion: sizingCompletionFixture(w), Shape: shape, Outcome: TrendOutcomeSuccess, RiskKnown: true})
 	}
 	return in
 }
@@ -50,6 +54,7 @@ func TestJobSizingVerifiesExactPrimaryHistoryAndCoverageThresholds(t *testing.T)
 			retry := in.Samples[0]
 			retry.Resources.Scope.Job.Attempt.Attempt = 2
 			retry.Resources.Scope.RunnerIncarnation = "fixture-retry-incarnation"
+			retry.Completion.Job = retry.Resources.Scope.Job
 			in.Samples = append(in.Samples, retry)
 			got, err := SummarizeJobSizing(in)
 			if err != nil || got.Primary != tc.primary || got.Successful != tc.primary || got.Retried != 1 || got.CPU.State != tc.want || got.RAM.State != tc.want ||
@@ -118,13 +123,19 @@ func TestJobSizingNoDownsizeTrimmedAdviceOrUnreviewedCohort(t *testing.T) {
 
 func TestJobSizingRefusesDuplicateRunAndForeignOrContradictoryEvidence(t *testing.T) {
 	for name, mutate := range map[string]func(*JobSizingCohort){
-		"different job from same attempt": func(in *JobSizingCohort) { in.Samples[1].Resources.Scope.Job.Attempt.RunID = 1 },
-		"different repository":            func(in *JobSizingCohort) { in.Samples[1].Resources.Scope.Job.Attempt.RepositoryID++ },
-		"different size":                  func(in *JobSizingCohort) { in.Samples[1].Shape.RAMBytes++ },
-		"unknown risk with flags":         func(in *JobSizingCohort) { in.Samples[1].RiskKnown = false; in.Samples[1].Risks = JobSizingOOM },
-		"contradictory coverage":          func(in *JobSizingCohort) { in.Samples[1].Resources.CPU.Coverage.Complete = true },
-		"missing cadence":                 func(in *JobSizingCohort) { in.Samples[1].Resources.Scope.MaxGap = 0 },
-		"oversized cadence":               func(in *JobSizingCohort) { in.Samples[1].Resources.Scope.MaxGap = MaxJobResourceGap + time.Nanosecond },
+		"different job from same attempt": func(in *JobSizingCohort) {
+			in.Samples[1].Resources.Scope.Job.Attempt.RunID = 1
+			in.Samples[1].Completion.Job = in.Samples[1].Resources.Scope.Job
+		},
+		"different repository": func(in *JobSizingCohort) {
+			in.Samples[1].Resources.Scope.Job.Attempt.RepositoryID++
+			in.Samples[1].Completion.Job = in.Samples[1].Resources.Scope.Job
+		},
+		"different size":          func(in *JobSizingCohort) { in.Samples[1].Shape.RAMBytes++ },
+		"unknown risk with flags": func(in *JobSizingCohort) { in.Samples[1].RiskKnown = false; in.Samples[1].Risks = JobSizingOOM },
+		"contradictory coverage":  func(in *JobSizingCohort) { in.Samples[1].Resources.CPU.Coverage.Complete = true },
+		"missing cadence":         func(in *JobSizingCohort) { in.Samples[1].Resources.Scope.MaxGap = 0 },
+		"oversized cadence":       func(in *JobSizingCohort) { in.Samples[1].Resources.Scope.MaxGap = MaxJobResourceGap + time.Nanosecond },
 		"CPU coverage exceeds cadence": func(in *JobSizingCohort) {
 			in.Samples[1].Resources.Scope.MaxGap = 9*time.Second - time.Nanosecond
 			in.Samples[1].Resources.RAMMean = nil
@@ -137,6 +148,7 @@ func TestJobSizingRefusesDuplicateRunAndForeignOrContradictoryEvidence(t *testin
 		t.Run(name, func(t *testing.T) {
 			in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
 			in.Samples[1].Resources.Scope.Job.JobID++
+			in.Samples[1].Completion.Job = in.Samples[1].Resources.Scope.Job
 			mutate(&in)
 			if got, err := SummarizeJobSizing(in); err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
 				t.Fatalf("invalid cohort returned a partial result: %+v, %v", got, err)
@@ -215,10 +227,12 @@ func TestJobSizingRejectsOverlappingWindowsOnOneRunnerIncarnation(t *testing.T) 
 		r.Scope.RunnerIncarnation = first.RunnerIncarnation
 		r.Scope.StartedAt, r.Scope.EndAt, r.Scope.AsOf = r.Scope.StartedAt.Add(offset), r.Scope.EndAt.Add(offset), r.Scope.AsOf.Add(offset)
 		r.RAM.LatestAt = r.RAM.LatestAt.Add(offset)
+		in.Samples[1].Completion = sizingCompletionFixture(r.Scope)
 	}
 	newSample(5 * time.Second)
 	for _, attempted := range []int64{1, 2} {
 		in.Samples[1].Resources.Scope.Job.Attempt.Attempt = attempted
+		in.Samples[1].Completion.Job.Attempt.Attempt = attempted
 		in.Samples[0], in.Samples[1] = in.Samples[1], in.Samples[0] // later start comes first
 		got, err := SummarizeJobSizing(in)
 		if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
@@ -273,5 +287,100 @@ func TestJobSizingKeepsLoneRAMGaugeAndCPUCoverageIndependent(t *testing.T) {
 	got, err := SummarizeJobSizing(in)
 	if err != nil || got.CPU.State != JobSizingIncreaseAdvised || got.RAM.State != JobSizingCoverageUnavailable || got.RAM.Suggested != nil {
 		t.Fatalf("lone gauge should not fabricate coverage or suppress valid CPU advice: %+v, %v", got, err)
+	}
+}
+
+func TestJobSizingWithholdsAdviceFromFullyCoveredJobPrefix(t *testing.T) {
+	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	s := &in.Samples[len(in.Samples)-1]
+	scope := s.Resources.Scope
+	scope.MaxGap = scope.EndAt.Sub(scope.StartedAt)
+	first, last := resourceSampleFixture(scope, 0), resourceSampleFixture(scope, scope.MaxGap)
+	first.CPUTimeNanos, last.CPUTimeNanos = knownResource(0), knownResource(9*uint64(scope.MaxGap)/10)
+	first.RAMBytes, last.RAMBytes = knownResource(90), knownResource(96)
+	var err error
+	s.Resources, err = SummarizeJobResources(scope, []JobResourceSample{first, last})
+	if err != nil || !s.Resources.CPU.Coverage.Complete || !s.Resources.RAMMean.Coverage.Complete {
+		t.Fatalf("expected complete prefix coverage: %+v, %v", s.Resources, err)
+	}
+	// Separate terminal evidence arrived later; the resource cutoff is not a job end.
+	s.Completion.EndedAt = s.Resources.Scope.EndAt.Add(10 * time.Minute)
+	s.Completion.ObservedAt = s.Completion.EndedAt.Add(time.Second)
+	got, err := SummarizeJobSizing(in)
+	if err != nil || got.Successful != 20 || got.CPU.QualifyingSamples != 19 ||
+		got.RAM.QualifyingSamples != 19 || got.CPU.State != JobSizingCoverageUnavailable ||
+		got.RAM.State != JobSizingCoverageUnavailable || got.CPU.Suggested != nil || got.RAM.Suggested != nil {
+		t.Fatalf("resource prefix counted as completed-job evidence: %+v, %v", got, err)
+	}
+}
+
+func TestJobSizingTreatsMissingCompletionAsUnknownAndConflictsAsInvalid(t *testing.T) {
+	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	in.Samples[0].Completion = JobSizingCompletion{}
+	got, err := SummarizeJobSizing(in)
+	if err != nil || got.Unknown != 1 || got.Successful != 19 ||
+		got.CPU.State != JobSizingNeedsRiskOrOutcomeReview || got.RAM.State != JobSizingNeedsRiskOrOutcomeReview {
+		t.Fatalf("reported success lacks a confirmed completion: %+v, %v", got, err)
+	}
+	for name, change := range map[string]func(*JobSizingCompletion){
+		"foreign job":            func(c *JobSizingCompletion) { c.Job.JobID++ },
+		"different start":        func(c *JobSizingCompletion) { c.StartedAt = c.StartedAt.Add(time.Nanosecond) },
+		"end before cutoff":      func(c *JobSizingCompletion) { c.EndedAt = c.EndedAt.Add(-time.Nanosecond) },
+		"observation before end": func(c *JobSizingCompletion) { c.ObservedAt = c.EndedAt.Add(-time.Nanosecond) },
+		"partial record":         func(c *JobSizingCompletion) { c.ObservedAt = time.Time{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+			change(&in.Samples[0].Completion)
+			got, err := SummarizeJobSizing(in)
+			if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+				t.Fatalf("contradictory completion returned a result: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestJobSizingRejectsOverlapInUnsampledTailOfKnownJob(t *testing.T) {
+	in := jobSizingFixture(t, 20, 8*24*time.Hour, 9*time.Second)
+	first, later := &in.Samples[0], &in.Samples[1]
+	later.Resources.Scope.RunnerIncarnation = first.Resources.Scope.RunnerIncarnation
+	// The first job's resource cutoff precedes the second job, but its
+	// independently observed end confirms it was still running.
+	first.Completion.EndedAt = later.Resources.Scope.StartedAt.Add(time.Second)
+	first.Completion.ObservedAt = first.Completion.EndedAt
+	got, err := SummarizeJobSizing(in)
+	if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+		t.Fatalf("unsampled overlapping job tail accepted: %+v, %v", got, err)
+	}
+	first.Completion.EndedAt = later.Resources.Scope.StartedAt
+	got, err = SummarizeJobSizing(in)
+	if err != nil || got.CPU.State != JobSizingCoverageUnavailable || got.CPU.QualifyingSamples != 19 {
+		t.Fatalf("exact boundary should accept both jobs but withhold prefix advice: %+v, %v", got, err)
+	}
+}
+
+func TestJobSizingRejectsUnconfirmedRetryBeforeLaterJobOnSameRunner(t *testing.T) {
+	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	retry := in.Samples[0]
+	retry.Resources.Scope.Job.Attempt.Attempt = 2
+	completion := sizingCompletionFixture(retry.Resources.Scope)
+	retry.Completion = JobSizingCompletion{}
+	retry.Outcome = TrendOutcomeUnknown
+	in.Samples = append(in.Samples, retry)
+	// There is no ambiguity on a different incarnation.
+	in.Samples[0].Resources.Scope.RunnerIncarnation = "another-runner"
+	got, err := SummarizeJobSizing(in)
+	if err != nil || got.CPU.State != JobSizingIncreaseAdvised || got.Retried != 1 {
+		t.Fatalf("an unrelated retry should not poison proven primary data: %+v, %v", got, err)
+	}
+	in.Samples[1].Resources.Scope.RunnerIncarnation = retry.Resources.Scope.RunnerIncarnation
+	got, err = SummarizeJobSizing(in)
+	if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+		t.Fatalf("unconfirmed retry tail could overlap later primary: %+v, %v", got, err)
+	}
+	in.Samples[len(in.Samples)-1].Completion = completion
+	got, err = SummarizeJobSizing(in)
+	if err != nil || got.CPU.State != JobSizingIncreaseAdvised || got.Retried != 1 {
+		t.Fatalf("confirmed non-overlap should restore advice: %+v, %v", got, err)
 	}
 }
