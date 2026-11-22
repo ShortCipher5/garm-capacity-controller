@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -213,8 +214,22 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 		t.Cleanup(r.close)
 		return r
 	}
+	checkRefusal := func(err error, reason string) bool {
+		t.Helper()
+		if !errors.Is(err, errCIHealthConfiguration) || gatewayStartupFailureMessage(err) != "CI Health history startup refused: "+reason {
+			t.Errorf("wanted redacted startup refusal %q, got %v", reason, err)
+			return false
+		}
+		for _, private := range []string{dir, review.SnapshotSHA256, review.SourceID, testHistorySnapshot} {
+			if strings.Contains(gatewayStartupFailureMessage(err), private) {
+				t.Errorf("startup refusal exposed private review data")
+				return false
+			}
+		}
+		return true
+	}
 	runtime := openRuntime()
-	if err := attachConfiguredCIHistory(ctx, conf, runtime); err != errCIHealthConfiguration || runtime.activeHistory() != nil {
+	if err := attachConfiguredCIHistory(ctx, conf, runtime); !checkRefusal(err, "existing history snapshot could not be safely reopened") || runtime.activeHistory() != nil {
 		t.Fatal("missing snapshot initialized/adopted", err)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
@@ -239,13 +254,18 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 		return fmt.Sprintf("%x", sha256.Sum256(raw))
 	}
 	review.SnapshotSHA256 = digest()
-	if err := attachConfiguredCIHistory(ctx, conf, runtime); err != errCIHealthConfiguration {
+	if err := attachConfiguredCIHistory(ctx, conf, runtime); !checkRefusal(err, "existing history snapshot could not be safely reopened") {
 		t.Fatal("competing held writer was accepted", err)
 	}
 	if err := seed.Close(); err != nil {
 		t.Fatal(err)
 	}
 	initial := review.SnapshotSHA256
+	review.Inode++
+	if err := attachConfiguredCIHistory(ctx, conf, runtime); !checkRefusal(err, "reviewed history directory custody could not be verified") {
+		t.Fatal("mismatched directory identity was accepted", err)
+	}
+	review.Inode--
 	demandPath := filepath.Join(t.TempDir(), "demand.json")
 	rawDemand, err := json.Marshal(f.demand)
 	if err != nil {
@@ -272,7 +292,7 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 	// The missing ledger configuration would fail next. Returning the history
 	// configuration error proves the exact reviewed path runs first on the
 	// real serving path, not just in the adapter fixture below.
-	if err := serveOnListeners(ctx, conf, false, false, makeListener(), nil); err != errCIHealthConfiguration ||
+	if err := serveOnListeners(ctx, conf, false, false, makeListener(), nil); !checkRefusal(err, "history snapshot does not match independent review") ||
 		f.reads.Load() != 0 || digest() != initial {
 		t.Fatal("real startup bypassed local review or touched state before review", err)
 	}
@@ -282,7 +302,11 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 		if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := attachConfiguredCIHistory(ctx, conf, runtime); err != errCIHealthConfiguration {
+		reason := "existing history snapshot could not be safely reopened"
+		if strings.HasSuffix(name, ".intent") || strings.HasSuffix(name, ".stage") {
+			reason = "history publication could not be verified; preserve the existing store for review"
+		}
+		if err := attachConfiguredCIHistory(ctx, conf, runtime); !checkRefusal(err, reason) {
 			t.Fatal("unrelated or unresolved store adopted", err)
 		}
 		if err := os.Remove(path); err != nil {
@@ -290,7 +314,7 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 		}
 	}
 	review.SourceID = strings.Repeat("b", 64)
-	if err := attachConfiguredCIHistory(ctx, conf, runtime); err != errCIHealthConfiguration {
+	if err := attachConfiguredCIHistory(ctx, conf, runtime); !checkRefusal(err, "configured history source does not match the review") {
 		t.Fatal("another source approved by name/repository alone", err)
 	}
 	review.SourceID = f.runtime.source.SourceID()
@@ -340,16 +364,16 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 	}
 	restart := openRuntime()
 	readsBeforeRestart := f.reads.Load()
-	if err := attachConfiguredCIHistory(ctx, conf, restart); err != errCIHealthConfiguration {
+	if err := attachConfiguredCIHistory(ctx, conf, restart); !checkRefusal(err, "history snapshot does not match independent review") {
 		t.Fatal("stale review silently reopened changed state", err)
 	}
 	review.SnapshotSHA256 = changed
-	if err := attachConfiguredCIHistory(ctx, conf, restart); err != errCIHealthConfiguration {
+	if err := attachConfiguredCIHistory(ctx, conf, restart); !checkRefusal(err, "history checkpoint does not match independent review") {
 		t.Fatal("new bytes alone authorized the stale reviewed revision", err)
 	}
 	review.Workflows[0].Revision = &one
 	review.Workflows[0].Checkpoint = &one
-	if err := attachConfiguredCIHistory(ctx, conf, restart); err != errCIHealthConfiguration {
+	if err := attachConfiguredCIHistory(ctx, conf, restart); !checkRefusal(err, "history checkpoint does not match independent review") {
 		t.Fatal("reviewed revision masked a mismatched checkpoint", err)
 	}
 	review.Workflows[0].Checkpoint = &zero
@@ -368,7 +392,20 @@ func TestCIHistoryStartupReviewedStoreAndSameOwnerRoute(t *testing.T) {
 	}
 	fixed.Close()
 	review.SnapshotSHA256 = digest()
-	if err := attachConfiguredCIHistory(ctx, conf, openRuntime()); err != errCIHealthConfiguration {
+	if err := attachConfiguredCIHistory(ctx, conf, openRuntime()); !checkRefusal(err, "stored history scope does not match independent review") {
 		t.Fatal("reviewed directory adopted an unapproved stored workflow checkpoint", err)
+	}
+}
+
+func TestHistoryStartupFailureMessagesDoNotExposeRawErrors(t *testing.T) {
+	hidden := "private upstream path"
+	wrapped := fmt.Errorf("%s: %w", hidden, historyCursorReviewMismatch)
+	if got := gatewayStartupFailureMessage(wrapped); got != "CI Health history startup refused: history checkpoint does not match independent review" {
+		t.Fatal("did not choose fixed history refusal", got)
+	}
+	for _, err := range []error{errors.New(hidden), fmt.Errorf("%s: %w", hidden, errCIHealthConfiguration), historyStartupRefusalKind(255)} {
+		if got := gatewayStartupFailureMessage(err); got != "gateway unavailable; no automatic recovery or deployment attempted" {
+			t.Fatal("unexpected startup output", got)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"math"
 	"net"
 	"os"
@@ -93,12 +94,15 @@ func attachConfiguredCIHistory(ctx context.Context, c configuration, runtime *ci
 		return nil
 	}
 	history := *c.CIHealth.History
-	if runtime == nil || !runtime.source.LifetimeActive() || runtime.source.SourceID() != history.SourceID {
-		return errCIHealthConfiguration
+	if runtime == nil || !runtime.source.LifetimeActive() {
+		return historySourceUnavailable
+	}
+	if runtime.source.SourceID() != history.SourceID {
+		return historySourceReviewMismatch
 	}
 	root, err := openCIHistoryRoot(ctx, history)
 	if err != nil {
-		return err
+		return historyCustodyUnverified
 	}
 	defer root.Close()
 	digest, _ := ciHistoryDigest(history.SnapshotSHA256)
@@ -111,11 +115,69 @@ func attachConfiguredCIHistory(ctx context.Context, c configuration, runtime *ci
 	}
 	owned, exact, err := cihealthsource.ReopenReviewedCycleHistory(ctx, runtime.source, root, digest, reviewed)
 	if err != nil {
-		return errCIHealthConfiguration
+		return historyStartupRefusal(err)
 	}
 	if ctx.Err() != nil || runtime.attachOwnedHistoryWithTrends(owned, exact) != nil {
 		_ = owned.Close()
 		return errCIHealthConfiguration
 	}
 	return nil
+}
+
+// These fixed failure kinds are the only ones exposed from the serve path.
+// They carry no raw cause, private path, identity, or reviewed value.
+type historyStartupRefusalKind uint8
+
+const (
+	historySourceUnavailable historyStartupRefusalKind = iota + 1
+	historySourceReviewMismatch
+	historyCustodyUnverified
+	historyPublicationUnverified
+	historySnapshotReviewMismatch
+	historyScopeReviewMismatch
+	historyCursorReviewMismatch
+	historyReopenUnsafe
+)
+
+func (k historyStartupRefusalKind) message() string {
+	switch k {
+	case historySourceUnavailable:
+		return "configured history source is unavailable"
+	case historySourceReviewMismatch:
+		return "configured history source does not match the review"
+	case historyCustodyUnverified:
+		return "reviewed history directory custody could not be verified"
+	case historyPublicationUnverified:
+		return "history publication could not be verified; preserve the existing store for review"
+	case historySnapshotReviewMismatch:
+		return "history snapshot does not match independent review"
+	case historyScopeReviewMismatch:
+		return "stored history scope does not match independent review"
+	case historyCursorReviewMismatch:
+		return "history checkpoint does not match independent review"
+	case historyReopenUnsafe:
+		return "existing history snapshot could not be safely reopened"
+	}
+	return ""
+}
+
+func (k historyStartupRefusalKind) Error() string {
+	return errCIHealthConfiguration.Error() + ": " + k.message()
+}
+
+func (k historyStartupRefusalKind) Unwrap() error { return errCIHealthConfiguration }
+
+func historyStartupRefusal(err error) error {
+	switch {
+	case errors.Is(err, cihealth.ErrHistoryUncertain):
+		return historyPublicationUnverified
+	case errors.Is(err, cihealth.ErrHistorySnapshotReview):
+		return historySnapshotReviewMismatch
+	case errors.Is(err, cihealth.ErrHistoryScopeReview):
+		return historyScopeReviewMismatch
+	case errors.Is(err, cihealthsource.ErrHistoryCursorReview):
+		return historyCursorReviewMismatch
+	default:
+		return historyReopenUnsafe
+	}
 }

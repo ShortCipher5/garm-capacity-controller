@@ -1,5 +1,5 @@
 import React, {useEffect, useId, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, qualifiedCIJobURL, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciAttemptKey, ciHealthExpiry, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, qualifiedCIJobURL, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
@@ -43,6 +43,10 @@ function Result({conclusion}) {
   return Object.hasOwn(results, conclusion) ? <span>{results[conclusion]}</span> : <span className="muted">Unknown</span>;
 }
 function At({value}) { return <time dateTime={value}>{value.slice(0,19).replace("T", " ")} UTC</time>; }
+function Cutoff({label, deadline}) {
+  const value = new Date(deadline).toISOString();
+  return <p className="muted"><strong>{label}: </strong><time dateTime={value}>{value.replace("T", " ").replace("Z", " UTC")}</time></p>;
+}
 
 function StepRows({attempt, job, stepId}) {
   return (
@@ -232,6 +236,10 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
   const groups = ciHealthWorkflowCounts(snapshot, now);
   if (groups === null) return null;
   const attempts = snapshot.timing.attempts;
+  const historyDeadline = snapshot.history ? Date.parse(snapshot.history.expires_at) : null;
+  // The owner panel supplies the monotonic lease gate. Recheck the wall
+  // cutoff here too, so a formerly true render flag cannot show late rows.
+  const historyVisible = showHistory && historyDeadline !== null && historyDeadline > now;
   const active = attempts.filter(activeAttempt);
   const other = attempts.filter((a) => !activeAttempt(a));
   const jobId = (key) => prefix + "-ci-job-" + key;
@@ -241,6 +249,9 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
   return (
     <div className="ci-health-timing" ref={root}>
       <p><strong>Snapshot observed:</strong> <At value={snapshot.observed_at} /></p>
+      <Cutoff label="Timing display cutoff" deadline={ciHealthExpiry(snapshot)} />
+      {historyVisible ? <Cutoff label="Retained history display cutoff" deadline={historyDeadline} />
+        : snapshot.history && <p role="status" className="muted">Retained history has expired for this snapshot. Current timing remains visible.</p>}
       <p className="muted">
         {snapshot.coverage === "bounded_partial" ? "Partial coverage: not all requested observations were included. "
           : snapshot.coverage === "observed_subset" ? "Only selected observations are shown. "
@@ -253,7 +264,7 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} jobId={jobId} viewJob={viewJob} />
         <WorkflowCounts groups={groups} />
-        {showHistory && snapshot.history && <CIHealthHistory history={snapshot.history} durationText={displayDuration} />}
+        {historyVisible && <CIHealthHistory history={snapshot.history} durationText={displayDuration} />}
         <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
         {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} />) : <p>No active attempts in this snapshot.</p>}
@@ -399,6 +410,7 @@ export function CIHealthPanel({enabled, read}) {
         <button type="button" disabled={state === "loading"} onClick={refresh}>{snapshot ? "Refresh timing snapshot" : "Load timing snapshot"}</button>
       </div>
       <p className="muted">Read-only workflow, job and step timings and outcomes. This view does not show logs, individual test results, runner utilization or sizing recommendations.</p>
+      <p className="muted">Loading checks the latest available observation; it does not start a GitHub collection or automatically update the view. A fresh observation may not be available between collections.</p>
       <div role="status">
         {state === "loading" && "Reading CI Health…"}
         {state === "unavailable" && "CI Health timing is unavailable. Try again to read a new snapshot."}

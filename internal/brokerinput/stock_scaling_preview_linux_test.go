@@ -65,10 +65,10 @@ func TestStockMaximumPreviewHistoryFailsClosed(t *testing.T) {
 	if changed := collect(60*time.Second, 2, nil); len(changed.Proposals) != 0 || changed.Reason != "awaiting_matching_sample" {
 		t.Fatal("retained history across scope change")
 	}
-	if repeated := collect(60*time.Second, 2, nil); len(repeated.Proposals) != 0 || repeated.Reason != "no_confirmed_change" {
+	if repeated := collect(60*time.Second, 2, nil); len(repeated.Proposals) != 0 || repeated.Reason != "awaiting_matching_sample" {
 		t.Fatal("reused same sample")
 	}
-	if stale := collect(120*time.Second, 2, nil); len(stale.Proposals) != 0 {
+	if stale := collect(120*time.Second, 2, nil); len(stale.Proposals) != 0 || stale.Reason != "awaiting_matching_sample" {
 		t.Fatal("used expired history")
 	}
 	raw, err := json.Marshal(out)
@@ -242,14 +242,14 @@ func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
 			p := b.pools["visible-pool"]
 			p.target = p.current
 			b.pools["visible-pool"] = p
-		}, "no_confirmed_change", false},
+		}, "no_confirmed_change", true},
 		{"no demand", func(a, b *scalingPreviewSample) {
 			p := b.pools["visible-pool"]
 			p.target = p.current
 			b.pools["visible-pool"] = p
-		}, "no_confirmed_change", false},
-		{"expired prior", func(a, b *scalingPreviewSample) { a.expires = end }, "no_confirmed_change", false},
-		{"unconfirmed prior", func(a, b *scalingPreviewSample) { a.finish = end }, "no_confirmed_change", false},
+		}, "no_confirmed_change", true},
+		{"expired prior", func(a, b *scalingPreviewSample) { a.expires = end }, "awaiting_matching_sample", false},
+		{"unconfirmed prior", func(a, b *scalingPreviewSample) { a.finish = end }, "awaiting_matching_sample", false},
 		{"changed scope", func(a, b *scalingPreviewSample) { b.scope = [32]byte{2} }, "awaiting_matching_sample", false},
 		{"incomplete current", func(a, b *scalingPreviewSample) { b.incomplete = true }, "incomplete_evidence", false},
 		{"hidden assignment", func(a, b *scalingPreviewSample) {
@@ -261,7 +261,7 @@ func TestStockMaximumFitExplanationRequiresFreshVisibleGrowth(t *testing.T) {
 			a.configuredMaximumFit.pools[hidden] = a.configuredMaximumFit.pools["visible-pool"]
 			b.configuredMaximumFit.pools[hidden] = b.configuredMaximumFit.pools["visible-pool"]
 			b.order = []string{hidden}
-		}, "no_confirmed_change", false},
+		}, "no_confirmed_change", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := sample(now), sample(end)
