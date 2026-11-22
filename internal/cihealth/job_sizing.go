@@ -3,6 +3,7 @@ package cihealth
 import (
 	"errors"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -106,6 +107,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 		return out, nil
 	}
 	seen := make(map[AttemptKey]bool, len(in.Samples))
+	windows := make([]jobSizingRunnerWindow, 0, len(in.Samples))
 	var first, last time.Time
 	var highestCPU, highestRAM uint64
 	for _, sample := range in.Samples {
@@ -133,6 +135,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			return fail()
 		}
 		seen[key] = true // One slot per source/run/attempt, even if job IDs differ.
+		windows = append(windows, jobSizingRunnerWindow{r.Scope.RunnerIncarnation, start, end})
 		if key.Attempt != 1 {
 			out.Retried++
 			continue
@@ -164,6 +167,9 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			}
 		}
 	}
+	if overlappingJobSizingWindows(windows) {
+		return fail()
+	}
 	if out.AtRisk != 0 || out.Unknown != 0 || out.Unsuccessful != 0 {
 		out.CPU.State, out.RAM.State = JobSizingNeedsRiskOrOutcomeReview, JobSizingNeedsRiskOrOutcomeReview
 		return out, nil
@@ -179,6 +185,32 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 	finalizeJobSizingMetric(&out.CPU, out.Successful, highestCPU, in.Shape.CPUMilli)
 	finalizeJobSizingMetric(&out.RAM, out.Successful, highestRAM, in.Shape.RAMBytes)
 	return out, nil
+}
+
+type jobSizingRunnerWindow struct {
+	incarnation string
+	start, end  time.Time
+}
+
+// A runner-wide resource observation cannot independently describe two jobs
+// executing on the same incarnation at the same time. Reject ambiguity even
+// for retries: their samples are not counted, but their execution may affect
+// a primary job's counters. Touching boundaries share no elapsed time.
+func overlappingJobSizingWindows(windows []jobSizingRunnerWindow) bool {
+	sort.Slice(windows, func(i, j int) bool {
+		a, b := windows[i], windows[j]
+		if a.incarnation != b.incarnation {
+			return a.incarnation < b.incarnation
+		}
+		return a.start.Before(b.start)
+	})
+	for i := 1; i < len(windows); i++ {
+		a, b := windows[i-1], windows[i]
+		if a.incarnation == b.incarnation && b.start.Before(a.end) {
+			return true
+		}
+	}
+	return false
 }
 
 // jobSizingSamplingCeiling checks that the diagnostic is possible for the
