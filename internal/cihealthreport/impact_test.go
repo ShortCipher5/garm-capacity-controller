@@ -125,3 +125,20 @@ func TestRankReviewedCaseImpactKeepsDistinctShardsOfSameCase(t *testing.T) {
 		t.Fatalf("distinct reviewed shards pooled or ordered incorrectly: %+v %v", got, err)
 	}
 }
+
+func TestRankReviewedCaseImpactRequiresConsistentJobAcrossCohorts(t *testing.T) {
+	first := impactInput(101, reviewedTestCaseOnJob(t, 1, 1, 0, 201, 20, Failure, "1"))
+	sameJob := impactInput(102, reviewedTestCaseOnJob(t, 1, 1, 0, 202, 20, Pass, "1"))
+	if got, err := RankReviewedCaseImpact([]ReviewedCaseImpactInput{first, sameJob}); err != nil || len(got) != 2 {
+		t.Fatalf("valid distinct cases in one job refused: %+v %v", got, err)
+	}
+	for _, second := range []ReviewedCaseImpactInput{
+		impactInput(102, reviewedTestCaseOnJob(t, 1, 2, 0, 203, 20, Pass, "1")),
+		impactInput(102, reviewedTestCaseOnJob(t, 2, 1, 0, 204, 20, Pass, "1")),
+	} {
+		if got, err := RankReviewedCaseImpact([]ReviewedCaseImpactInput{first, second}); got != nil ||
+			!errors.Is(err, ErrCaseComparison) {
+			t.Fatalf("conflicting job claimed by different cohorts: %+v %v", got, err)
+		}
+	}
+}

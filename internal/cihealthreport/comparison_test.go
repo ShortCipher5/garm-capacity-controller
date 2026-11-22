@@ -20,9 +20,14 @@ var compareCohort = ReviewedCaseCohort{
 
 func reviewedTestCase(t *testing.T, run, attempt int64, retry uint16, artifact int64, outcome Outcome, seconds string) ReviewedCaseObservation {
 	t.Helper()
+	return reviewedTestCaseOnJob(t, run, attempt, retry, artifact, artifact+100, outcome, seconds)
+}
+
+func reviewedTestCaseOnJob(t *testing.T, run, attempt int64, retry uint16, artifact, jobID int64, outcome Outcome, seconds string) ReviewedCaseObservation {
+	t.Helper()
 	job := cihealth.JobKey{Attempt: cihealth.AttemptKey{
 		Source: compareCohort.Source, RepositoryID: compareCohort.RepositoryID, WorkflowID: compareCohort.WorkflowID, RunID: run, Attempt: attempt,
-	}, JobID: artifact + 100}
+	}, JobID: jobID}
 	binding := ArtifactBinding{
 		Attempt: job.Attempt, ArtifactID: artifact, Job: &job, Shard: compareCohort.ShardKey, Retry: &retry,
 	}
@@ -50,6 +55,19 @@ func reviewedTestCase(t *testing.T, run, attempt int64, retry uint16, artifact i
 		Cohort: compareCohort, ArtifactID: artifact, Job: job, Occurrence: 2, Retry: retry,
 		ExpectedReportSHA256: sha256.Sum256([]byte(raw)),
 	}}
+}
+
+func TestReviewedCaseRequiresConsistentRunAndAttemptForEachJob(t *testing.T) {
+	failure := reviewedTestCaseOnJob(t, 1, 1, 0, 201, 20, Failure, "1")
+	retry := reviewedTestCaseOnJob(t, 1, 1, 1, 202, 20, Pass, "1")
+	if got, err := CompareReviewedCase(compareCohort, []ReviewedCaseObservation{failure, retry}, 0); err != nil ||
+		got.RecoveryAmongRetestedFailures != (Frequency{1, 1}) {
+		t.Fatalf("valid same-job framework retry refused: %+v %v", got, err)
+	}
+	assertNoComparison(t, compareCohort, []ReviewedCaseObservation{failure,
+		reviewedTestCaseOnJob(t, 1, 2, 0, 203, 20, Pass, "1")})
+	assertNoComparison(t, compareCohort, []ReviewedCaseObservation{failure,
+		reviewedTestCaseOnJob(t, 2, 1, 0, 204, 20, Pass, "1")})
 }
 
 func TestReviewedCaseExactTimingPassFailAndRetryDenominators(t *testing.T) {

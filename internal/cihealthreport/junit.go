@@ -120,7 +120,9 @@ func ParseJUnit(raw []byte, binding ArtifactBinding) (Report, error) {
 	if !utf8.Valid(raw) {
 		return fail()
 	}
-	d := xml.NewDecoder(bytes.NewReader(raw))
+	// A single UTF-8 BOM is allowed only at the start of the document.
+	// Remove it for decoding, not from the original digest or byte bounds.
+	d := xml.NewDecoder(bytes.NewReader(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF"))))
 	// Standard XML escaping is handled by the strict decoder. No custom
 	// entities, external charset readers, DTDs or stylesheet PIs.
 	d.Strict = true
