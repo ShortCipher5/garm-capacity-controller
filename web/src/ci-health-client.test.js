@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ciHealthEndpoint, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciHealthEndpoint, ciJobHandleHeader, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {endpoint, ReadSession, SessionEnded, validateOverview} from "./client.js";
 
 const token = "a".repeat(64);
@@ -217,4 +217,74 @@ test("optional creation-to-start is an independent exact duration for started jo
       assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
     }
   }
+});
+
+const exactJobSelection = {
+  handle: "A".repeat(43), source: "registry_1", repository_id: "9007199254740993", workflow_id: "9007199254740997",
+  run_id: "9223372036854775807", attempt: "2", job_id: "9007199254740995",
+};
+const {handle: ignoredFixtureHandle, ...exactJobResponseIDs} = exactJobSelection;
+const exactJobHref = "https://github.com/synthetic/fixture/actions/runs/9223372036854775807/job/9007199254740995";
+
+test("CI job owner lookup validates origin, exact identity, and response bounds", async () => {
+  const responses = [
+    wire({...exactJobResponseIDs, url: exactJobHref}),
+    wire({...exactJobResponseIDs, attempt: "1", url: exactJobHref}),
+    wire({...exactJobResponseIDs, url: exactJobHref.replace("github.com", "github.com@other.invalid")}),
+    wire({...exactJobResponseIDs, url: exactJobHref + "?redirect=1"}),
+    wire({...exactJobResponseIDs, url: exactJobHref.replace("/job/", "/runs/")}),
+    wire({...exactJobResponseIDs, url: exactJobHref.replace(/5$/, "6")}),
+    new Response(" ".repeat(1025), {headers: {"content-type": "application/json"}}),
+    new Response("", {status: 404}),
+    new Response("", {status: 401}),
+  ];
+  const session = sessionWith(async (url, options) => {
+    assert.equal(url, ciHealthEndpoint);
+    assert.equal(options.method, "GET");
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    assert.deepEqual(options.headers, {Authorization: "Bearer " + token, Accept: "application/json", [ciJobHandleHeader]: exactJobSelection.handle});
+    return responses.shift();
+  });
+  await assert.rejects(session.ciHealthJobDestination(exactJobSelection), SessionEnded);
+  await session.connect(token);
+  assert.equal(await session.ciHealthJobDestination({...exactJobSelection, handle: "bad"}), null);
+  assert.equal(await session.ciHealthJobDestination(exactJobSelection), exactJobHref);
+  for (let i = 0; i < 7; i++) assert.equal(await session.ciHealthJobDestination(exactJobSelection), null);
+  await assert.rejects(session.ciHealthJobDestination(exactJobSelection), /Read authorization ended/);
+  await assert.rejects(session.ciHealthJobDestination(exactJobSelection), SessionEnded);
+  assert.equal(responses.length, 0);
+});
+
+test("timing refresh and disconnect cancel late job resolutions", async () => {
+  const pending = [];
+  const session = sessionWith((url, options) => new Promise((resolve) => pending.push({resolve, signal: options.signal})));
+  await session.connect(token);
+  const click = session.ciHealthJobDestination(exactJobSelection);
+  const refresh = session.ciHealthSnapshot();
+  assert.equal(pending[0].signal.aborted, true);
+  pending[0].resolve(wire({...exactJobResponseIDs, url: exactJobHref}));
+  await assert.rejects(click, SessionEnded);
+  pending[1].resolve(wire(snapshot()));
+  assert.equal((await refresh).state, "observed");
+  const revoked = session.ciHealthJobDestination(exactJobSelection);
+  session.disconnect();
+  assert.equal(pending[2].signal.aborted, true);
+  pending[2].resolve(wire({...exactJobResponseIDs, url: exactJobHref}));
+  await assert.rejects(revoked, SessionEnded);
+});
+
+test("current timing can carry a unique handle but never a URL", () => {
+  const view = snapshot();
+  const jobs = view.timing.attempts[0].jobs;
+  jobs[0].job_link_handle = exactJobSelection.handle;
+  assert.equal(validateCIHealthSnapshot(view), view);
+  jobs[0].url = exactJobHref;
+  assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
+  delete jobs[0].url;
+  jobs.push({...jobs[0], id: "9007199254740996"});
+  assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
+  jobs[1].job_link_handle = "A".repeat(42) + "B";
+  assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
 });

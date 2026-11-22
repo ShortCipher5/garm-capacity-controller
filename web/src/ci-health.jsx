@@ -1,5 +1,5 @@
 import React, {useEffect, useId, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthExpiry, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciAttemptKey, ciHealthExpiry, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, qualifiedCIJobURL, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
@@ -66,12 +66,13 @@ function StepRows({attempt, job, stepId}) {
     </div>
   );
 }
-function JobRow({attempt, job, jobId, stepId}) {
+function JobRow({attempt, job, jobId, stepId, openJob}) {
   const skip = job.status === "skipped";
   return (
     <li id={jobId(ciJobKey(attempt, job.id))} data-ci-job-row="" tabIndex={-1}>
       <div className="ci-health-row-head">
         <strong>Job <code>{job.id}</code></strong> <Phase status={job.status} />
+        {job.job_link_handle && openJob && <button type="button" onClick={() => openJob(attempt, job)}>Open exact job on GitHub</button>}
       </div>
       <dl className="ci-health-facts">
         <div><dt>Result</dt><dd><Result conclusion={job.conclusion} /></dd></div>
@@ -90,7 +91,7 @@ function JobRow({attempt, job, jobId, stepId}) {
     </li>
   );
 }
-function AttemptRow({attempt: a, jobId, stepId}) {
+function AttemptRow({attempt: a, jobId, stepId, openJob}) {
   return (
     <details className="ci-health-attempt" data-ci-attempt="" open={activeAttempt(a) || undefined}>
       <summary><strong>Run <code>{a.run_id}</code>, attempt <code>{a.attempt}</code></strong> <Phase status={a.status} /></summary>
@@ -105,7 +106,7 @@ function AttemptRow({attempt: a, jobId, stepId}) {
           : <div><dt>Attempt wall time</dt><dd><Timing span={a.wall} skipped={a.status === "skipped"} /></dd></div>}
       </dl>
       {a.jobs.length > 0
-        ? <ul className="ci-health-jobs" aria-label="Observed jobs">{a.jobs.map((job) => <JobRow key={job.id} attempt={a} job={job} jobId={jobId} stepId={stepId} />)}</ul>
+        ? <ul className="ci-health-jobs" aria-label="Observed jobs">{a.jobs.map((job) => <JobRow key={job.id} attempt={a} job={job} jobId={jobId} stepId={stepId} openJob={openJob} />)}</ul>
         : <p className="muted">No job observations in this snapshot.</p>}
     </details>
   );
@@ -229,7 +230,7 @@ function WorkflowCounts({groups}) {
   </section>;
 }
 
-export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHistory = false}) {
+export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHistory = false, openJob}) {
   const prefix = useId();
   const root = useRef(null);
   const groups = ciHealthWorkflowCounts(snapshot, now);
@@ -266,9 +267,9 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
         {historyVisible && <CIHealthHistory history={snapshot.history} durationText={displayDuration} />}
         <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
-        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} />) : <p>No active attempts in this snapshot.</p>}
+        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
-        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} />) : <p>No other attempts in this snapshot.</p>}
+        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} />) : <p>No other attempts in this snapshot.</p>}
       </>}
     </div>
   );
@@ -280,8 +281,12 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
 export function CIHealthPanel({enabled, read}) {
   const [view, setView] = useState(null);
   const request = useRef(null);
+  const jobRequest = useRef(null);
+  const owner = useRef(null);
+  const [jobStatus, setJobStatus] = useState("");
   const refreshGeneration = useRef(0);
   const available = ciHealthNavigationAvailable(enabled, read);
+  owner.current = available ? read : null;
   const current = view?.owner === read ? view : null;
   const snapshot = current?.snapshot;
   const lease = current?.lease;
@@ -291,6 +296,8 @@ export function CIHealthPanel({enabled, read}) {
   useEffect(() => () => {
     request.current?.abort();
     request.current = null;
+    jobRequest.current?.abort();
+    jobRequest.current = null;
   }, [available, read]);
 
   useEffect(() => {
@@ -300,6 +307,7 @@ export function CIHealthPanel({enabled, read}) {
       clearTimeout(timeout);
       const remaining = ciHealthLeaseRemaining(snapshot, lease);
       if (remaining < 1) {
+        jobRequest.current?.abort();
         setView((current) => current?.lease === lease ? {owner: current.owner, state: "expired"} : current);
       } else {
         timeout = setTimeout(expire, Math.floor(remaining));
@@ -333,9 +341,40 @@ export function CIHealthPanel({enabled, read}) {
     };
   }, [snapshot, historyLease]);
 
+  function currentView() {
+    return owner.current === read && refreshGeneration.current === current?.generation &&
+      ciHealthLeaseRemaining(snapshot, lease) > 0;
+  }
+
+  async function openJob(a, job) {
+    if (!currentView() || !job.job_link_handle) return;
+    jobRequest.current?.abort();
+    const controller = new AbortController();
+    jobRequest.current = controller;
+    const active = () => jobRequest.current === controller && !controller.signal.aborted && currentView();
+    const jobLink = {
+      handle: job.job_link_handle, source: a.source, repository_id: a.repository_id,
+      workflow_id: a.workflow_id, run_id: a.run_id, attempt: a.attempt, job_id: job.id,
+    };
+    setJobStatus("Resolving exact GitHub job…");
+    try {
+      const raw = await read({signal: controller.signal, jobLink});
+      if (!active()) return;
+      const href = qualifiedCIJobURL(raw, jobLink.run_id, jobLink.job_id);
+      if (href) window.location.assign(href);
+      else setJobStatus("GitHub job destination unavailable. Load a fresh timing snapshot.");
+    } catch {
+      if (active()) setJobStatus("GitHub job destination unavailable. Load a fresh timing snapshot.");
+    } finally {
+      if (jobRequest.current === controller) jobRequest.current = null;
+    }
+  }
+
   async function refresh() {
     if (!available) return;
     request.current?.abort();
+    jobRequest.current?.abort();
+    setJobStatus("");
     const generation = ++refreshGeneration.current;
     const controller = new AbortController();
     request.current = controller;
@@ -377,9 +416,10 @@ export function CIHealthPanel({enabled, read}) {
         {state === "unavailable" && "CI Health timing is unavailable. Try again to read a new snapshot."}
         {state === "expired" && "The snapshot expired. Load a new snapshot to view timing."}
       </div>
+      {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && jobStatus && <p role="status">{jobStatus}</p>}
       {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && <CIHealthTiming key={current.generation} snapshot={snapshot}
         showHistory={ciHealthLeaseRemaining(snapshot, historyLease) > 0}
-        canNavigate={() => refreshGeneration.current === current.generation && ciHealthLeaseRemaining(snapshot, lease) > 0} />}
+        openJob={openJob} canNavigate={currentView} />}
     </section>
   );
 }
