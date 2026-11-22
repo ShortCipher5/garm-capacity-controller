@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,5 +256,81 @@ func TestReadAttemptFactsIsOwnedCopy(t *testing.T) {
 	f.Jobs[0].Steps[0].Key.Number = 100
 	if original.Facts().Jobs[0].Steps[0].Key.Number != 7 {
 		t.Fatal("caller changed bridge facts")
+	}
+}
+
+func TestReadCycleInterleavesRunningAndQueuedUnderAttemptCap(t *testing.T) {
+	from, to := relativeWindow()
+	repo := cycleRepos()[0]
+	base := "/repos/fixture/" + repo.Name
+	transition := runID + maxCycleAttempts - 1
+	running := runID + maxCycleAttempts
+	var detailsMu sync.Mutex
+	var details []int64
+	var reads, discoveryReads atomic.Int32
+	s := fixtureRepos(t, []demandrepair.CIRepository{repo}, func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		switch {
+		case r.URL.Path == base:
+			_ = json.NewEncoder(w).Encode(repoMetadata(repo))
+		case r.URL.Path == base+"/actions/runs":
+			discoveryReads.Add(1)
+			switch r.URL.Query().Get("status") {
+			case "queued":
+				rows := make([]map[string]any, 0, maxCycleAttempts)
+				for i := range maxCycleAttempts {
+					rows = append(rows, cycleRun(repo, runID+int64(i), 2, "queued", from))
+				}
+				runPage(w, rows, len(rows))
+			case "in_progress":
+				runPage(w, []map[string]any{
+					cycleRun(repo, running, 2, "in_progress", from),
+					cycleRun(repo, transition, 2, "in_progress", from),
+				}, 2)
+			default:
+				runPage(w, nil, 0)
+			}
+		case strings.HasPrefix(r.URL.Path, base+"/actions/runs/"):
+			suffix := strings.Split(strings.TrimPrefix(r.URL.Path, base+"/actions/runs/"), "/")
+			run, err := strconv.ParseInt(suffix[0], 10, 64)
+			if err != nil || len(suffix) < 3 || suffix[1] != "attempts" || suffix[2] != "2" {
+				t.Error("not an exact attempt target")
+				w.WriteHeader(404)
+				return
+			}
+			status := "queued"
+			if run == running || run == transition {
+				status = "in_progress"
+			}
+			if len(suffix) == 3 {
+				detailsMu.Lock()
+				details = append(details, run)
+				detailsMu.Unlock()
+				_ = json.NewEncoder(w).Encode(cycleRun(repo, run, 2, status, from))
+			} else {
+				jobPage(w, run, 2, status)
+			}
+		default:
+			t.Error("out of scope read")
+			w.WriteHeader(404)
+		}
+	})
+	got, err := ReadCycle(t.Context(), s, []string{repo.GarmID}, from, to)
+	facts := got.Facts()
+	detailsMu.Lock()
+	defer detailsMu.Unlock()
+	if err != nil || got.State() != CyclePartial || len(facts) != maxCycleAttempts ||
+		len(details) != maxCycleAttempts || discoveryReads.Load() != 6 || reads.Load() > maxCycleHTTPReads {
+		t.Fatalf("unexpected cycle/attempt budget: state %v facts %d details %d discovery reads %d total reads %d: %v", got.State(), len(facts), len(details), discoveryReads.Load(), reads.Load(), err)
+	}
+	if details[0] != running || details[1] != runID || details[2] != transition {
+		t.Fatalf("running and queued candidates not interleaved: %v", details)
+	}
+	seen := make(map[int64]bool, len(facts))
+	for _, f := range facts {
+		if seen[f.Key.RunID] {
+			t.Fatalf("attempt fetched twice after transitioning: %+v", f.Key)
+		}
+		seen[f.Key.RunID] = true
 	}
 }
