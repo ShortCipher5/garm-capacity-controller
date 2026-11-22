@@ -69,8 +69,15 @@ func (s *Service) snapshot(now time.Time) Status {
 	if e.Status == "observed" {
 		expiry := e.StartedAt.Add(s.maxAge)
 		out.ExpiresAt = &expiry
-		if !now.Before(expiry) && out.State != "stopped" {
-			out.State = "stale"
+		if out.State != "stopped" {
+			switch {
+			case e.StartedAt.IsZero() || e.FinishedAt.Before(e.StartedAt) || now.Before(e.FinishedAt):
+				// A wall-clock rollback can put a completed observation in
+				// the future relative to this status read, or invert a poll's timestamps.
+				out.State = "unavailable"
+			case !now.Before(expiry):
+				out.State = "stale"
+			}
 		}
 	}
 	if out.State != "observed" {
