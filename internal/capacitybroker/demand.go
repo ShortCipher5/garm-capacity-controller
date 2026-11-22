@@ -22,13 +22,20 @@ type DemandMatch struct {
 // are not idle supply. Callers must not infer a complete/fresh observation from
 // this pure function or use its result as admission authority.
 func MatchDemand(jobs []DemandJob, idle map[string]int) (DemandMatch, error) {
-	return matchDemand(jobs, idle, false)
+	return matchDemand(jobs, idle, legacyDemand)
 }
 
-// inPriorityOrder is reserved for the offline stock maximum proposal. It lets
-// the same augmenting matcher prefer older jobs without changing its public
-// legacy ordering or giving up maximum cardinality.
-func matchDemand(jobs []DemandJob, idle map[string]int, inPriorityOrder bool) (DemandMatch, error) {
+type demandMatchMode uint8
+
+const (
+	legacyDemand demandMatchMode = iota
+	stockDemandByID
+	stockDemandChronological
+)
+
+// Keep the legacy public and planner behavior. The two stock advisory callers
+// can avoid recursive slot reassignment for disjoint single-pool demand.
+func matchDemand(jobs []DemandJob, idle map[string]int, mode demandMatchMode) (DemandMatch, error) {
 	if len(jobs) > 1000 || len(idle) > 1000 {
 		return DemandMatch{}, ErrSnapshot
 	}
@@ -41,18 +48,10 @@ func matchDemand(jobs []DemandJob, idle map[string]int, inPriorityOrder bool) (D
 		slots += n
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
-	poolSlots := map[string][]int{}
-	slotPool := []string{}
-	for _, id := range ids {
-		for n := 0; n < idle[id]; n++ {
-			poolSlots[id] = append(poolSlots[id], len(slotPool))
-			slotPool = append(slotPool, id)
-		}
-	}
 	ordered := make([]DemandJob, len(jobs))
 	seen := map[string]bool{}
 	edges := 0
+	direct := mode != legacyDemand
 	for i, j := range jobs {
 		if j.ID == "" || len(j.ID) > 256 || seen[j.ID] || len(j.Candidates) > 1000 {
 			return DemandMatch{}, ErrSnapshot
@@ -60,11 +59,12 @@ func matchDemand(jobs []DemandJob, idle map[string]int, inPriorityOrder bool) (D
 		seen[j.ID] = true
 		c := append([]string(nil), j.Candidates...)
 		sort.Strings(c)
+		direct = direct && len(c) <= 1
 		for k, p := range c {
 			if _, ok := idle[p]; !ok || (k > 0 && c[k-1] == p) {
 				return DemandMatch{}, ErrSnapshot
 			}
-			edges += len(poolSlots[p])
+			edges += idle[p]
 			if edges > 100000 {
 				return DemandMatch{}, ErrSnapshot
 			}
@@ -73,8 +73,20 @@ func matchDemand(jobs []DemandJob, idle map[string]int, inPriorityOrder bool) (D
 	}
 	// Stable ordering avoids dependence on maps/caller order. Eligibility is more
 	// important than preference; augmenting paths repair greedy flexible matches.
-	if !inPriorityOrder {
+	if mode != stockDemandChronological {
 		sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	}
+	if direct {
+		return matchSingleCandidateDemand(ordered, idle), nil
+	}
+	sort.Strings(ids)
+	poolSlots := map[string][]int{}
+	slotPool := []string{}
+	for _, id := range ids {
+		for n := 0; n < idle[id]; n++ {
+			poolSlots[id] = append(poolSlots[id], len(slotPool))
+			slotPool = append(slotPool, id)
+		}
 	}
 	owners := make([]int, len(slotPool))
 	for i := range owners {
@@ -130,4 +142,25 @@ func matchDemand(jobs []DemandJob, idle map[string]int, inPriorityOrder bool) (D
 		}
 	}
 	return result, nil
+}
+
+// With at most one candidate per job, pools have independent supply. Walking
+// the requested stable priority order yields the same priority-based coverage and
+// cardinality without recursively shifting owners between identical slots.
+// Input validation, expanded edge and slot caps still run before this path.
+func matchSingleCandidateDemand(ordered []DemandJob, idle map[string]int) DemandMatch {
+	result := DemandMatch{Covered: map[string]string{}, Unmet: []DemandJob{}}
+	used := make(map[string]int)
+	for _, job := range ordered {
+		if len(job.Candidates) == 1 {
+			pool := job.Candidates[0]
+			if used[pool] < idle[pool] {
+				used[pool]++
+				result.Covered[job.ID] = pool
+				continue
+			}
+		}
+		result.Unmet = append(result.Unmet, job)
+	}
+	return result
 }
