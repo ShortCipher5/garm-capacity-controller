@@ -37,6 +37,20 @@ CREATE TABLE IF NOT EXISTS usage_samples (
 PRAGMA user_version=10;
 `
 
+// Stored timestamps use canonical UTC RFC3339Nano. Its terminal Z sorts after
+// decimal digits and the decimal point, so e.g. .100000001Z sorts before .1Z
+// as plain text despite representing a later instant. A lower terminator in
+// the indexed key orders all canonical timestamps without rewriting the
+// original values or changing the primary key's retry/deduplication contract.
+const sqliteUsageTimeKey = "replace(sampled_at,'Z','!')"
+const sqliteUsageHistoryIndex = `
+CREATE INDEX IF NOT EXISTS usage_samples_chronological ON usage_samples(host, ` + sqliteUsageTimeKey + `);
+PRAGMA user_version=29;
+`
+const sqliteUsageHistorySelect = "SELECT host,sampled_at,cpu_used_millis,ram_used_mib,disk_used_mib,source FROM usage_samples WHERE host=?"
+const sqliteUsageHistorySince = " AND " + sqliteUsageTimeKey + ">=replace(?,'Z','!')"
+const sqliteUsageHistoryOrder = " ORDER BY " + sqliteUsageTimeKey + " ASC LIMIT ?"
+
 const sqliteDiskColumn = "disk INTEGER NOT NULL DEFAULT 0 CHECK(disk>=0)"
 
 func sqliteColumnExists(tx *sql.Tx, table, column string) (bool, error) {
@@ -192,13 +206,13 @@ func (s *SQLiteStore) UsageHistory(ctx context.Context, host string, since time.
 	}
 	result := []UsageSample{}
 	err := s.readTransaction(ctx, func(tx *sql.Tx) error {
-		query := "SELECT host,sampled_at,cpu_used_millis,ram_used_mib,disk_used_mib,source FROM usage_samples WHERE host=?"
+		query := sqliteUsageHistorySelect
 		args := []any{host}
 		if !since.IsZero() {
-			query += " AND sampled_at>=?"
+			query += sqliteUsageHistorySince
 			args = append(args, since.UTC().Format(time.RFC3339Nano))
 		}
-		query += " ORDER BY sampled_at ASC LIMIT ?"
+		query += sqliteUsageHistoryOrder
 		args = append(args, limit)
 		rows, err := tx.Query(query, args...)
 		if err != nil {
