@@ -80,6 +80,22 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.match(view, /Managed runner/);
     assert.match(view, />unknown<\/td>/);
     assert.match(view, /CPU 750 ms cumulative/);
+    assert.match(view, /Project guest observations/);
+    assert.match(view, /not whole-host load or per-job usage/);
+    assert.match(view, /shared volumes may be counted more than once/);
+    assert.match(view, /complete samples from the same guest counter lifetimes/);
+    assert.doesNotMatch(view, /two consecutive discoveries/);
+    const renderUsage = (utilization) => renderToStaticMarkup(React.createElement(DiscoveryResultView, {
+      result: {...discovery, utilization},
+    }));
+    const partial = renderUsage({...discovery.utilization, cpu_cumulative_millis: 0, disk_used_mib: 0, errors: ["opaque"]});
+    assert.match(partial, /Partial project guest observations/);
+    assert.match(partial, /CPU unknown · Memory 2,560 MiB used · Disk unknown/);
+    assert.match(partial, /Positive values are observed subtotals, not complete project totals/);
+    assert.doesNotMatch(partial, /CPU 0 ms|Disk 0 MiB used/);
+    const empty = renderUsage({source: "guest-state", cpu_cumulative_millis: 0, ram_used_mib: 0, disk_used_mib: 0, guests: 0});
+    assert.match(empty, /Project guest observations: CPU 0 ms cumulative · Memory 0 MiB used · Disk 0 MiB used · 0 guest/);
+    assert.doesNotMatch(empty, /Partial project guest observations/);
     assert.match(view, /physical_capacity_scope_unqualified/);
     assert.match(view, /point-in-time snapshot/);
     assert.match(view, /Suggested budget — advisory only, never applied/);
