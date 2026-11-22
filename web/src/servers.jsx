@@ -23,7 +23,7 @@ export function UsagePanel({ host, readUsage }) {
     const controller = new AbortController();
     setSamples(undefined);
     setError("");
-    readUsage(host, { signal: controller.signal })
+    readUsage(host, { limit: 500, order: "recent", signal: controller.signal })
       .then((history) => { if (!cancelled) setSamples(history); })
       .catch((failure) => { if (!cancelled && !controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Usage history is unavailable."); });
     return () => { cancelled = true; controller.abort(); };

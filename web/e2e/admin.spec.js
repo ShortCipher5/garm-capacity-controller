@@ -46,7 +46,8 @@ test("real TLS handler + SQLite snapshot, read-only requests, refresh and reload
   expect(api.length).toBeGreaterThan(1);
   for (const request of api) {
     expect(request.method()).toBe("GET");
-    expect(new URL(request.url()).search).toBe("");
+    const url = new URL(request.url());
+    expect(url.search).toBe(url.pathname === "/admin/api/v1/usage/host-a" ? "?limit=500&order=recent" : "");
     expect(request.headers().authorization).toBe(`Bearer ${token}`);
   }
   expect(
@@ -387,7 +388,8 @@ test("audit filters stay snapshot-local across clear, refresh and disconnect", a
   await expect(audit.locator(".event .pill")).toHaveText(["#3", "#2", "#1"]);
   await usageResponse;
   await expect(page.locator(".usage-panel")).not.toContainText("Loading resource observations");
-  expect(requests.filter(url => new URL(url).pathname === "/admin/api/v1/usage/host-a")).toHaveLength(1);
+  expect(requests.filter(url => new URL(url).pathname === "/admin/api/v1/usage/host-a").map(url => new URL(url).search))
+    .toEqual(["?limit=500&order=recent"]);
   const initial = requests.length;
   await page.getByLabel("Event kind", { exact: true }).selectOption("denied");
   await page.getByLabel("Event host", { exact: true }).selectOption("host-a");

@@ -118,6 +118,56 @@ func TestUsageHistoryFiltersBySinceAndLimit(t *testing.T) {
 	}
 }
 
+func TestUsageHistoryRecentSelectsNewestBoundedPage(t *testing.T) {
+	h, store, token := fixture(t)
+	ctx := context.Background()
+	base := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	record := func(host string, n int) {
+		t.Helper()
+		if err := store.RecordUsageSample(ctx, host, base.Add(time.Duration(n)*time.Millisecond), int64(n), 0, 0, "guest-state"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for n := 0; n <= 500; n++ {
+		record("host-a", n)
+	}
+	record("host-b", 800)
+	const endpoint = "/admin/api/v1/usage/host-a"
+	check := func(query string, count, first, last int) {
+		t.Helper()
+		res := usageRequest(t, h, "GET", endpoint+query, token)
+		if res.Code != 200 {
+			t.Fatalf("%s returned %d: %s", query, res.Code, res.Body)
+		}
+		samples := decodeUsage(t, res)
+		if len(samples) != count || samples[0].CPUUsedMillis != int64(first) || samples[count-1].CPUUsedMillis != int64(last) {
+			t.Fatalf("%s did not return %d samples spanning %d through %d", query, count, first, last)
+		}
+		for i, sample := range samples {
+			if sample.Host != "host-a" || !sample.SampledAt.Equal(base.Add(time.Duration(first+i)*time.Millisecond)) {
+				t.Fatalf("%s row %d not in exact host/time order: %+v", query, i, sample)
+			}
+		}
+	}
+	check("", 500, 0, 499)
+	check("?limit=500&order=recent", 500, 1, 500)
+	record("host-a", 501)
+	check("?limit=500&order=recent", 500, 2, 501)
+	check("", 500, 0, 499)
+	cutoff := base.Add(500 * time.Millisecond).Format(time.RFC3339Nano)
+	check("?since="+cutoff+"&order=recent", 2, 500, 501)
+	check("?since="+cutoff+"&limit=1&order=recent", 1, 501, 501)
+	check("?since="+cutoff+"&limit=1", 1, 500, 500)
+	empty := usageRequest(t, h, "GET", "/admin/api/v1/usage/unused?order=recent", token)
+	if empty.Code != 200 || strings.TrimSpace(empty.Body.String()) != "[]" {
+		t.Fatalf("empty recent history: %d %s", empty.Code, empty.Body)
+	}
+	noAuth := usageRequest(t, h, "GET", endpoint+"?order=recent", "")
+	if noAuth.Code != 401 {
+		t.Fatalf("recent not authenticated: %d", noAuth.Code)
+	}
+}
+
 func TestUsageHistoryRejectsMalformedInputFailClosed(t *testing.T) {
 	h, _, token := fixture(t)
 	for _, target := range []string{
@@ -133,6 +183,11 @@ func TestUsageHistoryRejectsMalformedInputFailClosed(t *testing.T) {
 		"/admin/api/v1/usage/host-a?limit=two",
 		"/admin/api/v1/usage/host-a?limit=1.5",
 		"/admin/api/v1/usage/host-a?limit=2&limit=3",
+		"/admin/api/v1/usage/host-a?order=forward",
+		"/admin/api/v1/usage/host-a?order=",
+		"/admin/api/v1/usage/host-a?order=recent&order=recent",
+		"/admin/api/v1/usage/host-a?order=%ZZ",
+		"/admin/api/v1/usage/host-a?order=recent;limit=1",
 		"/admin/api/v1/usage/host-a?host=other",
 		"/admin/api/v1/usage/host-a?token=" + token,
 	} {

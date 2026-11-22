@@ -67,6 +67,22 @@ test("usageHistory passes since and limit and fences late bodies", async () => {
   session.disconnect();
   await assert.rejects(pending, SessionEnded);
 });
+test("usageHistory sends explicit recent order only for callers that ask", async () => {
+  const calls = [];
+  const session = new ReadSession(async (url, options) => {
+    if (url === "/admin/api/v1/overview") return overviewResponse();
+    calls.push([url, options.method]);
+    return { ok: true, status: 200, json: async () => [] };
+  });
+  await session.connect(token);
+  assert.deepEqual(await session.usageHistory("host-a", { limit: 500, order: "recent" }), []);
+  assert.deepEqual(await session.usageHistory("host-a"), []);
+  assert.deepEqual(calls, [
+    ["/admin/api/v1/usage/host-a?limit=500&order=recent", "GET"],
+    ["/admin/api/v1/usage/host-a", "GET"],
+  ]);
+});
+
 test("usageHistory maps unavailable history without fabricating samples", async () => {
   const session = new ReadSession(async (url) => {
     if (url.startsWith("/admin/api/v1/overview")) return overviewResponse();

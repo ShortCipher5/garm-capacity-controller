@@ -49,6 +49,7 @@ PRAGMA user_version=29;
 `
 const sqliteUsageHistorySelect = "SELECT host,sampled_at,cpu_used_millis,ram_used_mib,disk_used_mib,source FROM usage_samples WHERE host=?"
 const sqliteUsageHistorySince = " AND " + sqliteUsageTimeKey + ">=replace(?,'Z','!')"
+const sqliteUsageHistoryRecentOrder = " ORDER BY " + sqliteUsageTimeKey + " DESC LIMIT ?"
 const sqliteUsageHistoryOrder = " ORDER BY " + sqliteUsageTimeKey + " ASC LIMIT ?"
 
 const sqliteDiskColumn = "disk INTEGER NOT NULL DEFAULT 0 CHECK(disk>=0)"
@@ -195,6 +196,16 @@ func (s *SQLiteStore) RecordUsageSample(ctx context.Context, host string, at tim
 // rejected. A host without samples yields an empty result: monitoring absence
 // means unavailable, never a fabricated zero-filled series.
 func (s *SQLiteStore) UsageHistory(ctx context.Context, host string, since time.Time, limit int) ([]UsageSample, error) {
+	return s.usageHistory(ctx, host, since, limit, false)
+}
+
+// RecentUsageHistory selects the latest bounded samples at or after since,
+// then returns them in chronological order for display.
+func (s *SQLiteStore) RecentUsageHistory(ctx context.Context, host string, since time.Time, limit int) ([]UsageSample, error) {
+	return s.usageHistory(ctx, host, since, limit, true)
+}
+
+func (s *SQLiteStore) usageHistory(ctx context.Context, host string, since time.Time, limit int, recent bool) ([]UsageSample, error) {
 	if !validAdminText(host, 256) {
 		return nil, ErrDenied
 	}
@@ -212,7 +223,11 @@ func (s *SQLiteStore) UsageHistory(ctx context.Context, host string, since time.
 			query += sqliteUsageHistorySince
 			args = append(args, since.UTC().Format(time.RFC3339Nano))
 		}
-		query += sqliteUsageHistoryOrder
+		if recent {
+			query += sqliteUsageHistoryRecentOrder
+		} else {
+			query += sqliteUsageHistoryOrder
+		}
 		args = append(args, limit)
 		rows, err := tx.Query(query, args...)
 		if err != nil {
@@ -234,6 +249,12 @@ func (s *SQLiteStore) UsageHistory(ctx context.Context, host string, since time.
 	})
 	if err != nil {
 		return nil, err
+	}
+	if recent {
+		// Only the bounded page is reversed; SQLite does the indexed selection.
+		for lo, hi := 0, len(result)-1; lo < hi; lo, hi = lo+1, hi-1 {
+			result[lo], result[hi] = result[hi], result[lo]
+		}
 	}
 	return result, nil
 }
