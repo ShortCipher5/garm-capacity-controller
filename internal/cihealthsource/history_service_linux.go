@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,9 @@ func OpenOwnedCycleHistory(ctx context.Context, source Source, in OwnedCycleHist
 	return openOwnedCycleHistory(ctx, source, in, nil)
 }
 
+// ErrHistoryCursorReview identifies a reviewed reopen refusal without details.
+var ErrHistoryCursorReview = fmt.Errorf("%w: reviewed checkpoint mismatch", ErrCycleHistory)
+
 // ReopenReviewedCycleHistory requires an exact independent review of the
 // dedicated existing snapshot and every approved initial cursor. It exposes
 // no unreviewed cursor, creates no files and cannot initialize a store.
@@ -77,7 +81,7 @@ func ReopenReviewedCycleHistory(ctx context.Context, source Source, root *os.Roo
 	for _, item := range current {
 		if cursor, ok := want[item.Scope]; !ok || cursor != item.Cursor {
 			_ = owner.Close()
-			return nil, nil, ErrCycleHistory
+			return nil, nil, ErrHistoryCursorReview
 		}
 	}
 	if ctx.Err() != nil || len(current) != len(want) {

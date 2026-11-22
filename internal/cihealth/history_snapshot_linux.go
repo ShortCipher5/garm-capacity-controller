@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -35,6 +36,9 @@ var (
 	ErrHistory          = errors.New("CI history unavailable")
 	ErrHistoryConflict  = errors.New("CI history checkpoint or observation changed")
 	ErrHistoryUncertain = errors.New("CI history publication uncertain; review dedicated storage")
+	// Reviewed reopen refusals carry no paths, names, identities or snapshot contents.
+	ErrHistorySnapshotReview = fmt.Errorf("%w: reviewed snapshot mismatch", ErrHistory)
+	ErrHistoryScopeReview    = fmt.Errorf("%w: reviewed scope mismatch", ErrHistory)
 )
 
 type HistoryScope struct {
@@ -164,6 +168,9 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 		return nil, ErrHistoryUncertain
 	}
 	if !h.missing(historyStage) {
+		if reviewed != nil {
+			return nil, ErrHistoryUncertain
+		}
 		return nil, ErrHistory
 	}
 	if reviewed != nil && !onlyHistorySnapshot(dir) {
@@ -204,7 +211,7 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 			return nil, ErrHistory
 		}
 		if reviewed != nil && sha256.Sum256(payload) != expected {
-			return nil, ErrHistory
+			return nil, ErrHistorySnapshotReview
 		}
 		if h.state, err = decodeHistory(payload); err != nil || !h.available(ctx) {
 			return nil, ErrHistory
@@ -214,7 +221,7 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 			// No other source or previously configured scope is adopted.
 			for _, checkpoint := range h.state.Checkpoints {
 				if !reviewed[checkpoint.Scope] {
-					return nil, ErrHistory
+					return nil, ErrHistoryScopeReview
 				}
 			}
 		}

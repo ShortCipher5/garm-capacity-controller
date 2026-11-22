@@ -203,7 +203,10 @@ func selectRepos(source Source, requested []string) ([]demandrepair.CIRepository
 func (r *cycleReader) discover(ctx context.Context, repo demandrepair.CIRepository, from, to time.Time) (repoScan, error) {
 	out := repoScan{repo: repo}
 	seenAttempts := make(map[attemptLocator]bool)
+	seenRunning := make(map[attemptLocator]bool)
+	var running, otherActive []runCandidate
 	workflows := make(map[int64]int64)
+discovery:
 	for _, status := range []string{"queued", "in_progress", "requested", "waiting", "pending", ""} {
 		q := demandrepair.CIRunQuery{Status: status}
 		if status == "" {
@@ -216,7 +219,7 @@ func (r *cycleReader) discover(ctx context.Context, repo demandrepair.CIReposito
 			// after an empty page. Charge the worst case before touching it.
 			if !r.budget.take(2) {
 				r.partial = true
-				return out, nil
+				break discovery
 			}
 			q.Page = page
 			rows, err := r.source.ListCIRuns(ctx, repo.GarmID, q)
@@ -234,16 +237,22 @@ func (r *cycleReader) discover(ctx context.Context, repo demandrepair.CIReposito
 				}
 				seenQuery[row.RunID], workflows[row.RunID] = true, row.WorkflowID
 				id := attemptLocator{row.RunID, row.Attempt}
-				if seenAttempts[id] {
-					continue
+				candidate := runCandidate{row.RunID, row.Attempt, row.WorkflowID}
+				if status == "in_progress" {
+					// A later positive running observation promotes the exact
+					// attempt even when it was already listed as queued.
+					if !seenRunning[id] {
+						running = append(running, candidate)
+						seenRunning[id] = true
+					}
+				} else if !seenAttempts[id] {
+					if status == "" {
+						out.recent = append(out.recent, candidate)
+					} else {
+						otherActive = append(otherActive, candidate)
+					}
 				}
 				seenAttempts[id] = true
-				candidate := runCandidate{row.RunID, row.Attempt, row.WorkflowID}
-				if status == "" {
-					out.recent = append(out.recent, candidate)
-				} else {
-					out.active = append(out.active, candidate)
-				}
 			}
 			if rows.NextPage == 0 {
 				break
@@ -251,6 +260,23 @@ func (r *cycleReader) discover(ctx context.Context, repo demandrepair.CIReposito
 			if page == maxDiscoveryPages {
 				r.partial = true
 			}
+		}
+	}
+	// Interleave both active groups, giving the first available detail slot
+	// to running work without letting a full running group hide the queue.
+	// Repository interleaving and all attempt/read limits still apply.
+	nonRunning := otherActive[:0]
+	for _, candidate := range otherActive {
+		if !seenRunning[attemptLocator{candidate.runID, candidate.attempt}] {
+			nonRunning = append(nonRunning, candidate)
+		}
+	}
+	for i := 0; i < max(len(running), len(nonRunning)); i++ {
+		if i < len(running) {
+			out.active = append(out.active, running[i])
+		}
+		if i < len(nonRunning) {
+			out.active = append(out.active, nonRunning[i])
 		}
 	}
 	return out, nil

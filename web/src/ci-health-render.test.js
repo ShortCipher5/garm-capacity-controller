@@ -20,6 +20,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(panel("true", read), "");
     assert.equal(panel(true, undefined), "");
     assert.match(panel(true, read), /CI Health.*Load timing snapshot/);
+    assert.match(panel(true, read), /Loading checks the latest available observation; it does not start a GitHub collection or automatically update the view/);
     const resources = {cpu_millis: 0, ram_mib: 0, runners: 0};
     const data = {hosts: [], pools: [], events: [], global: {budget: resources, allocated: resources}, states: {}, epoch: 0, observed_at: "2026-01-01T00:00:00Z"};
     const dashboard = (extra = {}) => renderToStaticMarkup(React.createElement(Dashboard, {data, ...extra}));
