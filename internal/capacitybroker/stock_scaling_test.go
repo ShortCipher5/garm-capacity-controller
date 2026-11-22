@@ -1,6 +1,8 @@
 package capacitybroker
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -105,5 +107,89 @@ func TestStockScalingMixedSizesConserveCPUAndRAMBeforeSlots(t *testing.T) {
 				t.Fatal("advisory planning changed charges or runner profiles")
 			}
 		})
+	}
+}
+
+func TestStockScalingLargeSinglePoolQueueCoversOldestWithoutRecursiveWork(t *testing.T) {
+	s, o := jobsFixture()
+	s.Global = Resources{32000, 32000, 32000, 32}
+	s.Hosts["h"] = Host{Budget: s.Global, AcceptNew: true}
+	a := s.Pools["a"]
+	a.AvailableIdle, a.MaxRunners = 32, 32
+	s.Pools["a"] = a
+	s.Charges = []Charge{{ID: "existing", Host: "h", Pool: "a", Resources: s.Global}}
+	jobs := make([]QueuedDemand, 1000)
+	for i := range jobs {
+		jobs[i] = QueuedDemand{fmt.Sprintf("job-%04d", i), []string{"a"}, o.Now.Add(-time.Duration(i) * time.Second)}
+	}
+	got, err := BuildForStockScaling(s, o, jobs, nil)
+	if err != nil || len(got.CoveredByIdle) != 32 || len(got.RemainingJobs) != 968 || len(got.Assignments) != 0 {
+		t.Fatalf("normal single-pool queue did not fit existing supply: idle=%d waiting=%d assignments=%d err=%v", len(got.CoveredByIdle), len(got.RemainingJobs), len(got.Assignments), err)
+	}
+	for i, job := range jobs {
+		if (got.CoveredByIdle[job.ID] == "a") != (i >= 968) {
+			t.Fatalf("wrong age preference for %s", job.ID)
+		}
+	}
+	if !reflect.DeepEqual(s.Pools["a"], a) || len(s.Charges) != 1 {
+		t.Fatal("advice changed the original supply or its charge")
+	}
+
+	// The unrelated public planner and matcher keep their bounds.
+	if _, err := BuildForJobs(s, o, jobs); !errors.Is(err, ErrSnapshot) {
+		t.Fatalf("legacy planner path unexpectedly changed: %v", err)
+	}
+	legacy := make([]DemandJob, len(jobs))
+	for i, j := range jobs {
+		legacy[i] = DemandJob{j.ID, j.Candidates}
+	}
+	if _, err := MatchDemand(legacy, map[string]int{"a": 32}); !errors.Is(err, ErrSnapshot) {
+		t.Fatalf("legacy path unexpectedly changed: %v", err)
+	}
+}
+
+func TestStockScalingSingleCandidateKeepsIdleOnlyAndZeroCandidateSemantics(t *testing.T) {
+	s, o := jobsFixture()
+	s.Global = Resources{3000, 3000, 3000, 3}
+	s.Hosts["h"] = Host{Budget: s.Global, AcceptNew: true}
+	a, b := s.Pools["a"], s.Pools["b"]
+	a.AvailableIdle = 1
+	b.MaxRunners, b.WarmIdle = 0, 0
+	b.AvailableIdle, b.PendingWarm, b.OutstandingGrants = 1, 1, 1
+	s.Pools["a"], s.Pools["b"] = a, b
+	s.Charges = []Charge{
+		{ID: "normal", Host: "h", Pool: "a", Resources: a.Size},
+		{ID: "disabled", Host: "h", Pool: "b", Resources: Resources{2000, 2000, 2000, 2}},
+	}
+	jobs := []QueuedDemand{
+		{"disabled-young", nil, o.Now}, {"normal", []string{"a"}, o.Now},
+		{"disabled-old", nil, o.Now.Add(-time.Minute)}, {"none", nil, o.Now},
+	}
+	idleOnly := map[string][]string{"disabled-young": {"b"}, "disabled-old": {"b"}}
+	got, err := BuildForStockScaling(s, o, jobs, idleOnly)
+	if err != nil || !reflect.DeepEqual(got.CoveredByIdle, map[string]string{"disabled-old": "b", "normal": "a"}) ||
+		len(got.CoveredByGrant) != 0 || len(got.DeferredByInflight) != 0 || len(got.Assignments) != 0 ||
+		!reflect.DeepEqual(got.RemainingJobs, []QueuedDemand{jobs[0], jobs[3]}) {
+		t.Fatalf("idle-only matching borrowed a grant or lost zero-candidate demand: %+v, %v", got, err)
+	}
+}
+
+func TestStockDemandStillRefusesDenseAndExpandedEdgeCaps(t *testing.T) {
+	for _, mode := range []demandMatchMode{stockDemandByID, stockDemandChronological} {
+		jobs := make([]DemandJob, 1000)
+		for i := range jobs {
+			jobs[i] = DemandJob{fmt.Sprintf("j%04d", i), []string{"a", "b"}}
+		}
+		// One zero-supply alternate still makes the candidate graph multi-pool.
+		// It must use the original bounded augmenting matcher.
+		if got, err := matchDemand(jobs, map[string]int{"a": 32, "b": 0}, mode); !errors.Is(err, ErrSnapshot) || got.Covered != nil || got.Unmet != nil {
+			t.Fatalf("dense multi-pool work cap bypassed: %+v, %v", got, err)
+		}
+		for i := range jobs {
+			jobs[i].Candidates = []string{"a"}
+		}
+		if got, err := matchDemand(jobs, map[string]int{"a": 101}, mode); !errors.Is(err, ErrSnapshot) || got.Covered != nil || got.Unmet != nil {
+			t.Fatalf("expanded edge bound bypassed for direct matching: %+v, %v", got, err)
+		}
 	}
 }
