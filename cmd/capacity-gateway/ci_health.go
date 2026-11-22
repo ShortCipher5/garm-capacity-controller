@@ -150,8 +150,11 @@ func (c *ciHealthRuntime) run(ctx context.Context) {
 	defer c.disableHistory()
 	defer c.snapshot.Withdraw()
 	delay := ciHealthCycleDelay
+	// The timing worker owns this identity-only handoff; it is cleared
+	// before use and discarded when this exact worker exits.
+	var next *cihealthsource.ActiveContinuation
 	for ctx.Err() == nil {
-		if c.runCycle(ctx) {
+		if c.runCycleContinuing(ctx, &next) {
 			delay = ciHealthCycleDelay
 		} else {
 			delay = ciHealthCycleBackoff
@@ -167,13 +170,24 @@ func (c *ciHealthRuntime) run(ctx context.Context) {
 }
 
 func (c *ciHealthRuntime) runCycle(ctx context.Context) bool {
+	return c.runCycleContinuing(ctx, nil)
+}
+
+func (c *ciHealthRuntime) runCycleContinuing(ctx context.Context, next **cihealthsource.ActiveContinuation) bool {
+	var prior *cihealthsource.ActiveContinuation
+	if next != nil {
+		prior, *next = *next, nil
+	}
 	to := time.Now().UTC().Truncate(time.Second)
-	cycle, err := cihealthsource.ReadCycle(ctx, c.source, c.repos, to.Add(-ciHealthRecentWindow), to)
+	cycle, err := cihealthsource.ReadCycleContinuing(ctx, c.source, c.repos, to.Add(-ciHealthRecentWindow), to, prior)
 	if err != nil || ctx.Err() != nil || cycle.State() == cihealthsource.CycleUnavailable ||
 		c.snapshot.PublishTiming(cycle.ObservedAt(), cycle.Facts(), cycle.State() == cihealthsource.CyclePartial) != nil {
 		c.snapshot.Withdraw()
 		c.disableHistory()
 		return false
+	}
+	if next != nil && c.source.LifetimeActive() && ctx.Err() == nil {
+		*next = cycle.ActiveContinuation()
 	}
 	if history := c.activeHistory(); history != nil && cycle.State() == cihealthsource.CycleObserved {
 		if _, err := history.PersistCycle(ctx, cycle); err != nil {

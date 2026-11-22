@@ -48,6 +48,17 @@ bounds timing traffic even if the data set is busy. Other consumers of the
 same credential must still have enough independent rate budget. Confirm that
 budget before enabling on a shared credential.
 
+An old rerun disappears from the active listing when it finishes, and it
+may be outside the recent window, which uses the original run's creation
+time. After a successful clean publication, the next cycle can recheck one
+exact previously observed active attempt per repository if ordinary reads
+leave enough of that repository's existing budget. This never displaces
+ordinary reads or increases the hard limits. It does not guess rerun
+numbers, retry a failed collection, look back after restart, or discover
+attempts that were never observed active. The one-use locator lasts less
+than six minutes in memory, not as a display or data lease. Only new exact
+attempt and job reads can produce a result or update opted-in history.
+
 The dedicated timing reader also honors GitHub's applicable quota deadlines.
 It does not resolve credentials or send another timing request while its
 local backoff is active. The worker's existing schedule is unchanged: it
