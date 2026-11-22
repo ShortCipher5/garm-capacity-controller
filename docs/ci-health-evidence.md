@@ -31,6 +31,14 @@ A sizing cohort with overlapping job windows on the same runner incarnation
 is rejected, including a retry overlapping a primary job. Touching windows
 and simultaneous jobs on distinct incarnations are not overlaps.
 
+A separate offline report-set comparison can match one exact workflow attempt
+to a bounded, independently reviewed list of selected XML reports (artifact,
+producer job, shard, framework retry and exact extracted-byte digest). Missing,
+unexpected or duplicated reports reject the whole aggregate. Its counts
+describe occurrences, not unique test names, and initial executions are kept
+separate from framework retries. This does not authenticate the reviewed list,
+prove archive provenance or prove that it covers all upstream tests.
+
 ## What remains unavailable
 
 - **Verified stock job-to-resource attribution.** There is no live producer for
