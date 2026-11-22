@@ -129,9 +129,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 		}
 		cpu, ram := r.CPU, r.RAMMean
 		if cpu != nil && (cpu.AverageMilliCPU > cpu.PeakIntervalMilliCPU || !sizingCoverageValid(cpu.Coverage, r.Window, r.Scope.MaxGap, r.Samples, cadence)) ||
-			r.RAM != nil && (r.RAM.Samples < 1 || r.RAM.Samples > r.Samples || r.RAM.Latest > r.RAM.SampleMax ||
-				r.RAM.LatestAt.Before(start.Add(r.Sampling.BeforeFirstSample)) || r.RAM.LatestAt.After(end.Add(-r.Sampling.AfterLastSample))) ||
-			ram != nil && (r.RAM == nil || ram.Bytes > r.RAM.SampleMax || !sizingCoverageValid(ram.Coverage, r.Window, r.Scope.MaxGap, r.RAM.Samples, cadence)) {
+			!jobSizingRAMValid(r, start, end, cadence) {
 			return fail()
 		}
 		seen[key] = true // One slot per source/run/attempt, even if job IDs differ.
@@ -240,6 +238,26 @@ func jobSizingSamplingCeiling(r JobResourceSummary) (ResourceCoverage, bool) {
 		return ResourceCoverage{}, false
 	}
 	return ResourceCoverage{Intervals: pairs, Duration: duration}, true
+}
+
+// A RAM interval requires a gauge at both endpoints, so its summed
+// non-overlapping duration cannot extend beyond the latest RAM reading.
+// Individual gauges also occupy distinct timestamps in the overall series.
+func jobSizingRAMValid(r JobResourceSummary, start, end time.Time, cadence ResourceCoverage) bool {
+	gauge, mean := r.RAM, r.RAMMean
+	if gauge == nil {
+		return mean == nil
+	}
+	earliest := start.Add(r.Sampling.BeforeFirstSample)
+	latest := end.Add(-r.Sampling.AfterLastSample)
+	span := gauge.LatestAt.Sub(earliest)
+	if gauge.Samples < 1 || gauge.Samples > r.Samples || gauge.Latest > gauge.SampleMax ||
+		gauge.Samples == 1 && gauge.Latest != gauge.SampleMax ||
+		gauge.LatestAt.After(latest) || span < time.Duration(gauge.Samples-1)*time.Nanosecond {
+		return false
+	}
+	return mean == nil || mean.Bytes <= gauge.SampleMax && mean.Coverage.Duration <= span &&
+		sizingCoverageValid(mean.Coverage, r.Window, r.Scope.MaxGap, gauge.Samples, cadence)
 }
 
 func sizingCoverageValid(c ResourceCoverage, window, maxGap time.Duration, samples int, ceiling ResourceCoverage) bool {

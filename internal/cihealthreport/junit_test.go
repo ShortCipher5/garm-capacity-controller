@@ -46,6 +46,26 @@ func TestJUnitAcceptsOnlyOneLeadingUTF8PreambleAndRetainsExactDigest(t *testing.
 	}
 }
 
+func TestJUnitXMLDeclarationAllowsXMLWhitespace(t *testing.T) {
+	const body = `<testsuite tests="1"><testcase name="fixture" time="1"/></testsuite>`
+	for _, space := range []string{" ", "\t", "\n", "\r", "\r\n"} {
+		declaration := strings.ReplaceAll(`<?xml version = '1.0' encoding = "UTF-8" standalone = 'yes' ?>`, " ", space)
+		raw := []byte(declaration + body)
+		report, err := ParseJUnit(raw, fixtureBinding)
+		if err != nil || report.Summary().Passed != 1 || report.digest != sha256.Sum256(raw) {
+			t.Errorf("XML declaration whitespace %q: summary=%+v err=%v", space, report.Summary(), err)
+		}
+	}
+	for _, raw := range []string{
+		"<?xml\vversion='1.0'?>" + body,
+		"<?xml version='1.0'\u00a0encoding='UTF-8'?>" + body,
+		"\n<?xml version='1.0'?>" + body,
+		"<?xml version='1.0'encoding='UTF-8'?>" + body,
+	} {
+		expectRejection(t, raw, fixtureBinding)
+	}
+}
+
 func TestJUnitProjectionExcludesLogsPathsAndUnsupportedTrust(t *testing.T) {
 	xml := []byte(`<?xml version="1.0" encoding="utf-8"?>
 <testsuites tests="5" failures="1" errors="1" skipped="1">
