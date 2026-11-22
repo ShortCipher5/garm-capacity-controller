@@ -60,12 +60,13 @@ func TestReadAttemptRejectsMovingTotalWithUniqueJobs(t *testing.T) {
 }
 
 func TestReadCycleKeepsIndependentFactsOnValidDiscoveryCountDrift(t *testing.T) {
-	for _, fault := range []string{"none", "duplicate", "wrong repository", "rate limit", "malformed page"} {
+	for _, fault := range []string{"none", "exhausted", "exhausted zero", "empty bad pin", "duplicate", "wrong repository", "rate limit", "malformed page"} {
 		t.Run(fault, func(t *testing.T) {
 			from, to := relativeWindow()
 			repos := cycleRepos()
 			discarded, quiet := runID+int64(demandrepair.CIPerPage), runID+100
-			var calls, detailReads, secondPages atomic.Int32
+			var calls, detailReads, secondPages, tailPins atomic.Int32
+			var awaitTailPin atomic.Bool
 			s := fixtureRepos(t, repos, func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				repo := repos[0]
@@ -73,9 +74,19 @@ func TestReadCycleKeepsIndependentFactsOnValidDiscoveryCountDrift(t *testing.T) 
 					repo = repos[1]
 				}
 				base := "/repos/fixture/" + repo.Name
+				if awaitTailPin.Load() && r.URL.Path != "/repos/fixture/runners" {
+					t.Error("exhausted tail was processed before the same repository was confirmed")
+				}
 				switch {
 				case r.URL.Path == base:
-					_ = json.NewEncoder(w).Encode(repoMetadata(repo))
+					pin := repo
+					if repo == repos[0] && awaitTailPin.Swap(false) {
+						tailPins.Add(1)
+						if fault == "empty bad pin" {
+							pin.GitHubID++
+						}
+					}
+					_ = json.NewEncoder(w).Encode(repoMetadata(pin))
 				case r.URL.Path == base+"/actions/runs":
 					q := r.URL.Query()
 					if q.Get("status") != "queued" {
@@ -104,6 +115,12 @@ func TestReadCycleKeepsIndependentFactsOnValidDiscoveryCountDrift(t *testing.T) 
 							w.WriteHeader(http.StatusTooManyRequests)
 						case "malformed page":
 							runPage(w, nil, demandrepair.CIPerPage+1)
+						case "exhausted", "empty bad pin":
+							awaitTailPin.Store(true)
+							runPage(w, nil, demandrepair.CIPerPage)
+						case "exhausted zero":
+							awaitTailPin.Store(true)
+							runPage(w, nil, 0)
 						default:
 							runPage(w, []map[string]any{cycleRun(repo, discarded, 2, "queued", from)}, demandrepair.CIPerPage+1)
 						}
@@ -130,11 +147,17 @@ func TestReadCycleKeepsIndependentFactsOnValidDiscoveryCountDrift(t *testing.T) 
 				}
 			})
 			got, err := ReadCycle(t.Context(), s, []string{repos[1].GarmID, repos[0].GarmID}, from, to)
-			if fault != "none" {
+			if fault != "none" && fault != "exhausted" && fault != "exhausted zero" {
+				if fault == "empty bad pin" && tailPins.Load() != 1 {
+					t.Fatal("bad pin fixture did not reach repository confirmation")
+				}
 				if !errors.Is(err, ErrCycleObservation) || got.State() != CycleUnavailable || got.Facts() != nil || detailReads.Load() != 0 {
 					t.Fatalf("bad page did not fail closed: %v", err)
 				}
 				return
+			}
+			if (fault == "exhausted" || fault == "exhausted zero") && tailPins.Load() != 1 {
+				t.Fatal("empty exhausted tail lacked exact repository pin confirmation")
 			}
 			facts := got.Facts()
 			if err != nil || got.State() != CyclePartial || len(facts) != maxCycleAttempts/2+1 ||
