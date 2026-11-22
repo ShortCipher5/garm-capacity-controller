@@ -113,12 +113,9 @@ func (c *Client) absenceInstances(ctx context.Context, prior VerifiedInstanceIde
 	result := make([]absenceInstance, 0, len(rows))
 	subject := prior.data.Subject
 	for _, raw := range rows {
-		fields, err := object(raw)
+		fields, config, err := exactInstanceEvidenceFields(raw)
 		if err != nil {
 			return "", 0, err
-		}
-		if rejectFolded(fields, "name", "status_code", "created_at", "expanded_config") != nil {
-			return "", 0, ErrResponse
 		}
 		value, err := parseInstance(raw)
 		if err != nil {
@@ -130,13 +127,6 @@ func (c *Client) absenceInstances(ctx context.Context, prior VerifiedInstanceIde
 		created, err := identityTime(fields, "created_at")
 		if err != nil {
 			return "", 0, err
-		}
-		config, err := object(fields["expanded_config"])
-		if err != nil {
-			return "", 0, err
-		}
-		if rejectFolded(config, "volatile.uuid", "volatile.uuid.generation", "user.runner-controller-id", "user.runner-pool-id", "user.garm-capacity.reservation", "limits.cpu", "limits.memory") != nil {
-			return "", 0, ErrResponse
 		}
 		uuid, err := field[string](config, "volatile.uuid")
 		if err != nil || !operationID(uuid) {
