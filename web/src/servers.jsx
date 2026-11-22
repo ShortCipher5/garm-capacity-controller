@@ -75,7 +75,7 @@ export function ServerCard({ host, readUsage }) {
       <p className="muted">Mode and budget changes stay in <a href="#management">Ledger policy management</a>. They pause new claims only; they never drain runners or release charges.</p>
       <Usage allocation={host} />
       <p className="detected-line">
-        <span className="muted">Detected physical totals (last discovery):</span>{" "}
+        <span className="muted">Backend-reported totals from last discovery:</span>{" "}
         {host.detected ? (
           <strong>
             CPU {fmt(host.detected.cpu_millis)} millicores · Memory {fmt(host.detected.ram_mib)} MiB · Disk {fmt(host.detected.disk_mib)} MiB · Runners not measured by discovery
@@ -84,6 +84,7 @@ export function ServerCard({ host, readUsage }) {
           <strong>unknown — no discovery totals recorded for this host</strong>
         )}
       </p>
+      {host.detected && <p className="muted">These totals do not verify whole-host capacity or current headroom.</p>}
       {host.cpu_cap_millis ? (
         <p className="muted">CPU fair-use cap: {fmt(host.cpu_cap_millis)} millicores. Display only; admission does not enforce it.</p>
       ) : null}
@@ -122,13 +123,14 @@ export function DiscoveryResultView({ result }) {
       </p>
       {result.totals ? (
         <p>
-          Physical totals ({result.totals.complete ? "complete" : "incomplete — one or more totals unknown"}): CPU {total(result.totals.cpu_millis, "millicores")} · Memory {total(result.totals.ram_mib, "MiB")} · Disk {total(result.totals.disk_mib, "MiB")}
+          Backend-reported totals ({result.totals.complete ? "complete" : "incomplete — one or more totals unknown"}): CPU {total(result.totals.cpu_millis, "millicores")} · Memory {total(result.totals.ram_mib, "MiB")} · Disk {total(result.totals.disk_mib, "MiB")}
           {result.totals.disk_mib_used !== undefined ? ` (${fmt(result.totals.disk_mib_used)} MiB used)` : ""}
           {result.totals.storage_pool ? ` · Storage pool ${result.totals.storage_pool}: ${total(result.totals.storage_pool_disk_mib, "MiB")}${result.totals.storage_pool_disk_mib_used !== undefined ? ` (${fmt(result.totals.storage_pool_disk_mib_used)} MiB used)` : ""}` : ""}
         </p>
       ) : (
-        <p>Physical totals unknown — the backend did not report them during this run.</p>
+        <p>Backend totals unknown — no resource totals were reported during this run.</p>
       )}
+      {result.totals && <p className="muted">These resource observations do not verify whole-host capacity, current headroom or runner limits.</p>}
       <ProjectGuestUsage utilization={result.utilization} />
       {unmanaged > 0 && (
         <p className="drain-warning" data-unmanaged={unmanaged}>{unmanaged} unmanaged guest(s) observed without runner-controller attribution: the shared limit may not cover them.</p>
@@ -328,7 +330,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh, readOverhead
     <section id="servers">
       <div className="section-heading">
         <h2>Servers <small>{data.hosts.length}</small></h2>
-        <span className="muted">Detected physical totals, resource observations and explicit enrollment</span>
+        <span className="muted">Backend-reported totals, resource observations and explicit enrollment</span>
       </div>
       <SSHTargetRegistration />
       <SSHInventory />
