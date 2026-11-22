@@ -97,6 +97,11 @@ type CIRunQuery struct {
 	Status   string
 	From, To time.Time
 	Page     int
+	// PreviousTotal is the verified immediately preceding nonempty page's
+	// total for this same query. It is not sent upstream. Only callers that
+	// observe count drift may supply it; it permits an exhausted empty tail
+	// to be distinguished from an arbitrary out-of-range page request.
+	PreviousTotal int
 }
 
 type CIRunPage struct {
@@ -189,6 +194,10 @@ func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q CIRunQ
 	if !ok || !ciPage(q.Page) {
 		return CIRunPage{}, ErrObservation
 	}
+	first := (q.Page - 1) * CIPerPage
+	if q.PreviousTotal != 0 && (q.Page == 1 || q.PreviousTotal <= first || q.PreviousTotal >= CIPerPage*CIMaxPages) {
+		return CIRunPage{}, ErrObservation
+	}
 	params := ciPageQuery(q.Page)
 	var from, to time.Time
 	switch q.Status {
@@ -213,7 +222,9 @@ func (s *CIHealthSource) ListCIRuns(ctx context.Context, garmID string, q CIRunQ
 		return CIRunPage{}, ErrObservation
 	}
 	next, valid := ciNextPage(q.Page, wire.Total, len(wire.Runs))
-	if !valid || q.Status != "" && *wire.Total == CIPerPage*CIMaxPages {
+	exhaustedTail := q.PreviousTotal != 0 && len(wire.Runs) == 0 && wire.Total != nil &&
+		*wire.Total >= 0 && *wire.Total <= first
+	if (!valid && !exhaustedTail) || q.Status != "" && *wire.Total == CIPerPage*CIMaxPages {
 		// Active scans still fail closed without a historical split signal.
 		return CIRunPage{}, ErrObservation
 	}
