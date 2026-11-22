@@ -35,6 +35,7 @@ export function AllocatorPlan({readPlan,policyRevision,ledgerSequence,policyStal
  return <section aria-label="Observed runners and fresh allocation plan"><h3>Observed runners and fresh allocation plan</h3>
  <p>Read-only demand preview using saved policy. Additional planned runners are advisory, not created runners, a replacement total or a guarantee of GitHub job assignment. No grants, expiry, pool settings or runners are changed by this read.</p>
  <details><summary>Why automatic cross-repository scaling is unavailable here</summary><p>These previews suggest changes but do not apply them. A separately configured cap reconciler can lower existing maxima only; it is not an automatic cross-repository scaler.</p><p>Production scaling needs a verified provider destination, a single settings writer, and a shared capacity check that every runner start must pass. Reusing capacity also needs evidence that the previous runner’s resources were released. Saved mappings and budgets are configuration, not proof that these checks are in place.</p></details>
+ <p><strong>Applied outcome: unknown.</strong> This panel does not track settings writes. Even a captured value matching a suggestion does not confirm who changed it or whether an earlier write finished.</p>
  <button type="button" disabled={busy||!readPlan} onClick={load}>{busy?'Reading demand and ledger…':'Read fresh allocation plan'}</button>
  {error&&<p role="status">{error}</p>}
  {!view&&<p>Observed runner counts and demand-derived plan: unknown until a successful fresh read.</p>}
@@ -73,5 +74,5 @@ export function StockMaximumBatchSuggestions({plan,comparison,now}){
 }
 
 function MaximumRows({maximums}){
- return <><p>Evidence expires {new Date(maximums.expiresAt).toLocaleString()}.</p><div className="table-wrap"><table><thead><tr><th>Repository / pool</th><th>Observed maximum</th><th>Suggested maximum</th></tr></thead><tbody>{maximums.proposals.map(p=><tr key={p.pool_id}><td>{p.repository_id}<p>{p.pool_id}</p>{Object.hasOwn(p,"observed_min_idle")&&<p>Minimum idle: {p.observed_min_idle} (unchanged)</p>}</td><td>{p.observed}</td><td>{p.suggested}</td></tr>)}</tbody></table></div></>;
+ return <><p>Evidence expires {new Date(maximums.expiresAt).toLocaleString()}.</p><div className="table-wrap"><table><thead><tr><th>Repository / pool</th><th>Maximum at capture</th><th>Suggested maximum (not applied here)</th></tr></thead><tbody>{maximums.proposals.map(p=><tr key={p.pool_id}><td>{p.repository_id}<p>{p.pool_id}</p>{Object.hasOwn(p,"observed_min_idle")&&<p>Minimum idle at capture: {p.observed_min_idle} (not part of this suggestion)</p>}</td><td>{p.observed}</td><td>{p.suggested}</td></tr>)}</tbody></table></div></>;
 }
