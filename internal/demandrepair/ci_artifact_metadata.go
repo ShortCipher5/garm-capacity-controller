@@ -2,7 +2,10 @@ package demandrepair
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -17,12 +20,17 @@ const (
 // CIArtifactMetadata is deliberately scalar and run-scoped. ListedUnexpired
 // is a metadata observation, not proof that an archive can be downloaded.
 // Zero times and SizeKnown=false mean absent evidence, not observed zero.
+// AdvertisedSHA256 is only the digest advertised by GitHub's metadata.
+// Unpinned rows (AdvertisedSHA256Known=false) cannot supply an archive pin.
+// A pin is not proof of downloaded bytes, a producing job, or an attempt.
 type CIArtifactMetadata struct {
-	ID                   int64
-	SizeInBytes          int64
-	SizeKnown            bool
-	CreatedAt, ExpiresAt time.Time
-	Availability         CIArtifactAvailability
+	ID                    int64
+	SizeInBytes           int64
+	SizeKnown             bool
+	CreatedAt, ExpiresAt  time.Time
+	Availability          CIArtifactAvailability
+	AdvertisedSHA256      [sha256.Size]byte
+	AdvertisedSHA256Known bool
 }
 
 // CIArtifactPage refers only to one enrolled repository and numeric workflow
@@ -133,6 +141,7 @@ type ciArtifactPageWire struct {
 type ciArtifactWire struct {
 	ID          int64             `json:"id"`
 	Size        *int64            `json:"size_in_bytes"`
+	Digest      *string           `json:"digest"`
 	Expired     *bool             `json:"expired"`
 	Created     *time.Time        `json:"created_at"`
 	Expires     *time.Time        `json:"expires_at"`
@@ -164,7 +173,12 @@ func (w ciArtifactWire) validate(repositoryID, runID int64, now time.Time) (CIAr
 		w.Created != nil && w.Expires != nil && w.Expires.Before(*w.Created) {
 		return CIArtifactMetadata{}, false
 	}
-	out := CIArtifactMetadata{ID: w.ID, Availability: CIArtifactAvailabilityUnknown}
+	digest, known, valid := ciAdvertisedArtifactSHA256(w.Digest)
+	if !valid {
+		return CIArtifactMetadata{}, false
+	}
+	out := CIArtifactMetadata{ID: w.ID, Availability: CIArtifactAvailabilityUnknown,
+		AdvertisedSHA256: digest, AdvertisedSHA256Known: known}
 	if w.Size != nil {
 		out.SizeInBytes, out.SizeKnown = *w.Size, true
 	}
@@ -189,4 +203,24 @@ func ciArtifactTime(t *time.Time) bool {
 	}
 	year := t.UTC().Year()
 	return !t.IsZero() && year > 0 && year <= 9999
+}
+
+// Missing and unsupported algorithms stay unpinned. If the response claims
+// SHA-256, reject invalid encodings rather than treating a broken pin as absent.
+func ciAdvertisedArtifactSHA256(raw *string) (digest [sha256.Size]byte, known, valid bool) {
+	if raw == nil {
+		return digest, false, true
+	}
+	algorithm, payload, separated := strings.Cut(*raw, ":")
+	if !strings.EqualFold(algorithm, "sha256") {
+		return digest, false, true
+	}
+	if !separated || algorithm != "sha256" || len(payload) != hex.EncodedLen(len(digest)) || strings.ToLower(payload) != payload {
+		return digest, false, false
+	}
+	n, err := hex.Decode(digest[:], []byte(payload))
+	if err != nil || n != len(digest) || digest == ([sha256.Size]byte{}) {
+		return [sha256.Size]byte{}, false, false
+	}
+	return digest, true, true
 }
