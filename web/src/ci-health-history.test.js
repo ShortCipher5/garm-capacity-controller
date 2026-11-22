@@ -122,6 +122,16 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
     }));
     const markup = render(snapshot, {showHistory: true});
     assert.match(markup, /Retained workflow timing and results/);
+    assert.match(markup, /Timing display cutoff: <\/strong><time dateTime="2026-01-21T00:02:00\.123Z">/);
+    assert.match(markup, /Retained history display cutoff: <\/strong><time dateTime="2026-01-21T00:01:00\.123Z">/);
+    const afterHistory = render(snapshot, {showHistory: true, now: Date.parse(snapshot.history.expires_at)});
+    assert.match(afterHistory, /Retained history has expired for this snapshot/);
+    assert.match(afterHistory, /Active attempts at observation/);
+    assert.doesNotMatch(afterHistory, /Retained workflow timing and results|Most recent 7 days/);
+    const closedLease = render(snapshot);
+    assert.match(closedLease, /Retained history has expired for this snapshot/);
+    assert.doesNotMatch(closedLease, /Most recent 7 days/);
+    assert.equal(render(snapshot, {showHistory: true, now: Date.parse(at) + 120_000}), "");
     assert.match(markup, /not complete workflow history/);
     assert.doesNotMatch(markup, /Limited selection|Additional older retained attempts/);
     for (const [selection, label] of [["attempts", "64-attempt"], ["records", "12,000-record"]]) {
