@@ -114,6 +114,12 @@ browser user's own GitHub access. Reload the timing snapshot if a handle
 has expired, been replaced, or lost its original reader. A destination
 already handed to the browser cannot be recalled.
 
+An attempt's **Status observed** time comes from its original attempt
+read. Each job's status time comes from the exact page that returned that job.
+The attempt's **Latest included read** is the later collection cutoff, not a
+new sighting of earlier statuses. These times describe observations, not when
+the status changed. If a status observation time is absent, it is unknown.
+
 CI Health presents source-confirmed results separately from timing for each
 observed run attempt, job, and step. A completed row without a result is
 unknown; a duration alone does not imply success. The view does not expose

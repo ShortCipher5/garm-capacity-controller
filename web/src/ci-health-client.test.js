@@ -288,3 +288,23 @@ test("current timing can carry a unique handle but never a URL", () => {
   jobs[1].job_link_handle = "A".repeat(42) + "B";
   assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
 });
+
+test("optional status timestamps retain exact precision and cannot exceed the attempt read cutoff", () => {
+  const view = snapshot("2026-01-18T16:48:07.000000123Z");
+  const a = view.timing.attempts[0];
+  const j = a.jobs[0];
+  a.status_observed_at = "2026-01-18T16:48:03.000000123Z";
+  j.status_observed_at = "2026-01-18T16:48:04.000000123Z";
+  assert.equal(validateCIHealthSnapshot(view), view);
+  for (const row of [a, j]) {
+    const at = row.status_observed_at;
+    for (const bad of [null, "tomorrow", "2026-01-18T16:48:07.000000124Z"]) {
+      row.status_observed_at = bad;
+      assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+    }
+    row.status_observed_at = at;
+  }
+  delete a.status_observed_at;
+  delete j.status_observed_at;
+  assert.equal(validateCIHealthSnapshot(view), view);
+});
