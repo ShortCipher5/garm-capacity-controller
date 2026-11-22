@@ -32,7 +32,7 @@ func TestJobResourcesRatesWeightedGaugesAndOptionalDisk(t *testing.T) {
 	samples[1].DiskWriteBytes, samples[2].DiskWriteBytes = knownResource(6), knownResource(6)
 	out, err := SummarizeJobResources(scope, samples)
 	full := ResourceCoverage{Intervals: 2, Duration: 6 * time.Second, Complete: true}
-	if err != nil || out.Window != 6*time.Second || out.Samples != 3 || out.CPU == nil || *out.CPU != (JobCPURates{1000, 1250, full}) ||
+	if err != nil || out.Window != 6*time.Second || out.Samples != 3 || out.Sampling != (ResourceSamplingCoverage{}) || out.CPU == nil || *out.CPU != (JobCPURates{1000, 1250, full}) ||
 		out.RAMMean == nil || *out.RAMMean != (JobRAMAverage{33, full}) || out.RAM == nil || *out.RAM != (ResourceGaugeSummary{3, 50, 50, scope.EndAt}) ||
 		out.DiskRead == nil || *out.DiskRead != (JobResourceCounterDelta{50, full}) ||
 		out.DiskWrite == nil || *out.DiskWrite != (JobResourceCounterDelta{0, ResourceCoverage{Intervals: 1, Duration: 4 * time.Second}}) ||
@@ -58,11 +58,28 @@ func TestJobResourcesDoesNotBridgeLostCadenceOrMissingMetrics(t *testing.T) {
 		out.DiskRead != nil || out.DiskWrite != nil || out.DiskUsed != nil {
 		t.Fatalf("missing metrics or cadence were bridged: %+v, %v", out, err)
 	}
+	want := ResourceSamplingCoverage{
+		BeforeFirstSample: time.Second, AfterLastSample: time.Second,
+		CadenceGaps: 1, CadenceGapDuration: 3 * time.Second,
+	}
+	if out.Sampling != want {
+		t.Fatalf("unexpected sampling coverage: got %+v, want %+v", out.Sampling, want)
+	}
+	// Missed CPU values cost two more seconds than the shared sampling holes.
+	samplingHoles := out.Sampling.BeforeFirstSample + out.Sampling.AfterLastSample + out.Sampling.CadenceGapDuration
+	if missingCPU := out.Window - out.CPU.Coverage.Duration - samplingHoles; missingCPU != 2*time.Second {
+		t.Fatalf("unexpected missing CPU coverage beyond sampling holes: %s", missingCPU)
+	}
+	none, err := SummarizeJobResources(scope, nil)
+	if err != nil || none.Sampling != (ResourceSamplingCoverage{NoSamples: scope.EndAt.Sub(scope.StartedAt)}) || none.RAM != nil || none.CPU != nil {
+		t.Fatalf("empty window not distinct from a complete sample series: %+v, %v", none, err)
+	}
 	// A single observed gauge keeps its sample strength without inventing time.
 	single := samples[:1]
 	single[0].RAMBytes = knownResource(0)
 	one, err := SummarizeJobResources(scope, single)
-	if err != nil || one.CPU != nil || one.RAMMean != nil || one.RAM == nil || one.RAM.Samples != 1 || one.RAM.SampleMax != 0 {
+	if err != nil || one.CPU != nil || one.RAMMean != nil || one.RAM == nil || one.RAM.Samples != 1 || one.RAM.SampleMax != 0 ||
+		one.Sampling != (ResourceSamplingCoverage{BeforeFirstSample: time.Second, AfterLastSample: 9 * time.Second}) {
 		t.Fatalf("observed zero or uncovered metrics lost: %+v, %v", one, err)
 	}
 }

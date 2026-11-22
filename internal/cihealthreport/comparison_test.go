@@ -68,14 +68,17 @@ func TestReviewedCaseExactTimingPassFailAndRetryDenominators(t *testing.T) {
 	want := CaseComparison{
 		All: CaseComparisonStats{
 			Summary:              Summary{Totals: Totals{Cases: 9, Passed: 3, Failed: 3, Errors: 1, Skipped: 2}, Timed: 6, Mean: 2500 * time.Millisecond, P95: 5 * time.Second},
+			TotalTimedDuration:   15 * time.Second,
 			FailureAmongPassFail: Frequency{3, 6}, ErrorAmongPassFailError: Frequency{1, 7}, SlowAmongTimed: Frequency{3, 6},
 		},
 		First: CaseComparisonStats{
 			Summary:              Summary{Totals: Totals{Cases: 5, Passed: 1, Failed: 2, Errors: 1, Skipped: 1}, Timed: 3, Mean: 3_333_333_333, P95: 5 * time.Second},
+			TotalTimedDuration:   10 * time.Second,
 			FailureAmongPassFail: Frequency{2, 3}, ErrorAmongPassFailError: Frequency{1, 4}, SlowAmongTimed: Frequency{2, 3},
 		},
 		Repeat: CaseComparisonStats{
 			Summary:              Summary{Totals: Totals{Cases: 4, Passed: 2, Failed: 1, Skipped: 1}, Timed: 3, Mean: 1_666_666_666, P95: 4 * time.Second},
+			TotalTimedDuration:   5 * time.Second,
 			FailureAmongPassFail: Frequency{1, 3}, ErrorAmongPassFailError: Frequency{0, 3}, SlowAmongTimed: Frequency{1, 3},
 		},
 		DistinctRuns: 6, DistinctRunsWithRepeat: 3, IndependentContrast: true, RecoveryAmongRetestedFailures: Frequency{1, 1},
@@ -104,7 +107,7 @@ func TestReviewedCaseRetryRecoveryDoesNotBecomeIndependentContrast(t *testing.T)
 	got, err := CompareReviewedCase(compareCohort, []ReviewedCaseObservation{otherRetry, pass, failure}, 0)
 	if err != nil || got.IndependentContrast || got.DistinctRuns != 2 || got.DistinctRunsWithRepeat != 2 ||
 		got.First.FailureAmongPassFail != (Frequency{1, 1}) || got.RecoveryAmongRetestedFailures != (Frequency{1, 1}) ||
-		got.All.SlowAmongTimed.Denominator != 0 || got.All.Timed != 0 {
+		got.All.SlowAmongTimed.Denominator != 0 || got.All.Timed != 0 || got.All.TotalTimedDuration != 0 {
 		t.Fatalf("retry promoted to independent contrast or invented timing: %+v %v", got, err)
 	}
 }

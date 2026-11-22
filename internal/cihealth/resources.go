@@ -71,10 +71,23 @@ type JobResourceCounterDelta struct {
 	Coverage ResourceCoverage
 }
 
+// ResourceSamplingCoverage reports where the job window lacks a timely
+// sample pair. These are sample timestamps, not evidence that any metric was
+// measured: use the individual metric coverage for that distinction.
+type ResourceSamplingCoverage struct {
+	BeforeFirstSample, AfterLastSample time.Duration
+	CadenceGaps                        int
+	CadenceGapDuration                 time.Duration
+	// NoSamples covers the entire job window only when there are no samples.
+	// In that case the edge durations are zero because no edges were observed.
+	NoSamples time.Duration
+}
+
 type JobResourceSummary struct {
 	Scope     JobResourceScope
 	Window    time.Duration
 	Samples   int
+	Sampling  ResourceSamplingCoverage
 	CPU       *JobCPURates
 	RAM       *ResourceGaugeSummary
 	RAMMean   *JobRAMAverage
@@ -97,6 +110,9 @@ func SummarizeJobResources(scope JobResourceScope, samples []JobResourceSample) 
 		return JobResourceSummary{}, ErrJobResourceFacts
 	}
 	out := JobResourceSummary{Scope: scope, Window: window, Samples: len(samples)}
+	if len(samples) == 0 {
+		out.Sampling.NoSamples = window
+	}
 	var lastAt time.Time
 	var cpu, diskRead, diskWrite resourceCounter
 	var ramWeight wideResourceSum
@@ -116,9 +132,14 @@ func SummarizeJobResources(scope JobResourceScope, samples []JobResourceSample) 
 			prev = samples[i-1]
 			dt = at.Sub(lastAt)
 			if dt > scope.MaxGap {
+				out.Sampling.CadenceGaps++
+				out.Sampling.CadenceGapDuration += dt
 				dt = 0 // don't credit an interval whose sampling cadence was lost
 			}
+		} else {
+			out.Sampling.BeforeFirstSample = at.Sub(start)
 		}
+		out.Sampling.AfterLastSample = end.Sub(at)
 		lastAt = at
 		if delta, ok := cpu.include(prev.CPUTimeNanos, s.CPUTimeNanos, dt); !ok {
 			return JobResourceSummary{}, ErrJobResourceFacts

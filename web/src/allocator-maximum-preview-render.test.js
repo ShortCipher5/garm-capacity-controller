@@ -18,6 +18,8 @@ test('optional maximum advice renders in the existing panel with no apply contro
   assert.match(initial,/every runner start must pass/);
   assert.match(initial,/configuration, not proof/);
   assert.match(initial,/lower existing maxima only/);
+  assert.match(initial,/Applied outcome: unknown/);
+  assert.match(initial,/a captured value matching a suggestion does not confirm who changed it/);
   const id='11111111-1111-4111-8111-111111111111', now=Date.parse('2026-11-18T10:00:00Z');
   const plan={captured_at:new Date(now).toISOString(),expires_at:new Date(now+20000).toISOString(),
    pools:[{pool:id,repository:id}],stock_maximum_preview:{state:'proposed',expires_at:new Date(now+10000).toISOString(),
@@ -25,14 +27,14 @@ test('optional maximum advice renders in the existing panel with no apply contro
   const render=(delta={})=>renderToStaticMarkup(React.createElement(StockMaximumSuggestions,{plan,comparison:'linked_at_capture',now,...delta}));
   assert.equal(render({plan:{...plan,stock_maximum_preview:undefined}}),'');
   const fresh=render();
-  assert.match(fresh,/Observed maximum/);assert.match(fresh,/Suggested maximum/);assert.match(fresh,/<td>2<\/td><td>3<\/td>/);
+  assert.match(fresh,/Maximum at capture/);assert.match(fresh,/Suggested maximum \(not applied here\)/);assert.match(fresh,/<td>2<\/td><td>3<\/td>/);
   assert.doesNotMatch(fresh,/<button|<form/);assert.match(fresh,/No settings changes/);
-  assert.doesNotMatch(fresh,/Minimum idle:/);
+  assert.doesNotMatch(fresh,/Minimum idle(?: at capture)?:/);
   const withIdle={...plan,stock_maximum_preview:{...plan.stock_maximum_preview,proposals:plan.stock_maximum_preview.proposals.map(p=>({...p,observed_min_idle:0}))}};
   withIdle.stock_maximum_preview.host_evidence="configured_only";
-  const idleHTML=render({plan:withIdle});assert.match(idleHTML,/provider destination is not verified/);assert.match(idleHTML,/Minimum idle: 0 \(unchanged\)/);assert.doesNotMatch(idleHTML,/<button|<form/);
-  assert.doesNotMatch(render({plan:withIdle,now:now+10000}),/Minimum idle:|provider destination/);
-  assert.doesNotMatch(render({plan:withIdle,comparison:'preview_superseded'}),/Minimum idle:/);
+  const idleHTML=render({plan:withIdle});assert.match(idleHTML,/provider destination is not verified/);assert.match(idleHTML,/Minimum idle at capture: 0 \(not part of this suggestion\)/);assert.doesNotMatch(idleHTML,/<button|<form/);
+  assert.doesNotMatch(render({plan:withIdle,now:now+10000}),/Minimum idle(?: at capture)?:|provider destination/);
+  assert.doesNotMatch(render({plan:withIdle,comparison:'preview_superseded'}),/Minimum idle(?: at capture)?:/);
   const blocked={...plan,stock_maximum_preview:{...plan.stock_maximum_preview,state:'unavailable',reason:'pressure_evidence_unavailable',proposals:[]}};
   assert.match(render({plan:blocked}),/Required pressure evidence/);
   for(const reason of ['private error', ['pressure_evidence_unavailable'], 'awaiting_matching_sample', null]){
@@ -65,12 +67,14 @@ test('optional maximum advice renders in the existing panel with no apply contro
   const slotsBatch={...slots.stock_maximum_preview,host_evidence:"configured_only"};
   assert.doesNotMatch(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:slotsBatch}}),/runner-slot ceiling/);
   assert.match(renderBatch(),/does not monitor applied changes, enforce a cooldown, or queue any action/);
-  assert.match(renderBatch(),/Minimum idle: 0/);
+  assert.match(renderBatch(),/Minimum idle at capture: 0/);
   assert.doesNotMatch(renderBatch(),/<button|<form/);
-  assert.doesNotMatch(renderBatch({now:now+10000}),/<table|Minimum idle:/);
-  assert.doesNotMatch(renderBatch({comparison:'preview_superseded'}),/<table|Minimum idle:/);
+  assert.doesNotMatch(renderBatch({now:now+10000}),/<table|Minimum idle(?: at capture)?:/);
+  assert.doesNotMatch(renderBatch({comparison:'preview_superseded'}),/<table|Minimum idle(?: at capture)?:/);
   const mismatch={...withIdle.stock_maximum_preview,proposals:[{...withIdle.stock_maximum_preview.proposals[0],suggested:1}]};
   assert.doesNotMatch(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:mismatch}}),/<table/);
+  assert.match(render({plan:fit('no_confirmed_change')}),/The captured comparison did not produce a maximum suggestion/);
+  assert.doesNotMatch(render({plan:fit('no_confirmed_change')}),/confirmed no maximum change/);
   const waiting={...withIdle.stock_maximum_preview,state:'no_confirmed_proposals',reason:'awaiting_cadence_window',proposals:[]};
   assert.match(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:waiting}}),/Waiting for a longer span of matching observations/);
   assert.doesNotMatch(render({plan:{...withIdle,stock_maximum_preview:waiting}}),/Waiting for a longer span of matching observations/);

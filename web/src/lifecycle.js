@@ -19,7 +19,7 @@ const blockers = {
  reservations_without_inventory_remain_charged: 'Reservations lack matching inventory. Resolve their original create outcomes; missing inventory is not proof of absence.',
  inventory_without_reservation_requires_reconciliation: 'Inventory has no matching reservation. Investigate attribution before adoption, deletion or release.',
  job_assignment_fence_unqualified: 'This assessment does not establish a GitHub job-assignment fence. Idle runners can still receive jobs.',
- confirmed_retirement_unimplemented: 'This assessment reports no confirmed retirement capability. Use the separately qualified retirement workflow, not host mode changes.',
+ confirmed_retirement_unimplemented: 'This assessment reports no confirmed retirement capability. Keep capacity charged until the exact runner teardown and capacity reuse are independently verified. A host mode change does not supply that proof.',
 };
 export function blockerGuidance(code) { return blockers[code] || `Unrecognized blocker (${code}). Keep retirement blocked and inspect the backend assessment.`; }
 export function hostPauseReasons(host, data) {
