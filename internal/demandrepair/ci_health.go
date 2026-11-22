@@ -555,7 +555,7 @@ func ciWireAlias(actual string) bool {
 		"id", "full_name", "total_count", "workflow_runs", "workflow_id", "run_attempt", "repository",
 		"name", "status", "conclusion", "created_at", "run_started_at", "jobs", "run_id", "started_at", "completed_at",
 		"runner_id", "runner_name", "steps", "number",
-		"artifacts", "workflow_run", "repository_id", "size_in_bytes", "expired", "expires_at",
+		"artifacts", "workflow_run", "repository_id", "size_in_bytes", "expired", "expires_at", "digest",
 	} {
 		if actual != canonical && strings.EqualFold(actual, canonical) {
 			return true

@@ -72,3 +72,24 @@ test("legacy and malformed optional hold markers do not create new evidence",()=
  }
  assert.doesNotMatch(writerRecoveryEvidenceGuidance("durable-unclassified"),/journal|durable/);
 });
+
+test("a failed fresh read takes precedence over a retained conflict, but not an unknown write", () => {
+ const input = { conflict: true, unavailable: true };
+ assert.equal(writerRecoveryState(input), "unavailable");
+ assert.equal(writerRecoveryReport(input).snapshot_freshness, "unavailable-or-stale");
+ assert.equal(writerRecoveryReport(input).state, "unavailable");
+ assert.equal(writerRecoveryState({...input, uncertain: true}), "unknown-write");
+ assert.equal(writerRecoveryState({...input, snapshot: {write_blocked: true}}), "unknown-write");
+});
+
+test("historical pending reference retains only a bounded request ID and known state", async () => {
+  const { historicalPendingReference } = await import("./garm-recovery.js");
+  const snapshot = {write_blocked:true,pending:{request_id:"req-1",state:"unknown",kind:"private",target:"private",resolution_available:true},history:[{reason:"private"}]};
+  assert.deepEqual(historicalPendingReference(snapshot), {requestId:"req-1",state:"unknown"});
+  assert.equal(historicalPendingReference({...snapshot,write_blocked:false}),null);
+  assert.equal(historicalPendingReference({...snapshot,pending:null}),null);
+  for (const invalid of ["bad id","<hidden>","é","x".repeat(129),"bad\n",1]) {
+    assert.equal(historicalPendingReference({...snapshot,pending:{request_id:invalid,state:"pending"}}),null);
+  }
+  assert.deepEqual(historicalPendingReference({...snapshot,pending:{request_id:"req-1",state:"anything"}}), {requestId:"req-1",state:"unclassified"});
+});

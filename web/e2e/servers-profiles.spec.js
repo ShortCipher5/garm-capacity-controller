@@ -98,6 +98,43 @@ test("usage chart renders observations without inventing interval coverage", asy
   await expect(quiet.locator("polyline.history-line")).toHaveCount(0);
 });
 
+test("usage history deadline ends loading for only the held server card", async ({ page }) => {
+  const installedAt = new Date();
+  await page.clock.install({ time: installedAt });
+  await page.clock.pauseAt(new Date(installedAt.getTime() + 1000));
+  const held = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const settledRoute = Promise.withResolvers();
+  let requests = 0;
+  await page.route("**/admin/api/v1/usage/host-a?*", async route => {
+    requests++;
+    held.resolve();
+    await release.promise;
+    await route.abort().catch(() => {}); // The browser may already have cancelled the request.
+    settledRoute.resolve();
+  });
+  try {
+    await connect(page);
+    await held.promise;
+    await page.getByRole("link", { name: "Servers", exact: true }).click();
+    const measured = page.locator('#servers [data-host="host-a"] .usage-panel');
+    const quiet = page.locator('#servers [data-host="host-b"] .usage-panel');
+    await expect(quiet.getByText(/Usage history unavailable: no measured samples exist for this host/)).toBeVisible();
+    await page.clock.runFor(14_999);
+    await expect(measured.getByText("Loading resource observations…")).toBeVisible();
+    await page.clock.runFor(1);
+    await expect(measured.getByRole("status")).toHaveText("Usage history read timed out. Refresh to retry.");
+    await expect(measured.getByText("Loading resource observations…")).toHaveCount(0);
+    await expect(measured.locator("svg")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Allocation overview" })).toBeVisible();
+    await expect(quiet.getByText(/Usage history unavailable: no measured samples exist for this host/)).toBeVisible();
+    expect(requests).toBe(1);
+  } finally {
+    release.resolve();
+    if (requests > 0) await settledRoute.promise;
+  }
+});
+
 test("runner-size profile CRUD, validation and per-host fit estimates including an honest zero", async ({ page }) => {
   await connect(page);
   // admin.spec.js leaves host-a disabled: estimates only cover enabled hosts,

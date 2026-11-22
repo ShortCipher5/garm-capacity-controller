@@ -133,6 +133,7 @@ function ActiveJobGroup({phase, group, jobId, viewJob}) {
         <table aria-labelledby={heading}>
           <thead><tr>
             <th scope="col">Job ID</th><th scope="col">Run and attempt</th><th scope="col">Workflow scope</th>
+            <th scope="col">Status observed</th>
             <th scope="col">{phase === "queued" ? "Waiting when observed" : "Execution elapsed when observed"}</th>
             <th scope="col">Details</th>
           </tr></thead>
@@ -144,6 +145,7 @@ function ActiveJobGroup({phase, group, jobId, viewJob}) {
               <span>Repository <code>{row.repository}</code></span>
               <span>Source <code>{row.source}</code></span>
             </td>
+            <td>{row.statusObservedAt ? <At value={row.statusObservedAt} precise /> : <span className="muted">Unknown</span>}</td>
             <td><Timing span={row.timing} /></td>
             <td><button type="button" aria-controls={jobId(row.key)}
               aria-label={`View job ${row.job}, run ${row.run}, attempt ${row.attempt}, workflow ${row.workflow}, repository ${row.repository}, source ${row.source}`}

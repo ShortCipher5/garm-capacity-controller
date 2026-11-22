@@ -129,6 +129,8 @@ test("native timing shows only verified evidence and explicitly guarded navigati
 
     const observedFirst = structuredClone(first);
     delete observedFirst.jobs[0].waiting;
+    const earlyStatusAt = "2025-12-31T23:59:57.000000321Z";
+    const laterStatusAt = "2025-12-31T23:59:59.000000654Z";
     const queued = [
       ...Array.from({length: 10}, (_, i) => ({id: String(100 + i), status: "queued", steps: []})),
       {id: "9007199254741001", status: "queued", steps: []},
@@ -141,9 +143,9 @@ test("native timing shows only verified evidence and explicitly guarded navigati
         {...previous, status: "unknown", jobs: [
           ...queued.reverse(),
           {id: "9007199254741003", status: "running", steps: []},
-          {id: "9007199254741004", status: "running", elapsed: exact("2000000000"), steps: []},
+          {id: "9007199254741004", status: "running", status_observed_at: earlyStatusAt, elapsed: exact("2000000000"), steps: []},
           {id: "9007199254741005", status: "completed", steps: []},
-          {id: "9007199254741006", status: "running", elapsed: exact("0"), steps: []},
+          {id: "9007199254741006", status: "running", status_observed_at: laterStatusAt, elapsed: exact("0"), steps: []},
         ]},
         {...common, repository_id: "9007199254740995", run_id: "9223372036854775806",
           status: "unknown", attempt: "1", jobs: [{id: "9007199254741003", status: "running", steps: []}]},
@@ -161,10 +163,17 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.deepEqual([...queuedSection.matchAll(/<th scope="row"><code>(\d+)<\/code>/g)].map((m) => m[1]),
       [...Array.from({length: 10}, (_, i) => String(100 + i)), "9007199254741001", "9007199254741002"]);
     assert.match(queuedSection, /<code>9007199254741001<\/code>.*attempt <code>1<\/code>.*Unknown/);
-    assert.equal((queuedSection.match(/<span class="muted">Unknown<\/span>/g) ?? []).length, 12);
     assert.doesNotMatch(queuedSection, /attempt <code>2<\/code>|At least|nanoseconds/);
     assert.match(activeHTML, /<strong>Run <code>9223372036854775807<\/code>, attempt <code>2<\/code><\/strong>.*<strong>Job <code>9007199254741001<\/code><\/strong>/);
     assert.match(runningSection, /Running jobs \(4 observed\)/);
+    const runningRow = (job) => [...runningSection.matchAll(/<tr>.*?<\/tr>/g)]
+      .map(([row]) => row).find((row) => row.includes(`<th scope="row"><code>${job}</code>`)) ?? "";
+    assert.match(runningSection, /<th scope="col">Status observed<\/th><th scope="col">Execution elapsed when observed<\/th>/);
+    assert.match(runningRow("9007199254741004"), /<td><time datetime="2025-12-31T23:59:57\.000000321Z">2025-12-31 23:59:57\.000000321 UTC<\/time><\/td>/i);
+    assert.match(runningRow("9007199254741006"), /<td><time datetime="2025-12-31T23:59:59\.000000654Z">2025-12-31 23:59:59\.000000654 UTC<\/time><\/td>/i);
+    assert.match(runningRow("9007199254741003"), /<td><span class="muted">Unknown<\/span><\/td><td><span class="muted">Unknown<\/span><\/td>/);
+    assert.doesNotMatch(runningSection, /datetime="2026-01-01T00:00:00Z"/i);
+    assert.equal((queuedSection.match(/<td><span class="muted">Unknown<\/span><\/td><td><span class="muted">Unknown<\/span><\/td>/g) ?? []).length, 12);
     assert.match(runningSection, /<code>9007199254741003<\/code>.*Run <code>9223372036854775806<\/code>, attempt <code>1<\/code>.*<code>9007199254740995<\/code>.*<code>fixture_source<\/code>.*Unknown/);
     assert.equal((runningSection.match(/<th scope="row"><code>9007199254741003/g) ?? []).length, 2);
     assert.match(runningSection, /<code>9007199254741004<\/code>.*title="2000000000 nanoseconds">2 s/);
