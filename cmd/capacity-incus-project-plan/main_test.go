@@ -216,3 +216,53 @@ func TestProjectPlanV3DoesNotQualifyDisk(t *testing.T) {
 	}
 	expect(t, strings.NewReader(strings.Replace(string(raw), "capture/v3", "capture/v1", 1)), 2, unknown, unknown, unknown)
 }
+
+func TestProjectPlanV4ChecksStateWithoutClaimingDiskFit(t *testing.T) {
+	raw, err := os.ReadFile("testdata/sanitized-capture-without-disk.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := strings.Replace(strings.TrimSpace(string(raw)), "capture/v3", "capture/v4", 1)
+	addState := func(capture, state string) string {
+		if state == "" {
+			return capture
+		}
+		return strings.TrimSuffix(capture, "}") + `,"project_state":` + state + "}"
+	}
+	// A reported disk allocation with no project disk limit is deliberately
+	// not evidence of fit or failure for the modeled count/CPU/RAM envelope.
+	state := strings.Replace(fictionalProjectState, `"disk":{"Limit":128849018880,"Usage":0}`, `"disk":{"Limit":-1,"Usage":1}`, 1)
+	busy := strings.NewReplacer(
+		`"instances":{"Limit":6,"Usage":0}`, `"instances":{"Limit":6,"Usage":1}`,
+		`"containers":{"Limit":5,"Usage":0}`, `"containers":{"Limit":5,"Usage":1}`,
+		`"cpu":{"Limit":12,"Usage":0}`, `"cpu":{"Limit":12,"Usage":2}`,
+		`"memory":{"Limit":25769803776,"Usage":0}`, `"memory":{"Limit":25769803776,"Usage":2147483648}`,
+		`"disk":{"Limit":-1,"Usage":1}`, `"disk":{"Limit":-1,"Usage":0}`,
+	).Replace(state)
+	for _, tt := range []struct {
+		name, capture, state, assessment string
+		code                             int
+	}{
+		{"matching caps and zero scoped allocations", base, state, "reported_count_cpu_ram_allocations_zero", 0},
+		{"positive count with zero disk allocation", base, busy, "reported_count_cpu_ram_allocations_nonzero", 1},
+		{"unexpected declared disk cap", base, fictionalProjectState, "conflicting", 1},
+		{"missing count cap", base, strings.Replace(state, `"Limit":5`, `"Limit":-1`, 1), "conflicting", 1},
+		{"CPU limit mismatch", base, strings.Replace(state, `"Limit":12`, `"Limit":11`, 1), "conflicting", 1},
+		{"missing reported RAM for container", base, strings.Replace(busy, `"Usage":2147483648`, `"Usage":0`, 1), "conflicting", 1},
+		{"changed project label", base, strings.Replace(state, "fixture-runners", "different-project", 1), "unknown", 2},
+		{"fractional parse in excluded disk row", base, strings.Replace(state, `"disk":{"Limit":-1,"Usage":1}`, `"disk":{"Limit":-1,"Usage":1.0}`, 1), "unknown", 2},
+		{"missing state", base, "", "unknown", 2},
+		{"state cannot override ceiling mismatch", strings.Replace(base, `"runners": 5`, `"runners": 4`, 1), state, "reported_count_cpu_ram_allocations_zero", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, diagnostic bytes.Buffer
+			code := run(nil, strings.NewReader(addState(tt.capture, tt.state)), &out, &diagnostic)
+			var got output
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil || code != tt.code || got.Schema != "incus-project-plan-report/v4" ||
+				got.SuppliedProjectState != tt.assessment || got.DiskAssessment != "not_evaluated" || got.RouteVerified || got.EnforcementVerified ||
+				diagnostic.Len() != 0 || strings.Contains(out.String(), "fixture-runners") || strings.Contains(out.String(), "different-project") {
+				t.Fatalf("code=%d report=%q diagnostic=%q wanted %d/%s; decode=%v", code, out.String(), diagnostic.String(), tt.code, tt.assessment, err)
+			}
+		})
+	}
+}

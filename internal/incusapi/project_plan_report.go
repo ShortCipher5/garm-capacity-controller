@@ -16,8 +16,8 @@ type Incus702ProjectPlan struct {
 	Profiles                                    []Incus702PlanProfile
 	Pools                                       []Incus702PlannedPool
 	NetHostBudget                               *capacitybroker.Resources
-	projectStateResponse                        []byte // only populated by the closed v2 capture decoder
-	withoutDiskCeiling                          bool   // only set by the closed v3 capture decoder
+	projectStateResponse                        []byte // only populated by the closed v2/v4 capture decoder
+	withoutDiskCeiling                          bool   // only set by the closed v3/v4 capture decoder
 }
 
 type Incus702PlanProfile struct {
@@ -54,7 +54,7 @@ type Incus702ProjectPlanReport struct {
 
 // CompareIncus702ProjectPlan checks exact supplied v7.0.2 declarations against
 // one proposed whole-project mix and one finite modeled host. Existing schemas
-// use the stock planner for count/CPU/RAM/disk; the distinct v3 capture only
+// use the stock planner for count/CPU/RAM/disk; the distinct v3/v4 captures only
 // checks count, CPU and RAM. It performs no I/O. No caller uses
 // it for live planning; independent source/build/route/override/freshness
 // qualification remains outside this offline comparison.
@@ -171,7 +171,7 @@ func CompareIncus702ProjectPlan(in Incus702ProjectPlan) Incus702ProjectPlanRepor
 		DiskNotEvaluated: in.withoutDiskCeiling,
 	}
 	if in.projectStateResponse != nil {
-		out.SuppliedProjectState = checkIncus702ProjectState(in.projectStateResponse, project)
+		out.SuppliedProjectState = checkIncus702ProjectState(in.projectStateResponse, project, in.withoutDiskCeiling)
 	}
 	return out
 }

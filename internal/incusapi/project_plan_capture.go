@@ -23,18 +23,18 @@ func CheckIncus702ProjectPlanCapture(raw []byte) Incus702ProjectPlanReport {
 		return unknown
 	}
 	schema, err := field[string](header, "schema")
-	if err != nil || (schema != "incus-project-plan-capture/v1" && schema != "incus-project-plan-capture/v2" && schema != "incus-project-plan-capture/v3") {
+	if err != nil || (schema != "incus-project-plan-capture/v1" && schema != "incus-project-plan-capture/v2" && schema != "incus-project-plan-capture/v3" && schema != "incus-project-plan-capture/v4") {
 		return unknown
 	}
 	keys := []string{"schema", "project", "storage_pool", "reviewed_project_sha256", "project_response", "profiles", "pools", "net_host_budget"}
-	v2 := schema == "incus-project-plan-capture/v2"
-	v3 := schema == "incus-project-plan-capture/v3"
-	unknown.DiskNotEvaluated = v3
+	hasState := schema == "incus-project-plan-capture/v2" || schema == "incus-project-plan-capture/v4"
+	withoutDisk := schema == "incus-project-plan-capture/v3" || schema == "incus-project-plan-capture/v4"
+	unknown.DiskNotEvaluated = withoutDisk
 	readResources := incus702CaptureResources
-	if v3 {
+	if withoutDisk {
 		readResources = incus702CaptureResourcesWithoutDisk
 	}
-	if v2 {
+	if hasState {
 		keys = append(keys, "project_state")
 		unknown.SuppliedProjectState = Incus702ProjectStateUnknown
 	}
@@ -63,9 +63,9 @@ func CheckIncus702ProjectPlanCapture(raw []byte) Incus702ProjectPlanReport {
 	}
 	in := Incus702ProjectPlan{
 		Project: project, StoragePool: storage, ReviewedProjectSHA256: projectPin,
-		ProjectResponse: fields["project_response"], NetHostBudget: &budget, withoutDiskCeiling: v3,
+		ProjectResponse: fields["project_response"], NetHostBudget: &budget, withoutDiskCeiling: withoutDisk,
 	}
-	if v2 {
+	if hasState {
 		state, err := incus702DeclarationObject(fields["project_state"], "project", "response")
 		sourceProject, labelErr := field[string](state, "project")
 		if err != nil || labelErr != nil || sourceProject != project {
@@ -101,7 +101,7 @@ func CheckIncus702ProjectPlanCapture(raw []byte) Incus702ProjectPlanReport {
 		in.Pools = append(in.Pools, Incus702PlannedPool{ID: id, Profile: profile, Count: count, Size: size})
 	}
 	out := CompareIncus702ProjectPlan(in)
-	if v2 && out.SuppliedProjectState == Incus702ProjectStateNotSupplied {
+	if hasState && out.SuppliedProjectState == Incus702ProjectStateNotSupplied {
 		return unknown
 	}
 	return out
