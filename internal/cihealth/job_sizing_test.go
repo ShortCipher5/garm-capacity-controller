@@ -239,3 +239,39 @@ func TestJobSizingRejectsOverlappingWindowsOnOneRunnerIncarnation(t *testing.T) 
 		t.Fatalf("different runner incarnations can have simultaneous jobs: %+v, %v", got, err)
 	}
 }
+
+func TestJobSizingRefusesImpossibleRAMGaugeAndMean(t *testing.T) {
+	for name, change := range map[string]func(*JobResourceSummary){
+		"mean exceeds span ending at latest gauge": func(r *JobResourceSummary) {
+			r.RAM.LatestAt = r.RAM.LatestAt.Add(-time.Nanosecond)
+		},
+		"multiple gauges cannot occur at first sample": func(r *JobResourceSummary) {
+			r.RAMMean = nil
+			r.RAM.LatestAt = r.Scope.StartedAt.Add(r.Sampling.BeforeFirstSample)
+		},
+		"one gauge must be its own maximum": func(r *JobResourceSummary) {
+			r.RAMMean = nil
+			r.RAM.Samples = 1
+			r.RAM.SampleMax++
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+			change(&in.Samples[0].Resources)
+			if got, err := SummarizeJobSizing(in); err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+				t.Fatalf("impossible RAM samples produced sizing summary: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestJobSizingKeepsLoneRAMGaugeAndCPUCoverageIndependent(t *testing.T) {
+	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	r := &in.Samples[0].Resources
+	r.RAM = &ResourceGaugeSummary{Latest: 90, SampleMax: 90, LatestAt: r.Scope.StartedAt, Samples: 1}
+	r.RAMMean = nil
+	got, err := SummarizeJobSizing(in)
+	if err != nil || got.CPU.State != JobSizingIncreaseAdvised || got.RAM.State != JobSizingCoverageUnavailable || got.RAM.Suggested != nil {
+		t.Fatalf("lone gauge should not fabricate coverage or suppress valid CPU advice: %+v, %v", got, err)
+	}
+}
