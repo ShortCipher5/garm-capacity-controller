@@ -72,3 +72,12 @@ test("legacy and malformed optional hold markers do not create new evidence",()=
  }
  assert.doesNotMatch(writerRecoveryEvidenceGuidance("durable-unclassified"),/journal|durable/);
 });
+
+test("a failed fresh read takes precedence over a retained conflict, but not an unknown write", () => {
+ const input = { conflict: true, unavailable: true };
+ assert.equal(writerRecoveryState(input), "unavailable");
+ assert.equal(writerRecoveryReport(input).snapshot_freshness, "unavailable-or-stale");
+ assert.equal(writerRecoveryReport(input).state, "unavailable");
+ assert.equal(writerRecoveryState({...input, uncertain: true}), "unknown-write");
+ assert.equal(writerRecoveryState({...input, snapshot: {write_blocked: true}}), "unknown-write");
+});
