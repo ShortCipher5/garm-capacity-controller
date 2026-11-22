@@ -126,3 +126,24 @@ func TestStockMaximumPreviewsDoNotPresentOmittedMinimumAsObservedZero(t *testing
 		})
 	}
 }
+
+func TestStockMaximumBatchWaitsForEligibleLatestPairAfterStableSpan(t *testing.T) {
+	samples := maximumCycleHistory(5, 7)
+	samples[3].start = samples[2].finish.Add(10 * time.Second)
+	samples[3].finish = samples[3].start.Add(time.Second)
+	samples[3].expires = samples[3].start.Add(time.Minute)
+	var history stockMaximumBatchHistory
+	for _, sample := range samples[:3] {
+		history.accept(sample, nil, sample.finish, sample.expires)
+	}
+	recent := samples[3]
+	preview := history.accept(recent, nil, recent.finish, recent.expires)
+	if preview.State != "no_confirmed_proposals" || preview.Reason != "awaiting_cadence_window" || len(preview.Proposals) != 0 {
+		t.Fatalf("stable settings did not establish a disjoint latest comparison: %+v", preview)
+	}
+	next := samples[4]
+	preview = history.accept(next, nil, next.finish, next.expires)
+	if preview.State != "proposed" || len(preview.Proposals) != 2 {
+		t.Fatalf("an eligible next observation did not recover: %+v", preview)
+	}
+}

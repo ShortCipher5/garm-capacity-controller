@@ -159,3 +159,22 @@ zero, and neither route nor enforcement is verified. This report does not
 evaluate backing storage, quotas or live disk pressure. Check disk reserve,
 pressure and any provider/storage defaults separately before qualification;
 a modeled fit is not permission to start runners.
+
+### Optional project-state cross-check without sized disk declarations
+
+Use `incus-project-plan-capture/v4` for the v3 declaration model plus the
+required v2-shaped `project_state` object. The independently reviewed project
+label must match. Its supplied count, CPU and RAM caps must match the
+declarations, and the reported aggregate disk `Limit` must be `-1` (unset).
+The disk row must still have the pinned wire shape. Disk allocation values do
+not participate in this comparison: a positive reported disk value does not
+establish physical occupancy, and a zero does not establish headroom.
+
+The v4 report retains `disk_assessment: "not_evaluated"`. For this schema,
+`supplied_project_state` distinguishes
+`reported_count_cpu_ram_allocations_zero` (a necessary condition for exit 0)
+from `reported_count_cpu_ram_allocations_nonzero` (exit 1). As in v2,
+contradictions exit 1, and missing or malformed inputs exit 2. Count, CPU or
+RAM evidence from this database view cannot prove resource use, defeat
+unaccounted external demand, or confirm that the effective provider and
+daemon point to this project. No version verifies route or enforcement.

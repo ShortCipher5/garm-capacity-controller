@@ -143,3 +143,63 @@ func TestJobSizingRefusesDuplicateRunAndForeignOrContradictoryEvidence(t *testin
 		})
 	}
 }
+
+func TestJobSizingRefusesCoverageThatContradictsSamplingHoles(t *testing.T) {
+	for name, change := range map[string]func(*JobResourceSummary){
+		"reported CPU coverage crosses missing edge": func(r *JobResourceSummary) {
+			r.Sampling.AfterLastSample = 2 * time.Second
+		},
+		"two samples cannot bridge an observed cadence gap": func(r *JobResourceSummary) {
+			r.Sampling = ResourceSamplingCoverage{CadenceGaps: 1, CadenceGapDuration: 10 * time.Second}
+		},
+		"gap duration does not exceed maximum cadence": func(r *JobResourceSummary) {
+			r.Sampling = ResourceSamplingCoverage{CadenceGaps: 1, CadenceGapDuration: 9 * time.Second}
+		},
+		"single recorded pair cannot leave unmatched time": func(r *JobResourceSummary) {
+			r.CPU.Coverage.Duration--
+		},
+		"metric reported on empty series": func(r *JobResourceSummary) {
+			r.Sampling = ResourceSamplingCoverage{NoSamples: r.Window}
+		},
+		"point gauge outside observed sample envelope": func(r *JobResourceSummary) {
+			r.RAM.LatestAt = r.Scope.EndAt
+		},
+		"sampling gap duration overflows when added": func(r *JobResourceSummary) {
+			r.Sampling.BeforeFirstSample = time.Duration(math.MaxInt64)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+			change(&in.Samples[0].Resources)
+			got, err := SummarizeJobSizing(in)
+			if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+				t.Fatalf("inconsistent sampling produced advice: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestJobSizingAcceptsRecordedSamplingGapsAndEmptyEvidenceWithoutAdvice(t *testing.T) {
+	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	scope := in.Samples[0].Resources.Scope
+	scope.MaxGap = 3 * time.Second
+	for _, offsets := range [][]time.Duration{nil, {0, 2 * time.Second, 7 * time.Second, 9 * time.Second}} {
+		var samples []JobResourceSample
+		for _, offset := range offsets {
+			s := resourceSampleFixture(scope, offset)
+			s.CPUTimeNanos = knownResource(uint64(offset))
+			s.RAMBytes = knownResource(96)
+			samples = append(samples, s)
+		}
+		observed, err := SummarizeJobResources(scope, samples)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Samples[0].Resources = observed
+		got, err := SummarizeJobSizing(in)
+		if err != nil || got.CPU.State != JobSizingCoverageUnavailable || got.RAM.State != JobSizingCoverageUnavailable ||
+			got.CPU.Suggested != nil || got.RAM.Suggested != nil {
+			t.Fatalf("honest missing coverage not reported: %+v, %v", got, err)
+		}
+	}
+}
