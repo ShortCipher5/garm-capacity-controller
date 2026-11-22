@@ -1,6 +1,7 @@
 package cihealthreport
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"reflect"
 	"strings"
@@ -13,6 +14,36 @@ import (
 var fixtureBinding = ArtifactBinding{
 	Attempt:    cihealth.AttemptKey{Source: "source_a", RepositoryID: 9007199254740993, WorkflowID: 20, RunID: 31, Attempt: 2},
 	ArtifactID: 9007199254740997,
+}
+
+func TestJUnitAcceptsOnlyOneLeadingUTF8PreambleAndRetainsExactDigest(t *testing.T) {
+	const bom = "\xEF\xBB\xBF"
+	const body = `<testsuite tests="1"><testcase name="fixture case" time="0.125"/></testsuite>`
+	for _, declaration := range []string{"", `<?xml version="1.0" encoding="UTF-8"?>` + "\n"} {
+		plain := []byte(declaration + body)
+		withBOM := []byte(bom + string(plain))
+		want, err := ParseJUnit(plain, fixtureBinding)
+		if err != nil {
+			t.Fatal("ordinary UTF-8 report refused")
+		}
+		got, err := ParseJUnit(withBOM, fixtureBinding)
+		if err != nil || !reflect.DeepEqual(got.Cases(), want.Cases()) || got.Summary() != want.Summary() {
+			t.Fatalf("leading UTF-8 preamble changed or rejected a report: %v", err)
+		}
+		if got.digest != sha256.Sum256(withBOM) || want.digest != sha256.Sum256(plain) || got.digest == want.digest {
+			t.Fatal("decoding preamble was incorrectly excluded from exact report digest")
+		}
+	}
+	for _, raw := range []string{
+		bom + bom + body,
+		"\n" + bom + body,
+		`<?xml version="1.0"?>` + bom + body,
+		body + bom,
+	} {
+		if _, err := ParseJUnit([]byte(raw), fixtureBinding); err != ErrReport {
+			t.Fatalf("unexpected acceptance of repeated or misplaced UTF-8 preamble: %v", err)
+		}
+	}
 }
 
 func TestJUnitProjectionExcludesLogsPathsAndUnsupportedTrust(t *testing.T) {
