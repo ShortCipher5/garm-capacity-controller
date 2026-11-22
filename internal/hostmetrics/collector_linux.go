@@ -184,11 +184,20 @@ func (c *Collector) collectWithClock(ctx context.Context, now func() time.Time) 
 			defer wg.Done()
 			at := now()
 			c.mu.Lock()
-			skip := at.Before(c.states[host].skipUntil)
+			state := c.states[host]
+			skip := at.Before(state.skipUntil)
 			c.mu.Unlock()
-			if !skip && ctx.Err() == nil {
-				c.collectHost(ctx, host, source, at)
+			if ctx.Err() != nil {
+				return
 			}
+			if skip {
+				// A retained baseline must not cross a rollback seen
+				// during backoff, even if the clock recovers before
+				// the next eligible sweep.
+				state.clearBaselineOnWallRollback(at.UTC())
+				return
+			}
+			c.collectHost(ctx, host, source, at)
 		}(host, source)
 	}
 	wg.Wait()
@@ -212,8 +221,7 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	// Compare the wall coordinates separately so a clock correction never
 	// replays a history time or bridges a CPU rate across the rollback.
 	wall := at.UTC()
-	if wall.IsZero() || wall.Before(state.lastStart) {
-		state.baseline = nil
+	if state.clearBaselineOnWallRollback(wall) {
 		return
 	}
 	if wall.Equal(state.lastStart) {
@@ -263,6 +271,15 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	if err := c.recorder.RecordUsageSample(sweep, host, at, rate, usage.RAMUsedMiB, usage.DiskUsedMiB, GuestStateSourceV2); err != nil {
 		c.backOff(host, at, "usage sample record unavailable")
 	}
+}
+
+// wall must not carry a monotonic reading. Per-host sweeps are serialized.
+func (s *hostState) clearBaselineOnWallRollback(wall time.Time) bool {
+	if wall.IsZero() || wall.Before(s.lastStart) {
+		s.baseline = nil
+		return true
+	}
+	return false
 }
 
 func newGuestCPUBaseline(usage incusapi.UtilizationSample, at time.Time) *guestCPUBaseline {

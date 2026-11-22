@@ -551,3 +551,24 @@ func TestCollectorDoesNotPersistReplayedWallTimeAfterRollback(t *testing.T) {
 		t.Fatalf("want no replayed or bridged rows after a wall-clock rollback, got %+v", rows)
 	}
 }
+
+func TestWallRollbackWhileBackedOffDoesNotBridgeHistory(t *testing.T) {
+	start := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	source, recorder := &fakeSource{}, &fakeRecorder{}
+	collector, err := New(map[string]Source{"fixture": source}, recorder, Options{Backoff: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.sample = fixtureUsage(1000, 1, 1, 1)
+	collector.collect(t.Context(), start)
+	source.sample = fixtureUsage(61_000, 1, 1, 1)
+	recorder.err = errFixture
+	collector.collect(t.Context(), start.Add(time.Minute))
+	collector.collect(t.Context(), start.Add(20*time.Second))
+	source.sample = fixtureUsage(121_000, 1, 1, 1)
+	recorder.err = nil
+	collector.collect(t.Context(), start.Add(2*time.Minute))
+	if rows := recorder.recorded(); len(rows) != 0 {
+		t.Fatalf("first post-backoff observation must rebaseline after wall rollback, got %+v", rows)
+	}
+}
