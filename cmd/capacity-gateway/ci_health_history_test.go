@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/adminview"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealthsource"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/demandobserver"
@@ -32,6 +35,7 @@ type ciHistoryFixture struct {
 	reads    atomic.Int32
 	mode     atomic.Int32
 	notFound atomic.Int32
+	capReads atomic.Int32
 	entered  chan struct{}
 }
 
@@ -92,7 +96,18 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 				status = "" // Completed runs are discovered by the bounded recent scan.
 			}
 			total := 0
-			if r.URL.Query().Get("status") == status {
+			if f.mode.Load() == 10 && r.URL.Query().Get("created") != "" {
+				if r.URL.Query().Get("page") != "1" || r.URL.Query().Get("per_page") != strconv.Itoa(demandrepair.CIPerPage) {
+					t.Error("unexpected capped discovery page")
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				f.capReads.Add(1)
+				total = demandrepair.CIPerPage * demandrepair.CIMaxPages
+				for i := int64(0); i < demandrepair.CIPerPage; i++ {
+					rows = append(rows, run(baseRun+i))
+				}
+			} else if r.URL.Query().Get("status") == status {
 				first := int64(0)
 				total = int(want)
 				if f.mode.Load() == 9 {
@@ -115,6 +130,11 @@ func newCIHistoryFixture(t *testing.T) *ciHistoryFixture {
 			}
 			out = map[string]any{"total_count": total, "workflow_runs": rows}
 		case strings.HasPrefix(r.URL.Path, path+"/actions/runs/"):
+			if f.mode.Load() == 10 {
+				t.Error("capped discovery must not read attempt details")
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, path+"/actions/runs/"), "/")
 			id, err := strconv.ParseInt(parts[0], 10, 64)
 			attempt := "1"
@@ -280,6 +300,102 @@ func TestCIHistoryBackgroundExactAttemptNotFoundLeavesRetainedRevision(t *testin
 		t.Fatal("a later successful timing read resumed history without an owner review")
 	}
 	f.ensureHistory(t, 1)
+}
+
+func TestCIHistoryBackgroundScopedCapPreservesReviewedCheckpoint(t *testing.T) {
+	f := newCIHistoryFixture(t)
+	ctx := t.Context()
+	if err := f.owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := cihealth.OpenHistory(ctx, cihealth.HistoryInput{Enabled: true, Root: f.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := append([]cihealthsource.HistoryExpectation(nil), f.expect...)
+	resume[0].Cursor = cihealth.HistoryCursor{Revision: 1, Checkpoint: 42}
+	if err := seed.Apply(ctx, resume[0].Scope, cihealth.HistoryCursor{}, resume[0].Cursor, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readSnapshot := func() []byte {
+		t.Helper()
+		b, err := f.root.ReadFile(testHistorySnapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	before := readSnapshot()
+	owned, expected, err := cihealthsource.ReopenReviewedCycleHistory(ctx, f.runtime.source, f.root, sha256.Sum256(before), resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owned.Close() })
+	if err := f.runtime.attachOwnedHistory(owned, expected); err != nil {
+		t.Fatal(err)
+	}
+
+	budget := admission.Resources{CPU: 1, RAM: 1, Runners: 1}
+	policy := admission.Config{Global: budget, Hosts: map[string]admission.Host{"a": {Budget: budget, Mode: "enabled", ObservedAt: time.Now()}},
+		Pools: map[string]admission.Pool{"pool": {Budget: budget, Hosts: []string{"a"}}}, MaxObservationAge: time.Minute}
+	store, err := admission.OpenSQLite(filepath.Join(t.TempDir(), "local.db"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const ownerToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	handler, err := adminview.New(store, ownerToken, nil, false)
+	if err != nil || handler.SetCIHealthSnapshot(f.runtime.snapshot) != nil {
+		t.Fatal("could not attach local owner endpoint", err)
+	}
+	assertView := func(state string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "https://127.0.0.1/admin/api/v1/ci-health", nil)
+		req.Header.Set("Authorization", "Bearer "+ownerToken)
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, req)
+		var response struct{ State string }
+		if err := json.Unmarshal(out.Body.Bytes(), &response); err != nil || out.Code != http.StatusOK || response.State != state {
+			t.Fatalf("expected authenticated %s view, got %d: %s", state, out.Code, out.Body.String())
+		}
+	}
+	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() == nil {
+		t.Fatal("initial complete cycle did not persist")
+	}
+	assertView("observed")
+	persisted := readSnapshot()
+	if bytes.Equal(before, persisted) {
+		t.Fatal("complete cycle did not change the reviewed snapshot")
+	}
+
+	f.mode.Store(10)
+	if f.runtime.runCycle(ctx) || f.runtime.activeHistory() != nil || f.capReads.Load() != 1 {
+		t.Fatal("capped creation window was accepted, kept history open, or did not stop after its first page")
+	}
+	assertView("unavailable")
+	if !bytes.Equal(readSnapshot(), persisted) {
+		t.Fatal("capped window modified the retained snapshot")
+	}
+	resume[0].Cursor.Revision = 2
+	reopened, _, err := cihealthsource.ReopenReviewedCycleHistory(ctx, f.runtime.source, f.root, sha256.Sum256(persisted), resume)
+	if err != nil {
+		t.Fatal("exact reviewed checkpoint or snapshot did not survive saturation", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f.mode.Store(0)
+	if !f.runtime.runCycle(ctx) || f.runtime.activeHistory() != nil {
+		t.Fatal("a later complete cycle did not recover timing or reopened history without review")
+	}
+	assertView("observed")
+	if !bytes.Equal(readSnapshot(), persisted) {
+		t.Fatal("timing recovery changed the retained snapshot")
+	}
 }
 
 func TestCIHistoryBackgroundExplicitDisablePublicationFailureAndUncertainty(t *testing.T) {
