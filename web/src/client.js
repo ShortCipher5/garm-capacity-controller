@@ -546,7 +546,12 @@ export class ReadSession {
     const controller = new AbortController();
     this.#usageInFlight.add(controller);
     const abort = () => controller.abort(); signal?.addEventListener("abort", abort, { once: true });
-    const timeout = setTimeout(abort, 15000);
+    let deadlineExpired = false;
+    const timeout = setTimeout(() => {
+      if (controller.signal.aborted) return;
+      deadlineExpired = true;
+      abort();
+    }, 15000);
     const query = new URLSearchParams();
     if (since !== undefined) query.set("since", since instanceof Date ? since.toISOString() : String(since));
     if (limit !== undefined) query.set("limit", String(limit));
@@ -561,6 +566,11 @@ export class ReadSession {
       if (controller.signal.aborted) throw new SessionEnded();
       return validateUsageHistory(body, host);
     } catch (error) {
+      // A local deadline is visible to this card, not a lost session. An
+      // intervening disconnect or caller cancellation still fences late work.
+      if (deadlineExpired && !signal?.aborted && this.#usageInFlight.has(controller)) {
+        throw new Error("Usage history read timed out. Refresh to retry.");
+      }
       if (error instanceof SessionEnded) throw error;
       if (controller.signal.aborted) throw new SessionEnded();
       throw new Error("Usage history could not be read. Refresh before reviewing measured utilization.");
