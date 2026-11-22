@@ -20,7 +20,7 @@ test("usage history validation accepts the wire shape and rejects inventions", (
 });
 test("fetchUsageHistory issues the exact same-origin read request", async () => {
   const calls = [];
-  const history = [sample("2026-01-01T00:00:00Z", 100)];
+  const history = [{ ...sample("2026-01-01T00:00:00Z", 100), host: "host a" }];
   const result = await fetchUsageHistory(token, "host a", {
     since: "2026-01-01T00:00:00Z",
     limit: 12,
@@ -62,4 +62,10 @@ test("guest-state scope is project guest observations, never host load", () => {
   assert.match(usageScope([guest, current]), /stored zero in legacy history/);
   assert.match(usageScope([guest, {...guest, source:"other"}]), /Source-specific/);
   assert.match(usageScope([]), /unavailable/);
+});
+
+test("fetchUsageHistory rejects a host mismatch instead of presenting it as the requested host", async () => {
+  await assert.rejects(fetchUsageHistory(token, "host-b", {
+    fetcher: async () => ({ok: true, status: 200, json: async () => [sample("2026-01-01T00:00:00Z", 100)]}),
+  }), UsageResponseError);
 });
