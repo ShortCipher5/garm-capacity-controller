@@ -49,6 +49,7 @@ func TestJobSizingVerifiesExactPrimaryHistoryAndCoverageThresholds(t *testing.T)
 			in := jobSizingFixture(t, tc.primary, tc.span, tc.cover)
 			retry := in.Samples[0]
 			retry.Resources.Scope.Job.Attempt.Attempt = 2
+			retry.Resources.Scope.RunnerIncarnation = "fixture-retry-incarnation"
 			in.Samples = append(in.Samples, retry)
 			got, err := SummarizeJobSizing(in)
 			if err != nil || got.Primary != tc.primary || got.Successful != tc.primary || got.Retried != 1 || got.CPU.State != tc.want || got.RAM.State != tc.want ||
@@ -201,5 +202,40 @@ func TestJobSizingAcceptsRecordedSamplingGapsAndEmptyEvidenceWithoutAdvice(t *te
 			got.CPU.Suggested != nil || got.RAM.Suggested != nil {
 			t.Fatalf("honest missing coverage not reported: %+v, %v", got, err)
 		}
+	}
+}
+
+func TestJobSizingRejectsOverlappingWindowsOnOneRunnerIncarnation(t *testing.T) {
+	in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	first := in.Samples[0].Resources.Scope
+	newSample := func(offset time.Duration) {
+		in.Samples[1].Resources = jobSizingFixture(t, 1, 0, 9*time.Second).Samples[0].Resources
+		r := &in.Samples[1].Resources
+		r.Scope.Job.Attempt.RunID = 2
+		r.Scope.RunnerIncarnation = first.RunnerIncarnation
+		r.Scope.StartedAt, r.Scope.EndAt, r.Scope.AsOf = r.Scope.StartedAt.Add(offset), r.Scope.EndAt.Add(offset), r.Scope.AsOf.Add(offset)
+		r.RAM.LatestAt = r.RAM.LatestAt.Add(offset)
+	}
+	newSample(5 * time.Second)
+	for _, attempted := range []int64{1, 2} {
+		in.Samples[1].Resources.Scope.Job.Attempt.Attempt = attempted
+		in.Samples[0], in.Samples[1] = in.Samples[1], in.Samples[0] // later start comes first
+		got, err := SummarizeJobSizing(in)
+		if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+			t.Errorf("overlapping window on attempt %d returned a result: %+v, %v", attempted, got, err)
+		}
+		in.Samples[0], in.Samples[1] = in.Samples[1], in.Samples[0]
+	}
+
+	newSample(first.EndAt.Sub(first.StartedAt))
+	got, err := SummarizeJobSizing(in)
+	if err != nil || got.Successful != 20 || got.CPU.State != JobSizingIncreaseAdvised {
+		t.Fatalf("touching windows have no positive overlap: %+v, %v", got, err)
+	}
+	newSample(5 * time.Second)
+	in.Samples[1].Resources.Scope.RunnerIncarnation = "different-runner-incarnation"
+	got, err = SummarizeJobSizing(in)
+	if err != nil || got.Successful != 20 || got.CPU.State != JobSizingIncreaseAdvised {
+		t.Fatalf("different runner incarnations can have simultaneous jobs: %+v, %v", got, err)
 	}
 }
