@@ -538,7 +538,7 @@ export class ReadSession {
     } finally { clearTimeout(timeout); }
   }
   async usageHistory(host, { since, limit, signal } = {}) {
-    if (!this.#token) throw new SessionEnded();
+    if (!this.#token || signal?.aborted) throw new SessionEnded();
     // Concurrent calls are independent: every host card owns its request.
     // A shared single-flight abort here would strand every card but the last
     // on 'Loading…', and a shared generation guard would turn concurrent
@@ -556,9 +556,12 @@ export class ReadSession {
       if (controller.signal.aborted) throw new SessionEnded();
       if (response.status === 401) { this.disconnect(); throw new SessionEnded("Read authorization ended. Reconnect to the admin service."); }
       if (!response.ok) throw new Error("Usage history is unavailable. No automatic retry was made.");
-      return validateUsageHistory(await response.json());
+      const body = await response.json();
+      if (controller.signal.aborted) throw new SessionEnded();
+      return validateUsageHistory(body);
     } catch (error) {
       if (error instanceof SessionEnded) throw error;
+      if (controller.signal.aborted) throw new SessionEnded();
       throw new Error("Usage history could not be read. Refresh before reviewing measured utilization.");
     } finally { clearTimeout(timeout); signal?.removeEventListener("abort", abort); this.#usageInFlight.delete(controller); }
   }
