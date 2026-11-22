@@ -4,6 +4,21 @@
 export class UsageResponseError extends Error {}
 const object = (value) => value && typeof value === "object" && !Array.isArray(value);
 const integer = (value) => Number.isSafeInteger(value) && value >= 0;
+// The server emits Go time.Time JSON (RFC3339 with up to nine fractional
+// digits). Date.parse alone coerces other JSON types and rolls invalid dates
+// such as February 30 into a different observation day.
+const usageTimestamp = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+function validUsageTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const match = usageTimestamp.exec(value);
+  if (!match || match[0] !== value) return false;
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText), month = Number(monthText), day = Number(dayText);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const lastDay = month === 2 ? (leap ? 29 : 28) : ([4, 6, 9, 11].includes(month) ? 30 : 31);
+  return day <= lastDay;
+}
+
 export function validateUsageHistory(value, expectedHost) {
   if (
     !Array.isArray(value) ||
@@ -13,7 +28,7 @@ export function validateUsageHistory(value, expectedHost) {
         typeof sample.host === "string" &&
         sample.host.length > 0 &&
         (expectedHost === undefined || sample.host === expectedHost) &&
-        Number.isFinite(Date.parse(sample.sampled_at)) &&
+        validUsageTimestamp(sample.sampled_at) &&
         integer(sample.cpu_used_millis) &&
         integer(sample.ram_used_mib) &&
         integer(sample.disk_used_mib) &&
