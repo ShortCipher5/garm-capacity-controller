@@ -14,6 +14,13 @@ owner-only, opt-in view and retention limits.
 | Per-job resources and sizing | **Offline model only.** Exact job/runner identity, matching initial and closing bindings and separate execution evidence must cover the sampled job window. CPU averages and interval peaks, RAM gauges and time-weighted mean, and optional disk metrics describe only measured coverage. | The reducer refuses resets and wrong incarnations and never fills cadence gaps or missing fields. Disk requires its own independently bound samples. The sizing model also requires reviewed comparable history and risk evidence; it does not authorize changes. See the [stock binding gate](../internal/cihealth/stock_job_resource_binding.go), [replacement and cutoff fixtures](../internal/cihealth/stock_job_resource_binding_test.go), [cadence fixtures](../internal/cihealth/resources_test.go), and [sizing fixtures](../internal/cihealth/job_sizing_test.go). |
 | Test reports and artifacts | **Offline JUnit parser; separate metadata reader.** A bounded JUnit report, independently bound to an exact artifact and attempt, can yield occurrence-level outcomes, counts and durations. The scoped GitHub reader returns run-level artifact metadata, not the archive. | An artifact name or its XML cannot prove attempt, job, shard, retry or reporter identity. The parser does not retain labels or report bodies, infer tests outside the report, or fetch artifacts. See the [metadata fixture](../internal/demandrepair/ci_artifact_metadata_test.go) and [JUnit binding, privacy and limits fixtures](../internal/cihealthreport/junit_test.go). |
 
+The offline sizing window consumer bounds the review to at most 30 days and
+requires a recent primary completion before returning advice. The caller
+supplies the review clock and maximum age. An out-of-window observation
+invalidates the entire review rather than being silently dropped from a
+supposedly complete cohort. Retries do not refresh primary evidence. This
+consumer has no gateway or UI wiring and does not verify the data source.
+
 ## What remains unavailable
 
 - **Verified stock job-to-resource attribution.** There is no live producer for

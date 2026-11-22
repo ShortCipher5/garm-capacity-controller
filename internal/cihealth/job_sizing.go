@@ -70,6 +70,8 @@ const (
 	JobSizingNoIncrease
 	JobSizingIncreaseAdvised
 	JobSizingNeedsManualReview
+	// JobSizingStaleHistory is reported by the windowed review consumer.
+	JobSizingStaleHistory
 )
 
 type JobSizingMetric struct {
