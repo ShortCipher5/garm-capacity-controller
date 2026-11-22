@@ -109,6 +109,11 @@ func (f *fakeRecorder) recorded() []recorded {
 	return append([]recorded(nil), f.samples...)
 }
 
+// Supply the same explicit start to all hosts in direct fixture sweeps.
+func (c *Collector) collect(ctx context.Context, at time.Time) {
+	c.collectWithClock(ctx, func() time.Time { return at })
+}
+
 var errFixture = errors.New("private fixture failure")
 
 func TestCollectorRebaselinesOnReportedGuestCountChange(t *testing.T) {
@@ -498,5 +503,51 @@ func TestCollectorFailedUtilizationOrTotalsReadFencesBaseline(t *testing.T) {
 				t.Fatalf("new consecutive observations failed: %+v", got)
 			}
 		})
+	}
+}
+
+func TestDelayedTickerUsesActualHostSampleStart(t *testing.T) {
+	start := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	clock := &fakeClock{at: start}
+	source, recorder := &fakeSource{}, &fakeRecorder{}
+	collector, err := New(map[string]Source{"fixture": source}, recorder, Options{Interval: MinInterval, Now: clock.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.sample = fixtureUsage(1_000, 1, 1, 1)
+	collector.collect(t.Context(), start)
+	for _, step := range []struct {
+		tick, advance time.Duration
+		cpu           int64
+	}{{15 * time.Second, 20 * time.Second, 21_000}, {30 * time.Second, 10 * time.Second, 31_000}} {
+		clock.advance(step.advance)
+		source.sample = fixtureUsage(step.cpu, 1, 1, 1)
+		ticks := make(chan time.Time, 1)
+		ticks <- start.Add(step.tick)
+		close(ticks)
+		collector.runTicks(t.Context(), ticks)
+	}
+	rows := recorder.recorded()
+	if len(rows) != 2 || !rows[0].at.Equal(start.Add(20*time.Second)) || !rows[1].at.Equal(start.Add(30*time.Second)) ||
+		rows[0].cpuUsedMillis != 1000 || rows[1].cpuUsedMillis != 1000 {
+		t.Fatalf("want the actual start and 1000 millicores for both samples, got %+v", rows)
+	}
+}
+
+func TestCollectorDoesNotPersistReplayedWallTimeAfterRollback(t *testing.T) {
+	start := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	source, recorder := &fakeSource{}, &fakeRecorder{}
+	collector, err := New(map[string]Source{"fixture": source}, recorder, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, seconds := range []int{0, 60, 15, 30, 60, 120, 180} {
+		source.sample = fixtureUsage(int64(1000+i*60_000), 1, 1, 1)
+		collector.collectHost(t.Context(), "fixture", source, start.Add(time.Duration(seconds)*time.Second))
+	}
+	rows := recorder.recorded()
+	if len(rows) != 2 || !rows[0].at.Equal(start.Add(time.Minute)) || !rows[1].at.Equal(start.Add(3*time.Minute)) ||
+		rows[0].cpuUsedMillis != 1000 || rows[1].cpuUsedMillis != 1000 {
+		t.Fatalf("want no replayed or bridged rows after a wall-clock rollback, got %+v", rows)
 	}
 }
