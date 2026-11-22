@@ -60,13 +60,15 @@ type Options struct {
 	Backoff time.Duration
 	// Log receives redacted operational notes; nil discards them.
 	Log func(string)
-	// Now overrides the clock; nil uses time.Now. Intended for tests.
+	// Now overrides the clock; nil uses time.Now. Intended for tests and
+	// must be safe for concurrent calls from independent host sweeps.
 	Now func() time.Time
 }
 
 type hostState struct {
 	baseline  *guestCPUBaseline
 	skipUntil time.Time
+	lastStart time.Time
 }
 
 type guestCPUBaseline struct {
@@ -147,36 +149,54 @@ func New(sources map[string]Source, recorder Recorder, options Options) (*Collec
 // tick until ctx is canceled, which stops the collector promptly. Collection
 // jitter is expected; sweeps never overlap.
 func (c *Collector) Run(ctx context.Context) {
-	c.collect(ctx, c.now())
+	c.collectWithClock(ctx, c.now)
 	if ctx.Err() != nil {
 		return
 	}
 	timer := time.NewTicker(c.interval)
 	defer timer.Stop()
+	c.runTicks(ctx, timer.C)
+}
+
+func (c *Collector) runTicks(ctx context.Context, ticks <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case at := <-timer.C:
-			c.collect(ctx, at)
+		case _, ok := <-ticks:
+			if !ok || ctx.Err() != nil {
+				return
+			}
+			// A tick only wakes the poll. The scheduled time can be old by
+			// the time the previous sweep finishes.
+			c.collectWithClock(ctx, c.now)
 		}
 	}
 }
 
-// collect samples every host whose backoff window has expired. Hosts are
-// sampled concurrently so one slow or failing host cannot delay another.
-func (c *Collector) collect(ctx context.Context, at time.Time) {
+// collectWithClock starts every eligible host independently and reads its
+// own sweep-start time, not a scheduled tick, a shared start, or completion.
+func (c *Collector) collectWithClock(ctx context.Context, now func() time.Time) {
 	var wg sync.WaitGroup
 	for host, source := range c.sources {
-		c.mu.Lock()
-		skip := at.Before(c.states[host].skipUntil)
-		c.mu.Unlock()
-		if skip {
-			continue
-		}
 		wg.Add(1)
 		go func(host string, source Source) {
 			defer wg.Done()
+			at := now()
+			c.mu.Lock()
+			state := c.states[host]
+			skip := at.Before(state.skipUntil)
+			c.mu.Unlock()
+			if ctx.Err() != nil {
+				return
+			}
+			if skip {
+				// A retained baseline must not cross a rollback seen
+				// during backoff, even if the clock recovers before
+				// the next eligible sweep.
+				state.clearBaselineOnWallRollback(at.UTC())
+				return
+			}
 			c.collectHost(ctx, host, source, at)
 		}(host, source)
 	}
@@ -189,12 +209,25 @@ func (c *Collector) collect(ctx context.Context, at time.Time) {
 // A counter reset or a change in observed guest membership or runtime
 // re-baselines. A complete sweep without continuity data cannot bridge rates.
 // The recorded cpu_used_millis rate is derived from consecutive
-// cumulative readings over elapsed wall time. Matching observed runtime
+// cumulative readings over elapsed sweep-start time (monotonic when
+// available). The start is a conservative history timestamp, not the
+// measurement time of every individual guest. Matching observed runtime
 // fields are not proof of immutable guest identity or a physical host rate.
 func (c *Collector) collectHost(ctx context.Context, host string, source Source, at time.Time) {
 	c.mu.Lock()
 	state := c.states[host]
 	c.mu.Unlock()
+	// Time.Before can prefer a monotonic reading when both times have one.
+	// Compare the wall coordinates separately so a clock correction never
+	// replays a history time or bridges a CPU rate across the rollback.
+	wall := at.UTC()
+	if state.clearBaselineOnWallRollback(wall) {
+		return
+	}
+	if wall.Equal(state.lastStart) {
+		return // No new observation time and no continuity inferred.
+	}
+	state.lastStart = wall
 	sweep, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	usage, err := source.SampleUtilization(sweep)
@@ -238,6 +271,15 @@ func (c *Collector) collectHost(ctx context.Context, host string, source Source,
 	if err := c.recorder.RecordUsageSample(sweep, host, at, rate, usage.RAMUsedMiB, usage.DiskUsedMiB, GuestStateSourceV2); err != nil {
 		c.backOff(host, at, "usage sample record unavailable")
 	}
+}
+
+// wall must not carry a monotonic reading. Per-host sweeps are serialized.
+func (s *hostState) clearBaselineOnWallRollback(wall time.Time) bool {
+	if wall.IsZero() || wall.Before(s.lastStart) {
+		s.baseline = nil
+		return true
+	}
+	return false
 }
 
 func newGuestCPUBaseline(usage incusapi.UtilizationSample, at time.Time) *guestCPUBaseline {

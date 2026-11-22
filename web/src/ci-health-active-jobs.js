@@ -19,6 +19,7 @@ export function observedActiveJobs(attempts) {
         run: attempt.run_id,
         attempt: attempt.attempt,
         job: job.id,
+        statusObservedAt: job.status_observed_at,
         timing: job.status === "queued" ? job.waiting : job.elapsed,
       });
     }

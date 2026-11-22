@@ -24,3 +24,19 @@ test('conflict presentation escapes values, has no write controls and explains a
  const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});
  try {const {GarmConflictDetails}=await server.ssrLoadModule('/src/garm-conflict.jsx');const a=snapshot(),b=snapshot();b.settings.pools[0].tags=['<script>bad</script>'];const html=renderToStaticMarkup(React.createElement(GarmConflictDetails,{previous:a,latest:b}));assert.match(html,/&lt;script&gt;/);assert.match(html,/draft is not changed or merged/);assert.match(html,/cannot identify who/);assert.doesNotMatch(html,/<script|<button|<input|<form/);}finally{await server.close();}
 });
+
+test('a retained comparison is explicitly historical after a failed refresh',async()=>{
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:'custom'});
+ try {
+  const {GarmConflictDetails}=await server.ssrLoadModule('/src/garm-conflict.jsx');
+  const previous=snapshot(),latest=snapshot();
+  latest.settings.pools[0].max_runners=5;
+  const fresh=renderToStaticMarkup(React.createElement(GarmConflictDetails,{previous,latest}));
+  const stale=renderToStaticMarkup(React.createElement(GarmConflictDetails,{previous,latest,stale:true}));
+  assert.match(fresh,/latest observed settings/);
+  assert.match(stale,/last successful read/);
+  assert.match(stale,/not current settings evidence/);
+  assert.match(stale,/max_runners: 2 → 5/);
+  assert.doesNotMatch(stale,/latest observed settings|<button|<input|<form/);
+ } finally {await server.close();}
+});
