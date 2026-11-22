@@ -93,9 +93,25 @@ export function ServerCard({ host, readUsage }) {
     </article>
   );
 }
+function ProjectGuestUsage({ utilization }) {
+  if (!utilization || utilization.source !== "guest-state") {
+    return <p>Project guest usage unknown — no supported guest-state observation was reported.</p>;
+  }
+  const partial = (utilization.errors?.length ?? 0) > 0;
+  const displayCounter = (value, unit) => partial && value === 0 ? "unknown" : fmt(value) + " " + unit;
+  return (
+    <>
+      <p>
+        {partial ? "Partial project guest observations" : "Project guest observations"}: CPU {displayCounter(utilization.cpu_cumulative_millis, "ms cumulative")} · Memory {displayCounter(utilization.ram_used_mib, "MiB used")} · Disk {displayCounter(utilization.disk_used_mib, "MiB used")} · {fmt(utilization.guests)} guest(s) contributing
+      </p>
+      {partial && <p className="drain-warning">Positive values are observed subtotals, not complete project totals. Missing measurements are unknown, not zero.</p>}
+      <p className="muted">These observations are not whole-host load or per-job usage. For disk usage, shared volumes may be counted more than once.</p>
+      <p className="drain-warning">CPU is cumulative time since each guest started, not a rate or a percentage. An interval rate needs complete samples from the same guest counter lifetimes.</p>
+    </>
+  );
+}
 export function DiscoveryResultView({ result }) {
   const unmanaged = result.guests.filter((guest) => !guest.managed).length;
-  const utilization = result.utilization;
   const guidance = hostBudgetGuidance(result);
   return (
     <div className="discovery-result" role="status">
@@ -113,14 +129,7 @@ export function DiscoveryResultView({ result }) {
       ) : (
         <p>Physical totals unknown — the backend did not report them during this run.</p>
       )}
-      {utilization ? (
-        <p>
-          Measured this run ({utilization.source}): CPU {fmt(utilization.cpu_cumulative_millis)} ms cumulative · Memory {fmt(utilization.ram_used_mib)} MiB used · Disk {fmt(utilization.disk_used_mib)} MiB used · {fmt(utilization.guests)} guest(s) contributing
-        </p>
-      ) : (
-        <p>Utilization unknown — the backend did not measure it during this run.</p>
-      )}
-      <p className="drain-warning">Guest-state CPU is cumulative time since each guest started, not a rate or a percentage. A usage rate needs two consecutive discoveries.</p>
+      <ProjectGuestUsage utilization={result.utilization} />
       {unmanaged > 0 && (
         <p className="drain-warning" data-unmanaged={unmanaged}>{unmanaged} unmanaged guest(s) observed without runner-controller attribution: the shared limit may not cover them.</p>
       )}
