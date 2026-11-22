@@ -36,12 +36,13 @@ const (
 // it does not mean complete history. Unavailable results carry no facts: a
 // publisher must withdraw old observations on failure, not append later rows.
 type Cycle struct {
-	state      CycleState
-	observedAt time.Time
-	sealedAt   time.Time // local monotonic clock for proof expiry, never history time
-	facts      []cihealth.AttemptFacts
-	source     cycleSourceInstance
-	runLinks   map[cihealth.AttemptKey]demandrepair.WorkflowRunLink
+	state        CycleState
+	observedAt   time.Time
+	sealedAt     time.Time // local monotonic clock for proof expiry, never history time
+	facts        []cihealth.AttemptFacts
+	source       cycleSourceInstance
+	runLinks     map[cihealth.AttemptKey]demandrepair.WorkflowRunLink
+	continuation *activeContinuationCell
 }
 
 func (c Cycle) State() CycleState     { return c.state }
@@ -88,6 +89,10 @@ type cycleReader struct {
 // independently of age; the recent window catches terminal runs. No retries,
 // automatic scheduling, persistence, or snapshot publication happen here.
 func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, from, to time.Time) (Cycle, error) {
+	return readCycle(ctx, source, enrolledGarmRepos, from, to, nil)
+}
+
+func readCycle(ctx context.Context, source Source, enrolledGarmRepos []string, from, to time.Time, hint *ActiveContinuation) (Cycle, error) {
 	if ctx == nil || ctx.Err() != nil || source == nil || len(enrolledGarmRepos) == 0 || len(enrolledGarmRepos) > maxCycleRepositories ||
 		from.IsZero() || !from.Before(to) || to.After(time.Now()) || to.Sub(from) > maxRecentWindow ||
 		!from.UTC().Truncate(time.Second).Before(to.UTC().Truncate(time.Second)) {
@@ -97,6 +102,7 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 	if !ok {
 		return Cycle{}, ErrCycleObservation
 	}
+	continuation := hint.consume(source, repos)
 	ctx, cancel := context.WithTimeout(ctx, cycleDeadline)
 	defer cancel()
 	r := cycleReader{source: source, budget: readBudget{maxCycleHTTPReads}}
@@ -120,6 +126,36 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 	for i := range perRepo {
 		perRepo[i].budget.remaining = r.budget.remaining / len(scans)
 	}
+	readCandidate := func(scan repoScan, candidate runCandidate, used *usage) error {
+		used.attempted++
+		got, err := readAttempt(ctx, source, out.source, scan.repo.GarmID, candidate.runID, candidate.attempt, &used.budget,
+			maxCycleJobs/len(scans)-used.jobs, maxCycleSteps/len(scans)-used.steps)
+		if errors.Is(err, errReadLimit) {
+			// Never publish a partial attempt. Retain only independently
+			// read complete attempts and continue within the cycle budget.
+			r.partial = true
+			return nil
+		}
+		key := got.facts.Key
+		if err != nil || key.Source != source.SourceID() || key.RepositoryID != scan.repo.GitHubID ||
+			key.RunID != candidate.runID || key.Attempt != candidate.attempt || key.WorkflowID != candidate.workflow ||
+			got.facts.AsOf.Before(r.latest) {
+			return ErrCycleObservation
+		}
+		r.latest = got.facts.AsOf
+		out.facts = append(out.facts, got.facts)
+		if got.runLink.Available() {
+			if out.runLinks == nil {
+				out.runLinks = make(map[cihealth.AttemptKey]demandrepair.WorkflowRunLink)
+			}
+			out.runLinks[key] = got.runLink
+		}
+		used.jobs += len(got.facts.Jobs)
+		for _, j := range got.facts.Jobs {
+			used.steps += len(j.Steps)
+		}
+		return nil
+	}
 	for _, active := range []bool{true, false} {
 		for i := 0; ; i++ {
 			found := false
@@ -137,37 +173,34 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 					r.partial = true
 					continue
 				}
-				used.attempted++
-				candidate := candidates[i]
-				got, err := readAttempt(ctx, source, out.source, scan.repo.GarmID, candidate.runID, candidate.attempt, &used.budget,
-					maxCycleJobs/len(scans)-used.jobs, maxCycleSteps/len(scans)-used.steps)
-				if errors.Is(err, errReadLimit) {
-					// Never publish a partial attempt. Retain only independently
-					// read complete attempts and continue within the cycle budget.
-					r.partial = true
-					continue
-				}
-				key := got.facts.Key
-				if err != nil || key.Source != source.SourceID() || key.RepositoryID != scan.repo.GitHubID ||
-					key.RunID != candidate.runID || key.Attempt != candidate.attempt || key.WorkflowID != candidate.workflow ||
-					got.facts.AsOf.Before(r.latest) {
-					return Cycle{}, ErrCycleObservation
-				}
-				r.latest = got.facts.AsOf
-				out.facts = append(out.facts, got.facts)
-				if got.runLink.Available() {
-					if out.runLinks == nil {
-						out.runLinks = make(map[cihealth.AttemptKey]demandrepair.WorkflowRunLink)
-					}
-					out.runLinks[key] = got.runLink
-				}
-				used.jobs += len(got.facts.Jobs)
-				for _, j := range got.facts.Jobs {
-					used.steps += len(j.Steps)
+				if err := readCandidate(scan, candidates[i], used); err != nil {
+					return Cycle{}, err
 				}
 			}
 			if !found {
 				break
+			}
+		}
+	}
+	normalFacts := len(out.facts)
+	// Never displace a normal candidate or spend another repository's budget.
+	// A newly found rerun is independent and never completes a prior attempt.
+	if !r.partial && continuation.current(source) {
+		for i, scan := range scans {
+			used := &perRepo[i]
+			if r.partial || !continuation.current(source) {
+				break
+			}
+			candidate, ok, err := continuation.candidate(scan)
+			if err != nil {
+				return Cycle{}, err
+			}
+			if !ok || used.attempted >= maxCycleAttempts/len(scans) || used.budget.remaining < 2 ||
+				used.jobs >= maxCycleJobs/len(scans) || used.steps >= maxCycleSteps/len(scans) {
+				continue
+			}
+			if err := readCandidate(scan, candidate, used); err != nil {
+				return Cycle{}, err
 			}
 		}
 	}
@@ -179,6 +212,7 @@ func ReadCycle(ctx context.Context, source Source, enrolledGarmRepos []string, f
 	if r.partial {
 		out.state = CyclePartial
 	}
+	out.continuation = mintActiveContinuation(out, repos, normalFacts)
 	return out, nil
 }
 
