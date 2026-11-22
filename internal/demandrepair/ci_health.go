@@ -330,25 +330,50 @@ type ciRunPageWire struct {
 	Runs  []ciRunWire `json:"workflow_runs"`
 }
 type ciRunWire struct {
-	ID         int64      `json:"id"`
-	WorkflowID int64      `json:"workflow_id"`
-	Attempt    int64      `json:"run_attempt"`
-	Repo       ciRepoWire `json:"repository"`
-	Name       string     `json:"name"`
-	Status     string     `json:"status"`
-	Conclusion string     `json:"conclusion"`
-	CreatedAt  *time.Time `json:"created_at"`
-	StartedAt  *time.Time `json:"run_started_at"`
+	ID         int64          `json:"id"`
+	WorkflowID int64          `json:"workflow_id"`
+	Attempt    int64          `json:"run_attempt"`
+	Repo       ciRepoWire     `json:"repository"`
+	Name       string         `json:"name"`
+	Status     string         `json:"status"`
+	Conclusion string         `json:"conclusion"`
+	CreatedAt  *ciRunCreation `json:"created_at"`
+	StartedAt  *time.Time     `json:"run_started_at"`
+}
+
+// ciRunCreation preserves decoding for status-only and exact-attempt reads.
+// A historical window additionally needs a valid numeric timezone offset to
+// place the original run in an inclusive UTC-second bucket. Go time parsing
+// can normalize out-of-range offset hours/minutes instead of rejecting them.
+type ciRunCreation struct {
+	at              time.Time
+	validZoneOffset bool
+}
+
+func (c *ciRunCreation) UnmarshalJSON(raw []byte) error {
+	if err := c.at.UnmarshalJSON(raw); err != nil {
+		return err
+	}
+	c.validZoneOffset = true
+	// The decoder above already validated the timestamp structure. A numeric
+	// zone ends in ±hh:mm before the closing JSON quote.
+	if len(raw) >= 7 {
+		zone := raw[len(raw)-7 : len(raw)-1]
+		if zone[0] == '+' || zone[0] == '-' {
+			c.validZoneOffset = string(zone[1:3]) <= "23" && string(zone[4:6]) <= "59"
+		}
+	}
+	return nil
 }
 
 func (w ciRunWire) matchesQuery(status string, from, to, now time.Time) bool {
 	if status != "" {
 		return w.Status == status
 	}
-	if w.CreatedAt == nil || !ciClocks(w.CreatedAt, nil, now) {
+	if w.CreatedAt == nil || !w.CreatedAt.validZoneOffset || !ciClocks(&w.CreatedAt.at, nil, now) {
 		return false
 	}
-	created := w.CreatedAt.UTC().Truncate(time.Second)
+	created := w.CreatedAt.at.UTC().Truncate(time.Second)
 	return !created.Before(from) && !created.After(to)
 }
 
