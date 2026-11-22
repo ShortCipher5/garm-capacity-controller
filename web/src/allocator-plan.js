@@ -77,7 +77,7 @@ const previewReasonMessages = Object.freeze({
  configured_maximum_fit_veto: ['no_confirmed_proposals', 'No increase was suggested because the modeled runner load would exceed a configured budget in at least one observation. This is a modeled limit, not a measured host limit or a settings change.'],
  configured_maximum_fit_unavailable: ['no_confirmed_proposals', 'The configured maximums could not be compared for an increase. No increase was suggested; this does not establish a capacity limit.'],
  awaiting_cadence_window: ['no_confirmed_proposals', 'Waiting for a longer span of matching observations before comparing a smaller batch.'],
- no_confirmed_change: ['no_confirmed_proposals', 'The captured comparison confirmed no maximum change. This does not prove that no change is needed or that every comparison prerequisite was satisfied.'],
+ no_confirmed_change: ['no_confirmed_proposals', 'The captured comparison did not produce a maximum suggestion. This does not confirm any applied outcome or show that no change is needed.'],
 });
 const previewStates = new Set(["unavailable", "no_confirmed_proposals", "proposed"]);
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) &&
