@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +14,9 @@ import (
 )
 
 // serveUsage returns recorded host utilization monitoring history for one
-// host: GET /admin/api/v1/usage/{host}?since=<RFC3339>&limit=<n>. It is a
+// host: GET /admin/api/v1/usage/{host}?since=<RFC3339>&limit=<n>&order=recent.
+// Without order, the oldest matching rows are selected; order=recent selects
+// the newest instead. Both return rows in chronological order. This is a
 // read surface guarded by the read token. A host without samples yields an
 // empty JSON array with 200: monitoring absence means unavailable, never a
 // fabricated zero-filled series. Samples are monitoring data only and never
@@ -39,12 +42,24 @@ func (h *Handler) serveUsage(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnauthorized, "read token rejected")
 		return
 	}
-	values := r.URL.Query()
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		fail(http.StatusBadRequest, "invalid usage query")
+		return
+	}
 	for key, entries := range values {
-		if (key != "since" && key != "limit") || len(entries) != 1 {
+		if (key != "since" && key != "limit" && key != "order") || len(entries) != 1 {
 			fail(http.StatusBadRequest, "invalid usage query")
 			return
 		}
+	}
+	read := h.store.UsageHistory
+	if order, present := values["order"]; present {
+		if order[0] != "recent" {
+			fail(http.StatusBadRequest, "invalid usage order")
+			return
+		}
+		read = h.store.RecentUsageHistory
 	}
 	var since time.Time
 	if raw := values.Get("since"); raw != "" {
@@ -66,7 +81,7 @@ func (h *Handler) serveUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	history, err := h.store.UsageHistory(ctx, host, since, limit)
+	history, err := read(ctx, host, since, limit)
 	switch {
 	case errors.Is(err, admission.ErrDenied):
 		fail(http.StatusBadRequest, "invalid usage request")

@@ -537,7 +537,7 @@ export class ReadSession {
       throw new Error("Charged capacity could not be read. Refresh to retry.");
     } finally { clearTimeout(timeout); }
   }
-  async usageHistory(host, { since, limit, signal } = {}) {
+  async usageHistory(host, { since, limit, order, signal } = {}) {
     if (!this.#token || signal?.aborted) throw new SessionEnded();
     // Concurrent calls are independent: every host card owns its request.
     // A shared single-flight abort here would strand every card but the last
@@ -550,6 +550,7 @@ export class ReadSession {
     const query = new URLSearchParams();
     if (since !== undefined) query.set("since", since instanceof Date ? since.toISOString() : String(since));
     if (limit !== undefined) query.set("limit", String(limit));
+    if (order !== undefined) query.set("order", order);
     const suffix = query.size ? `?${query}` : "";
     try {
       const response = await this.fetcher(`/admin/api/v1/usage/${encodeURIComponent(host)}${suffix}`, { method: "GET", headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json" }, credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
