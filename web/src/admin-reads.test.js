@@ -150,3 +150,61 @@ test("usageHistory rejects an otherwise valid response containing another host",
   assert.deepEqual(await session.usageHistory("host-b"), [other]);
   await rejected;
 });
+
+for (const phase of ["headers", "body"]) {
+  test(`usageHistory reports a local timeout while waiting for ${phase} without ending the session`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const started = Promise.withResolvers();
+    const caller = new AbortController();
+    let requests = 0;
+    const waitForAbort = (signal) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      started.resolve(signal);
+    });
+    const session = new ReadSession(async (url, { signal }) => {
+      if (url === "/admin/api/v1/overview") return overviewResponse();
+      if (url === "/admin/api/v1/usage/host-b") return { ok: true, status: 200, json: async () => [] };
+      assert.equal(url, "/admin/api/v1/usage/host-a");
+      requests++;
+      return phase === "headers" ? waitForAbort(signal) : { ok: true, status: 200, json: () => waitForAbort(signal) };
+    });
+    await session.connect(token);
+    const pending = session.usageHistory("host-a", { signal: caller.signal });
+    const rejected = assert.rejects(pending, (error) => !(error instanceof SessionEnded) &&
+      error.message === "Usage history read timed out. Refresh to retry.");
+    const transport = await started.promise;
+    t.mock.timers.tick(14_999);
+    assert.equal(transport.aborted, false);
+    assert.deepEqual(await session.usageHistory("host-b"), []);
+    t.mock.timers.tick(1);
+    await rejected;
+    assert.equal(transport.aborted, true);
+    assert.equal(caller.signal.aborted, false);
+    assert.deepEqual(await session.usageHistory("host-b"), []);
+    assert.equal(requests, 1);
+    session.disconnect();
+  });
+}
+
+for (const stop of ["caller abort", "disconnect"]) {
+  test(`usageHistory stays silently cancelled after a deadline followed by ${stop}`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const started = Promise.withResolvers();
+    const body = Promise.withResolvers();
+    const session = new ReadSession(async (url, { signal }) => {
+      if (url === "/admin/api/v1/overview") return overviewResponse();
+      return { ok: true, status: 200, json: () => { started.resolve(signal); return body.promise; } };
+    });
+    await session.connect(token);
+    const caller = new AbortController();
+    const pending = session.usageHistory("host-a", { signal: caller.signal });
+    const rejected = assert.rejects(pending, (error) => error instanceof SessionEnded && error.message === "");
+    const transport = await started.promise;
+    t.mock.timers.tick(15_000);
+    assert.equal(transport.aborted, true);
+    if (stop === "disconnect") session.disconnect();
+    else caller.abort();
+    body.resolve([]);
+    await rejected;
+  });
+}
