@@ -410,3 +410,69 @@ func TestJobSizingRejectsJobIDReusedAcrossAttempts(t *testing.T) {
 		})
 	}
 }
+
+func TestJobSizingChecksCompleteRAMSampleSeries(t *testing.T) {
+	var trailingCadenceGap []int
+	for i := 0; i <= 18; i++ {
+		trailingCadenceGap = append(trailingCadenceGap, i)
+	}
+	trailingCadenceGap = append(trailingCadenceGap, 20)
+	for _, tc := range []struct {
+		name        string
+		times       []int
+		gap         int
+		missingLast bool
+		mutate      func(*JobResourceSummary)
+		want        JobSizingMetricState
+	}{
+		{name: "full RAM series", times: []int{0, 9, 10}, gap: 9, want: JobSizingIncreaseAdvised},
+		{name: "all RAM with a real cadence gap", times: trailingCadenceGap, gap: 1, want: JobSizingIncreaseAdvised},
+		{name: "all RAM and no eligible pairs", times: []int{0, 10}, gap: 1, want: JobSizingCoverageUnavailable},
+		{name: "partial RAM series may omit its final reading", times: []int{0, 9, 10}, gap: 9, missingLast: true, want: JobSizingIncreaseAdvised},
+		{name: "all RAM mean cannot omit an eligible pair", times: []int{0, 9, 10}, gap: 9, mutate: func(r *JobResourceSummary) {
+			r.RAMMean.Coverage = ResourceCoverage{Intervals: 1, Duration: 9 * time.Second}
+		}},
+		{name: "all RAM mean cannot be absent when pairs exist", times: []int{0, 9, 10}, gap: 9, mutate: func(r *JobResourceSummary) {
+			r.RAMMean = nil
+		}},
+		{name: "all RAM latest cannot predate the final sample even with a trailing cadence gap", times: trailingCadenceGap, gap: 1, mutate: func(r *JobResourceSummary) {
+			r.RAM.LatestAt = r.RAM.LatestAt.Add(-time.Second)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+			item := &in.Samples[1]
+			scope := item.Resources.Scope
+			scope.EndAt = scope.StartedAt.Add(time.Duration(tc.times[len(tc.times)-1]) * time.Second)
+			scope.AsOf = scope.EndAt.Add(time.Second)
+			scope.MaxGap = time.Duration(tc.gap) * time.Second
+			var samples []JobResourceSample
+			for i, at := range tc.times {
+				s := resourceSampleFixture(scope, time.Duration(at)*time.Second)
+				if !tc.missingLast || i != len(tc.times)-1 {
+					s.RAMBytes = knownResource(96)
+				}
+				samples = append(samples, s)
+			}
+			var err error
+			item.Resources, err = SummarizeJobResources(scope, samples)
+			if err != nil {
+				t.Fatal(err)
+			}
+			item.Completion = sizingCompletionFixture(scope)
+			if tc.mutate != nil {
+				tc.mutate(&item.Resources)
+			}
+			got, err := SummarizeJobSizing(in)
+			if tc.mutate != nil {
+				if err != ErrJobSizingFacts || got != (JobSizingSummary{}) {
+					t.Fatalf("contradictory RAM evidence accepted: %+v, %v", got, err)
+				}
+				return
+			}
+			if err != nil || got.RAM.State != tc.want {
+				t.Fatalf("genuine reducer output refused or misclassified: %+v, %v", got, err)
+			}
+		})
+	}
+}
