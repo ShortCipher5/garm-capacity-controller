@@ -48,6 +48,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     const html = render(snapshot);
     assert.match(html, /Active jobs in this snapshot/);
     assert.match(html, /Queued jobs \(1 observed\)/);
+    assert.match(html, /Wait timing available for 1 of 1 observed jobs \(1 lower bound\)/);
     assert.match(html, /Running jobs \(0 observed\)/);
     assert.match(html, /<section aria-labelledby="ci-active-jobs-queued">.*At least 7\.000000001 s.*?<\/section>/);
     const jobControl = html.match(/aria-controls="([^"]+)" aria-label="View job 9007199254741001, run 9223372036854775807, attempt 2, workflow 17, repository 9007199254740993, source fixture_source"/)?.[1];
@@ -128,7 +129,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.equal(render({...snapshot, timing: {attempts: [{...first, run_id: 123}]}}), "");
 
     const observedFirst = structuredClone(first);
-    delete observedFirst.jobs[0].waiting;
+    // The eligible wait measurement is on the thirteenth row, off the table.
     const earlyStatusAt = "2025-12-31T23:59:57.000000321Z";
     const laterStatusAt = "2025-12-31T23:59:59.000000654Z";
     const queued = [
@@ -159,6 +160,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(activeHTML, /This is not the live queue\. Rows are ordered by identity/);
     assert.match(queuedSection, /Queued jobs \(13 observed\)/);
     assert.match(queuedSection, /Showing 12 of 13 observed jobs/);
+    assert.match(queuedSection, /Wait timing available for 1 of 13 observed jobs \(1 lower bound\)/);
     assert.equal((queuedSection.match(/<th scope="row">/g) ?? []).length, 12);
     assert.deepEqual([...queuedSection.matchAll(/<th scope="row"><code>(\d+)<\/code>/g)].map((m) => m[1]),
       [...Array.from({length: 10}, (_, i) => String(100 + i)), "9007199254741001", "9007199254741002"]);
@@ -166,6 +168,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.doesNotMatch(queuedSection, /attempt <code>2<\/code>|At least|nanoseconds/);
     assert.match(activeHTML, /<strong>Run <code>9223372036854775807<\/code>, attempt <code>2<\/code><\/strong>.*<strong>Job <code>9007199254741001<\/code><\/strong>/);
     assert.match(runningSection, /Running jobs \(4 observed\)/);
+    assert.match(runningSection, /Elapsed timing available for 2 of 4 observed jobs/);
     const runningRow = (job) => [...runningSection.matchAll(/<tr>.*?<\/tr>/g)]
       .map(([row]) => row).find((row) => row.includes(`<th scope="row"><code>${job}</code>`)) ?? "";
     assert.match(runningSection, /<th scope="col">Status observed<\/th><th scope="col">Execution elapsed when observed<\/th>/);

@@ -123,14 +123,19 @@ function AttemptRow({attempt: a, jobId, stepId, openJob}) {
 function ActiveJobGroup({phase, group, jobId, viewJob}) {
   const title = phase === "queued" ? "Queued jobs" : "Running jobs";
   const heading = "ci-active-jobs-" + phase;
+  const coverage = heading + "-coverage";
   return <section aria-labelledby={heading}>
     <h4 id={heading}>{title} ({group.observed} observed)</h4>
     {group.observed === 0 ? <p className="muted">None observed in this snapshot.</p> : <>
+      <p className="muted" id={coverage}>
+        {phase === "queued" ? "Wait" : "Elapsed"} timing available for {group.timed} of {group.observed} observed jobs
+        {group.lowerBounds > 0 && ` (${group.lowerBounds} lower bound${group.lowerBounds === 1 ? "" : "s"})`}.
+      </p>
       {group.shown.length < group.observed && <p className="muted">
         Showing {group.shown.length} of {group.observed} observed jobs. All observed jobs remain in the attempt details below.
       </p>}
       <div className="table-wrap">
-        <table aria-labelledby={heading}>
+        <table aria-labelledby={heading} aria-describedby={coverage}>
           <thead><tr>
             <th scope="col">Job ID</th><th scope="col">Run and attempt</th><th scope="col">Workflow scope</th>
             <th scope="col">Status observed</th>

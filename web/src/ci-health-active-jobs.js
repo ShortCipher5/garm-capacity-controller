@@ -27,6 +27,8 @@ export function observedActiveJobs(attempts) {
 
   const summarize = (rows) => ({
     observed: rows.length,
+    timed: rows.filter((row) => row.timing !== undefined).length,
+    lowerBounds: rows.filter((row) => row.timing?.basis === "observed_lower_bound").length,
     // Order by exact identities, not bounds, duration or apparent queue age.
     shown: rows.sort((a, b) => compareText(a.source, b.source) ||
       compareDecimal(a.repository, b.repository) || compareDecimal(a.workflow, b.workflow) ||
