@@ -261,7 +261,12 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
       <p><strong>Snapshot observed:</strong> <At value={snapshot.observed_at} /></p>
       <Cutoff label="Timing display cutoff" deadline={ciHealthExpiry(snapshot)} />
       {historyVisible ? <Cutoff label="Retained history display cutoff" deadline={historyDeadline} />
-        : snapshot.history && <p role="status" className="muted">Retained history has expired for this snapshot. Current timing remains visible.</p>}
+        : <>
+          {snapshot.history
+            ? <p role="status" className="muted">Retained history has expired for this snapshot. Current timing remains visible.</p>
+            : <p className="muted">No retained history was included in this snapshot.</p>}
+          <p className="muted">Verified test reports are unavailable. Timing and job outcomes are not test report coverage.</p>
+        </>}
       <p className="muted">
         {snapshot.coverage === "bounded_partial" ? "Partial coverage: not all requested observations were included. "
           : snapshot.coverage === "observed_subset" ? "Only selected observations are shown. "
