@@ -228,7 +228,7 @@ test("resource history selects one collector at a time and keeps each scope expl
       sample("2026-01-01T00:03:00.123456789Z", 33, "guest-state-v2"),
     ];
     const render = (source, history = samples) => renderToStaticMarkup(React.createElement(
-      UsageHistoryDetail, { samples: history, dimension: "cpu_used_millis", source },
+      UsageHistoryDetail, { samples: history, dimension: "cpu_used_millis", source, now: new Date("2026-01-01T00:03:45Z") },
     ));
     const latest = render(undefined);
     assert.match(latest, /Observation source/);
@@ -236,7 +236,7 @@ test("resource history selects one collector at a time and keeps each scope expl
     assert.match(latest, /value="guest-state">guest-state \(1\)/);
     assert.match(latest, /shared devices and do not establish backing-store pressure/);
     assert.match(latest, /not whole-host load/);
-    assert.match(latest, /datetime="2026-01-01T00:03:00.123456789Z"/i);
+    assert.match(latest, /Last sample <time datetime="2026-01-01T00:03:00\.123456789Z">45 seconds ago<\/time> · source guest-state-v2/i);
     assert.match(latest, /aria-label="2026-01-01T00:02:00Z · CPU used: 0 millicores · source guest-state-v2"/);
     assert.match(latest, /<title>2026-01-01T00:03:00.123456789Z · CPU used: 33 millicores · source guest-state-v2<\/title>/);
     assert.equal((latest.match(/<circle/g) || []).length, 2);

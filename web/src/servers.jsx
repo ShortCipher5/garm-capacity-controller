@@ -9,7 +9,7 @@ import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
 import { hostBudgetGuidance, assessBudget, runnerMix, runnerProfileMaximum, DIMENSIONS, RUNNER_PRESETS, plannedRunnerLimit, reviewedRunnerBudget, runnerPlanningReviewWindow } from "./host-budget.js";
 import { Usage } from "./usage-bars.jsx";
 import { RunnerDiskHealth } from "./runner-disk-health.jsx";
-import { UsageChart, USAGE_DIMENSIONS } from "./usage-chart.jsx";
+import { UsageChart, USAGE_DIMENSIONS, formatSampleAge } from "./usage-chart.jsx";
 
 const fmt = (n) => n.toLocaleString();
 const date = (value) => new Date(value).toLocaleString();
@@ -54,7 +54,7 @@ export function UsagePanel({ host, readUsage }) {
 }
 // The bounded history response is chronological. Group on exact source IDs
 // rather than treating a collector change as a change in resource load.
-export function UsageHistoryDetail({ samples, dimension, source, onSourceChange }) {
+export function UsageHistoryDetail({ samples, dimension, source, onSourceChange, now = new Date() }) {
   if (!samples.length) return null;
   const groups = new Map();
   for (const sample of samples) {
@@ -85,7 +85,7 @@ export function UsageHistoryDetail({ samples, dimension, source, onSourceChange 
         <div className="chart-key">
           <span className="dot" aria-hidden="true" />
           <span>{selected[1]} — recorded, not allocated</span>
-          <span className="muted">Last sample <time dateTime={latest.sampled_at}>{date(latest.sampled_at)}</time> · source {selectedSource}</span>
+          <span className="muted">Last sample <time dateTime={latest.sampled_at}>{formatSampleAge(now, latest.sampled_at)}</time> · source {selectedSource}</span>
         </div>
         <UsageChart samples={visible} dimension={selected[0]} label={selected[1]} unit={selected[2]} />
       </div>
