@@ -27,7 +27,7 @@ func stockResourceBindingFixture() (JobResourceScope, StockJobResourceBinding, S
 	x, y := resourceSampleFixture(s, 0), resourceSampleFixture(s, time.Minute-time.Second)
 	x.CPUTimeNanos, y.CPUTimeNanos = knownResource(100), knownResource(200)
 	x.DiskReadBytes, y.DiskReadBytes = knownResource(250), knownResource(400)
-	job := StockJobExecutionObservation{Job: s.Job, StartedAt: s.StartedAt, ObservedAt: s.AsOf, State: StockJobObservedExecuting}
+	job := StockJobExecutionObservation{Job: s.Job, RunnerAgentID: a.RunnerAgentID, StartedAt: s.StartedAt, ObservedAt: s.AsOf, State: StockJobObservedExecuting}
 	return s, a, b, job, []JobResourceSample{x, y}
 }
 
@@ -165,5 +165,31 @@ func TestBoundStockJobResourcesRequiresSeparateExecutionThroughCutoff(t *testing
 	job.State, job.EndedAt = StockJobObservedEnded, s.EndAt
 	if got, err := SummarizeBoundStockJobResources(s, &a, &b, &job, samples); err != nil || got.Samples != len(samples) {
 		t.Fatalf("independently proven job end at report cutoff rejected: %+v %v", got, err)
+	}
+}
+
+func TestBoundStockJobResourcesRefusesDifferentOrMissingExecutionRunnerRegistration(t *testing.T) {
+	for _, state := range []struct {
+		name  string
+		state StockJobExecutionState
+	}{
+		{"executing", StockJobObservedExecuting},
+		{"ended", StockJobObservedEnded},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			s, a, b, job, samples := stockResourceBindingFixture()
+			job.State = state.state
+			if job.State == StockJobObservedEnded {
+				job.EndedAt = s.EndAt
+			}
+			for _, id := range []int64{0, -1, a.RunnerAgentID + 1} {
+				changed := job
+				changed.RunnerAgentID = id
+				assertBoundStockRefused(t, s, &a, &b, &changed, samples)
+			}
+			if got, err := SummarizeBoundStockJobResources(s, &a, &b, &job, samples); err != nil || got.Samples != len(samples) {
+				t.Fatalf("matching registration did not preserve the exact window: %+v %v", got, err)
+			}
+		})
 	}
 }
