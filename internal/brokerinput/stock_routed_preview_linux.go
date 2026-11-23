@@ -27,7 +27,7 @@ func planRoutedStockPreview(state admission.BrokerGrantState, snapshot capacityb
 	fail := func() (capacitybroker.JobPlan, time.Time, error) {
 		return capacitybroker.JobPlan{}, time.Time{}, capacitybroker.ErrSnapshot
 	}
-	if source == "" || len(routes) == 0 || len(routes) > 1000 || len(snapshot.Pools) > 1000 ||
+	if source == "" || observation.SourceIdentity() != source || len(routes) == 0 || len(routes) > 1000 || len(snapshot.Pools) > 1000 ||
 		len(observation.Pools) > 1000 || opt.Now.IsZero() || opt.MaxAge <= 0 || len(snapshot.Hosts) > 1000 {
 		return fail()
 	}
