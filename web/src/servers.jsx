@@ -6,7 +6,7 @@ import { SSHInventory } from "./ssh-inventory.jsx";
 import { ConnectionManager } from "./connections.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
-import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS, plannedRunnerLimit, runnerPlanningReviewWindow } from "./host-budget.js";
+import { hostBudgetGuidance, assessBudget, runnerMix, runnerProfileMaximum, DIMENSIONS, RUNNER_PRESETS, plannedRunnerLimit, reviewedRunnerBudget, runnerPlanningReviewWindow } from "./host-budget.js";
 import { Usage } from "./usage-bars.jsx";
 import { RunnerDiskHealth } from "./runner-disk-health.jsx";
 import { UsageChart, USAGE_DIMENSIONS, formatSampleAge } from "./usage-chart.jsx";
@@ -214,6 +214,8 @@ export function BudgetPlanner({ result, budget, onChange, allowPlan = true }) {
     update();
     return () => clearTimeout(timer);
   }, [observed, expires]);
+  const reviewedBudget = reviewedRunnerBudget(result, now);
+  const reviewedExceeded = reviewedBudget && mix.totals ? DIMENSIONS.filter(key => mix.totals[key] > reviewedBudget[key]) : [];
   const plannedLimit = allowPlan ? plannedRunnerLimit(result, budget, counts, now) : undefined;
   const reviewFresh = reviewWindow && now >= observed && now < expires;
   return <div className="budget-planner">
@@ -225,12 +227,13 @@ export function BudgetPlanner({ result, budget, onChange, allowPlan = true }) {
     </div>
     <ul className="warning-list">{guidance.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
     {warnings.length > 0 && <div role="status"><strong>Budget needs review</strong><ul>{warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></div>}
-    <p>{result.proposal?.size_source === "saved-profiles" ? "Saved runner-size profiles from this discovery review are shown below; edits elsewhere require fresh discovery." : result.proposal?.size_source === "unavailable" ? "Saved runner-size profiles are unavailable. Refresh discovery before planning a mix." : "Illustrative runner sizes below are planning presets, not saved profiles."} Each maximum is an alternative, not additional capacity. Mix planning does not save counts, change profiles or provision runners. Manage custom sizes in Runner-size profiles.</p>
+    <p>{result.proposal?.size_source === "saved-profiles" ? "Saved runner-size profiles from this discovery review are shown below; edits elsewhere require fresh discovery." : result.proposal?.size_source === "unavailable" ? "Saved runner-size profiles are unavailable. Refresh discovery before planning a mix." : "Illustrative runner sizes below are planning presets, not saved profiles."} Each maximum uses one size alone and only the budget named in that column. The entered budget may exceed the reviewed recommendation; copying a total requires fitting both. Mix planning does not save counts, change profiles or provision runners. Manage custom sizes in Runner-size profiles.</p>
     {sizes.some(size => size.disk_mib === 0) && <p className="drain-warning">A saved profile has unconstrained disk. Define a positive disk size before using it for a bounded mix estimate.</p>}
-    <div className="table-wrap"><table><thead><tr><th>Size</th><th>CPU / RAM / disk</th><th>Resource-only maximum if used alone</th><th>Planned count</th></tr></thead><tbody>
-      {sizes.map((profile,index) => <tr key={profile.name}><td>{profile.name}</td><td>{profile.cpu_millis / 1000} vCPU / {profile.ram_mib / 1024} GiB / {profile.disk_mib / 1024} GiB</td><td>{mix.fits?.[index] ?? "unknown"}</td><td><input aria-label={`${profile.name} planned count`} type="number" min="0" step="1" value={counts[index]} onChange={event => setCounts(counts.map((count,i) => i === index ? event.target.value : count))} /></td></tr>)}
+    <div className="table-wrap"><table><thead><tr><th>Size</th><th>CPU / RAM / disk</th><th>Maximum under entered budget</th><th>Maximum under reviewed recommendation alone</th><th>Planned count</th></tr></thead><tbody>
+      {sizes.map((profile,index) => <tr key={profile.name}><td>{profile.name}</td><td>{profile.cpu_millis / 1000} vCPU / {profile.ram_mib / 1024} GiB / {profile.disk_mib / 1024} GiB</td><td>{mix.fits?.[index] ?? "unknown"}</td><td>{runnerProfileMaximum(reviewedBudget, profile) ?? "Unavailable"}</td><td><input aria-label={`${profile.name} planned count`} type="number" min="0" step="1" value={counts[index]} onChange={event => setCounts(counts.map((count,i) => i === index ? event.target.value : count))} /></td></tr>)}
     </tbody></table></div>
     <p role="status">{mix.unknown ? "Mix unavailable: enter explicit positive CPU, RAM and disk budgets." : mix.invalid ? "Enter valid whole-number counts." : `Combined mix: ${mix.totals.cpu_millis} millicores, ${mix.totals.ram_mib} MiB RAM, ${mix.totals.disk_mib} MiB disk. ${mix.exceeds.length ? "Exceeds shared budget: " + mix.exceeds.join(", ") : "Within the entered resource budget; not an admission guarantee."}`}</p>
+    {reviewedExceeded.length > 0 && <p className="drain-warning">The mix exceeds the reviewed recommendation: {reviewedExceeded.join(", ")}. Reduce the mix before copying its count.</p>}
     {Number(budget.runners) < counts.reduce((sum,count) => sum + Number(count),0) && <p className="drain-warning">Planned count exceeds the entered runner count limit.</p>}
     <button type="button" disabled={plannedLimit === undefined} onClick={() => {
       // Recheck expiry on click even when a background-tab timer was delayed.

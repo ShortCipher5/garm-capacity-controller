@@ -175,3 +175,41 @@ test("server card shows only matched runner storage health and hides stale count
   assert.match(show({}),/Unknown: no verified runner filesystem reading/);
  } finally {await server.close();}
 });
+
+test("planner distinguishes an entered override from the fresh reviewed recommendation", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  try {
+    const { BudgetPlanner } = await server.ssrLoadModule("/src/servers.jsx");
+    const now = Date.now();
+    const recommended = { cpu_millis: 2500, ram_mib: 7500, disk_mib: 50000 };
+    const size = { name: "small", cpu_millis: 1000, ram_mib: 2048, disk_mib: 20480 };
+    const result = {
+      ...discovery,
+      observed_at: new Date(now - 1000).toISOString(),
+      review_expires_at: new Date(now + 60000).toISOString(),
+      review: { profile_id: discovery.profile_id, id: "11111111-1111-4111-8111-111111111111", revision: "a".repeat(64) },
+      proposal: { version: 1, budget: recommended, warnings: [], size_source: "saved-profiles", sizes: [size] },
+    };
+    const draft = { cpu_millis: 5000, ram_mib: 15000, disk_mib: 110000, runners: 0 };
+    const show = (review) => renderToStaticMarkup(React.createElement(BudgetPlanner, { result: review, budget: draft, onChange: () => {} }));
+    const fresh = show(result);
+    assert.match(fresh, /Maximum under entered budget<\/th><th>Maximum under reviewed recommendation/);
+    assert.match(fresh, /<td>5<\/td><td>2<\/td>/);
+    for (const reviewed of [
+      { ...recommended, cpu_millis: 0 },
+      { ...recommended, ram_mib: 0 },
+      { ...recommended, cpu_millis: 500 },
+    ]) {
+      const knownZero = { ...result, proposal: { ...result.proposal, budget: reviewed } };
+      assert.match(show(knownZero), /<td>5<\/td><td>0<\/td>/);
+    }
+    for (const noRecommendation of [
+      { ...result, observed_at: new Date(now - 60000).toISOString(), review_expires_at: new Date(now - 1000).toISOString() },
+      { ...result, proposal: { ...result.proposal, budget: { ...recommended, disk_mib: undefined } } },
+      { ...result, proposal: { ...result.proposal, budget: { ...recommended, disk_mib: 0 } } },
+      { ...result, review: undefined },
+    ]) {
+      assert.match(show(noRecommendation), /<td>5<\/td><td>Unavailable<\/td>/);
+    }
+  } finally { await server.close(); }
+});

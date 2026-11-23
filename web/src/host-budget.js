@@ -92,6 +92,14 @@ export function runnerMix(budget, profiles, counts) {
   return { totals, fits, exceeds: DIMENSIONS.filter(key => totals[key] > Number(budget[key])) };
 }
 
+// An individual profile's resource ceiling does not depend on proposed mix
+// counts. CPU and RAM can be known zero; a zero disk budget is unconstrained.
+export function runnerProfileMaximum(budget, profile) {
+  if (DIMENSIONS.some(key => !enteredInteger(budget?.[key]) ||
+      !valid(profile?.[key]) || profile[key] === 0) || Number(budget.disk_mib) === 0) return null;
+  return Math.min(...DIMENSIONS.map(key => Math.floor(Number(budget[key]) / profile[key])));
+}
+
 // Presentation-only deadline from the exact discovery review. Older responses
 // still support manual enrollment, but cannot copy their plan into the draft.
 export function runnerPlanningReviewWindow(result) {
@@ -108,17 +116,24 @@ export function runnerPlanningReviewWindow(result) {
 const enteredInteger = value => typeof value === 'number' ? valid(value) :
   typeof value === 'string' && /^[0-9]+$/.test(value) && valid(Number(value));
 
-// Do not treat a manual override of unknown/headroom-constrained physical
-// dimensions as evidence. A copied count fits BOTH the entered draft and the
-// existing reviewed recommendation. This cannot save or activate anything.
-export function plannedRunnerLimit(result, budget, counts, now = Date.now()) {
+// Share the evidence check between the displayed recommendation and the draft
+// copy control. A legacy, incomplete or expired proposal is not a reviewed budget.
+export function reviewedRunnerBudget(result, now = Date.now()) {
   const window = runnerPlanningReviewWindow(result), proposal = result?.proposal;
   if (!window || !Number.isFinite(now) || now < window.observed || now >= window.expires ||
       proposal?.version !== 1 || !['saved-profiles','illustrative-presets'].includes(proposal.size_source) ||
       !Array.isArray(proposal.sizes) || proposal.sizes.length < 1 || proposal.sizes.length > 512 ||
-      !Array.isArray(counts) || counts.length !== proposal.sizes.length ||
-      DIMENSIONS.some(key => !valid(proposal.budget?.[key]) || proposal.budget[key] === 0 ||
-        !enteredInteger(budget?.[key]) || Number(budget[key]) === 0)) return undefined;
+      DIMENSIONS.some(key => !valid(proposal.budget?.[key])) || proposal.budget.disk_mib === 0) return undefined;
+  return proposal.budget;
+}
+
+// Do not treat a manual override of unknown/headroom-constrained physical
+// dimensions as evidence. A copied count fits BOTH the entered draft and the
+// existing reviewed recommendation. This cannot save or activate anything.
+export function plannedRunnerLimit(result, budget, counts, now = Date.now()) {
+  const reviewed = reviewedRunnerBudget(result, now), proposal = result?.proposal;
+  if (!reviewed || !Array.isArray(counts) || counts.length !== proposal.sizes.length ||
+      DIMENSIONS.some(key => reviewed[key] === 0 || !enteredInteger(budget?.[key]) || Number(budget[key]) === 0)) return undefined;
 
   let total = 0;
   for (let i = 0; i < counts.length; i++) {
@@ -129,6 +144,6 @@ export function plannedRunnerLimit(result, budget, counts, now = Date.now()) {
   if (total === 0) return undefined;
   const mix = runnerMix(budget, proposal.sizes, counts);
   if (mix.unknown || mix.invalid || mix.exceeds.length ||
-      DIMENSIONS.some(key => mix.totals[key] > proposal.budget[key])) return undefined;
+      DIMENSIONS.some(key => mix.totals[key] > reviewed[key])) return undefined;
   return total;
 }
