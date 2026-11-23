@@ -245,6 +245,23 @@ function WorkflowCounts({groups}) {
   </section>;
 }
 
+function RetainedWorkflowCoverage({groups, history}) {
+  // Both lists are already validated and bounded by the timing snapshot.
+  const included = new Set(history.workflows.map(ciWorkflowKey));
+  const omitted = groups.filter((group) => !included.has(ciWorkflowKey(group)));
+  return <>
+    <p className="muted">Retained history included for {included.size} of {groups.length} {groups.length === 1 ? "workflow" : "workflows"} in this timing snapshot.</p>
+    {omitted.length > 0 && <>
+      <p className="muted">Retained history not included for:</p>
+      <ul>
+        {omitted.map((group) => <li key={ciWorkflowKey(group)}>
+          Workflow <code>{group.workflow_id}</code>, repository <code>{group.repository_id}</code>, source <code>{group.source}</code>
+        </li>)}
+      </ul>
+    </>}
+  </>;
+}
+
 export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHistory = false, openJob}) {
   const prefix = useId();
   const root = useRef(null);
@@ -284,7 +301,10 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} jobId={jobId} viewJob={viewJob} />
         <WorkflowCounts groups={groups} />
-        {historyVisible && <CIHealthHistory history={snapshot.history} durationText={displayDuration} />}
+        {historyVisible && <>
+          <RetainedWorkflowCoverage groups={groups} history={snapshot.history} />
+          <CIHealthHistory history={snapshot.history} durationText={displayDuration} />
+        </>}
         <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
         {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} />) : <p>No active attempts in this snapshot.</p>}

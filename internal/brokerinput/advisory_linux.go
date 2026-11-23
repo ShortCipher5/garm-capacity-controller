@@ -260,12 +260,8 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 		return ReadPlan{}, unavailable("snapshot_changed_or_expired", capacitybroker.ErrSnapshot)
 	}
 	result := cloneReadPlan(*s.plan)
-	if result.StockMaximumPreview != nil && !result.StockMaximumPreview.ExpiresAt.After(now) {
-		result.StockMaximumPreview = nil
-	}
-	if result.StockMaximumBatchPreview != nil && !result.StockMaximumBatchPreview.ExpiresAt.After(now) {
-		result.StockMaximumBatchPreview = nil
-	}
+	result.StockMaximumPreview = stockMaximumAtRead(result.StockMaximumPreview, now)
+	result.StockMaximumBatchPreview = stockMaximumAtRead(result.StockMaximumBatchPreview, now)
 	if result.StockIdleDecisionPreview != nil && !result.StockIdleDecisionPreview.ExpiresAt.After(now) {
 		result.StockIdleDecisionPreview = nil
 	}
@@ -274,6 +270,17 @@ func (s *AdvisoryLoop) ReadPlan(ctx context.Context) (ReadPlan, error) {
 	}
 	return result, nil
 }
+
+// A maximum section may expire before the base plan. Preserve its own deadline
+// so clients can distinguish expiry from an omitted (unconfigured) section,
+// while stripping every expired proposal and its host evidence from the wire.
+func stockMaximumAtRead(p *StockMaximumPreview, now time.Time) *StockMaximumPreview {
+	if p == nil || p.ExpiresAt.After(now) {
+		return p
+	}
+	return &StockMaximumPreview{State: "unavailable", ExpiresAt: p.ExpiresAt, Proposals: []StockMaximumProposal{}}
+}
+
 func cloneReadPlan(v ReadPlan) ReadPlan {
 	if v.StockIdleDecisionPreview != nil {
 		copy := *v.StockIdleDecisionPreview

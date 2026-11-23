@@ -189,3 +189,16 @@ test("lost or reversed monotonic time fails closed for the page preview",()=>{
   assert.equal(allocatorPlanStale(view(),clock(n,15)),true);
  }
 });
+
+test("expired stock maximum wire evidence reports expiry without proposal rows",()=>{
+ const plan=view();
+ const expired={state:"unavailable",expires_at:new Date(n+10000).toISOString(),proposals:[]};
+ plan.stock_maximum_preview=expired;
+ plan.stock_maximum_batch_preview=expired;
+ const now=n+10000;
+ assert.equal(validateAllocatorPlan(plan,now),plan);
+ for(const read of [stockMaximumPreviewView,stockMaximumBatchPreviewView]){
+  assert.deepEqual(read(plan,"linked_at_capture",now),{state:"expired",proposals:[]});
+  assert.equal(read(view(),"linked_at_capture",now),null);
+ }
+});
