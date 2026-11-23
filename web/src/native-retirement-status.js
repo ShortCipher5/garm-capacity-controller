@@ -21,6 +21,31 @@ const reuseLabels=Object.freeze({
  retained_diagnostics_not_recorded:'Some completed operations had no recorded retained diagnostics.',
  physical_capacity_reuse_not_established:'Physical capacity reuse was not established.',
 });
+// Match the producer's factual reason predicates against this same cycle.
+function expectedReuseReasons(view){
+ try{validateNativeRetirementStatus(view);}catch{return null;}
+ const {Incomplete,Result:r}=view.status;
+ const available=Object.hasOwn(r,'RetainedDiagnosticsAvailable');
+ const unavailable=Object.hasOwn(r,'RetainedDiagnosticsUnavailable');
+ const bounded=n=>Number.isSafeInteger(n)&&n>=0&&n<=64;
+ if(available!==unavailable)return null;
+ const recorded=r.RetainedDiagnosticsAvailable;
+ const missing=r.RetainedDiagnosticsUnavailable;
+ if(available&&(!bounded(recorded)||!bounded(missing)||recorded+missing>r.OperationsCompleted))return null;
+ const reasons=['physical_capacity_reuse_not_established'];
+ if(Incomplete)reasons.push('cycle_incomplete');
+ if(r.AwaitingEvidence>0)reasons.push('canonical_root_fence_missing');
+ if(r.OutsideScope>0)reasons.push('outside_configured_owner_scope');
+ if(r.Unresolved>0)reasons.push('operation_outcome_unresolved');
+ // Missing legacy counters are unknown rather than observed zero.
+ if(available){
+  if(missing>0)reasons.push('retained_diagnostics_unavailable');
+  if(recorded>0)reasons.push('retained_diagnostics_are_not_release_proof');
+  if(r.OperationsCompleted>recorded+missing)reasons.push('retained_diagnostics_not_recorded');
+ }
+ return reasons;
+}
+
 export function retirementReuseView(view){
  const value=view?.capacity_reuse;
  if(value===undefined)return null;
@@ -31,6 +56,8 @@ export function retirementReuseView(view){
   if(value.reasons.length!==1||value.reasons[0]!==expected)return unknown;
   return {historical:true,labels:value.reasons.map(r=>reuseLabels[r])};
  }
- if(value.availability!=='last_cycle_diagnostics'||view.freshness!=='within_cycle_window'||!value.reasons.includes('physical_capacity_reuse_not_established')||value.reasons.some(r=>r==='cycle_stale'||r==='cycle_clock_unverified'))return unknown;
+ if(value.availability!=='last_cycle_diagnostics'||view.freshness!=='within_cycle_window')return unknown;
+ const expected=expectedReuseReasons(view);
+ if(!expected||value.reasons.length!==expected.length||!expected.every(reason=>value.reasons.includes(reason)))return unknown;
  return {historical:true,labels:value.reasons.map(r=>reuseLabels[r])};
 }
