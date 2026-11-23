@@ -33,6 +33,9 @@ def discover(items, reference):
         raise ValueError('not a direct GARM executable')
     if config.get('Cmd') or config.get('OnBuild') or config.get('Volumes'):
         raise ValueError('implicit execution or mounts refused')
+    healthcheck = config.get('Healthcheck')
+    if healthcheck is not None and healthcheck != {'Test': ['NONE']}:
+        raise ValueError('implicit healthcheck refused')
     return {'image_id': image_id, 'executable': entry[0], 'reference': reference,
             'os': image['Os'], 'architecture': image['Architecture'],
             'environment': config.get('Env'), 'working_directory': config.get('WorkingDir'),
