@@ -2,13 +2,13 @@
 
 A lightweight Go control plane **above [Garm](https://github.com/cloudbase/garm)** for GitHub Actions runners on multiple [Incus](https://linuxcontainers.org/incus/) hosts, with a React management view and durable SQLite capacity ledger.
 
-> **Experimental, not production-qualified.** The real gateway and provider integration are implemented and tested against disposable authenticated API fixtures. Provisioning is off by default. The web application reads the real ledger and optionally edits bounded ledger policy using a separate write credential. Physical retirement, automatic job-safe drain and installed-infrastructure recovery qualification remain incomplete. Do not replace an existing provider just because CI passes.
+> **Experimental, not production-qualified.** The [stock GARM release path](docs/stock-scaling-release-boundary.md) observes demand and capacity across pools and offers an optional read-only scaling preview. GitHub queues jobs; stock GARM creates, assigns and retires runners. The preview neither changes pool settings nor enforces a fleet quota. The separate experimental gateway/provider path is tested against authenticated fixtures and defaults to provisioning off. Neither path is qualified for production activation.
 
 ## Why this is needed
 
 Repository pools can each have a sensible `max_runners` while their combined demand exceeds the CPU, RAM or runner budget of a shared host. Updating maxima periodically is not atomic enforcement: two pools can provision between updates, and existing idle runners can accept jobs without provisioning anything new.
 
-Garm remains responsible for runner demand and GitHub integration. This controller adds:
+The repository also contains experimental gateway, provider and ledger foundations. The following capabilities belong to that separate path; they are not guarantees provided by the stock preview:
 
 - **One global admission transaction** covering global, per-host and pool CPU/RAM/runner budgets.
 - **Atomic configured multi-host placement** with [immutable execution settings](docs/durable-placement.md), conservative policy revocation and no ambiguous-create failover.
@@ -30,7 +30,8 @@ Physical deletion and project-observation-based release are blocked by the [reti
 | Component | Implemented | Remaining qualification |
 | --- | --- | --- |
 | Admission | SQLite WAL/FULL, `BEGIN IMMEDIATE`, atomic budget/reservation/audit and process-race tests | One authoritative local ledger, not distributed consensus |
-| Garm integration | Pinned v0.2.1 admission/bootstrap API patch, original JIT receipts and actual API/SQL/AddRunner/poll-to-compiled-gateway harness | Requires the documented patch; installed stack not qualified |
+| Stock GARM | Scoped demand and runner observations; optional read-only cross-pool scaling preview | No automated pool writes or enforced fleet quota; installed path not qualified |
+| Experimental patched integration | Pinned v0.2.1 admission/bootstrap patch, original JIT receipts and API/SQL/AddRunner/poll-to-compiled-gateway tests | Requires the documented patch for this separate path; not the stock release path |
 | Provisioning | Verified Incus HTTPS/mTLS, explicit limits, durable at-most-once intent and readback | Experimental opt-in; full physical-host coverage must be proved |
 | Reconciliation | Fresh-generation fence and bounded three-source inventory | Incomplete or unbounded inventory keeps admission blocked |
 | Administration | Separate TLS read/write roles and responsive React ledger view | Opt-in separate write role for ledger host modes and budgets; scoped journalled Garm settings editor; no registration or retirement button |
@@ -107,7 +108,7 @@ Do not copy only an open WAL database file. Use the [consistent backup procedure
 
 ## Next
 
-Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then qualified recovery, registration/retirement workflows and historical telemetry. See [the roadmap](docs/roadmap.md). Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
+Never-dispatched preparation cleanup, evidence-gated recovery and retirement, secure operator packaging, isolated self-hosted CI qualification, then qualified recovery, registration/retirement workflows and historical telemetry. See the [stock scaling release boundary](docs/stock-scaling-release-boundary.md) for the current release direction and the [earlier roadmap](docs/roadmap.md) for the experimental foundations. Passing local or browser CI does not establish native Incus isolation, a complete lifecycle or production readiness.
 
 No live controller deployment is claimed. Tests must never access live runner infrastructure or commit credentials, private host addresses or user-specific configuration.
 
