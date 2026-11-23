@@ -303,6 +303,16 @@ func jobSizingRAMValid(r JobResourceSummary, start, end time.Time, cadence Resou
 		gauge.LatestAt.After(latest) || span < time.Duration(gauge.Samples-1)*time.Nanosecond {
 		return false
 	}
+	if gauge.Samples == r.Samples {
+		// Every endpoint is known, so the last reading is the final
+		// sample and every cadence-eligible pair contributes to the mean.
+		if !gauge.LatestAt.Equal(latest) || (mean == nil) != (cadence.Intervals == 0) {
+			return false
+		}
+		if mean != nil && (mean.Coverage.Intervals != cadence.Intervals || mean.Coverage.Duration != cadence.Duration) {
+			return false
+		}
+	}
 	return mean == nil || mean.Bytes <= gauge.SampleMax && mean.Coverage.Duration <= span &&
 		sizingCoverageValid(mean.Coverage, r.Window, r.Scope.MaxGap, gauge.Samples, cadence)
 }
