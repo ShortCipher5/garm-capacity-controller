@@ -62,6 +62,16 @@ test("retained history accepts only authorized scope, exact windows, bounded sam
   }
 });
 
+test("retained history never accepts steps without an observed parent job", () => {
+  const view = fixture();
+  const bucket = view.history.workflows[0].current.initial;
+  bucket.jobs = none();
+  assert.throws(() => validateCIHealthSnapshot(view), /CI Health response unavailable/);
+  // An observed attempt can have no job or step observations at all.
+  bucket.steps = none();
+  assert.equal(validateCIHealthSnapshot(view), view);
+});
+
 test("earlier history expiry does not renew on wall rollback or remove still-current timing", () => {
   const view = fixture();
   const wall = Date.parse(at), mono = 50;

@@ -113,7 +113,8 @@ function validRetainedHistory(history, observed, scopes) {
             !validRetainedMetric(bucket.attempts, 64) || !validRetainedMetric(bucket.jobs, 12000) ||
             !validRetainedMetric(bucket.steps, 12000) || !count(bucket.distinct_runs, bucket.attempts.observed) ||
             (initial && bucket.distinct_runs !== bucket.attempts.observed) ||
-            (!bucket.distinct_runs && (bucket.attempts.observed || bucket.jobs.observed || bucket.steps.observed))) return false;
+            (!bucket.distinct_runs && (bucket.attempts.observed || bucket.jobs.observed || bucket.steps.observed)) ||
+            (!bucket.jobs.observed && bucket.steps.observed)) return false;
         retainedAttempts += bucket.attempts.observed;
         retainedRecords += bucket.attempts.observed + bucket.jobs.observed + bucket.steps.observed;
       }
