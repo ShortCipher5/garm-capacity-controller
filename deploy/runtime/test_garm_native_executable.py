@@ -47,6 +47,22 @@ class Discovery(unittest.TestCase):
             with self.assertRaises(ValueError):
                 native.discover(image, self.reference)
 
+    def test_only_absent_null_or_explicitly_disabled_healthchecks_are_allowed(self):
+        for disabled in (None, {'Test': ['NONE']}):
+            image = self.fixture()
+            image[0]['Config']['Healthcheck'] = disabled
+            with self.subTest(disabled=disabled):
+                self.assertEqual(native.discover(image, self.reference)['executable'], '/bin/garm')
+
+        for unsafe in ({'Test': ['CMD', '/bin/true']}, {'Test': ['CMD-SHELL', 'true']},
+                       {}, {'Test': []}, {'Test': 'NONE'}, {'Test': ['NONE', 'extra']},
+                       {'Test': ['NONE'], 'Interval': 1_000_000_000}, ['NONE']):
+            image = self.fixture()
+            image[0]['Config']['Healthcheck'] = unsafe
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaisesRegex(ValueError, 'implicit healthcheck refused'):
+                    native.discover(image, self.reference)
+
 
 if __name__ == '__main__':
     unittest.main()
