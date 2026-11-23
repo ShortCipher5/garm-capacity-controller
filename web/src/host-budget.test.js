@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS, plannedRunnerLimit } from './host-budget.js';
+import { hostBudgetGuidance, assessBudget, runnerMix, RUNNER_PRESETS, plannedRunnerLimit, reviewedRunnerBudget, runnerProfileMaximum } from './host-budget.js';
 const result = { totals: {cpu_millis: 12000, ram_mib: 24576, disk_mib: 240000, disk_mib_used: 20000}, guests: [], blockers: [] };
 test('suggestion reserves proportional headroom and existing disk usage', () => {
   const g = hostBudgetGuidance(result);
@@ -96,4 +96,32 @@ test("copy only a positive known reviewed mix fitting both draft and suggested h
   assert.equal(plannedRunnerLimit(result,draft,[1,0,0],Date.parse(observed)-1),undefined);
   assert.equal(plannedRunnerLimit({...result,review_expires_at:undefined},draft,[1,0,0],now),undefined);
   assert.equal(plannedRunnerLimit({...result,review:{...result.review,profile_id:"other"}},draft,[1,0,0],now),undefined);
+});
+
+test('review-only maxima retain known zero and ignore draft count edits without enabling copying', () => {
+  const now = Date.parse('2026-11-23T04:00:00Z');
+  const size = RUNNER_PRESETS[0];
+  const positive = { cpu_millis: 2500, ram_mib: 7500, disk_mib: 50000 };
+  const input = {
+    profile_id: 'synthetic',
+    observed_at: new Date(now - 1000).toISOString(),
+    review_expires_at: new Date(now + 1000).toISOString(),
+    review: { profile_id: 'synthetic', id: '11111111-1111-4111-8111-111111111111', revision: 'a'.repeat(64) },
+    proposal: { version: 1, size_source: 'saved-profiles', sizes: [size], budget: positive },
+  };
+  assert.equal(runnerMix(positive, [size], ['']).invalid, true);
+  assert.equal(runnerProfileMaximum(reviewedRunnerBudget(input, now), size), 2);
+  assert.equal(plannedRunnerLimit(input, positive, [''], now), undefined);
+  assert.equal(plannedRunnerLimit(input, positive, [2], now), 2);
+  assert.equal(plannedRunnerLimit(input, {...positive, cpu_millis: 1000}, [2], now), undefined);
+  for (const key of ['cpu_millis', 'ram_mib']) {
+    const zero = {...input, proposal: {...input.proposal, budget: {...positive, [key]: 0}}};
+    assert.equal(runnerProfileMaximum(reviewedRunnerBudget(zero, now), size), 0);
+    assert.equal(plannedRunnerLimit(zero, positive, [1], now), undefined);
+  }
+  assert.equal(runnerProfileMaximum({...positive, cpu_millis: 500}, size), 0);
+  assert.equal(runnerProfileMaximum(reviewedRunnerBudget(input, now + 1000), size), null);
+  assert.equal(runnerProfileMaximum({...positive, disk_mib: 0}, size), null);
+  assert.equal(runnerProfileMaximum({...positive, cpu_millis: null}, size), null);
+  assert.equal(runnerProfileMaximum(positive, {...size, disk_mib: 0}), null);
 });
