@@ -22,6 +22,8 @@ Reuse `internal/cihealth/{job_sizing,job_sizing_window}.go` and `docs/ci-health-
 - The feature leaves all scaling settings unchanged and has no apply action. Local fixtures can verify the model and view without host or GitHub access.
 
 ## Dependency boundary
+Use `cihealth.JobSizingSample` in `internal/cihealth/job_sizing.go` as the shared Go contract: Plan 04 produces a verified `JobResourceSummary` with its exact `JobKey`, runner incarnation, observation window and coverage, Plan 05 retains that summary and the independently sourced completion, installed shape, outcome and risk facts under the same key without refreshing their timestamps, and Plan 07 projects them into `JobSizingCohort` for `ReviewJobSizingWindow`, treating missing facts as unknown.
+
 Can implement policy/view with fixtures in parallel. Live recommendations remain disabled/unavailable until Plan 04 has verified resources and Plan 05 has durable exact history. This is post-scaling functionality, not a condition for safe scaling code to be reviewed.
 
 ## Handoff and definition of done
