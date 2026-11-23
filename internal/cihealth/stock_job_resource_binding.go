@@ -53,6 +53,7 @@ const (
 // Incus process lifetime, stock runner state, or counter continuity.
 type StockJobExecutionObservation struct {
 	Job                            JobKey
+	RunnerAgentID                  int64 // independently observed GitHub registration ID for this job
 	StartedAt, EndedAt, ObservedAt time.Time
 	State                          StockJobExecutionState
 }
@@ -72,7 +73,7 @@ func SummarizeBoundStockJobResources(scope JobResourceScope, initial, closing *S
 	}
 	a, b := *initial, *closing
 	start, end, asOf := scope.StartedAt.UTC(), scope.EndAt.UTC(), scope.AsOf.UTC()
-	if !stockJobExecutionCovers(scope.Job, start, end, asOf, job) {
+	if !stockJobExecutionCovers(scope.Job, a.RunnerAgentID, start, end, asOf, job) {
 		return fail()
 	}
 	a.Runtime.StartedAt, b.Runtime.StartedAt = a.Runtime.StartedAt.UTC(), b.Runtime.StartedAt.UTC()
@@ -107,12 +108,12 @@ func SummarizeBoundStockJobResources(scope JobResourceScope, initial, closing *S
 	return SummarizeJobResources(scope, samples)
 }
 
-func stockJobExecutionCovers(key JobKey, start, end, asOf time.Time, job *StockJobExecutionObservation) bool {
+func stockJobExecutionCovers(key JobKey, runnerAgentID int64, start, end, asOf time.Time, job *StockJobExecutionObservation) bool {
 	if job == nil {
 		return false
 	}
 	started, observed, ended := job.StartedAt.UTC(), job.ObservedAt.UTC(), job.EndedAt.UTC()
-	if job.Job != key || !validTime(started) || !started.Equal(start) || !validTime(observed) ||
+	if job.Job != key || job.RunnerAgentID != runnerAgentID || !validTime(started) || !started.Equal(start) || !validTime(observed) ||
 		observed.Before(end) || observed.After(asOf) || observed.Sub(end) > MaxJobResourceGap {
 		return false
 	}
