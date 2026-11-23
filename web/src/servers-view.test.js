@@ -59,6 +59,19 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.doesNotMatch(view, /Physical totals/);
     const noTotals = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: {...discovery, totals: undefined} }));
     assert.match(noTotals, /Backend totals unknown/);
+    const noInventory = renderToStaticMarkup(React.createElement(DiscoveryResultView, {
+      result: {...discovery, guests: [], blockers: ["guest_inventory_unavailable"]},
+    }));
+    assert.match(noInventory, /Guest inventory unavailable; the number of guests is unknown/);
+    assert.doesNotMatch(noInventory, /No guests observed in the bounded inventory/);
+    assert.doesNotMatch(noInventory, /Observed guests <small class="muted">0/);
+    assert.match(noInventory, /Project guest observations: CPU 750 ms cumulative/);
+    const emptyInventory = renderToStaticMarkup(React.createElement(DiscoveryResultView, {
+      result: {...discovery, guests: [], utilization: undefined},
+    }));
+    assert.match(emptyInventory, /Observed guests <small class="muted">0/);
+    assert.match(emptyInventory, /No guests observed in the bounded inventory/);
+    assert.doesNotMatch(emptyInventory, /Guest inventory unavailable/);
     assert.match(view, /Workload-aware suggested budget/);
     assert.match(view, /<th scope="row">CPU<\/th><td>Not estimated<\/td><td>Not suggested<\/td>/);
     assert.doesNotMatch(view, /6,000 millicores|30,720 MiB|471,860 MiB/);
