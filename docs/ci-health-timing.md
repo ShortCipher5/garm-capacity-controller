@@ -229,6 +229,17 @@ coverage proof: the current bounded observer can show an empty observed
 subset while retaining prior positive observations and their reviewed
 checkpoint. An empty read does not authorize a retained-history projection.
 
+GitHub.com documents two different limits for filtered workflow-run queries:
+[at most 1,000 returned records](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+and a [reported match count of “2,500+” above 2,500 matches](https://github.blog/changelog/2026-09-25-changes-to-query-results-in-the-github-actions-api-and-ui/).
+The reported count is not a pagination allowance; the announcement does not
+specify the capped count’s JSON encoding.
+A saturated or otherwise inconclusive page chain does not advance the
+reviewed checkpoint, even if it ends without another page. It does not erase
+the prior retained facts. The current reader does not split saturated
+creation-time windows or backfill older runs. A creation-time window also
+cannot enumerate retries added later to runs created outside that window.
+
 On GitHub.com, the [Actions retention setting](https://github.blog/changelog/2026-10-01-actions-retention-now-covers-checks-runs-and-statuses/)
 has also covered workflow runs, checks and statuses since October 1, 2026.
 A repository's current setting cannot prove historical coverage or restore
