@@ -144,11 +144,29 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
     assert.ok(retainedSection, "retained history section should be rendered");
     assertOneReportNotice(retainedSection);
     assertOneReportNotice(markup);
+    assert.match(markup, /Retained history included for 1 of 1 workflow in this timing snapshot/);
+    assert.doesNotMatch(markup, /Retained history not included for:/);
+    const partial = fixture();
+    const first = partial.timing.attempts[0];
+    partial.timing.attempts.push(
+      {...first, attempt: "1"},
+      {...first, source: "other_source"},
+      {...first, repository_id: "9007199254740994"},
+    );
+    const partialMarkup = render(partial, {showHistory: true});
+    assert.match(partialMarkup, /Retained history included for 1 of 3 workflows in this timing snapshot/);
+    const omitted = partialMarkup.match(/Retained history not included for:<\/p><ul>(.*?)<\/ul>/)?.[1];
+    assert.ok(omitted);
+    assert.match(omitted, /Workflow <code>9007199254740995<\/code>, repository <code>9007199254740993<\/code>, source <code>other_source<\/code>/);
+    assert.match(omitted, /Workflow <code>9007199254740995<\/code>, repository <code>9007199254740994<\/code>, source <code>fixture<\/code>/);
+    assert.equal((omitted.match(/<li>/g) ?? []).length, 2);
+    assertOneReportNotice(partialMarkup);
+    assert.doesNotMatch(render(partial, {showHistory: true, now: Date.parse(partial.history.expires_at)}), /Retained history included for|Retained history not included for:/);
     const {history, ...timingOnly} = snapshot;
     const absent = render(timingOnly, {showHistory: true});
     assert.match(absent, /No retained history was included in this snapshot/);
     assertOneReportNotice(absent);
-    assert.doesNotMatch(absent, /Most recent 7 days|Retained history has expired/);
+    assert.doesNotMatch(absent, /Most recent 7 days|Retained history has expired|Retained history included for|Retained history not included for:/);
     assertOneReportNotice(render({...timingOnly, timing: {attempts: []}}, {showHistory: true}));
     const empty = fixture();
     empty.history.workflows[0].current.initial = zeroBucket();

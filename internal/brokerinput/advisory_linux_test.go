@@ -355,3 +355,42 @@ func TestAdvisoryLoopRejectsLateSuccessfulPoll(t *testing.T) {
 		t.Fatalf("late source result was not discarded: %+v %v", plan, err)
 	}
 }
+
+func TestAdvisoryLoopRetainsExpiredMaximumDeadlineWithoutRecommendations(t *testing.T) {
+	base := time.Now()
+	deadline := base.Add(-time.Second)
+	row := StockMaximumProposal{PoolID: "test-pool"}
+	preview := &StockMaximumPreview{
+		State: "proposed", HostEvidence: "configured_only", ExpiresAt: deadline,
+		Proposals: []StockMaximumProposal{row},
+	}
+	loop := &AdvisoryLoop{plan: &ReadPlan{
+		ExpiresAt: base.Add(time.Minute), StockMaximumPreview: preview, StockMaximumBatchPreview: preview,
+	}}
+	result, err := loop.ReadPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]*StockMaximumPreview{
+		"ordinary": result.StockMaximumPreview, "batch": result.StockMaximumBatchPreview,
+	} {
+		if got == nil || got.State != "unavailable" || !got.ExpiresAt.Equal(deadline) ||
+			got.Proposals == nil || len(got.Proposals) != 0 || got.HostEvidence != "" || got.Reason != "" {
+			t.Fatalf("%s: wanted expiry with proposals and evidence removed, got %+v", name, got)
+		}
+	}
+	if preview.State != "proposed" || len(preview.Proposals) != 1 {
+		t.Fatal("read modified cached preview")
+	}
+
+	loop.plan.StockMaximumPreview = nil
+	loop.plan.StockMaximumBatchPreview = &StockMaximumPreview{
+		State: "proposed", HostEvidence: "configured_only", ExpiresAt: base.Add(time.Minute),
+		Proposals: []StockMaximumProposal{row},
+	}
+	result, err = loop.ReadPlan(context.Background())
+	if err != nil || result.StockMaximumPreview != nil || result.StockMaximumBatchPreview == nil ||
+		result.StockMaximumBatchPreview.State != "proposed" || len(result.StockMaximumBatchPreview.Proposals) != 1 {
+		t.Fatalf("omitted or fresh preview changed: %+v, %v", result, err)
+	}
+}

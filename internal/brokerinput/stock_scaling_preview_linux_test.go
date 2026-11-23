@@ -103,22 +103,36 @@ func TestStockMaximumPreviewPressureOnlyVetoesAndExpires(t *testing.T) {
 
 func TestStockMaximumPreviewCacheDoesNotExposeStaleOrSharedRows(t *testing.T) {
 	now := time.Now()
-	p := &ReadPlan{ExpiresAt: now.Add(time.Minute), StockMaximumPreview: &StockMaximumPreview{
-		State: "proposed", ExpiresAt: now.Add(30 * time.Second), Proposals: []StockMaximumProposal{{"p", "r", 1, 2, new(int64)}},
+	minimumIdle := int64(1)
+	p := &ReadPlan{CapturedAt: now.Add(-2 * time.Second), ExpiresAt: now.Add(time.Minute), StockMaximumPreview: &StockMaximumPreview{
+		State: "proposed", HostEvidence: "configured_only", ExpiresAt: now.Add(30 * time.Second),
+		Proposals: []StockMaximumProposal{{"p", "r", 1, 2, &minimumIdle}},
 	}}
 	s := &AdvisoryLoop{plan: p}
 	fresh, err := s.ReadPlan(context.Background())
-	if err != nil || fresh.StockMaximumPreview == nil {
+	if err != nil || fresh.StockMaximumPreview == nil || fresh.StockMaximumPreview.State != "proposed" ||
+		len(fresh.StockMaximumPreview.Proposals) != 1 || fresh.StockMaximumPreview.Proposals[0].ObservedMinIdle == nil {
 		t.Fatal(fresh, err)
 	}
 	fresh.StockMaximumPreview.Proposals[0].Suggested = 100
-	if p.StockMaximumPreview.Proposals[0].Suggested != 2 {
+	*fresh.StockMaximumPreview.Proposals[0].ObservedMinIdle = 99
+	if row := p.StockMaximumPreview.Proposals[0]; row.Suggested != 2 || *row.ObservedMinIdle != 1 {
 		t.Fatal("preview mutates cache")
 	}
-	p.StockMaximumPreview.ExpiresAt = now.Add(-time.Second)
+
+	deadline := now.Add(-time.Second)
+	p.StockMaximumPreview.ExpiresAt = deadline
 	stale, err := s.ReadPlan(context.Background())
-	if err != nil || stale.StockMaximumPreview != nil || !stale.ExpiresAt.Equal(p.ExpiresAt) {
-		t.Fatal("stale preview escaped or invalidated ordinary plan", stale, err)
+	if err != nil || !stale.ExpiresAt.Equal(p.ExpiresAt) {
+		t.Fatal("expiry invalidated ordinary plan", stale, err)
+	}
+	got := stale.StockMaximumPreview
+	if got == nil || got.State != "unavailable" || !got.ExpiresAt.Equal(deadline) ||
+		got.Proposals == nil || len(got.Proposals) != 0 || got.HostEvidence != "" || got.Reason != "" {
+		t.Fatalf("stale preview leaked recommendation or lost its deadline: %+v", got)
+	}
+	if p.StockMaximumPreview.State != "proposed" || len(p.StockMaximumPreview.Proposals) != 1 {
+		t.Fatal("expiry response mutated cache")
 	}
 }
 
