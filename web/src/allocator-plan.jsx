@@ -74,5 +74,6 @@ export function StockMaximumBatchSuggestions({plan,comparison,now}){
 }
 
 function MaximumRows({maximums}){
- return <><p>Evidence expires {new Date(maximums.expiresAt).toLocaleString()}.</p><div className="table-wrap"><table><thead><tr><th>Repository / pool</th><th>Maximum at capture</th><th>Suggested maximum (not applied here)</th></tr></thead><tbody>{maximums.proposals.map(p=><tr key={p.pool_id}><td>{p.repository_id}<p>{p.pool_id}</p>{Object.hasOwn(p,"observed_min_idle")&&<p>Minimum idle at capture: {p.observed_min_idle} (not part of this suggestion)</p>}</td><td>{p.observed}</td><td>{p.suggested}</td></tr>)}</tbody></table></div></>;
+ const includesReduction=maximums.proposals.some(({observed,suggested})=>suggested<observed);
+ return <>{includesReduction&&<p>Lowering a pool maximum does not itself stop a running job, drain the pool, or prove capacity has been released.</p>}<p>Evidence expires {new Date(maximums.expiresAt).toLocaleString()}.</p><div className="table-wrap"><table><thead><tr><th>Repository / pool</th><th>Maximum at capture</th><th>Suggested maximum (not applied here)</th></tr></thead><tbody>{maximums.proposals.map(p=><tr key={p.pool_id}><td>{p.repository_id}<p>{p.pool_id}</p>{Object.hasOwn(p,"observed_min_idle")&&<p>Minimum idle at capture: {p.observed_min_idle} (not part of this suggestion)</p>}</td><td>{p.observed}</td><td>{p.suggested}</td></tr>)}</tbody></table></div></>;
 }

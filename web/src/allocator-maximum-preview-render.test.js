@@ -26,7 +26,9 @@ test('optional maximum advice renders in the existing panel with no apply contro
     proposals:[{pool_id:id,repository_id:id,observed:2,suggested:3}]}};
   const render=(delta={})=>renderToStaticMarkup(React.createElement(StockMaximumSuggestions,{plan,comparison:'linked_at_capture',now,...delta}));
   assert.equal(render({plan:{...plan,stock_maximum_preview:undefined}}),'');
+  const reductionWarning=/Lowering a pool maximum does not itself stop a running job, drain the pool, or prove capacity has been released/;
   const fresh=render();
+  assert.doesNotMatch(fresh,reductionWarning);
   assert.match(fresh,/Maximum at capture/);assert.match(fresh,/Suggested maximum \(not applied here\)/);assert.match(fresh,/<td>2<\/td><td>3<\/td>/);
   assert.doesNotMatch(fresh,/<button|<form/);assert.match(fresh,/No settings changes/);
   assert.doesNotMatch(fresh,/Minimum idle(?: at capture)?:/);
@@ -72,6 +74,19 @@ test('optional maximum advice renders in the existing panel with no apply contro
   assert.doesNotMatch(renderBatch({now:now+10000}),/<table|Minimum idle(?: at capture)?:/);
   assert.doesNotMatch(renderBatch({comparison:'preview_superseded'}),/<table|Minimum idle(?: at capture)?:/);
   const mismatch={...withIdle.stock_maximum_preview,proposals:[{...withIdle.stock_maximum_preview.proposals[0],suggested:1}]};
+  const lowerPlan={...withIdle,stock_maximum_preview:mismatch,stock_maximum_batch_preview:mismatch};
+  assert.doesNotMatch(renderBatch(),reductionWarning);
+  for(const renderSection of [render,renderBatch]){
+   const lowerHTML=renderSection({plan:lowerPlan});
+   assert.match(lowerHTML,/<td>2<\/td><td>1<\/td>/);
+   assert.match(lowerHTML,reductionWarning);assert.doesNotMatch(lowerHTML,/<button|<form/);
+   assert.doesNotMatch(renderSection({plan:lowerPlan,now:now+10000}),reductionWarning);
+   assert.doesNotMatch(renderSection({plan:lowerPlan,comparison:'preview_superseded'}),reductionWarning);
+   for(const suggested of [2,3]){
+    const other={...mismatch,proposals:[{...mismatch.proposals[0],suggested}]};
+    assert.doesNotMatch(renderSection({plan:{...lowerPlan,stock_maximum_preview:other,stock_maximum_batch_preview:other}}),reductionWarning);
+   }
+  }
   assert.doesNotMatch(renderBatch({plan:{...withIdle,stock_maximum_batch_preview:mismatch}}),/<table/);
   assert.match(render({plan:fit('no_confirmed_change')}),/The captured comparison did not produce a maximum suggestion/);
   assert.doesNotMatch(render({plan:fit('no_confirmed_change')}),/confirmed no maximum change/);
