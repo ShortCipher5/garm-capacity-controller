@@ -112,7 +112,8 @@ function ProjectGuestUsage({ utilization }) {
   );
 }
 export function DiscoveryResultView({ result }) {
-  const unmanaged = result.guests.filter((guest) => !guest.managed).length;
+  const inventoryUnavailable = result.blockers.includes("guest_inventory_unavailable");
+  const unmanaged = inventoryUnavailable ? 0 : result.guests.filter((guest) => !guest.managed).length;
   const guidance = hostBudgetGuidance(result);
   return (
     <div className="discovery-result" role="status">
@@ -151,8 +152,10 @@ export function DiscoveryResultView({ result }) {
       </div>
       <p>Runner count is not derivable from host totals. Review local services, provider fair-use limits and workloads before overriding the suggestion.</p>
       <ul className="warning-list">{guidance.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
-      <h4>Observed guests <small className="muted">{result.guests.length}</small></h4>
-      {result.guests.length === 0 ? (
+      <h4>Observed guests{!inventoryUnavailable && <> <small className="muted">{result.guests.length}</small></>}</h4>
+      {inventoryUnavailable ? (
+        <p className="drain-warning">Guest inventory unavailable; the number of guests is unknown.</p>
+      ) : result.guests.length === 0 ? (
         <p className="empty">No guests observed in the bounded inventory.</p>
       ) : (
         <div className="table-wrap">
