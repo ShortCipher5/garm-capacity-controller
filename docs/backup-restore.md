@@ -1,4 +1,4 @@
-> Runtime recovery gate: schema 6 preserves immutable ledger lineage but stamps every supported backup and restore as permanently runtime-disabled. Offline readiness/reconciliation cannot activate an artifact. `capacity-gateway` refuses these artifacts even when their ID matches its independent identity file. There is no activation command or boolean bypass. The inventory/fencing procedures below remain necessary recovery research, not a supported runtime activation workflow. See [runtime ledger lineage](runtime-ledger-lineage.md).
+> Runtime recovery gate: supported backups and restores preserve immutable ledger lineage and are permanently runtime-disabled. Offline readiness/reconciliation cannot activate an artifact. `capacity-gateway` refuses these artifacts even when their ID matches its independent identity file. There is no activation command or boolean bypass. The inventory/fencing procedures below remain necessary recovery research, not a supported runtime activation workflow. See [runtime ledger lineage](runtime-ledger-lineage.md).
 
 # Consistent SQLite backup and fail-closed restore
 
@@ -24,6 +24,9 @@ go build -o ./capacity-ledger ./cmd/capacity-ledger
 # This flag acknowledges work performed separately. It does not perform or prove it.
 ./capacity-ledger restore --source /private/backups/new-snapshot.db \
     --destination /private/recovery/new-ledger.db --old-writers-fenced
+
+# Read-only diagnostic on a current ledger (not authority to resume).
+./capacity-ledger assess-recovery --source /private/recovery/new-ledger.db
 ```
 
 The tool never creates a missing source, migrates the source in place, overwrites
@@ -41,10 +44,15 @@ newer dispatch/cancellation history, quarantine request identities whose complet
 history cannot be recovered, and account for ambiguous in-flight work before
 using the restored path. The complete operator procedure below remains mandatory.
 The CLI never collects inventory and cannot verify external credentials, physical
-allocation boundaries, or post-backup operation history.
+allocation boundaries, or post-backup operation history. `assess-recovery` opens
+the current schema read-only without migration and reports advisory entries only.
+Paginated results are separate snapshots, not a consistent global inventory.
+For `assess-recovery`, exit code `0` confirms a successful read only; it
+does not create a file or authorize recovery.
 
-Exit codes: `0` confirms publication of a standalone private **admission-blocked**
-artifact; `2` means invalid usage or missing fencing acknowledgement; `1` means
+For `backup` and `restore`, exit code `0` confirms publication of a standalone
+private **admission-blocked** artifact; `2` means invalid usage or missing
+fencing acknowledgement; `1` means
 failure/interruption; `3` means an uncertain result that may already have installed
 the destination. Never interpret a nonzero exit as proof the destination is absent.
 For an uncertain result, retain the source and backup, inspect the destination
@@ -93,7 +101,7 @@ publication it checks application/schema ownership, SQLite integrity, foreign
 keys, stored policy, and allocation accounting. It preserves reservations,
 inventory, dispatch intents/outcomes, included cancellation tombstones, and prior audit history, then durably sets
 `ready=0` and clears the reconciliation nonce and barrier timestamp. An audit
-entry records `backup_created` or `backup_restored` on the copy. Owned older inputs receive conservative migrations through current version five on the copy only, preserving included cancellation, daemon-binding and CREATE-observation history and their provenance exclusions. Included tombstones are preserved; later history absent from an older backup must be recovered or old identities quarantined before replay. See [cancellation history limits](undispatched-cancellation.md).
+entry records `backup_created` or `backup_restored` on the copy. Owned older inputs are conservatively migrated to the running build's current schema on the copy only, preserving included cancellation, daemon-binding and CREATE-observation history and their provenance exclusions. Included tombstones are preserved; later history absent from an older backup must be recovered or old identities quarantined before replay. See [cancellation history limits](undispatched-cancellation.md).
 
 The finished artifact is closed in DELETE journal mode with all committed data
 in its single private database file. File sync, an atomic same-filesystem
@@ -122,7 +130,7 @@ Restore invalidates fences again, even if a caller opened and reconciled the
 backup after it was created. Passing SQLite integrity checks, restarting a
 process, or finding an old healthy snapshot is not permission to provision.
 
-Before using a restored path:
+For an offline recovery assessment of a restored path:
 
 1. Establish a maintenance window and stop/fence **every old gateway writer**,
    provider execution path, and collector. Preserve the original database and
@@ -134,7 +142,9 @@ Before using a restored path:
    does not store provider credentials or encryption keys. Restrict backup
    storage and any separate archival encryption to the operator's security
    requirements.
-3. Open the new path using `admission.OpenSQLite(path, admission.Config{})`.
+3. Keep the exported artifact intact for read-only diagnostics. For a deliberate
+   writable offline model exercise, use a separate restored path with
+   `admission.OpenSQLite(path, admission.Config{})`, not `capacity-gateway`.
    Reopening does not clear the durable barrier. New `Admit` and new
    `ClaimDispatch` calls fail closed; existing reservation replay is lookup
    only, never a fresh external-execution permit. Existing dispatch intents
@@ -151,10 +161,11 @@ Before using a restored path:
    missing from the new view become unknown and remain charged. Observed orphans
    are charged; absence from a historical backup or a single list is not release
    evidence. There is still no physical-retirement release API. Narrow never-dispatched cancellation requires fresh ready baseline and authoritative history; a restored blocked snapshot alone cannot authorize it.
-7. Resume scheduling only after the complete new reconciliation succeeds and
-   external credential isolation, bypass resistance, and host-budget boundaries
-   have been independently established and qualified. This repository does not
-   yet implement that production orchestration.
+7. Keep scheduling stopped. Even a complete reconciliation changes only the
+   offline model; it does not clear the permanent runtime restriction. Do not
+   point `capacity-gateway` at the restored path or replace the original database
+   with the restored artifact. This repository does not implement a production
+   recovery or reactivation workflow.
 
 The model trusts the adapter's completeness and identity assertions. It cannot
 prove an omitted post-backup operation does not exist or recognize resources an
@@ -205,10 +216,9 @@ production acceptance.
 ## Schema-four daemon-binding history
 
 Current artifacts retain immutable daemon bindings, their audit-sequenced dispatch
-provenance and legacy charged-host binding exclusions. Versions one through four
-are accepted by the offline file exporter; historical source files remain read-only
-and are upgraded only in the new copy. Neither a copy nor a fresh baseline may
-silently bind a historically charged unqualified host. See [binding upgrade and
+provenance and legacy charged-host binding exclusions. Historical source files
+remain read-only and are upgraded only in the new copy. Neither a copy nor a
+fresh baseline may silently bind a historically charged unqualified host. See [binding upgrade and
 open live-recovery gates](durable-host-bindings.md). Runtime expected-lineage and
 external old-writer fencing are still separate qualification requirements.
 
@@ -216,5 +226,6 @@ Schema-five artifacts also preserve the immutable original-CREATE observation
 journal and binding-audit association. The [journal's recovery limits](create-observation-journal.md)
 apply: observations absent from a historical backup are not reconstructed by
 migration, and stored terminal observations are not release or fencing authority.
-Owned schema versions 1 through 5 are supported; older source files are inspected
-read-only and migrations affect only the new exported artifact.
+The offline file exporter accepts owned schemas from version 1 through the
+running build's `sqliteCurrentVersion`. It inspects sources read-only and migrates
+only the new exported artifact.

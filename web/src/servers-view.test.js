@@ -213,3 +213,44 @@ test("planner distinguishes an entered override from the fresh reviewed recommen
     }
   } finally { await server.close(); }
 });
+
+test("resource history selects one collector at a time and keeps each scope explicit", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  try {
+    const { UsageHistoryDetail } = await server.ssrLoadModule("/src/servers.jsx");
+    const sample = (sampled_at, cpu_used_millis, source) => ({
+      host: "host-a", sampled_at, cpu_used_millis, source, ram_used_mib: 600, disk_used_mib: 900,
+    });
+    const samples = [
+      sample("2026-01-01T00:00:00Z", 0, "guest-state"),
+      sample("2026-01-01T00:01:00Z", 12, "other-source"),
+      sample("2026-01-01T00:02:00Z", 0, "guest-state-v2"),
+      sample("2026-01-01T00:03:00.123456789Z", 33, "guest-state-v2"),
+    ];
+    const render = (source, history = samples) => renderToStaticMarkup(React.createElement(
+      UsageHistoryDetail, { samples: history, dimension: "cpu_used_millis", source, now: new Date("2026-01-01T00:03:45Z") },
+    ));
+    const latest = render(undefined);
+    assert.match(latest, /Observation source/);
+    assert.match(latest, /value="guest-state-v2" selected="">guest-state-v2 \(2\)/);
+    assert.match(latest, /value="guest-state">guest-state \(1\)/);
+    assert.match(latest, /shared devices and do not establish backing-store pressure/);
+    assert.match(latest, /not whole-host load/);
+    assert.match(latest, /Last sample <time datetime="2026-01-01T00:03:00\.123456789Z">45 seconds ago<\/time> · source guest-state-v2/i);
+    assert.match(latest, /aria-label="2026-01-01T00:02:00Z · CPU used: 0 millicores · source guest-state-v2"/);
+    assert.match(latest, /<title>2026-01-01T00:03:00.123456789Z · CPU used: 33 millicores · source guest-state-v2<\/title>/);
+    assert.equal((latest.match(/<circle/g) || []).length, 2);
+    assert.doesNotMatch(latest, /<polyline|stored zero in legacy|T00:00:00Z/);
+    const legacy = render("guest-state");
+    assert.match(legacy, /stored zero in legacy history is not proof of zero usage/);
+    assert.match(legacy, /CPU used: 0 millicores · source guest-state/);
+    assert.equal((legacy.match(/<circle/g) || []).length, 1);
+    assert.doesNotMatch(legacy, /shared devices/);
+    assert.match(render("other-source"), /Source-specific resource observations/);
+    assert.equal(render("no-longer-returned"), latest);
+    assert.doesNotMatch(render(undefined, [samples[0]]), /Observation source/);
+    assert.equal(render(undefined, []), "");
+  } finally {
+    await server.close();
+  }
+});

@@ -1,5 +1,29 @@
 # Current platform state and next plan
 
+## Current release checkpoint (2026-11-23 UTC)
+
+Verified repository source: [`c06ddafa`](https://github.com/ShortCipher5/garm-capacity-controller/commit/c06ddafa547125f27e69ba998b76972856409d76).
+This is a source checkpoint, not a deployment record. The target uses
+unmodified GARM with normal repository pools. GitHub owns job queuing,
+GARM owns the runner lifecycle, and the controller compares demand and
+capacity across repositories.
+
+| Area | Available in source | Still required before release |
+|---|---|---|
+| Stock capacity | Read-only demand and host discovery, an advisory allocator, and settings previews. The offline Incus declaration model compares count, CPU and RAM; disk stays unevaluated. | Prove the exact provider route and effective host limits, establish who can apply stock settings changes, and qualify recovery when the result of a write is unknown. |
+| Retirement | The controller model keeps charging uncertain resources. Neither lower pool settings nor a missing runner row proves capacity is free. | Verify removal of the exact runner and its storage before releasing capacity. Prove restart behavior, rollback, and staged rollout. |
+| CI Health | Opt-in GitHub timing, bounded retained-history observations, and per-job resource validation in the offline model. Incus guest history is not individual-job telemetry. | Bind a real job attempt to its runner and immutable Incus instance; verify its measurement window and any test report source. |
+
+The [stock scaling release boundary](stock-scaling-release-boundary.md)
+and [CI Health evidence matrix](ci-health-evidence.md) describe what each
+observation can establish. Production autoscaling, live per-job resource
+collection, and deployment are not established by this checkpoint.
+
+## Historical record (2026-11-16 to 2026-11-17)
+
+> Everything below is retained for historical reference. It is not the
+> current queue or a plan to resume the native settings experiment.
+
 Status date: 2026-11-17 (UTC). Verified `main`:
 `fc2fa3ed` (conditional client hardening and settings wiring atop
 `0daa398b`, which merged #84 and the conditional settings client; that
@@ -8,10 +32,9 @@ workflow evidence belongs to its tested PR heads; it must not be
 described as a separate verification of the merge tree without
 exact-tree evidence.
 
-This document is the current status ledger for the project. It
-supersedes the stale snapshot sections of issue #53 (use #53 for
-architecture and safety background only) and replaces the intent of
-#22, which is closed in favor of this file.
+At the time, this snapshot superseded the status sections of issue #53
+(use #53 for architecture and safety background only) and replaced the
+intent of #22, which was closed in favor of this file.
 
 ## What `main` provides today (verified)
 

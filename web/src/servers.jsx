@@ -18,6 +18,7 @@ export function UsagePanel({ host, readUsage }) {
   const [samples, setSamples] = useState(undefined);
   const [error, setError] = useState("");
   const [dimension, setDimension] = useState(USAGE_DIMENSIONS[0][0]);
+  const [source, setSource] = useState("");
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -28,7 +29,6 @@ export function UsagePanel({ host, readUsage }) {
       .catch((failure) => { if (!cancelled && !controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Usage history is unavailable."); });
     return () => { cancelled = true; controller.abort(); };
   }, [host, readUsage]);
-  const selected = USAGE_DIMENSIONS.find(([key]) => key === dimension);
   return (
     <div className="usage-panel">
       <div className="usage-panel-heading">
@@ -40,23 +40,56 @@ export function UsagePanel({ host, readUsage }) {
         )}
       </div>
       {samples === undefined && !error && <p className="muted">Loading resource observations…</p>}
-      <p className="muted">{usageScope(samples)}</p>
+      {!samples?.length && <p className="muted">{usageScope(samples)}</p>}
       <p className="muted">Sampling cadence and interval coverage are not supplied. Individual points show recorded observations, not verified continuous telemetry; no line or zero value is inferred between samples.</p>
       {error && <p className="error" role="status">{error}</p>}
       {samples && samples.length === 0 && (
         <p className="empty">Usage history unavailable: no measured samples exist for this host. A monitoring gap is never drawn as zeros.</p>
       )}
       {samples && samples.length > 0 && (
-        <div className="chart">
-          <div className="chart-key">
-            <span className="dot" aria-hidden="true" />
-            <span>{selected[1]} — recorded, not allocated</span>
-            <span className="muted">Last sample {formatSampleAge(new Date(), samples[samples.length - 1].sampled_at)} · source {samples[samples.length - 1].source}</span>
-          </div>
-          <UsageChart samples={samples} dimension={selected[0]} label={selected[1]} unit={selected[2]} />
-        </div>
+        <UsageHistoryDetail samples={samples} dimension={dimension} source={source} onSourceChange={setSource} />
       )}
     </div>
+  );
+}
+// The bounded history response is chronological. Group on exact source IDs
+// rather than treating a collector change as a change in resource load.
+export function UsageHistoryDetail({ samples, dimension, source, onSourceChange, now = new Date() }) {
+  if (!samples.length) return null;
+  const groups = new Map();
+  for (const sample of samples) {
+    if (!groups.has(sample.source)) groups.set(sample.source, []);
+    groups.get(sample.source).push(sample);
+  }
+  const selectedSource = groups.has(source) ? source : samples[samples.length - 1].source;
+  const visible = groups.get(selectedSource);
+  const latest = visible[visible.length - 1];
+  const selected = USAGE_DIMENSIONS.find(([key]) => key === dimension) ?? USAGE_DIMENSIONS[0];
+  return (
+    <>
+      {groups.size > 1 && (
+        <label>
+          Observation source{" "}
+          <select value={selectedSource} onChange={(event) => onSourceChange(event.target.value)}>
+            {Array.from(groups, ([id, rows]) => (
+              <option key={id} value={id}>{id} ({rows.length})</option>
+            ))}
+          </select>
+        </label>
+      )}
+      <p className="muted">{usageScope(visible)}</p>
+      {selectedSource === "guest-state-v2" && (
+        <p className="muted">Project disk observations can include shared devices and do not establish backing-store pressure.</p>
+      )}
+      <div className="chart">
+        <div className="chart-key">
+          <span className="dot" aria-hidden="true" />
+          <span>{selected[1]} — recorded, not allocated</span>
+          <span className="muted">Last sample <time dateTime={latest.sampled_at}>{formatSampleAge(now, latest.sampled_at)}</time> · source {selectedSource}</span>
+        </div>
+        <UsageChart samples={visible} dimension={selected[0]} label={selected[1]} unit={selected[2]} />
+      </div>
+    </>
   );
 }
 export function ServerCard({ host, readUsage }) {

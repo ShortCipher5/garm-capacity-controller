@@ -116,6 +116,49 @@ reverse on rollback.
   runner is gone or its capacity is free. If any source is incomplete,
   pause the change and preserve the existing mapping.
 
+### Check the effective Incus profile and root volume
+
+Use existing authorized, independent read-only evidence for one naturally
+occurring allocation on the exact normal pool. Keep the provider invocation,
+Incus operation, authenticated daemon/project and exact instance tied to that
+allocation. Do not combine a past placement with today's provider, profiles or
+storage defaults.
+
+1. **Loaded provider and profile order.** Record the exact provider build and
+   loaded `include_default_profile` setting alongside the pool flavor. The
+   [stock Incus provider v0.1.5](https://github.com/cloudbase/garm-provider-incus/blob/v0.1.5/provider/incus.go)
+   requests the flavor alone, or `[default, Flavor]` when that setting is true.
+   Compare the expected list to the actual instance's ordered `profiles` list.
+   For each applied profile, independently verify its owning project and
+   reviewed config/device contents or content digest. A profile name, including
+   `default`, is not proof of identity or content.
+2. **Local and expanded configuration.** Compare the instance's local
+   `config` and `devices` with its `expanded_config` and `expanded_devices`.
+   [Incus v7.0.2](https://github.com/lxc/incus/blob/v7.0.2/internal/server/db/cluster/profiles.go#L117-L153)
+   applies the profiles in order, replacing a same-named device as a whole,
+   then applies local instance overrides. Verify effective CPU, hard absolute
+   memory and the single named storage-pool root disk at `/`. The v0.1.5
+   create request does not set a local root device; do not assume that from
+   an unverified installed executable.
+3. **Root volume and disk pressure.** On that same daemon and allocation, match
+   the expanded root's named pool to the resulting instance volume by project,
+   type and instance identity. Check the pool driver, the applicable
+   `volume.size` default (set, absent or unknown), and any effective volume size
+   or override independently observed. An omitted root-device `size` is not
+   evidence of unlimited storage: [Incus volume sizing](https://github.com/lxc/incus/blob/v7.0.2/internal/server/storage/drivers/volume.go#L141-L154)
+   can inherit a pool default; the [create path](https://github.com/lxc/incus/blob/v7.0.2/internal/server/storage/drivers/volume.go#L589-L675)
+   also depends on volume type and source. A size setting does not prove
+   enforcement. Evaluate free bytes, free inodes and reserve separately on
+   the verified backing storage, not from the guest, profile or pool name.
+
+If the existing evidence cannot corroborate these checks, leave the affected
+claim unknown. Do not enable tracing, request broader access, launch a job, or
+change pool settings just to fill a gap. The
+[offline v3 model](incus-project-declaration.md#optional-countcpuram-model-without-sized-disk-declarations)
+still compares only count, CPU and RAM; its disk assessment is `not_evaluated`.
+Neither that model nor a single observed route verifies fleet-wide limits or
+authorizes a settings write.
+
 ## Minimum-idle shadow comparison
 
 With the existing read-only minimum-idle preview enabled, the same scoped
