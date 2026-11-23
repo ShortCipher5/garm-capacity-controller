@@ -33,7 +33,7 @@ export function UsageChart({ samples, dimension = "cpu_used_millis", label = "CP
   const y = (value) => padTop + (1 - value / max) * (height - padTop - padBottom);
   const gridSteps = [0, 0.5, 1];
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} history chart`}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={`${label} history chart`}>
       {gridSteps.map((step) => (
         <g key={step}>
           <line className="grid-line" x1={padX} x2={width - 10} y1={y(max * step)} y2={y(max * step)} />
@@ -42,9 +42,14 @@ export function UsageChart({ samples, dimension = "cpu_used_millis", label = "CP
           </text>
         </g>
       ))}
-      {ordered.map((sample, index) => (
-        <circle key={`${sample.source}:${sample.sampled_at}:${index}`} cx={x(sample)} cy={y(sample[dimension])} r="2.4" />
-      ))}
+      {ordered.map((sample, index) => {
+        const description = `${sample.sampled_at} · ${label}: ${fmt(sample[dimension])} ${unit} · source ${sample.source}`;
+        return (
+          <circle key={`${sample.source}:${sample.sampled_at}:${index}`} role="img" aria-label={description} cx={x(sample)} cy={y(sample[dimension])} r="2.4">
+            <title>{description}</title>
+          </circle>
+        );
+      })}
       <text x={padX} y={height - 6}>
         {new Date(start).toLocaleString()}
       </text>
