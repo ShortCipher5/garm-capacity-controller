@@ -124,7 +124,12 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
   const cacheDir = await mkdtemp(join(tmpdir(), "garm-ci-history-render-"));
   let server;
   try {
-    server = await createServer({cacheDir, server: {middlewareMode: true, hmr: false}, appType: "custom"});
+    // This test only loads SSR modules. Do not start the client dependency
+    // optimizer, which can race removal of the temporary cache at teardown.
+    server = await createServer({
+      cacheDir, optimizeDeps: {noDiscovery: true, include: []},
+      server: {middlewareMode: true, hmr: false}, appType: "custom",
+    });
     const {CIHealthTiming} = await server.ssrLoadModule("/src/ci-health.jsx");
     const snapshot = fixture();
     const render = (value, props = {}) => renderToStaticMarkup(React.createElement(CIHealthTiming, {
