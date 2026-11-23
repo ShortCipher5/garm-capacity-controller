@@ -251,11 +251,11 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				if (p.Budget != nil && !fits(poolResources[id], p.Size, *p.Budget)) || pools[id] >= p.MaxRunners || repos[p.Repository][3] >= r.MaxRunners || !fits(global, p.Size, s.Global) {
 					continue
 				}
-				eligible := append([]string(nil), p.Hosts...)
-				sort.Strings(eligible)
+				// Only the sole fit (if any) matters here. For multiple fits,
+				// the final host selection below breaks ties lexically.
 				placement := ""
 				fitCount := 0
-				for _, h := range eligible {
+				for _, h := range p.Hosts {
 					if s.Hosts[h].AcceptNew && fits(hosts[h], p.Size, s.Hosts[h].Budget) {
 						if placement == "" {
 							placement = h

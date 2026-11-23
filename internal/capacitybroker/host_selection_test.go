@@ -1,6 +1,7 @@
 package capacitybroker
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -150,5 +151,60 @@ func TestHostChoiceRejectsDuplicateHostEdgesBeforeCountingFits(t *testing.T) {
 	s.Pools["b"] = b
 	if _, err := BuildForJobs(s, o, []QueuedDemand{{ID: "job", Candidates: []string{"a"}, CreatedAt: o.Now}}); err != ErrSnapshot {
 		t.Fatal("job planner accepted duplicate host edges", err)
+	}
+}
+
+func TestHostChoicePermutationKeepsExactPlanAndInputs(t *testing.T) {
+	s, o := hostChoiceFixture()
+	s.Global = Resources{3000, 3000, 3000, 3}
+	s.Hosts["h3"] = s.Hosts["h2"]
+	a := s.Pools["a"]
+	permutations := [][]string{
+		{"h1", "h2", "h3"}, {"h1", "h3", "h2"}, {"h2", "h1", "h3"},
+		{"h2", "h3", "h1"}, {"h3", "h1", "h2"}, {"h3", "h2", "h1"},
+	}
+	for _, warm := range []bool{false, true} {
+		if warm {
+			a.Waiting, a.WarmIdle = 0, 1
+			b := s.Pools["b"]
+			b.Waiting, b.WarmIdle = 0, 1
+			s.Pools["b"] = b
+		}
+		for _, order := range permutations {
+			a.Hosts = append([]string(nil), order...)
+			s.Pools["a"] = a
+			p, err := Build(s, o)
+			if err != nil || len(p.Assignments) != 2 ||
+				p.Assignments[0].Pool != "a" || p.Assignments[0].Host != "h2" ||
+				p.Assignments[1].Pool != "b" || p.Assignments[1].Host != "h1" ||
+				p.Assignments[0].Warm != warm || p.Assignments[1].Warm != warm {
+				t.Fatalf("order=%v warm=%v: changed plan %+v, %v", order, warm, p, err)
+			}
+			if !reflect.DeepEqual(s.Pools["a"].Hosts, order) {
+				t.Fatalf("order=%v warm=%v: input host slice modified: %v", order, warm, s.Pools["a"].Hosts)
+			}
+		}
+	}
+}
+
+func BenchmarkCrossRepoHostCandidateScan(b *testing.B) {
+	now := time.Now()
+	poolCount, hostCount := 64, 128
+	s := Snapshot{Revision: "bench", ObservedAt: now, Complete: true, Global: Resources{10000, 10000, 10000, 10000}, Hosts: map[string]Host{}, Repositories: map[string]Repository{}, Pools: map[string]Pool{}}
+	ids := make([]string, hostCount)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("h%03d", hostCount-i)
+		s.Hosts[ids[i]] = Host{Budget: Resources{200, 200, 200, 200}, AcceptNew: true}
+	}
+	for i := 0; i < poolCount; i++ {
+		k := fmt.Sprintf("p%03d", i)
+		s.Repositories[k] = Repository{MaxRunners: 10, Weight: uint32(i%7 + 1)}
+		s.Pools[k] = Pool{Hosts: ids, Repository: k, Size: Resources{1, 1, 1, 1}, Waiting: 10, MaxRunners: 10, OldestWaiting: now}
+	}
+	for i := 0; i < b.N; i++ {
+		p, err := Build(s, Options{Now: now, MaxAge: time.Minute, MaxAssignments: 128})
+		if err != nil || len(p.Assignments) != 128 {
+			b.Fatal(err, len(p.Assignments))
+		}
 	}
 }
