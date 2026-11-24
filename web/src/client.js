@@ -12,7 +12,7 @@ import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboardi
 import { validateGarm } from "./garm-client.js";
 import { validateProfilesList } from "./profiles-client.js";
 import { validateUsageHistory } from "./usage-client.js";
-import { ciHealthEndpoint, ciHealthFresh, readCIHealthBody, ciJobHandleHeader, readCIJobDestinationBody, validCIJobHandle, readCIHealthJSON } from "./ci-health-client.js";
+import { ciHealthEndpoint, ciHealthFresh, readCIHealthBody, ciJobHandleHeader, ciRunHandleHeader, readCIJobDestinationBody, readCIRunDestinationBody, validCIJobHandle, validCIRunHandle, readCIHealthJSON } from "./ci-health-client.js";
 import { ciSizingEndpoint, readCISizingBody, validateCISizingSnapshot } from "./ci-health-sizing-client.js";
 
 // This client has no persistence and no configurable remote endpoint.
@@ -100,6 +100,7 @@ export function validateOverview(value) {
 export class ReadSession {
   #ciHealthRequest;
   #ciJobLinkRequest;
+  #ciRunLinkRequest;
   #ciSizingRequest;
  #demandObserverRequest;
  #demandObserverGeneration=0;
@@ -143,6 +144,8 @@ export class ReadSession {
     this.#ciHealthRequest = undefined;
     this.#ciJobLinkRequest?.abort();
     this.#ciJobLinkRequest = undefined;
+    this.#ciRunLinkRequest?.abort();
+    this.#ciRunLinkRequest = undefined;
     this.#ciSizingRequest?.abort();
     this.#ciSizingRequest = undefined;
  this.#demandObserverGeneration++;this.#demandObserverRequest?.abort();this.#demandObserverRequest=undefined;
@@ -412,6 +415,43 @@ export class ReadSession {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
       if (this.#ciJobLinkRequest === controller) this.#ciJobLinkRequest = undefined;
+    }
+  }
+  async ciHealthRunDestination(selection, {signal} = {}) {
+    if (!this.#token || signal?.aborted) throw new SessionEnded();
+    if (!validCIRunHandle(selection?.handle)) return null;
+    this.#ciRunLinkRequest?.abort();
+    const controller = new AbortController();
+    this.#ciRunLinkRequest = controller;
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, {once: true});
+    const timeout = setTimeout(abort, 15000);
+    const active = () => {
+      if (this.#ciRunLinkRequest !== controller || controller.signal.aborted) throw new SessionEnded();
+    };
+    try {
+      const response = await this.fetcher(ciHealthEndpoint, {
+        method: "GET",
+        headers: {Authorization: `Bearer ${this.#token}`, Accept: "application/json", [ciRunHandleHeader]: selection.handle},
+        credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal,
+      });
+      active();
+      if (response.status === 401) {
+        this.disconnect();
+        throw new SessionEnded("Read authorization ended. Reconnect to the admin service.");
+      }
+      if (!response.ok) return null;
+      const href = await readCIRunDestinationBody(response, controller.signal, selection);
+      active();
+      return href;
+    } catch (error) {
+      if (error instanceof SessionEnded) throw error;
+      active();
+      return null;
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      if (this.#ciRunLinkRequest === controller) this.#ciRunLinkRequest = undefined;
     }
   }
   async allocatorStatusSnapshot({signal}={}) {

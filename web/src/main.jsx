@@ -313,7 +313,9 @@ export function App() {
     try {
       return options?.jobLink
         ? await session.current.ciHealthJobDestination(options.jobLink, options)
-        : await session.current.ciHealthSnapshot(options);
+        : options?.runLink
+          ? await session.current.ciHealthRunDestination(options.runLink, options)
+          : await session.current.ciHealthSnapshot(options);
     }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);

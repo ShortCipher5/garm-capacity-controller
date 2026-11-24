@@ -1,12 +1,15 @@
 package cihealthsource
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,5 +250,172 @@ func TestCycleHistoryRequiresCurrentClockBeforeEachScopedWrite(t *testing.T) {
 				t.Fatalf("got %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+// One exact attempt is observed running, persisted, and later observed again
+// as a terminal completion: the late correction is a second retained version,
+// a stale post-restart expectation cannot advance the cursor, and resumed
+// backfill picks up from the durable cursor. All fixture traffic is local.
+func TestCycleHistoryLateCorrectionAndResumableBackfillAcrossRestart(t *testing.T) {
+	from, to := relativeWindow()
+	repo := demandrepair.CIRepository{
+		Repository: demandrepair.Repository{GarmID: scope, Host: "github.example", Owner: "fixture", Name: "runners"},
+		GitHubID:   repoID,
+	}
+	created := to.Add(-time.Minute)
+	started := created.Add(10 * time.Second)
+	finished := started.Add(30 * time.Second) // Ends before the fixture's next read.
+	var mode atomic.Int32
+	const (
+		running = iota
+		done
+	)
+	base := "/repos/fixture/runners"
+	attemptURL := base + "/actions/runs/" + strconv.FormatInt(runID, 10) + "/attempts/1"
+	s := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		listed := cycleRun(repo, runID, 1, "in_progress", created)
+		listed["run_started_at"] = started
+		jobs := map[string]any{"id": jobID, "run_id": runID, "run_attempt": 1, "status": "in_progress", "started_at": started}
+		if mode.Load() == done {
+			listed = cycleRun(repo, runID, 1, "completed", created)
+			listed["run_started_at"] = started
+			jobs = map[string]any{"id": jobID, "run_id": runID, "run_attempt": 1, "status": "completed", "conclusion": "success",
+				"started_at": started, "completed_at": finished,
+				"steps": []map[string]any{{"number": 9, "status": "completed", "conclusion": "success",
+					"started_at": started, "completed_at": started.Add(15 * time.Second)}},
+			}
+		}
+		switch r.URL.Path {
+		case base:
+			_ = json.NewEncoder(w).Encode(repoMetadata(repo))
+		case base + "/actions/runs":
+			status := r.URL.Query().Get("status")
+			if status == "" && mode.Load() == done || status == "in_progress" && mode.Load() == running {
+				runPage(w, []map[string]any{listed}, 1)
+			} else {
+				runPage(w, nil, 0)
+			}
+		case attemptURL:
+			_ = json.NewEncoder(w).Encode(listed)
+		case attemptURL + "/jobs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{jobs}, "total_count": 1})
+		default:
+			t.Error("unexpected request path")
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	ctx := t.Context()
+	read := func() Cycle {
+		t.Helper()
+		c, err := ReadCycle(ctx, s, []string{scope}, from, to)
+		if err != nil || c.State() != CycleObserved || len(c.Facts()) != 1 {
+			t.Fatalf("fixture cycle unavailable: %v, %v", c.State(), err)
+		}
+		return c
+	}
+	scopeID := cihealth.HistoryScope{Source: s.SourceID(), RepositoryID: repo.GitHubID, WorkflowID: workflowID}
+	path, root := serviceHistoryRoot(t)
+	reopen := func() (*OwnedCycleHistory, []HistoryExpectation) {
+		t.Helper()
+		history, expected, err := OpenOwnedCycleHistory(ctx, s, OwnedCycleHistoryInput{Enabled: true, Root: root, Workflows: []cihealth.HistoryScope{scopeID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return history, expected
+	}
+	durable := func() []byte {
+		t.Helper()
+		payload, err := os.ReadFile(filepath.Join(path, "ci-health-history-v1.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+
+	mode.Store(running)
+	first := read()
+	history, initial, err := OpenOwnedCycleHistory(ctx, s, OwnedCycleHistoryInput{Enabled: true, Root: root, Initialize: true, Workflows: []cihealth.HistoryScope{scopeID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := history.PersistObservedCycle(ctx, first, initial); err != nil || len(receipt.Commits) != 1 || receipt.Commits[0].Cursor != (cihealth.HistoryCursor{Revision: 1}) {
+		t.Fatalf("first observation not committed exactly once: %+v, %v", receipt, err)
+	}
+	if err := history.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart: the durable cursor is the resumption point. A caller holding
+	// the pre-restart expectation cannot advance it, and the refused write
+	// leaves durable bytes untouched.
+	history, expected := reopen()
+	if len(expected) != 1 || expected[0] != (HistoryExpectation{Scope: scopeID, Cursor: cihealth.HistoryCursor{Revision: 1}}) {
+		t.Fatalf("restart forgot the committed revision: %+v", expected)
+	}
+	mode.Store(done)
+	second := read()
+	sealed := durable()
+	if receipt, err := history.PersistObservedCycle(ctx, second, initial); !errors.Is(err, cihealth.ErrHistoryConflict) ||
+		len(receipt.Commits) != 0 || receipt.Failed == nil {
+		t.Fatalf("stale post-restart expectation advanced the store: %+v, %v", receipt, err)
+	}
+	if after := durable(); !bytes.Equal(sealed, after) {
+		t.Fatal("refused late correction mutated durable state")
+	}
+	if receipt, err := history.PersistObservedCycle(ctx, second, expected); err != nil || len(receipt.Commits) != 1 ||
+		receipt.Commits[0].Cursor != (cihealth.HistoryCursor{Revision: 2}) {
+		t.Fatalf("resumed backfill did not commit from the durable cursor: %+v, %v", receipt, err)
+	}
+
+	// The owned service still uses rollback-compatible v1. The exact
+	// terminal correction replaces the running row without opening the
+	// separately opted-in measurement-witness format.
+	var snapshot struct{ Format string }
+	if err := json.Unmarshal(durable(), &snapshot); err != nil || snapshot.Format != "garm-ci-health-history-v1" {
+		t.Fatalf("owned history silently changed its snapshot format: %+v, %v", snapshot, err)
+	}
+	rows, err := history.cell.history.Recent(ctx, scopeID, 1)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("owned v1 history must retain only the corrected row: %+v, %v", rows, err)
+	}
+	if rows[0].Clock.Phase != cihealth.Completed || rows[0].Clock.Conclusion != cihealth.ConclusionSuccess ||
+		!rows[0].AsOf.Equal(second.Facts()[0].AsOf) || !rows[0].AsOf.After(first.Facts()[0].AsOf) {
+		t.Fatalf("exact terminal correction lost: %+v", rows)
+	}
+	view, err := cihealth.ProjectRetainedAttempt(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Phase != cihealth.Completed || view.Conclusion != cihealth.ConclusionSuccess || len(view.Jobs) != 1 {
+		t.Fatalf("terminal correction is not the status authority: %+v", view)
+	}
+	job := view.Jobs[0]
+	if !job.Execution.Current || job.Execution.MeasuredAt != rows[0].AsOf || job.Execution.Duration != 30*time.Second {
+		t.Fatalf("measured execution missing its provenance: %+v", job.Execution)
+	}
+	if job.Active.Current || !job.Active.MeasuredAt.IsZero() || job.Active.Basis != cihealth.Unavailable {
+		t.Fatalf("v1 inferred an older running measurement: %+v", job.Active)
+	}
+	trends, err := cihealth.SummarizeRetainedTrends(cihealth.TrendScope(scopeID), rows[0].AsOf, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := trends.Current.Initial
+	if bucket.Runs != 1 || bucket.Attempts.Observed != 1 || bucket.Attempts.Success != 1 || bucket.Attempts.Completed != 1 ||
+		bucket.Jobs.Duration == nil || bucket.Jobs.Duration.Samples != 1 || bucket.Steps.Duration == nil || bucket.Steps.Duration.Samples != 1 {
+		t.Fatalf("corrected attempt double-counted or lost: %+v", bucket)
+	}
+	if err := history.Close(); err != nil {
+		t.Fatal(err)
+	}
+	history, expected = reopen()
+	defer history.Close()
+	if len(expected) != 1 || expected[0].Cursor != (cihealth.HistoryCursor{Revision: 2}) {
+		t.Fatalf("second restart lost the cursor: %+v", expected)
+	}
+	if rows, err := history.cell.history.Recent(ctx, scopeID, 1); err != nil || len(rows) != 1 ||
+		rows[0].Clock.Phase != cihealth.Completed || !rows[0].AsOf.Equal(second.Facts()[0].AsOf) {
+		t.Fatalf("second restart lost the exact v1 correction: %+v, %v", rows, err)
 	}
 }

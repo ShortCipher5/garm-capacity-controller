@@ -23,6 +23,7 @@ const (
 	historyStage          = "ci-health-history-v1.stage"
 	historyIntent         = "ci-health-history-v1.intent"
 	historyFormat         = "garm-ci-health-history-v1"
+	historyFormatV2       = "garm-ci-health-history-v2"
 	historyRetention      = 30 * 24 * time.Hour
 	historyMaxRecords     = 50_000
 	historyMaxScopes      = 64
@@ -64,6 +65,10 @@ type HistoryInput struct {
 	// Old snapshots without conclusions remain readable. A binary predating
 	// that optional field will refuse snapshots that contain one.
 	Initialize bool
+	// EnableVersionedObservations opts in to v2 measurement retention.
+	// It is not enabled by gateway configuration. Without this explicit
+	// opt-in, writes stay v1 and existing v2 snapshots are refused.
+	EnableVersionedObservations bool
 	// Review opts into a reopen-only verification of the exact independently
 	// reviewed snapshot while it is owned/flocked. It never initializes.
 	Review *HistoryReopenReview
@@ -93,6 +98,7 @@ type History struct {
 	current   os.FileInfo
 	state     historyState
 	failed    bool
+	versioned bool
 }
 
 // OpenHistory is opt-in. Ordinary startup never opens it; the explicit
@@ -152,7 +158,7 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 		_ = root.Close()
 		return nil, ErrHistory
 	}
-	h := &History{root: root, dir: dir}
+	h := &History{root: root, dir: dir, versioned: in.EnableVersionedObservations}
 	ok := false
 	defer func() {
 		if !ok {
@@ -213,7 +219,7 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 		if reviewed != nil && sha256.Sum256(payload) != expected {
 			return nil, ErrHistorySnapshotReview
 		}
-		if h.state, err = decodeHistory(payload); err != nil || !h.available(ctx) {
+		if h.state, err = decodeHistory(payload); err != nil || !h.versioned && h.state.Format == historyFormatV2 || !h.available(ctx) {
 			return nil, ErrHistory
 		}
 		if reviewed != nil {
@@ -436,7 +442,7 @@ func historyCopyAttempt(in AttemptFacts) (AttemptFacts, error) {
 
 func decodeHistory(payload []byte) (historyState, error) {
 	var s historyState
-	if len(payload) == 0 || len(payload) > historyMaxBytes || json.Unmarshal(payload, &s) != nil || s.Format != historyFormat ||
+	if len(payload) == 0 || len(payload) > historyMaxBytes || json.Unmarshal(payload, &s) != nil || (s.Format != historyFormat && s.Format != historyFormatV2) ||
 		s.Attempts == nil || s.Checkpoints == nil || len(s.Checkpoints) > historyMaxScopes || len(s.Attempts) > historyMaxRecords {
 		return historyState{}, ErrHistory
 	}
@@ -448,18 +454,26 @@ func decodeHistory(payload []byte) (historyState, error) {
 		}
 		scopes[c.Scope] = true
 	}
-	seen := make(map[AttemptKey]bool, len(s.Attempts))
+	type version struct {
+		key AttemptKey
+		as  time.Time
+	}
+	seen := make(map[version]bool, len(s.Attempts))
+	groupRecords := make(map[AttemptKey]int, len(s.Attempts))
 	total := 0
 	for i, in := range s.Attempts {
 		a, err := historyCopyAttempt(in)
-		if err != nil || !scopes[historyScope(a.Key)] || seen[a.Key] || i > 0 && !historyNewer(s.Attempts[i-1], a) {
+		if err != nil || !scopes[historyScope(a.Key)] || seen[version{a.Key, a.AsOf}] || i > 0 && !historyNewer(s.Attempts[i-1], a) {
 			return historyState{}, ErrHistory
 		}
-		total += historyRecordCount(a)
-		if total > historyMaxRecords {
+		count := historyRecordCount(a)
+		groupRecords[a.Key] += count
+		total += count
+		if total > historyMaxRecords || s.Format == historyFormat && groupRecords[a.Key] != count ||
+			s.Format == historyFormatV2 && groupRecords[a.Key] > historyMaxPageRecords {
 			return historyState{}, ErrHistory
 		}
-		seen[a.Key] = true
+		seen[version{a.Key, a.AsOf}] = true
 		s.Attempts[i] = a
 	}
 	data, err := json.Marshal(s)
@@ -506,11 +520,15 @@ func (h *History) Cursor(ctx context.Context, scope HistoryScope) (HistoryCursor
 	return c.Cursor, nil
 }
 
-// Apply seals a bounded coherent page and its CAS transition as one version.
-// A replacement cannot lose or contradict a known terminal conclusion on the
-// exact retained attempt, job, or step. It never merges absent children or
-// infers coverage. I/O failure leaves the handle fenced without publishing
-// its in-memory cursor. ErrHistoryUncertain
+// Apply seals a bounded coherent page and its CAS transition as one commit.
+// Default v1 retains the newest observation of each attempt. Explicit v2
+// retains only whole older observations still supplying the newest evidence
+// of a timing field, without moving their measurement timestamps to a newer
+// version. A byte-identical version is an exact replay. No version
+// can lose or contradict a known terminal conclusion on the exact retained
+// attempt, job, or step, and an older or out-of-scope version is refused.
+// It never merges absent children or infers coverage. I/O failure leaves the
+// handle fenced without publishing its in-memory cursor. ErrHistoryUncertain
 // means the durable outcome may have changed and must not be blindly retried.
 // Only the exact most recent accepted transition can be replayed.
 func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next HistoryCursor, page []AttemptFacts, now time.Time) error {
@@ -567,7 +585,7 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 	if expected.Revision == 0 && len(h.state.Checkpoints) >= historyMaxScopes {
 		return ErrHistory
 	}
-	pending := historyState{Format: historyFormat, Checkpoints: append([]historyCheckpoint{}, h.state.Checkpoints...)}
+	pending := historyState{Format: h.state.Format, Checkpoints: append([]historyCheckpoint{}, h.state.Checkpoints...)}
 	if expected.Revision == 0 {
 		pending.Checkpoints = append(pending.Checkpoints, historyCheckpoint{})
 		copy(pending.Checkpoints[pos+1:], pending.Checkpoints[pos:])
@@ -578,34 +596,65 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 		incoming[a.Key] = a
 	}
 	pending.Attempts = make([]AttemptFacts, 0, len(h.state.Attempts)+len(attempts))
+	replayed := make(map[AttemptKey]bool, len(attempts))
+	compared := make(map[AttemptKey]bool, len(attempts))
 	for _, old := range h.state.Attempts {
 		if a, ok := incoming[old.Key]; ok {
-			if a.AsOf.Before(old.AsOf) {
-				return ErrHistoryConflict
-			}
-			if a.AsOf.Equal(old.AsOf) {
-				left, leftErr := json.Marshal(a)
-				right, rightErr := json.Marshal(old)
-				if leftErr != nil || rightErr != nil || !bytes.Equal(left, right) {
+			// Retained records are ordered newest first, so the first record of
+			// this attempt is its latest version: a newer version is appended
+			// alongside prior ones, an identical one is an exact replay, and a
+			// contradictory or out-of-order one refuses the whole page.
+			if !compared[old.Key] {
+				compared[old.Key] = true
+				switch {
+				case old.AsOf.After(a.AsOf):
+					return ErrHistoryConflict
+				case old.AsOf.Equal(a.AsOf):
+					left, leftErr := json.Marshal(a)
+					right, rightErr := json.Marshal(old)
+					if leftErr != nil || rightErr != nil || !bytes.Equal(left, right) {
+						return ErrHistoryConflict
+					}
+					replayed[old.Key] = true
+				case !historyPreservesConclusions(old, a):
 					return ErrHistoryConflict
 				}
-			} else if !historyPreservesConclusions(old, a) {
-				return ErrHistoryConflict
 			}
+		}
+		// Legacy writes replace the previous observation exactly as v1 did.
+		if _, replaced := incoming[old.Key]; !h.versioned && replaced {
 			continue
 		}
 		if old.AsOf.After(cutoff) {
 			pending.Attempts = append(pending.Attempts, old)
 		}
 	}
-	pending.Attempts = append(pending.Attempts, attempts...)
+	for _, a := range attempts {
+		if !h.versioned || !replayed[a.Key] {
+			pending.Attempts = append(pending.Attempts, a)
+		}
+	}
 	sort.Slice(pending.Attempts, func(i, j int) bool { return historyNewer(pending.Attempts[i], pending.Attempts[j]) })
-	total := 0
-	for i, a := range pending.Attempts {
-		total += historyRecordCount(a)
-		if total > historyMaxRecords {
-			pending.Attempts = pending.Attempts[:i]
-			break
+	if h.versioned {
+		// No partial group or accepted unexpired evidence is silently
+		// evicted under real capacity pressure; refuse the entire write.
+		var multiple bool
+		pending.Attempts, multiple, err = compactHistoryMeasurements(ctx, pending.Attempts)
+		if err != nil {
+			return err
+		}
+		if multiple {
+			pending.Format = historyFormatV2
+		}
+	} else {
+		// Preserve v1's original whole-attempt newest-first retention.
+		total := 0
+		for i, a := range pending.Attempts {
+			total += historyRecordCount(a)
+			if total > historyMaxRecords {
+				pending.Attempts = pending.Attempts[:i]
+				break
+			}
 		}
 	}
 	data, err := json.Marshal(pending)
@@ -685,10 +734,13 @@ func (h *History) Recent(ctx context.Context, s HistoryScope, limit int, now tim
 	return p.Attempts, err
 }
 
-// RecentPrefix is the bounded aggregate read. It returns newest first, stops
-// before the first whole attempt that does not fit, and never skips one to
-// backfill a smaller older attempt. Only this surface treats excess matching
-// data as a partial selection rather than a storage error.
+// RecentPrefix is the bounded aggregate read. It selects whole attempt
+// groups first, newest first, stops before the first group that would exceed
+// the attempt or record limit, and never skips one to backfill a smaller
+// older group. Every retained observation version of a selected attempt is
+// included even when versions of different attempts interleave in the stored
+// order, and the record budget counts all of them. Only this surface treats
+// excess matching data as a partial selection rather than a storage error.
 func (h *History) RecentPrefix(ctx context.Context, s HistoryScope, limit int, now time.Time) (HistoryRecentPrefix, error) {
 	return h.recent(ctx, s, limit, now, true)
 }
@@ -704,8 +756,13 @@ func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now tim
 	if !h.available(ctx) {
 		return HistoryRecentPrefix{}, ErrHistory
 	}
-	out := HistoryRecentPrefix{Attempts: make([]AttemptFacts, 0, limit)}
-	records := 0
+	// First pass: eligible attempts in newest-first order with the combined
+	// record count of every retained version. Versions of one attempt can
+	// interleave with other attempts in the global order, so selection and
+	// emission are separate: a group is either fully included or not selected.
+	order := make([]AttemptKey, 0, limit)
+	seen := make(map[AttemptKey]bool, limit)
+	records := make(map[AttemptKey]int, limit)
 	for _, a := range h.state.Attempts {
 		if !historyActive(ctx) {
 			return HistoryRecentPrefix{}, ErrHistory
@@ -716,27 +773,44 @@ func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now tim
 		if a.AsOf.After(now) || historyScope(a.Key) != s {
 			continue
 		}
-		if len(out.Attempts) == limit {
+		if !seen[a.Key] {
+			seen[a.Key] = true
+			order = append(order, a.Key)
+		}
+		records[a.Key] += historyRecordCount(a)
+	}
+	out := HistoryRecentPrefix{Attempts: make([]AttemptFacts, 0, limit)}
+	used, selected := 0, make(map[AttemptKey]bool, limit)
+	for _, key := range order {
+		if len(selected) == limit {
 			out.Limited = HistorySelectionAttemptLimit
 			break
 		}
-		n := historyRecordCount(a)
-		if n > historyMaxPageRecords-records {
+		if n := records[key]; n > historyMaxPageRecords-used {
 			if !prefix {
 				return HistoryRecentPrefix{}, ErrHistory
 			}
 			out.Limited = HistorySelectionRecordLimit
 			break
 		}
+		selected[key] = true
+		used += records[key]
+	}
+	for _, a := range h.state.Attempts {
+		if !historyActive(ctx) {
+			return HistoryRecentPrefix{}, ErrHistory
+		}
+		if !a.AsOf.After(cutoff) {
+			break
+		}
+		if a.AsOf.After(now) || !selected[a.Key] {
+			continue
+		}
 		row, err := historyCopyAttempt(a)
 		if err != nil {
 			return HistoryRecentPrefix{}, err
 		}
 		out.Attempts = append(out.Attempts, row)
-		records += n
-		if !prefix && len(out.Attempts) == limit {
-			break
-		}
 	}
 	if !historyActive(ctx) || (prefix && !h.available(ctx)) {
 		return HistoryRecentPrefix{}, ErrHistory

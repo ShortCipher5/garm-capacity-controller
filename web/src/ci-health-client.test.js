@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ciHealthEndpoint, ciJobHandleHeader, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciHealthEndpoint, ciJobHandleHeader, ciRunHandleHeader, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, qualifiedCIRunURL, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {endpoint, ReadSession, SessionEnded, validateOverview} from "./client.js";
 
 const token = "a".repeat(64);
@@ -307,4 +307,64 @@ test("optional status timestamps retain exact precision and cannot exceed the at
   delete a.status_observed_at;
   delete j.status_observed_at;
   assert.equal(validateCIHealthSnapshot(view), view);
+});
+
+const exactRunSelection = {
+  handle: "A".repeat(42) + "E", source: "registry_1", repository_id: "9007199254740993", workflow_id: "9007199254740997",
+  run_id: "9223372036854775807", attempt: "2",
+};
+const {handle: ignoredRunFixtureHandle, ...exactRunResponseIDs} = exactRunSelection;
+const exactRunHref = "https://github.com/synthetic/fixture/actions/runs/9223372036854775807";
+
+test("CI run owner lookup validates origin, exact run identity, and response bounds", async () => {
+  const responses = [
+    wire({...exactRunResponseIDs, url: exactRunHref}),
+    wire({...exactRunResponseIDs, url: exactRunHref + "/job/9007199254740995"}),
+    wire({...exactRunResponseIDs, url: exactRunHref + "/attempts/2"}),
+    wire({...exactRunResponseIDs, url: exactRunHref.slice(0, -1) + "6"}),
+    wire({...exactRunResponseIDs, url: exactRunHref.replace("github.com", "github.example")}),
+    wire({...exactRunResponseIDs, attempt: "1", url: exactRunHref}),
+    new Response("", {status: 404}),
+    new Response("", {status: 401}),
+  ];
+  const session = sessionWith(async (url, options) => {
+    assert.equal(url, ciHealthEndpoint);
+    assert.deepEqual(options.headers, {Authorization: "Bearer " + token, Accept: "application/json", [ciRunHandleHeader]: exactRunSelection.handle});
+    return responses.shift();
+  });
+  await assert.rejects(session.ciHealthRunDestination(exactRunSelection), SessionEnded);
+  await session.connect(token);
+  assert.equal(await session.ciHealthRunDestination({...exactRunSelection, handle: "bad"}), null);
+  assert.equal(await session.ciHealthRunDestination(exactRunSelection), exactRunHref);
+  for (let i = 0; i < 6; i++) assert.equal(await session.ciHealthRunDestination(exactRunSelection), null);
+  await assert.rejects(session.ciHealthRunDestination(exactRunSelection), /Read authorization ended/);
+});
+
+test("current timing can carry a unique run handle but never a URL", () => {
+  const view = snapshot();
+  const [attempt] = view.timing.attempts;
+  attempt.run_link_handle = exactRunSelection.handle;
+  assert.equal(validateCIHealthSnapshot(view), view);
+  attempt.url = exactRunHref;
+  assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
+  delete attempt.url;
+  view.timing.attempts.push({...attempt, attempt: "1"});
+  assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
+  view.timing.attempts[1].run_link_handle = "A".repeat(42) + "B";
+  assert.throws(() => validateCIHealthSnapshot(view), /unavailable/);
+});
+
+test("run destinations qualify only the canonical exact run on github.com", () => {
+  assert.equal(qualifiedCIRunURL(exactRunHref, "9223372036854775807"), exactRunHref);
+  for (const invalid of [
+    exactRunHref + "/job/9007199254740995", // job destination is not a run
+    exactRunHref + "/attempts/2", // a retry cannot be inferred from the run
+    "http://" + exactRunHref.slice("https://".length),
+    exactRunHref.replace("/runs/", "/workflows/"),
+    exactRunHref.slice(0, -1) + "6",
+    "9223372036854775807",
+  ]) {
+    assert.equal(qualifiedCIRunURL(invalid, "9223372036854775807"), null);
+  }
+  assert.equal(qualifiedCIRunURL(exactRunHref, "9223372036854775806"), null);
 });

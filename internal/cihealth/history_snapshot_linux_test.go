@@ -30,7 +30,12 @@ func snapshotRoot(t *testing.T) (string, *os.Root) {
 
 func snapshotOpen(t *testing.T, root *os.Root, initialize bool) *History {
 	t.Helper()
-	h, err := OpenHistory(t.Context(), HistoryInput{Enabled: true, Root: root, Initialize: initialize})
+	return snapshotOpenMode(t, root, initialize, false)
+}
+
+func snapshotOpenMode(t *testing.T, root *os.Root, initialize, versioned bool) *History {
+	t.Helper()
+	h, err := OpenHistory(t.Context(), HistoryInput{Enabled: true, Root: root, Initialize: initialize, EnableVersionedObservations: versioned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +551,7 @@ func TestSnapshotHistoryRejectsAPageThatWouldLoseKnownConclusions(t *testing.T) 
 
 func TestSnapshotHistoryCompatibleResultsDoNotFillMissingIdentity(t *testing.T) {
 	_, root := snapshotRoot(t)
-	h := snapshotOpen(t, root, true)
+	h := snapshotOpenMode(t, root, true, true)
 	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	s := HistoryScope{"fixture", 9007199254740993, 44}
 	before := snapAttempt(s, 20, 1, now)
@@ -577,10 +582,11 @@ func TestSnapshotHistoryCompatibleResultsDoNotFillMissingIdentity(t *testing.T) 
 		t.Fatal(err)
 	}
 	rows, err := h.Recent(t.Context(), s, 2, later)
-	if err != nil || len(rows) != 2 || rows[0].Key != retry.Key || rows[0].Clock.Conclusion != ConclusionSuccess ||
+	if err != nil || len(rows) != 3 || rows[0].Key != retry.Key || rows[0].Clock.Conclusion != ConclusionSuccess ||
 		!rows[1].AsOf.Equal(later) || rows[1].Key != after.Key || rows[1].Jobs[0].Clock.Conclusion != ConclusionFailure ||
-		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Key.Number != after.Jobs[0].Steps[0].Key.Number {
-		t.Fatalf("known result moved scope or missing child was filled: %+v / %v", rows, err)
+		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Key.Number != after.Jobs[0].Steps[0].Key.Number ||
+		!rows[2].AsOf.Equal(now) || rows[2].Key != after.Key || len(rows[2].Jobs[0].Steps) != 2 {
+		t.Fatalf("known result moved scope, filled a missing child, or dropped the prior version: %+v / %v", rows, err)
 	}
 }
 
@@ -605,5 +611,363 @@ func TestHistoryIgnoresLiveJobCreationClock(t *testing.T) {
 	}
 	if a.Jobs[0].CreatedAt.IsZero() {
 		t.Fatal("history normalization mutated the live snapshot")
+	}
+}
+
+// A later positive observation of the same exact attempt that omits its
+// endpoints must not destroy the previously measured result: both stay
+// retained as their own versions, the latest one visibly incomplete.
+func TestSnapshotHistorySparseLaterObservationKeepsPriorMeasuredVersion(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	measured := snapAttempt(s, 20, 1, now)
+	measured.Clock.Conclusion = ConclusionSuccess
+	measured.Jobs[0].Clock.Conclusion = ConclusionSuccess
+	measured.Jobs[0].Steps[0].Clock.Conclusion = ConclusionSuccess
+	prior, next := HistoryCursor{1, 20}, HistoryCursor{2, 21}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{measured}, now); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(2 * time.Minute)
+	sparse := measured
+	sparse.AsOf = later
+	sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].Clock.StartedAt, sparse.Jobs[0].Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].Steps[0].Clock.StartedAt, sparse.Jobs[0].Steps[0].Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].CreatedAt = later // Live-only creation must not reach retained bytes.
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{sparse}, later); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := h.Recent(t.Context(), s, 1, later)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("expected exactly the sparse and measured versions: %+v, %v", rows, err)
+	}
+	if !rows[0].AsOf.Equal(later) || rows[0].Clock.Conclusion != ConclusionSuccess ||
+		!rows[0].Clock.StartedAt.IsZero() || !rows[0].Clock.CompletedAt.IsZero() ||
+		len(rows[0].Jobs) != 1 || !rows[0].Jobs[0].Clock.StartedAt.IsZero() {
+		t.Fatalf("latest row is not the visibly incomplete observation: %+v", rows[0])
+	}
+	if !rows[1].AsOf.Equal(now) || rows[1].Clock.StartedAt.IsZero() || rows[1].Clock.CompletedAt.IsZero() ||
+		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Clock.StartedAt.IsZero() {
+		t.Fatalf("previously measured result was not preserved as its own version: %+v", rows[1])
+	}
+	if timing, err := Measure(rows[1]); err != nil || timing.Wall != (Span{Basis: ObservedEndpoints, Duration: time.Minute}) {
+		t.Fatalf("prior measurement no longer measures: %+v, %v", timing, err)
+	}
+	// An exact replay of the accepted transition is a durable no-op.
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{sparse}, later); err != nil {
+		t.Fatalf("exact replay conflicted: %v", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(sealed, after) {
+		t.Fatal("replay mutated durable state", err)
+	}
+	// Restart around the committed versions preserves both and the cursor.
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h = snapshotOpenMode(t, root, false, true)
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != next {
+		t.Fatal("cursor advanced ahead of facts or was lost", c, err)
+	}
+	rows, err = h.Recent(t.Context(), s, 1, later)
+	if err != nil || len(rows) != 2 || !rows[0].AsOf.Equal(later) || !rows[1].AsOf.Equal(now) {
+		t.Fatalf("reopened store lost a version: %+v, %v", rows, err)
+	}
+	// The sparse row of one attempt never blocks unrelated facts in the same scope.
+	unrelated := snapAttempt(s, 21, 1, later)
+	if err := h.Apply(t.Context(), s, next, HistoryCursor{3, 22}, []AttemptFacts{unrelated}, later); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, later); err != nil || len(rows) != 3 || rows[0].Key.RunID != 21 {
+		t.Fatalf("unrelated observation was blocked by the sparse record: %+v, %v", rows, err)
+	}
+}
+
+func TestSnapshotHistoryVersionOrderingReplayAndPageRules(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	first := snapAttempt(s, 20, 1, now)
+	first.Jobs[0].Steps[0].Clock.Conclusion = ConclusionSuccess
+	prior, next := HistoryCursor{1, 20}, HistoryCursor{2, 21}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{first}, now); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	older := snapAttempt(s, 20, 1, now.Add(-time.Second))
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{older}, now); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("out-of-order version accepted", err)
+	}
+	reworded := snapAttempt(s, 20, 1, now) // Same observation time, different facts.
+	reworded.Jobs = nil
+	if err := h.Apply(t.Context(), s, prior, HistoryCursor{2, 19}, []AttemptFacts{reworded}, now); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("same-time contradiction accepted", err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{first}, now); err != nil {
+		t.Fatal("exact replay conflicted", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(sealed, after) {
+		t.Fatal("replay mutated durable state", err)
+	}
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != prior {
+		t.Fatal("replay moved the cursor", c, err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 21}, []AttemptFacts{snapAttempt(s, 21, 1, now)}, now); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("stale expected cursor accepted", err)
+	}
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{first, older}, now); !errors.Is(err, ErrHistory) {
+		t.Fatal("page with two versions of one attempt accepted", err)
+	}
+	// A newer version that regresses a known step conclusion is refused.
+	later := now.Add(time.Minute)
+	regressed := snapAttempt(s, 20, 1, later)
+	regressed.Jobs[0].Steps[0].Clock.Conclusion = ConclusionUnknown
+	if _, err := Measure(regressed); err != nil {
+		t.Fatalf("fixture failed basic validation: %v", err)
+	}
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{regressed}, later); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("terminal regression accepted", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(sealed, after) {
+		t.Fatal("rejected version mutated durable state", err)
+	}
+}
+
+func TestSnapshotHistoryPurgesExpiredVersionsByObservationTime(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	first := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{snapAttempt(s, 20, 1, first)}, first); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, first); err != nil || len(rows) != 1 || rows[0].Key.RunID != 20 {
+		t.Fatalf("fresh version not visible at its own observation time: %+v, %v", rows, err)
+	}
+	later := first.Add(historyRetention).Add(time.Hour)
+	current := snapAttempt(s, 21, 1, later)
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{current}, later); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, later); err != nil || len(rows) != 1 || rows[0].Key.RunID != 21 {
+		t.Fatalf("expired version was not purged by its own observation time: %+v, %v", rows, err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, first); err != nil || len(rows) != 0 {
+		t.Fatalf("reading at an older wall resurrected purged data: %+v, %v", rows, err)
+	}
+}
+
+// Versions of different attempts interleave in the stored newest-first order.
+// At the attempt limit the scan must still return every retained version of
+// each selected attempt, never a partial group cut off at the limit.
+func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtAttemptLimit(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	now := base.Add(5 * time.Minute)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	aNew := snapAttempt(s, 30, 1, base.Add(4*time.Minute))
+	aNew.Clock.StartedAt, aNew.Clock.CompletedAt = time.Time{}, time.Time{} // keep the older wall-time witness
+	b := snapAttempt(s, 31, 1, base.Add(3*time.Minute))
+	c := snapAttempt(s, 32, 1, base.Add(2*time.Minute))
+	aOld := snapAttempt(s, 30, 1, base.Add(time.Minute))
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{aOld, c}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{aNew, b}, now); err != nil {
+		t.Fatal(err)
+	}
+	p, err := h.RecentPrefix(t.Context(), s, 2, now)
+	if err != nil || p.Limited != HistorySelectionAttemptLimit || len(p.Attempts) != 3 {
+		t.Fatalf("expected two complete groups with the third reported limited: %+v, %v", p, err)
+	}
+	versions := map[int64]int{}
+	for _, row := range p.Attempts {
+		versions[row.Key.RunID]++
+		if row.Key.RunID == 32 {
+			t.Fatal("unselected attempt leaked into the selection")
+		}
+	}
+	if versions[30] != 2 || versions[31] != 1 {
+		t.Fatalf("interleaved older version of a selected attempt was dropped: %+v", p.Attempts)
+	}
+	rows, err := h.Recent(t.Context(), s, 2, now)
+	if err != nil || len(rows) != 3 || rows[2].Key.RunID != 30 || !rows[2].AsOf.Equal(base.Add(time.Minute)) {
+		t.Fatalf("strict bounded read did not return the complete groups: %+v, %v", rows, err)
+	}
+}
+
+// At the record limit a group that does not fit stops the selection, but
+// older versions of already selected attempts that sort after it must still
+// be included: the limit never splits a selected group.
+func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtRecordLimit(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	now := base.Add(5 * time.Minute)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	small := func(run int64, at time.Time) AttemptFacts {
+		return sizedSnapAttempt(s, run, at, 100, 396) // 497 records.
+	}
+	big := sizedSnapAttempt(s, 99, base.Add(3*time.Minute), 1000, 9900) // 10,901 records.
+	aNew := small(30, base.Add(4*time.Minute))
+	aNew.Clock.StartedAt, aNew.Clock.CompletedAt = time.Time{}, time.Time{} // keep the older wall-time witness
+	c := small(32, base.Add(2*time.Minute))
+	aOld := small(30, base.Add(time.Minute))
+	if records := historyRecordCount(big); 2*historyRecordCount(aNew)+records > historyMaxPageRecords ||
+		2*historyRecordCount(aNew)+records+historyRecordCount(c) <= historyMaxPageRecords {
+		t.Fatalf("fixture no longer brackets the record budget: %d", records)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{aOld, c}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{aNew, big}, now); err != nil {
+		t.Fatal(err)
+	}
+	p, err := h.RecentPrefix(t.Context(), s, 64, now)
+	if err != nil || p.Limited != HistorySelectionRecordLimit || len(p.Attempts) != 3 {
+		t.Fatalf("expected two complete groups with the third reported limited: %+v, %v", p, err)
+	}
+	versions := map[int64]int{}
+	for _, row := range p.Attempts {
+		versions[row.Key.RunID]++
+		if row.Key.RunID == 32 {
+			t.Fatal("unselected attempt leaked into the selection")
+		}
+	}
+	if versions[30] != 2 || versions[99] != 1 {
+		t.Fatalf("interleaved older version of a selected attempt was dropped: %+v", p.Attempts)
+	}
+	before, err := os.ReadFile(filepath.Join(root.Name(), historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RecentPrefix(t.Context(), s, 64, now); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := os.ReadFile(filepath.Join(root.Name(), historyFile)); err != nil || !bytes.Equal(before, after) {
+		t.Fatal("bounded selection changed retained snapshot bytes", err)
+	}
+}
+
+func TestSnapshotHistoryDefaultNeverUpgradesSparseObservation(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	start := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 901, 100}
+	full, sparse := snapAttempt(s, 1, 1, start), snapAttempt(s, 1, 1, start)
+	sparse.AsOf = start.Add(time.Minute)
+	sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{full}, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{sparse}, sparse.AsOf); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(filepath.Join(path, historyFile))
+	state, decodeErr := decodeHistory(payload)
+	if err != nil || decodeErr != nil || state.Format != historyFormat || len(state.Attempts) != 1 || !state.Attempts[0].AsOf.Equal(sparse.AsOf) {
+		t.Fatalf("default mode departed from v1: %+v, %v, %v", state, err, decodeErr)
+	}
+	h = snapshotOpen(t, root, false)
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != (HistoryCursor{2, 2}) {
+		t.Fatalf("default reopen cursor: %+v, %v", c, err)
+	}
+}
+
+func TestSnapshotHistoryVersionedSustainedPollingPreservesExactWitnessAndPeers(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	start := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s, otherScope := HistoryScope{"fixture", 901, 100}, HistoryScope{"fixture", 902, 100}
+	full, sibling := snapAttempt(s, 10, 1, start), snapAttempt(s, 20, 1, start)
+	other := snapAttempt(otherScope, 30, 1, start)
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{full, sibling}, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), otherScope, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{other}, start); err != nil {
+		t.Fatal(err)
+	}
+	now := start
+	for revision := int64(2); revision <= 130; revision++ {
+		now = now.Add(time.Second)
+		sparse := snapAttempt(s, 10, 1, start)
+		sparse.AsOf = now
+		sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+		if err := h.Apply(t.Context(), s, HistoryCursor{revision - 1, revision - 1}, HistoryCursor{revision, revision}, []AttemptFacts{sparse}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h.state.Format != historyFormatV2 || len(h.state.Attempts) != 4 {
+		t.Fatalf("sustained polling grew retained records: %s, %d", h.state.Format, len(h.state.Attempts))
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied, err := OpenHistory(t.Context(), HistoryInput{Enabled: true, Root: root}); denied != nil || !errors.Is(err, ErrHistory) {
+		t.Fatalf("non-opt-in reader accepted v2: %v, %v", denied, err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(after, before) {
+		t.Fatal("non-opt-in refusal changed v2 bytes", err)
+	}
+	h = snapshotOpenMode(t, root, false, true)
+	rows, err := h.Recent(t.Context(), s, 2, now)
+	if err != nil || len(rows) != 3 || rows[1].Key != sibling.Key || !rows[2].AsOf.Equal(start) {
+		t.Fatalf("polling displaced unrelated attempt or witness: %+v, %v", rows, err)
+	}
+	view, err := ProjectRetainedAttempt([]AttemptFacts{rows[0], rows[2]})
+	if err != nil || view.Wall.Current || view.Wall.Basis != ObservedEndpoints || !view.Wall.MeasuredAt.Equal(start) {
+		t.Fatalf("old measurement freshness changed: %+v, %v", view.Wall, err)
+	}
+	if rows, err := h.Recent(t.Context(), otherScope, 1, now); err != nil || len(rows) != 1 || rows[0].Key != other.Key {
+		t.Fatalf("polling displaced unrelated scope: %+v, %v", rows, err)
+	}
+}
+
+func TestSnapshotHistoryVersionedOverBudgetKeepsAcceptedFactsAndCursor(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	s := HistoryScope{"fixture", 901, 100}
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	a := sizedSnapAttempt(s, 1, now, 700, 6000)
+	b := sizedSnapAttempt(s, 1, now.Add(time.Minute), 700, 6000)
+	b.Clock.StartedAt, b.Clock.CompletedAt = time.Time{}, time.Time{} // prior version is still needed
+	if size := historyRecordCount(a) + historyRecordCount(b); size <= historyMaxPageRecords {
+		t.Fatalf("fixture does not exceed the whole-group bound: %d", size)
+	}
+	current := HistoryCursor{1, 1}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, current, []AttemptFacts{a}, now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, current, HistoryCursor{2, 2}, []AttemptFacts{b}, b.AsOf); !errors.Is(err, ErrHistory) {
+		t.Fatalf("over-budget witness group did not fail closed: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("over-budget write changed accepted bytes: %v", err)
+	}
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != current {
+		t.Fatalf("over-budget write advanced the cursor: %+v, %v", c, err)
 	}
 }

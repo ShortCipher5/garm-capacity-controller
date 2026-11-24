@@ -35,6 +35,7 @@ type CIHealthSnapshot struct {
 	body       []byte
 	history    ciHistoryResponse
 	jobLinks   map[string]ciJobLinkTarget
+	runLinks   map[string]ciRunLinkTarget
 	stopped    bool
 	workflows  map[cihealth.TrendScope]bool
 }
@@ -75,16 +76,16 @@ func ciHealthSourceLabel(label string) bool {
 // must Withdraw. A later publication cannot resurrect data at or before that
 // withdrawal. The publisher must own the supplied facts until this returns.
 func (s *CIHealthSnapshot) Publish(observedAt time.Time, facts []cihealth.AttemptFacts) error {
-	return s.PublishTiming(observedAt, facts, false)
+	return s.publishTiming(observedAt, facts, false, nil, nil)
 }
 
 // PublishTiming distinguishes local bounds from an ordinary observed subset.
 // Neither mode establishes complete or atomic GitHub history.
 func (s *CIHealthSnapshot) PublishTiming(observedAt time.Time, facts []cihealth.AttemptFacts, boundedPartial bool) error {
-	return s.publishTiming(observedAt, facts, boundedPartial, nil)
+	return s.publishTiming(observedAt, facts, boundedPartial, nil, nil)
 }
 
-func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.AttemptFacts, boundedPartial bool, selectLink ciJobLinkSelector) error {
+func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.AttemptFacts, boundedPartial bool, selectJob ciJobLinkSelector, selectRun ciRunLinkSelector) error {
 	if s == nil || len(s.scopes) == 0 {
 		return ErrConfiguration
 	}
@@ -102,7 +103,11 @@ func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.
 			return errCIProjection
 		}
 	}
-	jobLinks, err := attachCIJobHandles(&view, facts, selectLink)
+	jobLinks, err := attachCIJobHandles(&view, facts, selectJob)
+	if err != nil {
+		return err
+	}
+	runLinks, err := attachCIRunHandles(&view, facts, selectRun)
 	if err != nil {
 		return err
 	}
@@ -127,7 +132,7 @@ func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.
 	if err != nil || len(wire) > maxCIResponseBytes {
 		return errCIProjection
 	}
-	return s.commitTiming(at, lease, wire, workflows, jobLinks)
+	return s.commitTiming(at, lease, wire, workflows, jobLinks, runLinks)
 }
 
 func (s *CIHealthSnapshot) begin(at time.Time) *ciHealthGeneration {
@@ -140,10 +145,11 @@ func (s *CIHealthSnapshot) begin(at time.Time) *ciHealthGeneration {
 }
 
 func (s *CIHealthSnapshot) commit(at time.Time, lease *ciHealthGeneration, wire []byte, workflows map[cihealth.TrendScope]bool) error {
-	return s.commitTiming(at, lease, wire, workflows, nil)
+	return s.commitTiming(at, lease, wire, workflows, nil, nil)
 }
 
-func (s *CIHealthSnapshot) commitTiming(at time.Time, lease *ciHealthGeneration, wire []byte, workflows map[cihealth.TrendScope]bool, jobLinks map[string]ciJobLinkTarget) error {
+func (s *CIHealthSnapshot) commitTiming(at time.Time, lease *ciHealthGeneration, wire []byte, workflows map[cihealth.TrendScope]bool,
+	jobLinks map[string]ciJobLinkTarget, runLinks map[string]ciRunLinkTarget) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.validAtLocked(at) || lease != s.generation {
@@ -151,7 +157,7 @@ func (s *CIHealthSnapshot) commitTiming(at time.Time, lease *ciHealthGeneration,
 	}
 	s.latest, s.body, s.generation = at, wire, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
-	s.workflows, s.jobLinks = workflows, jobLinks
+	s.workflows, s.jobLinks, s.runLinks = workflows, jobLinks, runLinks
 	return nil
 }
 
@@ -245,6 +251,10 @@ func (h *Handler) serveCIHealth(w http.ResponseWriter, r *http.Request, source *
 	}
 	if handles := r.Header.Values(ciJobHandleHeader); len(handles) != 0 {
 		serveCIJobLink(w, r, source, handles)
+		return
+	}
+	if handles := r.Header.Values(ciRunHandleHeader); len(handles) != 0 {
+		serveCIRunLink(w, r, source, handles)
 		return
 	}
 	body := source.read()

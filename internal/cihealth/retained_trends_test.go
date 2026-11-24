@@ -157,3 +157,74 @@ func TestRetainedTrendsRefusesEntireInvalidScope(t *testing.T) {
 		})
 	}
 }
+
+// A sparse later observation of an exact attempt (terminal result, omitted
+// endpoints) refreshes the attempt's window and completed counts, keeps the
+// previously measured duration visible through the recovery projection, and
+// never blocks or double-counts unrelated attempts.
+func TestRetainedTrendsSparseLaterObservationRecoversPriorMeasurement(t *testing.T) {
+	end := time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC)
+	measuredAt := end.Add(-time.Hour)
+	key := AttemptKey{retainedTestScope.Source, retainedTestScope.RepositoryID, retainedTestScope.WorkflowID, 20, 1}
+	measuredClock := func(started, completed time.Time) Clock {
+		return Clock{Phase: Completed, StartedAt: started, CompletedAt: completed, ObservedAt: measuredAt, Conclusion: ConclusionSuccess}
+	}
+	measured := AttemptFacts{Key: key, AsOf: measuredAt, Clock: measuredClock(measuredAt.Add(-4*time.Minute), measuredAt),
+		Jobs: []JobFacts{{
+			Key:   JobKey{Attempt: key, JobID: 7},
+			Clock: measuredClock(measuredAt.Add(-3*time.Minute), measuredAt.Add(-time.Minute)),
+			Steps: []StepFacts{{
+				Key:   StepKey{Job: JobKey{Attempt: key, JobID: 7}, Number: 1},
+				Clock: measuredClock(measuredAt.Add(-2*time.Minute), measuredAt.Add(-time.Minute)),
+			}},
+		}}}
+	sparse := measured
+	sparse.AsOf = end
+	sparse.Jobs = append([]JobFacts(nil), measured.Jobs...)
+	sparse.Jobs[0].Steps = append([]StepFacts(nil), measured.Jobs[0].Steps...)
+	sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].Clock.StartedAt, sparse.Jobs[0].Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].Steps[0].Clock.StartedAt, sparse.Jobs[0].Steps[0].Clock.CompletedAt = time.Time{}, time.Time{}
+	normal := retainedTestFact(21, 1, end)
+	normal.Clock = Clock{Phase: Completed, StartedAt: end.Add(-2 * time.Minute), CompletedAt: end, ObservedAt: end, Conclusion: ConclusionSuccess}
+	normal.Jobs = []JobFacts{{Key: JobKey{Attempt: normal.Key, JobID: 8},
+		Clock: Clock{Phase: Completed, StartedAt: end.Add(-90 * time.Second), CompletedAt: end, ObservedAt: end, Conclusion: ConclusionSuccess},
+		Steps: []StepFacts{{Key: StepKey{Job: JobKey{Attempt: normal.Key, JobID: 8}, Number: 1},
+			Clock: Clock{Phase: Completed, StartedAt: end.Add(-time.Minute), CompletedAt: end, ObservedAt: end, Conclusion: ConclusionSuccess}}}}}
+
+	got, err := SummarizeRetainedTrends(retainedTestScope, end, []AttemptFacts{sparse, measured, normal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := got.Current.Initial
+	durations := []TrendDurations{
+		{Samples: 2, Mean: 3 * time.Minute, P95: 4 * time.Minute},   // Walls: 4m recovered, 2m current.
+		{Samples: 2, Mean: 105 * time.Second, P95: 2 * time.Minute}, // Executions: 2m recovered, 90s current.
+		{Samples: 2, Mean: time.Minute, P95: time.Minute},           // Steps: 1m recovered, 1m current.
+	}
+	if bucket.Attempts.Duration == nil || *bucket.Attempts.Duration != durations[0] {
+		t.Fatalf("attempt durations lost the recovered measurement: %+v", bucket.Attempts.Duration)
+	}
+	attempts := bucket.Attempts
+	attempts.Duration = nil
+	if bucket.Runs != 2 || attempts != (RetainedTrendMetric{Observed: 2, Success: 2, Completed: 2}) {
+		t.Fatalf("versions double-counted or window not refreshed: %+v", bucket.Attempts)
+	}
+	want := []RetainedTrendMetric{
+		{Observed: 2, Success: 2, Completed: 2},
+		{Observed: 2, Success: 2, Completed: 2},
+	}
+	for i, m := range []RetainedTrendMetric{bucket.Jobs, bucket.Steps} {
+		if m.Duration == nil || *m.Duration != durations[i+1] {
+			t.Fatalf("metric %d lost the recovered measurement: %+v", i, m.Duration)
+		}
+		m.Duration = nil
+		if m != want[i] {
+			t.Fatalf("metric %d counters: %+v", i, m)
+		}
+	}
+	// The same observation version twice is still wholesale refusal.
+	if got, err := SummarizeRetainedTrends(retainedTestScope, end, []AttemptFacts{sparse, sparse}); err != ErrTrendFacts || got != (RetainedTrends{}) {
+		t.Fatalf("duplicate version accepted: %+v, %v", got, err)
+	}
+}

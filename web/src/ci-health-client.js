@@ -6,8 +6,10 @@ const phases = ["queued", "running", "completed", "skipped", "unknown"];
 const terminalConclusions = ["success", "failure", "cancelled", "timed_out", "other_terminal"];
 export const ciHealthEndpoint = "/admin/api/v1/ci-health";
 export const ciJobHandleHeader = "X-GARM-CI-Job-Handle";
+export const ciRunHandleHeader = "X-GARM-CI-Run-Handle";
 export const validCIJobHandle = (handle) => typeof handle === "string" &&
   /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(handle);
+export const validCIRunHandle = validCIJobHandle;
 
 export function validateCIJobDestination(value, selection) {
   const fields = ["source", "repository_id", "workflow_id", "run_id", "attempt", "job_id"];
@@ -18,10 +20,27 @@ export function validateCIJobDestination(value, selection) {
   return qualifiedCIJobURL(value.url, value.run_id, value.job_id);
 }
 
+export function validateCIRunDestination(value, selection) {
+  const fields = ["source", "repository_id", "workflow_id", "run_id", "attempt"];
+  if (!exactKeys(value, ["url", ...fields]) || !selection || !validCIRunHandle(selection.handle) ||
+      !fields.every(key => Object.hasOwn(selection, key) && value[key] === selection[key]) ||
+      typeof value.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value.source) ||
+      !fields.slice(1).every(key => decimal(value[key])) || typeof value.url !== "string") return null;
+  return qualifiedCIRunURL(value.url, value.run_id);
+}
+
 export function qualifiedCIJobURL(url, run, job) {
   if (typeof url !== "string" || !decimal(run) || !decimal(job)) return null;
   const match = /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/actions\/runs\/([1-9][0-9]{0,18})\/job\/([1-9][0-9]{0,18})$/.exec(url);
   return match && match[0] === url && match[1] === run && match[2] === job ? url : null;
+}
+
+// The logical run destination is shared by every retry; it cannot identify
+// an exact attempt or job and never points outside the canonical host.
+export function qualifiedCIRunURL(url, run) {
+  if (typeof url !== "string" || !decimal(run)) return null;
+  const match = /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/actions\/runs\/([1-9][0-9]{0,18})$/.exec(url);
+  return match && match[0] === url && match[1] === run ? url : null;
 }
 const lifetime = 120_000; // Same display lifetime as the owner API.
 const trendWeek = 7 * 24 * 60 * 60 * 1000;
@@ -152,9 +171,10 @@ export function validateCIHealthSnapshot(value) {
   let stepCount = 0;
   const handles = new Set();
   for (const a of value.timing.attempts) {
-    if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed", "conclusion", "status_observed_at"]) ||
+    if (!exactKeys(a, ["source", "repository_id", "workflow_id", "run_id", "attempt", "observed_at", "status", "jobs"], ["wall", "elapsed", "conclusion", "status_observed_at", "run_link_handle"]) ||
         typeof a.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(a.source) || a.source.trim() !== a.source ||
         ![a.repository_id, a.workflow_id, a.run_id, a.attempt].every((id) => decimal(id)) ||
+        (Object.hasOwn(a, "run_link_handle") && (!validCIRunHandle(a.run_link_handle) || handles.has(a.run_link_handle))) ||
         !phases.includes(a.status) || !validConclusion(a) || !validSpan(a, "wall", a.status === "completed") ||
         !validSpan(a, "elapsed", a.status === "running") || !Array.isArray(a.jobs) ||
         a.jobs.length > 250 - jobCount) fail();
@@ -162,6 +182,7 @@ export function validateCIHealthSnapshot(value) {
     const id = ciAttemptKey(a);
     if (!at || at.exact > observed.exact || !validStatusObservation(a, at) || attempts.has(id)) fail();
     attempts.add(id);
+    if (a.run_link_handle) handles.add(a.run_link_handle);
     scopes.add([a.source, a.repository_id, a.workflow_id].join(":"));
     jobCount += a.jobs.length;
     const jobs = new Set();
@@ -246,6 +267,10 @@ export async function readCIHealthBody(response, signal) {
 
 export async function readCIJobDestinationBody(response, signal, selection) {
   return validateCIJobDestination(await readCIHealthJSON(response, signal, 1024), selection);
+}
+
+export async function readCIRunDestinationBody(response, signal, selection) {
+  return validateCIRunDestination(await readCIHealthJSON(response, signal, 1024), selection);
 }
 
 export async function readCIHealthJSON(response, signal, limit) {

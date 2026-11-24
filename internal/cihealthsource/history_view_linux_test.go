@@ -203,6 +203,12 @@ func TestObservedWorkflowHistoryRequiresFreshExactLiveReaderAndRevision(t *testi
 		!view.AuthorizationExpiresAt.Equal(view.AuthorizationObservedAt.Add(historyCycleFreshness)) {
 		t.Fatalf("historical timestamp rebased or live scope lost: %+v, %v", view, err)
 	}
+	if len(view.Views) != 1 || view.Views[0].Key != key || view.Views[0].Phase != cihealth.Completed ||
+		view.Views[0].Conclusion != cihealth.ConclusionSuccess || view.Views[0].Wall.MeasuredAt != (time.Time{}) ||
+		view.Views[0].Wall.Current || len(view.Views[0].Jobs) != 1 ||
+		!view.Views[0].Jobs[0].Execution.Current || view.Views[0].Jobs[0].Execution.MeasuredAt != view.Attempts[0].AsOf {
+		t.Fatalf("retained provenance projection missing or inferred: %+v", view.Views)
+	}
 	timing, err := cihealth.Measure(view.Attempts[0])
 	if err != nil || timing.Conclusion != cihealth.ConclusionSuccess || len(timing.Jobs) != 1 ||
 		timing.Jobs[0].Key.JobID != jobID || timing.Jobs[0].Conclusion != cihealth.ConclusionSuccess ||
