@@ -201,8 +201,11 @@ func TestAllocatorProposalExplainsQueuedAward(t *testing.T) {
 		proposal.PolicyRevision != in.Policy.Revision || proposal.DemandDigest != in.Observation.Digest {
 		t.Fatalf("input version not bound: %+v", proposal)
 	}
-	if proposal.InputRevision != allocatorInputRevision(in.Snapshot.Revision, in.Policy.Revision, in.Observation.Digest) {
-		t.Fatal("input revision does not rebind snapshot, policy and demand")
+	if proposal.InputRevision != allocatorEvidenceRevision(in, allocatorInputRevision(in.Snapshot.Revision, in.Policy.Revision, in.Observation.Digest)) {
+		t.Fatal("input revision does not rebind snapshot, policy, demand, route and pressure evidence")
+	}
+	if proposal.State != allocatorStateHypothetical {
+		t.Fatalf("unestablished growth must stay hypothetical: %+v", proposal)
 	}
 	if !proposal.ExpiresAt.Equal(in.Observation.StartedAt.Add(in.Options.MaxAge)) {
 		t.Fatalf("expiry %v; want demand-start bounded freshness", proposal.ExpiresAt)
@@ -533,6 +536,9 @@ func TestAllocatorRoutedDestinationEstablished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if proposal.State != allocatorStateVerified {
+		t.Fatalf("routed growth must be verified: %+v", proposal)
+	}
 	if !proposal.ExpiresAt.Equal(routes[0].ObservedAt.Add(opt.MaxAge)) {
 		t.Fatalf("route freshness not bound: %v", proposal.ExpiresAt)
 	}
@@ -547,10 +553,13 @@ func TestAllocatorRoutedDestinationEstablished(t *testing.T) {
 
 	// An eligible host list alone never establishes placement: the ordinary
 	// planner may name a fitting host, but the award stays explicitly
-	// unestablished and carries the matching risk.
+	// hypothetical and carries the matching risk.
 	unrouted, err := PlanAllocatorProposal(in)
 	if err != nil || len(unrouted.Awards) != 1 || unrouted.Awards[0].Host != "b" || unrouted.Awards[0].DestinationEstablished {
 		t.Fatalf("eligible host list established placement: %+v %v", unrouted.Awards, err)
+	}
+	if unrouted.State != allocatorStateHypothetical {
+		t.Fatalf("unestablished growth must stay hypothetical: %+v", unrouted)
 	}
 	found := false
 	for _, risk := range unrouted.Risks {
@@ -1033,5 +1042,129 @@ func TestAllocatorAdvisoryLoopServesAndIsolatesProposal(t *testing.T) {
 func TestAllocatorRepoForPool(t *testing.T) {
 	if allocatorRepoFor(pool) != repo || allocatorRepoFor(allocatorPoolB) != allocatorRepoB {
 		t.Fatal("repository lookup helper broken")
+	}
+}
+
+// TestAllocatorRoutedPressureVetoNeverSelectsHost proves the measured-usage
+// veto and freshness rules apply identically on both planning paths: a vetoed
+// host is never selected for growth, routed or unrouted, while unrelated
+// hosts keep planning unaffected.
+func TestAllocatorRoutedPressureVetoNeverSelectsHost(t *testing.T) {
+	state, snapshot, observation, opt, routes := routedStockFixture(t)
+	routes[0].Host, routes[0].HostBindingSequence = "b", 4
+	in := AllocatorInput{
+		Source:      observation.SourceIdentity(),
+		Snapshot:    snapshot,
+		Policy:      state.Policy,
+		Observation: observation,
+		Options:     opt,
+		CapturedAt:  opt.Now,
+		Weights:     map[string]uint32{repo: 1},
+	}
+
+	// Baseline without veto: the verified route selects b and awards growth.
+	proposal, err := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || len(proposal.Awards) != 1 || proposal.Awards[0].Host != "b" {
+		t.Fatalf("fixture did not award on the verified route: %+v %v", proposal.Awards, err)
+	}
+
+	// A veto on the verified route host stops the routed award entirely; the
+	// vetoed host is never selected. Retained charges are untouched.
+	vetoed := in
+	vetoed.Blocked = map[string]bool{"b": true}
+	proposal, err = PlanRoutedAllocatorProposal(state, vetoed, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.Awards) != 0 {
+		t.Fatalf("vetoed route host selected for growth: %+v", proposal.Awards)
+	}
+	if got := allocatorDecision(proposal, pool); got.Reason != allocatorDecisionBlockedPressure {
+		t.Fatalf("routed pressure reason: %+v", got)
+	}
+	if proposal.Held.Pools[pool].Runners != 1 || proposal.Held.Global.Runners != 1 {
+		t.Fatalf("veto changed retained accounting: %+v", proposal.Held)
+	}
+	unrouted, err := PlanAllocatorProposal(vetoed)
+	if err != nil || len(unrouted.Awards) != 0 {
+		t.Fatalf("unrouted veto parity lost: %+v %v", unrouted.Awards, err)
+	}
+
+	// A veto on an unrelated host does not disable the verified destination.
+	unrelated := in
+	unrelated.Blocked = map[string]bool{"a": true}
+	proposal, err = PlanRoutedAllocatorProposal(state, unrelated, routes)
+	if err != nil || len(proposal.Awards) != 1 || proposal.Awards[0].Host != "b" {
+		t.Fatalf("unrelated veto suppressed the verified route: %+v %v", proposal.Awards, err)
+	}
+
+	// The same veto evidence must change the published proposal revision on
+	// both paths: pressure evidence is part of the input identity.
+	baseline, err := PlanAllocatorProposal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.InputRevision == unrouted.InputRevision {
+		t.Fatal("pressure evidence not bound into the proposal revision")
+	}
+}
+
+// TestAllocatorEvidenceRevisionDistinguishesRouteAndPressure proves the
+// published revision binds route evidence and pressure evidence: identical
+// plans with different verified routes, or different vetoes, never share a
+// revision, while identical inputs recompute identically.
+func TestAllocatorEvidenceRevisionDistinguishesRouteAndPressure(t *testing.T) {
+	state, snapshot, observation, opt, routes := routedStockFixture(t)
+	routes[0].Host, routes[0].HostBindingSequence = "b", 4
+	base := AllocatorInput{
+		Source:      observation.SourceIdentity(),
+		Snapshot:    snapshot,
+		Policy:      state.Policy,
+		Observation: observation,
+		Options:     opt,
+		CapturedAt:  opt.Now,
+		Weights:     map[string]uint32{repo: 1},
+	}
+	first, err := PlanRoutedAllocatorProposal(state, base, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := PlanRoutedAllocatorProposal(state, base, routes)
+	if err != nil || first.InputRevision != second.InputRevision {
+		t.Fatalf("identical inputs must recompute one revision: %q vs %q", first.InputRevision, second.InputRevision)
+	}
+
+	// Different route evidence (host, binding sequence, freshness).
+	changed := append([]VerifiedStockProviderRoute(nil), routes...)
+	changed[0].HostBindingSequence = 3
+	if _, err := PlanRoutedAllocatorProposal(state, base, changed); err != capacitybroker.ErrSnapshot {
+		t.Fatal("stale route binding accepted", err)
+	}
+	fresh := append([]VerifiedStockProviderRoute(nil), routes...)
+	fresh[0].ObservedAt = routes[0].ObservedAt.Add(-time.Second)
+	proposal, err := PlanRoutedAllocatorProposal(state, base, fresh)
+	if err != nil || proposal.InputRevision == first.InputRevision {
+		t.Fatalf("route freshness not distinguished: %q vs %q %v", proposal.InputRevision, first.InputRevision, err)
+	}
+
+	// Routed and unrouted proposals never share a revision.
+	unrouted, err := PlanAllocatorProposal(base)
+	if err != nil || unrouted.InputRevision == first.InputRevision {
+		t.Fatalf("route presence not distinguished: %q vs %q %v", unrouted.InputRevision, first.InputRevision, err)
+	}
+
+	// Pressure evidence distinguishes revisions on both paths.
+	vetoed := base
+	vetoed.Blocked = map[string]bool{"b": true}
+	routedVetoed, err := PlanRoutedAllocatorProposal(state, vetoed, routes)
+	if err != nil || routedVetoed.InputRevision == first.InputRevision {
+		t.Fatal("routed pressure evidence not distinguished")
+	}
+	unroutedVetoed, err := PlanAllocatorProposal(vetoed)
+	if err != nil || unroutedVetoed.InputRevision == unrouted.InputRevision {
+		t.Fatal("unrouted pressure evidence not distinguished")
+	}
+	if unroutedVetoed.InputRevision == routedVetoed.InputRevision {
+		t.Fatal("route and pressure evidence collapsed into one revision")
 	}
 }

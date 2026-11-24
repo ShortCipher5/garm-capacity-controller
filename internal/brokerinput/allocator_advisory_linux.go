@@ -66,6 +66,7 @@ type AllocatorInput struct {
 	Commitments int64
 
 	destinationsEstablished bool
+	routes                  []VerifiedStockProviderRoute
 }
 
 // AllocatorHeldCapacity reports retained physical charges aggregated from the
@@ -121,21 +122,34 @@ type AllocatorPoolDecision struct {
 // restarts recompute it deterministically from durable inputs alone, so two
 // repositories can never be awarded the same retained slot.
 type AllocatorProposal struct {
-	Source         string                  `json:"source"`
-	SourceIdentity string                  `json:"source_identity"`
-	DemandDigest   string                  `json:"demand_digest"`
-	LedgerSequence int64                   `json:"ledger_sequence"`
-	PolicyRevision int64                   `json:"policy_revision"`
-	InputRevision  string                  `json:"input_revision"`
-	StartedAt      time.Time               `json:"started_at"`
-	FinishedAt     time.Time               `json:"finished_at"`
-	CapturedAt     time.Time               `json:"captured_at"`
-	ExpiresAt      time.Time               `json:"expires_at"`
-	Held           AllocatorHeldCapacity   `json:"held"`
-	Awards         []AllocatorAward        `json:"awards"`
-	Decisions      []AllocatorPoolDecision `json:"decisions"`
-	Risks          []string                `json:"risks,omitempty"`
+	Source         string `json:"source"`
+	SourceIdentity string `json:"source_identity"`
+	// State is verified only when every award's destination was narrowed by
+	// independently verified stock provider routes. Without established
+	// destinations the same growth is hypothetical: it explains what would be
+	// requested, never verified placement or enforceable capacity.
+	State          string `json:"state"`
+	DemandDigest   string `json:"demand_digest"`
+	LedgerSequence int64  `json:"ledger_sequence"`
+	PolicyRevision int64  `json:"policy_revision"`
+	// InputRevision binds the plan's own input rebind plus the verified route
+	// evidence and measured-usage pressure evidence; route or pressure changes
+	// always produce a different revision.
+	InputRevision string                  `json:"input_revision"`
+	StartedAt     time.Time               `json:"started_at"`
+	FinishedAt    time.Time               `json:"finished_at"`
+	CapturedAt    time.Time               `json:"captured_at"`
+	ExpiresAt     time.Time               `json:"expires_at"`
+	Held          AllocatorHeldCapacity   `json:"held"`
+	Awards        []AllocatorAward        `json:"awards"`
+	Decisions     []AllocatorPoolDecision `json:"decisions"`
+	Risks         []string                `json:"risks,omitempty"`
 }
+
+const (
+	allocatorStateVerified     = "verified"
+	allocatorStateHypothetical = "hypothetical"
+)
 
 // PlanAllocatorProposal runs the bounded observe-only stock cycle planner over
 // normalized inputs and translates the result. It polls nothing and writes
@@ -146,7 +160,7 @@ func PlanAllocatorProposal(in AllocatorInput) (AllocatorProposal, error) {
 	if in.Source == "" || in.Observation.SourceIdentity() != in.Source {
 		return fail()
 	}
-	plan, err := advisoryStock(in.Snapshot, in.Policy, in.Observation, in.Options, in.Blocked)
+	plan, err := stock(allocatorVetoHosts(in.Snapshot, in.Blocked), in.Policy, in.Observation, in.Options, true)
 	if err != nil {
 		return fail()
 	}
@@ -160,18 +174,41 @@ func PlanAllocatorProposal(in AllocatorInput) (AllocatorProposal, error) {
 // PlanRoutedAllocatorProposal narrows placement to independently verified
 // stock provider routes before planning. Every award it produces carries an
 // established exact destination; wrong-source, stale, duplicated, conflicting
-// or incomplete route/profile evidence awards nothing at all.
+// or incomplete route/profile evidence awards nothing at all. The measured
+// usage veto and freshness rules are the same ones the unrouted path applies:
+// a vetoed route host never funds an increase either.
 func PlanRoutedAllocatorProposal(state admission.BrokerGrantState, in AllocatorInput, routes []VerifiedStockProviderRoute) (AllocatorProposal, error) {
 	fail := func() (AllocatorProposal, error) { return AllocatorProposal{}, capacitybroker.ErrSnapshot }
 	if in.Source == "" || in.Observation.SourceIdentity() != in.Source {
 		return fail()
 	}
-	plan, expiry, err := planRoutedStockPreview(state, in.Snapshot, in.Observation, in.Source, in.Options, routes)
+	plan, expiry, err := planRoutedStockPreview(state, allocatorVetoHosts(in.Snapshot, in.Blocked), in.Observation, in.Source, in.Options, routes)
 	if err != nil {
 		return fail()
 	}
 	in.destinationsEstablished = true
+	in.routes = routes
 	return ExplainAllocatorPlan(in, plan, expiry)
+}
+
+// allocatorVetoHosts copies the snapshot and marks hosts with fresh high
+// measured usage as not accepting new placements. It cannot enable any host
+// and never moves or discounts existing charges. The same rule guards routed
+// and unrouted proposals, so a vetoed host is never selected for growth on
+// either path.
+func allocatorVetoHosts(snapshot capacitybroker.Snapshot, blocked map[string]bool) capacitybroker.Snapshot {
+	if len(blocked) == 0 {
+		return snapshot
+	}
+	hosts := make(map[string]capacitybroker.Host, len(snapshot.Hosts))
+	for id, h := range snapshot.Hosts {
+		if blocked[id] {
+			h.AcceptNew = false
+		}
+		hosts[id] = h
+	}
+	snapshot.Hosts = hosts
+	return snapshot
 }
 
 // allocatorInputRevision rebinds the exact planner inputs the way stockPlan
@@ -183,6 +220,40 @@ func allocatorInputRevision(capacityRevision string, policyRevision int64, deman
 		Policy   int64
 		Demand   string
 	}{capacityRevision, policyRevision, demandDigest})
+	if err != nil {
+		return ""
+	}
+	hash := sha256.Sum256(raw)
+	return hex.EncodeToString(hash[:])
+}
+
+// allocatorEvidenceRevision binds the published proposal revision to every
+// input class that can change a placement decision: the plan's own input
+// rebind, the verified route evidence (nil on the unrouted path) and the
+// measured-usage pressure evidence. Identical plans with different routes or
+// different vetoes therefore never share a revision.
+func allocatorEvidenceRevision(in AllocatorInput, planRevision string) string {
+	var routes []VerifiedStockProviderRoute
+	if in.destinationsEstablished {
+		routes = append([]VerifiedStockProviderRoute(nil), in.routes...)
+		sort.Slice(routes, func(i, j int) bool {
+			if routes[i].Provider != routes[j].Provider {
+				return routes[i].Provider < routes[j].Provider
+			}
+			return routes[i].Host < routes[j].Host
+		})
+	}
+	var blocked []string
+	for host := range in.Blocked {
+		blocked = append(blocked, host)
+	}
+	sort.Strings(blocked)
+	raw, err := json.Marshal(struct {
+		Version  string
+		Plan     string
+		Routes   []VerifiedStockProviderRoute
+		Pressure []string
+	}{"allocator-proposal-v1", planRevision, routes, blocked})
 	if err != nil {
 		return ""
 	}
@@ -220,10 +291,11 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 	out := AllocatorProposal{
 		Source:         "scoped-stock-and-coherent-ledger",
 		SourceIdentity: in.Observation.SourceIdentity(),
+		State:          allocatorStateHypothetical,
 		DemandDigest:   in.Observation.Digest,
 		LedgerSequence: in.LedgerSequence,
 		PolicyRevision: in.Policy.Revision,
-		InputRevision:  plan.Revision,
+		InputRevision:  allocatorEvidenceRevision(in, plan.Revision),
 		StartedAt:      in.Observation.StartedAt,
 		FinishedAt:     in.Observation.FinishedAt,
 		CapturedAt:     in.CapturedAt,
@@ -336,7 +408,9 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 	if in.Observation.MissedWebhookCoverage {
 		out.Risks = append(out.Risks, allocatorRiskMissedWebhookCoverage)
 	}
-	if !in.destinationsEstablished && len(out.Awards) > 0 {
+	if in.destinationsEstablished {
+		out.State = allocatorStateVerified
+	} else if len(out.Awards) > 0 {
 		out.Risks = append(out.Risks, allocatorRiskDestinationUnestablished)
 	}
 	if len(in.Blocked) > 0 {
@@ -502,25 +576,27 @@ func allocatorDecisionReason(s capacitybroker.Snapshot, planned allocatorHeldVie
 	if !allocatorFits(planned.global, pool.Size, s.Global) {
 		return allocatorDecisionBlockedGlobal
 	}
-	eligible, vetoed, fit := 0, 0, 0
+	eligiblyFit, pressureFit := 0, 0
 	for _, host := range pool.Hosts {
 		h, ok := s.Hosts[host]
 		if !ok || !h.AcceptNew {
 			continue // Paused, unhealthy or stale hosts never fund an increase.
 		}
-		eligible++
-		if blocked[host] {
-			vetoed++
+		if !allocatorFits(planned.hosts[host], pool.Size, h.Budget) {
 			continue
 		}
-		if allocatorFits(planned.hosts[host], pool.Size, h.Budget) {
-			fit++
+		if blocked[host] {
+			// Fresh high measured usage: the host could otherwise fund the
+			// increase, so the veto is what blocks it.
+			pressureFit++
+			continue
 		}
+		eligiblyFit++
 	}
-	if eligible > 0 && vetoed == eligible {
+	if pressureFit > 0 && eligiblyFit == 0 {
 		return allocatorDecisionBlockedPressure
 	}
-	if fit == 0 {
+	if eligiblyFit == 0 {
 		return allocatorDecisionBlockedHostUnfit
 	}
 	return allocatorDecisionBlockedUnfit
