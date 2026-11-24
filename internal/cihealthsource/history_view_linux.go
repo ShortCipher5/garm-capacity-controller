@@ -67,7 +67,13 @@ type ObservedWorkflowHistory struct {
 	// fresh telemetry merely because this history read succeeded.
 	AuthorizationObservedAt time.Time
 	AuthorizationExpiresAt  time.Time
-	Attempts                []cihealth.AttemptFacts
+	// Attempts carries the raw retained observation versions. Views carries
+	// one provenance-bearing projection per retained attempt: the newest
+	// version is the status and row-set authority, and every timing value is
+	// attributed to the exact version that measured it, with values a later
+	// observation omitted left visibly incomplete instead of inferred.
+	Attempts []cihealth.AttemptFacts
+	Views    []cihealth.RetainedAttemptView
 }
 
 // ReadObservedWorkflowHistory performs only a local held-store read at the
@@ -102,5 +108,22 @@ func (s *OwnedCycleHistory) ReadObservedWorkflowHistory(ctx context.Context, pro
 	if current, err := h.Cursor(ctx, scope); err != nil || current != expected || s.cell.closing.Load() || ctx.Err() != nil || !proof.current(time.Now()) {
 		return none, ErrCycleHistory
 	}
-	return ObservedWorkflowHistory{scope, expected, proof.observedAt, proof.wallDeadline, rows}, nil
+	byAttempt := make(map[cihealth.AttemptKey][]cihealth.AttemptFacts, len(rows))
+	viewOrder := make([]cihealth.AttemptKey, 0, len(rows))
+	for _, row := range rows {
+		if _, seen := byAttempt[row.Key]; !seen {
+			byAttempt[row.Key] = make([]cihealth.AttemptFacts, 0, 2)
+			viewOrder = append(viewOrder, row.Key)
+		}
+		byAttempt[row.Key] = append(byAttempt[row.Key], row)
+	}
+	views := make([]cihealth.RetainedAttemptView, 0, len(viewOrder))
+	for _, key := range viewOrder {
+		view, err := cihealth.ProjectRetainedAttempt(byAttempt[key])
+		if err != nil {
+			return none, ErrCycleHistory
+		}
+		views = append(views, view)
+	}
+	return ObservedWorkflowHistory{scope, expected, proof.observedAt, proof.wallDeadline, rows, views}, nil
 }
