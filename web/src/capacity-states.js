@@ -8,3 +8,17 @@ export function validateCapacityStates(v) {
  if(keys.some(k=>sum[k]!==v.total[k]))throw new Error('Capacity breakdown totals disagree.');
  return v;
 }
+
+// Optional explanation only. An unsupported or inconsistent split must not
+// replace, weaken, or hide the authoritative charged-capacity table.
+export function capacityUnknownBreakdown(view) {
+ const unknown=Array.isArray(view?.rows)?view.rows.find(row=>row?.state==='unknown')?.resources:null;
+ const split=view?.unknown_breakdown;
+ const reasons=['recorded_unknown','state_disagreement'];
+ const keys=['cpu_millis','ram_mib','disk_mib','runners'];
+ const exact=(value,allowed)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===allowed.length&&allowed.every(key=>Object.hasOwn(value,key));
+ const isCount=value=>Number.isSafeInteger(value)&&value>=0;
+ if(!unknown||!exact(split,reasons)||!reasons.every(reason=>exact(split[reason],keys)))return null;
+ if(!keys.every(k=>{const a=split.recorded_unknown[k],b=split.state_disagreement[k];return isCount(a)&&isCount(b)&&isCount(unknown[k])&&Number.isSafeInteger(a+b)&&a+b===unknown[k];}))return null;
+ return split;
+}
