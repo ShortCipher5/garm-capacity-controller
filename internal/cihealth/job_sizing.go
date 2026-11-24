@@ -99,6 +99,13 @@ type JobSizingSummary struct {
 	AtRisk, Unknown, Unsuccessful             int
 	Throttled, OOM, DiskFull, ExternalBuilder int
 	CPU, RAM, Disk                            JobSizingMetric
+	// Observed peaks are sampled-interval values across qualifying samples
+	// only. They are not a complete upper bound for unmeasured load.
+	CPUPeakMilliCPU, RAMPeakBytes uint64
+	// Saturated counts qualifying samples whose peak reached at least 9/10
+	// of the installed shape on that dimension: evidence of sustained
+	// pressure, not a claim that every interval was measured.
+	CPUSaturated, RAMSaturated int
 }
 
 // SummarizeJobSizing is a display-only comparison, never a scaler input.
@@ -186,10 +193,16 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 			if cpu != nil && sizingCoverageSufficient(cpu.Coverage.Duration, r.Window) {
 				out.CPU.QualifyingSamples++
 				highestCPU = max(highestCPU, cpu.PeakIntervalMilliCPU)
+				if in.Shape.CPUMilli != 0 && cpu.PeakIntervalMilliCPU >= in.Shape.CPUMilli-in.Shape.CPUMilli/10 {
+					out.CPUSaturated++
+				}
 			}
 			if ram != nil && sizingCoverageSufficient(ram.Coverage.Duration, r.Window) {
 				out.RAM.QualifyingSamples++
 				highestRAM = max(highestRAM, r.RAM.SampleMax)
+				if in.Shape.RAMBytes != 0 && r.RAM.SampleMax >= in.Shape.RAMBytes-in.Shape.RAMBytes/10 {
+					out.RAMSaturated++
+				}
 			}
 		}
 	}
@@ -210,6 +223,7 @@ func SummarizeJobSizing(in JobSizingCohort) (JobSizingSummary, error) {
 	}
 	finalizeJobSizingMetric(&out.CPU, out.Successful, highestCPU, in.Shape.CPUMilli)
 	finalizeJobSizingMetric(&out.RAM, out.Successful, highestRAM, in.Shape.RAMBytes)
+	out.CPUPeakMilliCPU, out.RAMPeakBytes = highestCPU, highestRAM
 	return out, nil
 }
 

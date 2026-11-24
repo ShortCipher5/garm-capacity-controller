@@ -201,11 +201,7 @@ func (s *SQLiteStore) claimDispatch(ctx context.Context, req Request, binding *H
 		if err != nil {
 			return err
 		}
-		freed, err := sqliteReuseFreed(tx)
-		if err != nil {
-			return err
-		}
-		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
+		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}

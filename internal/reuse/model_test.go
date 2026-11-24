@@ -1,9 +1,5 @@
-// Package reuse defines the verified teardown contract between observation
-// packages and capacity accounting: which original charge a runner teardown
-// claim addresses, which positive evidence qualifies it, and which resource
-// dimensions may be returned to the fleet. It contains no transport, no
-// ledger access and no release authority; a missing or unverifiable fact
-// always keeps the whole charge held.
+// These test-only types exercise a hypothetical teardown evidence contract.
+// They deliberately have no production consumers or release authority.
 package reuse
 
 import (
@@ -14,10 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// Dimensions selects the resource dimensions of one charge. A true value
-// means qualified positive evidence proved that dimension reusable; it is
-// never inferred from absence, timeout, a delete acknowledgement, a depleted
-// page, a reduced pool limit or a missing row.
+// Dimensions selects candidate dimensions in the offline model only. A true
+// value does not qualify real evidence, authorize reuse, or credit a charge.
 type Dimensions struct {
 	CPU     bool `json:"cpu"`
 	RAM     bool `json:"ram"`

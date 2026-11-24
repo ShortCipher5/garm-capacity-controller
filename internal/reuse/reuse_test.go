@@ -201,11 +201,11 @@ func TestChargeIdentityValidAndNameReuseDistinct(t *testing.T) {
 func TestAssessFullyQualifiedReleasesEveryDimension(t *testing.T) {
 	charge := reuseTestCharge()
 	verdict := Assess(charge, []TerminalEvidence{reuseTestEvidence(charge)})
-	if len(verdict.Held) != 0 || !verdict.Releasable.All() {
+	if len(verdict.Held) != 0 || !verdict.Candidate.All() {
 		t.Fatalf("qualified evidence held: %+v", verdict)
 	}
 	again := Assess(charge, []TerminalEvidence{reuseTestEvidence(charge), reuseTestEvidence(charge)})
-	if again.Digest != verdict.Digest || len(again.Held) != 0 || !again.Releasable.All() {
+	if again.Digest != verdict.Digest || len(again.Held) != 0 || !again.Candidate.All() {
 		t.Fatalf("duplicate delivery changed verdict: %+v", again)
 	}
 }
@@ -221,7 +221,7 @@ func TestAssessReorderedAndSplitDeliveriesAreDeterministic(t *testing.T) {
 	if a.Digest != b.Digest || b.Digest != c.Digest {
 		t.Fatalf("reordered/partial delivery changed verdict: %s %s %s", a.Digest, b.Digest, c.Digest)
 	}
-	if len(b.Held) != 0 || !b.Releasable.All() {
+	if len(b.Held) != 0 || !b.Candidate.All() {
 		t.Fatalf("split delivery held: %+v", b)
 	}
 }
@@ -235,7 +235,7 @@ func TestAssessStillAssignedRunnerStaysCharged(t *testing.T) {
 	evidence.Teardown = nil
 	evidence.Cleanup = nil
 	verdict := Assess(charge, []TerminalEvidence{evidence})
-	if verdict.Releasable.Any() {
+	if verdict.Candidate.Any() {
 		t.Fatalf("still-assigned runner released: %+v", verdict)
 	}
 	if !heldContains(verdict.Held, HeldAwaitingCompletedWorkload, HeldAwaitingTerminalDelete, HeldAwaitingPostDeleteAbsence, HeldResidualVolumeUnverified) {
@@ -247,7 +247,7 @@ func TestAssessStillAssignedRunnerStaysCharged(t *testing.T) {
 	busy := *reuseTestWorkload()
 	busy.Conclusion = "in_progress"
 	evidence.Workload = &busy
-	if verdict := Assess(charge, []TerminalEvidence{evidence}); verdict.Releasable.CPU || verdict.Releasable.RAM || verdict.Releasable.Runners || !heldContains(verdict.Held, HeldAwaitingCompletedWorkload) {
+	if verdict := Assess(charge, []TerminalEvidence{evidence}); verdict.Candidate.CPU || verdict.Candidate.RAM || verdict.Candidate.Runners || !heldContains(verdict.Held, HeldAwaitingCompletedWorkload) {
 		t.Fatalf("unqualified conclusion released compute: %+v", verdict)
 	}
 }
@@ -259,7 +259,7 @@ func TestAssessDelayedTeardownWithoutDeleteOrAbsenceStaysCharged(t *testing.T) {
 	evidence.Teardown = &InstanceTeardownProof{Identity: identity}
 	evidence.Cleanup = nil
 	verdict := Assess(charge, []TerminalEvidence{evidence})
-	if verdict.Releasable.Any() {
+	if verdict.Candidate.Any() {
 		t.Fatalf("teardown without terminal delete released: %+v", verdict)
 	}
 	if !heldContains(verdict.Held, HeldAwaitingTerminalDelete, HeldAwaitingPostDeleteAbsence, HeldResidualVolumeUnverified) {
@@ -269,7 +269,7 @@ func TestAssessDelayedTeardownWithoutDeleteOrAbsenceStaysCharged(t *testing.T) {
 	// unproven compute dimensions stay charged: verified dimensions only.
 	evidence.Cleanup = reuseTestCleanup()
 	verdict = Assess(charge, []TerminalEvidence{evidence})
-	if verdict.Releasable.CPU || verdict.Releasable.RAM || verdict.Releasable.Runners || !verdict.Releasable.Disk {
+	if verdict.Candidate.CPU || verdict.Candidate.RAM || verdict.Candidate.Runners || !verdict.Candidate.Disk {
 		t.Fatalf("dimension separation violated: %+v", verdict)
 	}
 }
@@ -279,7 +279,7 @@ func TestAssessResidualVolumeKeepsDiskCharged(t *testing.T) {
 	evidence := reuseTestEvidence(charge)
 	evidence.Cleanup = &CleanupProof{Volumes: []VolumeAbsence{{Name: "other-volume", ScopeDigest: reuseTestDigest('c'), ObservedAt: reuseTestStart.Add(3 * time.Minute)}}}
 	verdict := Assess(charge, []TerminalEvidence{evidence})
-	if !verdict.Releasable.CPU || !verdict.Releasable.RAM || !verdict.Releasable.Runners || verdict.Releasable.Disk {
+	if !verdict.Candidate.CPU || !verdict.Candidate.RAM || !verdict.Candidate.Runners || verdict.Candidate.Disk {
 		t.Fatalf("residual volume released disk: %+v", verdict)
 	}
 	if !heldContains(verdict.Held, HeldResidualVolumeUnverified) {
@@ -295,12 +295,12 @@ func TestAssessAuditedInseparabilityQualifiesDisk(t *testing.T) {
 		ScopeDigest: charge.Provider.ScopeFingerprint,
 		AuditedAt:   reuseTestStart.Add(3 * time.Minute),
 	}}
-	if verdict := Assess(charge, []TerminalEvidence{evidence}); len(verdict.Held) != 0 || !verdict.Releasable.All() {
+	if verdict := Assess(charge, []TerminalEvidence{evidence}); len(verdict.Held) != 0 || !verdict.Candidate.All() {
 		t.Fatalf("audited inseparability held: %+v", verdict)
 	}
 	// The capability is scoped: another provider scope never qualifies this charge.
 	evidence.Cleanup.Capability.ScopeDigest = reuseTestDigest('9')
-	if verdict := Assess(charge, []TerminalEvidence{evidence}); verdict.Releasable.Disk || !heldContains(verdict.Held, HeldResidualVolumeUnverified) {
+	if verdict := Assess(charge, []TerminalEvidence{evidence}); verdict.Candidate.Disk || !heldContains(verdict.Held, HeldResidualVolumeUnverified) {
 		t.Fatalf("foreign capability released disk: %+v", verdict)
 	}
 }
@@ -310,7 +310,7 @@ func TestAssessSameNameReplacementEvidenceStaysCharged(t *testing.T) {
 	replacement := charge
 	replacement.Incarnation.UUID = "33333333-3333-4333-8333-333333333333"
 	verdict := Assess(charge, []TerminalEvidence{reuseTestEvidence(replacement)})
-	if verdict.Releasable.Any() {
+	if verdict.Candidate.Any() {
 		t.Fatalf("replacement evidence released original charge: %+v", verdict)
 	}
 	if !heldContains(verdict.Held, HeldSameNameReplacement, HeldAwaitingCompletedWorkload, HeldAwaitingTerminalDelete, HeldAwaitingPostDeleteAbsence, HeldResidualVolumeUnverified) {
@@ -324,7 +324,7 @@ func TestAssessCompetingRepositoryEvidenceStaysCharged(t *testing.T) {
 	other.Stock.GitHubURL = "https://github.example/owner/other"
 	other.Stock.RegistrationDigest = reuseTestDigest('g')
 	verdict := Assess(charge, []TerminalEvidence{reuseTestEvidence(other)})
-	if verdict.Releasable.Any() {
+	if verdict.Candidate.Any() {
 		t.Fatalf("competing repository evidence released charge: %+v", verdict)
 	}
 	if !heldContains(verdict.Held, HeldEvidenceForDistinctCharge) {
@@ -339,7 +339,7 @@ func TestAssessConflictingEvidenceBlocksRelease(t *testing.T) {
 	second.Workload.JobID = 92
 	second.Workload.RunID = 13
 	verdict := Assess(charge, []TerminalEvidence{first, second})
-	if verdict.Releasable.Any() {
+	if verdict.Candidate.Any() {
 		t.Fatalf("conflicting evidence released: %+v", verdict)
 	}
 	if !heldContains(verdict.Held, HeldConflictingEvidence) {
@@ -356,7 +356,7 @@ func TestAssessChronologyConflictBlocksRelease(t *testing.T) {
 	late.ObservedAt = evidence.Teardown.Delete.CapturedAt.Add(3 * time.Minute)
 	evidence.Workload = late
 	verdict := Assess(charge, []TerminalEvidence{evidence})
-	if verdict.Releasable.Any() || !heldContains(verdict.Held, HeldConflictingEvidence, HeldChronologyConflict) {
+	if verdict.Candidate.Any() || !heldContains(verdict.Held, HeldConflictingEvidence, HeldChronologyConflict) {
 		t.Fatalf("impossible chronology released: %+v", verdict)
 	}
 }
@@ -370,7 +370,7 @@ func TestAssessInvalidChargeAndInvalidEvidenceStayHeld(t *testing.T) {
 	}
 	evidence := reuseTestEvidence(charge)
 	evidence.CapturedAt = time.Time{}
-	if verdict := Assess(charge, []TerminalEvidence{evidence}); verdict.Releasable.Any() || !heldContains(verdict.Held, HeldEvidenceForDistinctCharge) {
+	if verdict := Assess(charge, []TerminalEvidence{evidence}); verdict.Candidate.Any() || !heldContains(verdict.Held, HeldEvidenceForDistinctCharge) {
 		t.Fatalf("undated evidence not rejected deterministically: %+v", verdict)
 	}
 }
@@ -382,7 +382,50 @@ func TestAssessZeroDiskChargeNormalizesDiskDimension(t *testing.T) {
 	evidence := reuseTestEvidence(charge)
 	evidence.Cleanup = nil
 	verdict := Assess(charge, []TerminalEvidence{evidence})
-	if len(verdict.Held) != 0 || !verdict.Releasable.All() {
+	if len(verdict.Held) != 0 || !verdict.Candidate.All() {
 		t.Fatalf("zero-disk charge held: %+v", verdict)
+	}
+}
+
+// This tests only the in-memory dimension classifier, not SQLite replay,
+// physical settlement, provenance, or authority. Production credit is deferred.
+func TestSyntheticCandidateBothPartialProofOrders(t *testing.T) {
+	charge := reuseTestCharge()
+	full := reuseTestEvidence(charge)
+	compute := full
+	compute.Cleanup = nil
+	disk := full
+	disk.Workload, disk.Teardown = nil, nil
+
+	for _, tc := range []struct {
+		name         string
+		first, later TerminalEvidence
+		want         Dimensions
+		reason       string
+	}{
+		{"compute first", compute, disk, Dimensions{CPU: true, RAM: true, Runners: true}, HeldResidualVolumeUnverified},
+		{"disk first", disk, compute, Dimensions{Disk: true}, HeldAwaitingTerminalDelete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := Assess(charge, []TerminalEvidence{tc.first})
+			if first.Candidate != tc.want || !heldContains(first.Held, tc.reason) {
+				t.Fatalf("unexpected candidate mask or hold: %+v", first)
+			}
+			duplicate := Assess(charge, []TerminalEvidence{tc.first, tc.first})
+			if duplicate.Candidate != first.Candidate || duplicate.Digest != first.Digest || !heldContains(duplicate.Held, tc.reason) {
+				t.Fatal("duplicate modeled delivery changed the first candidate")
+			}
+			invalid := tc.later
+			invalid.CapturedAt = time.Time{}
+			rejected := Assess(charge, []TerminalEvidence{tc.first, invalid})
+			if rejected.Candidate != first.Candidate || rejected.Digest != first.Digest || !heldContains(rejected.Held, tc.reason, HeldEvidenceForDistinctCharge) {
+				t.Fatal("unqualified supplemental record changed modeled dimensions")
+			}
+			combined := Assess(charge, []TerminalEvidence{tc.first, tc.later})
+			reversed := Assess(charge, []TerminalEvidence{tc.later, tc.first})
+			if !combined.Candidate.All() || len(combined.Held) != 0 || reversed.Candidate != combined.Candidate || reversed.Digest != combined.Digest {
+				t.Fatal("hypothetical complete model did not converge in both input orders")
+			}
+		})
 	}
 }

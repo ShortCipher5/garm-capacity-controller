@@ -185,11 +185,7 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 		if err != nil {
 			return err
 		}
-		freed, err := sqliteReuseFreed(tx)
-		if err != nil {
-			return err
-		}
-		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
+		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}

@@ -80,6 +80,7 @@ type Overview struct {
 	LegacySourcePreparationCount int64          `json:"legacy_source_preparations"`
 	GarmManagementAvailable      bool           `json:"garm_management_available"`
 	CIHealthAvailable            bool           `json:"ci_health_available,omitempty"`
+	CIHealthSizingAvailable      bool           `json:"ci_health_sizing_available,omitempty"`
 	PolicyRevision               string         `json:"policy_revision"`
 	ManagementEnabled            bool           `json:"management_enabled"`
 	Mode                         string         `json:"mode"`
@@ -131,6 +132,7 @@ type Handler struct {
 	onboardingHash              [32]byte
 	runnerDiskHealth            RunnerDiskHealthSource
 	ciHealth                    atomic.Pointer[CIHealthSnapshot]
+	ciSizing                    atomic.Pointer[CISizingSnapshot]
 	store                       *admission.SQLiteStore
 	tokenHash                   [32]byte
 	writeHash                   [32]byte
@@ -198,6 +200,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.URL.Path == "/admin/api/v1/ci-health/sizing" {
+		if source := h.ciSizing.Load(); source != nil {
+			h.serveCISizing(w, r, source)
+			return
+		}
+	}
 	if r.URL.Path == "/admin/api/v1/demand-observer-status" {
 		h.serveDemandObserver(w, r)
 		return
@@ -220,10 +228,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/capacity-states" {
 		h.serveCapacityStates(w, r)
-		return
-	}
-	if r.URL.Path == "/admin/api/v1/reuse-status" {
-		h.serveReuseStatus(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/inventory-key-rotation" {
@@ -357,6 +361,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		view.GarmManagementAvailable = h.garm != nil
 		view.OnboardingPreflightAvailable = h.onboarding != nil
 		view.CIHealthAvailable = h.ciHealth.Load() != nil
+		view.CIHealthSizingAvailable = h.ciSizing.Load() != nil
 		h.attachRunnerDiskHealth(&view)
 		data, err := json.Marshal(view)
 		if err != nil || len(data) > 2<<20 {

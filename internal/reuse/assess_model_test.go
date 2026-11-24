@@ -4,17 +4,14 @@ import (
 	"sort"
 )
 
-// Verdict is the deterministic outcome of assessing delivered evidence
-// against one anchored charge. Releasable names the dimensions qualified by
-// positive matching evidence; Held lists the sorted, deduplicated reasons
-// every remaining dimension stays charged. A non-empty Held always means the
-// full charge is held: partial release is an accounting decision, never an
-// inference.
+// Verdict describes what the synthetic matcher classified as a candidate.
+// Held reasons explain unqualified components; neither field changes any
+// accounting or establishes the authenticity of an evidence record.
 type Verdict struct {
-	Charge     ChargeIdentity `json:"charge"`
-	Releasable Dimensions     `json:"releasable"`
-	Held       []string       `json:"held"`
-	Digest     string         `json:"digest"`
+	Charge    ChargeIdentity `json:"charge"`
+	Candidate Dimensions     `json:"candidate"`
+	Held      []string       `json:"held"`
+	Digest    string         `json:"digest"`
 }
 
 // mergedBundle is the conflict-checked union of matching evidence deliveries.
@@ -110,9 +107,9 @@ func Assess(charge ChargeIdentity, delivered []TerminalEvidence) Verdict {
 	if conflict {
 		rejected[HeldConflictingEvidence] = true
 	}
-	verdict.Releasable, verdict.Held = qualify(charge, bundle)
+	verdict.Candidate, verdict.Held = qualify(charge, bundle)
 	if conflict {
-		verdict.Releasable = Dimensions{}
+		verdict.Candidate = Dimensions{}
 	}
 	for reason := range rejected {
 		verdict.Held = append(verdict.Held, reason)
@@ -127,11 +124,9 @@ func Assess(charge ChargeIdentity, delivered []TerminalEvidence) Verdict {
 	return verdict
 }
 
-// qualify maps the merged bundle to qualified dimensions and hold reasons.
-// CPU/RAM/count require positive completed-workload evidence and the captured
-// terminal delete with post-delete absence; disk additionally requires exact
-// cleanup state for every charged volume, or an audited inseparability
-// capability for this provider scope. An unverified dimension stays charged.
+// qualify models compute and disk independently. Compute requires the
+// completed-workload and teardown components; disk requires applicable
+// cleanup, a modeled capability, or no originally charged disk.
 func qualify(charge ChargeIdentity, bundle mergedBundle) (Dimensions, []string) {
 	held := []string{}
 	workload := bundle.workload != nil

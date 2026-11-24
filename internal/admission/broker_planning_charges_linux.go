@@ -60,7 +60,7 @@ func (s *SQLiteStore) ReadBrokerPlanningState(ctx context.Context) (BrokerGrantS
 }
 
 func brokerPlanningCharges(s BrokerGrantState) ([]BrokerPlanningCharge, error) {
-	expected, err := sqliteAllocations(s.Config, s.Reservations, s.Inventory, s.Released, s.Reuse)
+	expected, err := sqliteAllocations(s.Config, s.Reservations, s.Inventory, s.Released)
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +73,8 @@ func brokerPlanningCharges(s BrokerGrantState) ([]BrokerPlanningCharge, error) {
 		if s.Released[key] {
 			continue
 		}
-		resources := r.Request.Resources
-		if dimensions, ok := s.Reuse[key]; ok {
-			// Verified reuse removes exactly the qualified dimensions from
-			// the planning charge; unverified dimensions stay charged.
-			resources = remainingCharge(resources, dimensions)
-		}
 		byKey[key] = len(charges)
-		charges = append(charges, BrokerPlanningCharge{"reservation:" + key, r.Request.Host, r.Request.Pool, resources})
+		charges = append(charges, BrokerPlanningCharge{"reservation:" + key, r.Request.Host, r.Request.Pool, r.Request.Resources})
 	}
 	for _, item := range s.Inventory {
 		if index, linked := byKey[item.ReservationKey]; linked {

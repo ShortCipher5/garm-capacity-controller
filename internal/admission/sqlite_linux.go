@@ -16,8 +16,6 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-
-	"github.com/ShortCipher5/garm-capacity-controller/internal/reuse"
 )
 
 var ErrReconciliation = errors.New("complete bounded reconciliation required")
@@ -36,7 +34,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 30
+const sqliteCurrentVersion = 29
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -466,14 +464,6 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
-		if version < 30 {
-			if _, err := tx.Exec(sqliteVerifiedReuseSchema); err != nil {
-				return err
-			}
-			if err := sqliteAudit(tx, "schema_migrated_v30", "", s.now()); err != nil {
-				return err
-			}
-		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -710,7 +700,7 @@ type Allocations struct {
 	Pools            map[string]Resources `json:"pools"`
 }
 
-func sqliteAllocations(config Config, reservations map[string]Reservation, inventory []InventoryResource, released map[string]bool, freed map[string]reuse.Dimensions) (Allocations, error) {
+func sqliteAllocations(config Config, reservations map[string]Reservation, inventory []InventoryResource, released map[string]bool) (Allocations, error) {
 	total := Allocations{Hosts: map[string]Resources{}, Pools: map[string]Resources{}}
 	add := func(host, pool string, resources Resources) error {
 		if _, ok := config.Hosts[host]; !ok {
@@ -733,13 +723,7 @@ func sqliteAllocations(config Config, reservations map[string]Reservation, inven
 		if released[r.Request.Key] {
 			continue
 		}
-		charge := r.Request.Resources
-		if dimensions, ok := freed[r.Request.Key]; ok {
-			// Verified reuse frees exactly the qualified dimensions; an
-			// unverified dimension keeps its full charge.
-			charge = remainingCharge(charge, dimensions)
-		}
-		if err := add(r.Request.Host, r.Request.Pool, charge); err != nil {
+		if err := add(r.Request.Host, r.Request.Pool, r.Request.Resources); err != nil {
 			return Allocations{}, err
 		}
 	}
@@ -847,11 +831,7 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		if err != nil {
 			return err
 		}
-		freed, err := sqliteReuseFreed(tx)
-		if err != nil {
-			return err
-		}
-		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
+		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
 		}
@@ -1035,11 +1015,7 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 		if err != nil {
 			return err
 		}
-		freed, err := sqliteReuseFreed(tx)
-		if err != nil {
-			return err
-		}
-		if _, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed); err != nil {
+		if _, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released); err != nil {
 			return err
 		}
 		encoded, err := json.Marshal(config)
@@ -1130,11 +1106,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 		if err != nil {
 			return err
 		}
-		freed, err := sqliteReuseFreed(tx)
-		if err != nil {
-			return err
-		}
-		result.Allocated, err = sqliteAllocationsWithGrants(tx, result.Config, result.Reservations, result.Inventory, released, freed)
+		result.Allocated, err = sqliteAllocationsWithGrants(tx, result.Config, result.Reservations, result.Inventory, released)
 		if err != nil {
 			return err
 		}
