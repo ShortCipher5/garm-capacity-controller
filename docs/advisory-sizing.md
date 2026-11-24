@@ -51,9 +51,15 @@ held capacity and outstanding durable commitments, plus input version
 (source, ledger sequence, policy revision, demand digest and their combined
 revision) and risks. Per-repository weights are read by repository UUID from
 the revisioned SQLite `broker_policy` document; a repository without an entry
-defaults to weight one. Destinations are marked established only when an
-independently verified stock provider route produced the plan; the eligible
-host list alone never establishes placement, and an unestablished award is
-flagged as a risk rather than as physical enforcement. The section never
-enables the `allocator_loop` writer path, issues grants, changes pool
-settings, retires resources or releases charges.
+defaults to weight one. The proposal `state` is `verified` only when every
+award was narrowed by an independently verified stock provider route;
+otherwise the same growth is published as `hypothetical` with the
+`destination_unestablished` risk, never as verified placement or enforceable
+capacity. The measured-usage pressure veto applies identically on both paths:
+a vetoed host is never selected for growth, routed or unrouted, and pressure
+or route evidence changes the proposal revision. Destinations are marked
+established only when an independently verified stock provider route produced
+the plan; the eligible host list alone never establishes placement. The
+section never enables the `allocator_loop` writer path, issues grants,
+changes pool settings, retires resources or releases charges, and the writer
+configuration never enables this reader.

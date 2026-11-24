@@ -24,6 +24,7 @@ func TestAllocatorProposalSectionServedOnExistingAuthenticatedRoute(t *testing.T
 	before, _ := store.ReadSnapshot(context.Background())
 	proposal := &brokerinput.AllocatorProposal{
 		SourceIdentity: "source",
+		State:          "hypothetical",
 		InputRevision:  "revision",
 		Held: brokerinput.AllocatorHeldCapacity{
 			Global:       admission.Resources{CPU: 1000, RAM: 1000, Disk: 1000, Runners: 1},
@@ -52,6 +53,7 @@ func TestAllocatorProposalSectionServedOnExistingAuthenticatedRoute(t *testing.T
 	var served brokerinput.ReadPlan
 	if json.Unmarshal(response.Body.Bytes(), &served) != nil || served.Allocator == nil ||
 		len(served.Allocator.Awards) != 1 || served.Allocator.Awards[0].Reason != "queued_demand" ||
+		served.Allocator.State != "hypothetical" ||
 		served.Allocator.Decisions[0].RepositoryWeight != 2 || served.Allocator.Held.Global.Runners != 1 ||
 		served.Allocator.Risks[0] != "destination_unestablished" {
 		t.Fatalf("allocator section not inspectable: %s", response.Body.String())
