@@ -395,14 +395,40 @@ type MetricWire struct {
 	GaugeSamples       int    `json:"gauge_samples,omitempty"`
 }
 
+// DiskWireVersion identifies the measured disk wire shape: read and write
+// counters carry independent byte totals and independent coverage, and the
+// used-space gauge is a separate sampled peak that never implies interval
+// coverage. The previous unversioned shape projected one shared coverage pair
+// taken from the read counter; decoders must never assign that historical
+// read coverage to writes.
+const DiskWireVersion = "disk-measured/v2"
+
+// DiskCounterWire is one available cumulative counter total with its own
+// covered nanoseconds and completeness flag. A partial total is not a
+// whole-job estimate; a measured zero is preserved as "0".
+type DiskCounterWire struct {
+	Bytes              string `json:"bytes"`
+	CoveredNanoseconds string `json:"covered_ns"`
+	Complete           bool   `json:"complete"`
+}
+
+// DiskGaugeWire is the used-space gauge: a sampled peak in bytes, the count
+// of gauge samples, the explicitly tracked time the peak was first reached,
+// and the last sample time. It never carries interval coverage.
+type DiskGaugeWire struct {
+	SamplePeakBytes string     `json:"sample_peak_bytes"`
+	GaugeSamples    int        `json:"gauge_samples"`
+	PeakAt          *time.Time `json:"peak_at,omitempty"`
+	LatestSampleAt  *time.Time `json:"latest_sample_at,omitempty"`
+}
+
 type DiskWire struct {
-	State      VerifiedUsageState  `json:"state"`
-	Reason     UsageOmissionReason `json:"reason,omitempty"`
-	ReadBytes  string              `json:"read_bytes,omitempty"`
-	WriteBytes string              `json:"write_bytes,omitempty"`
-	UsedBytes  string              `json:"used_sample_peak_bytes,omitempty"`
-	Covered    string              `json:"covered_ns,omitempty"`
-	Complete   bool                `json:"complete,omitempty"`
+	State   VerifiedUsageState  `json:"state"`
+	Reason  UsageOmissionReason `json:"reason,omitempty"`
+	Version string              `json:"version,omitempty"`
+	Read    *DiskCounterWire    `json:"read,omitempty"`
+	Write   *DiskCounterWire    `json:"write,omitempty"`
+	Used    *DiskGaugeWire      `json:"used,omitempty"`
 }
 
 // Wire projects the record for the CI Health UI under the documented
@@ -453,17 +479,39 @@ func (r VerifiedJobUsageRecord) Wire(matrix AttributionCapabilityMatrix) Wire {
 			// of showing numbers no source supports.
 			measured.Disk = DiskWire{State: VerifiedUsageUnavailable, Reason: UsageOmissionDiskUnsupported}
 		} else {
-			measured.Disk = DiskWire{State: VerifiedUsageVerified}
+			// Read and write are projected with independent coverage: the read
+			// counter's window never stands in for the write counter's, and a
+			// missing counter stays absent instead of becoming a zero. The
+			// used-space gauge is a separate sampled peak, not an interval.
+			measured.Disk = DiskWire{State: VerifiedUsageVerified, Version: DiskWireVersion}
 			if summary.DiskRead != nil {
-				measured.Disk.ReadBytes = strconv.FormatUint(summary.DiskRead.Bytes, 10)
-				measured.Disk.Covered = strconv.FormatUint(uint64(summary.DiskRead.Coverage.Duration), 10)
-				measured.Disk.Complete = summary.DiskRead.Coverage.Complete
+				measured.Disk.Read = &DiskCounterWire{
+					Bytes:              strconv.FormatUint(summary.DiskRead.Bytes, 10),
+					CoveredNanoseconds: strconv.FormatUint(uint64(summary.DiskRead.Coverage.Duration), 10),
+					Complete:           summary.DiskRead.Coverage.Complete,
+				}
 			}
 			if summary.DiskWrite != nil {
-				measured.Disk.WriteBytes = strconv.FormatUint(summary.DiskWrite.Bytes, 10)
+				measured.Disk.Write = &DiskCounterWire{
+					Bytes:              strconv.FormatUint(summary.DiskWrite.Bytes, 10),
+					CoveredNanoseconds: strconv.FormatUint(uint64(summary.DiskWrite.Coverage.Duration), 10),
+					Complete:           summary.DiskWrite.Coverage.Complete,
+				}
 			}
 			if summary.DiskUsed != nil {
-				measured.Disk.UsedBytes = strconv.FormatUint(summary.DiskUsed.SampleMax, 10)
+				gauge := &DiskGaugeWire{
+					SamplePeakBytes: strconv.FormatUint(summary.DiskUsed.SampleMax, 10),
+					GaugeSamples:    summary.DiskUsed.Samples,
+				}
+				if validTime(summary.DiskUsed.PeakAt) {
+					at := summary.DiskUsed.PeakAt.UTC()
+					gauge.PeakAt = &at
+				}
+				if validTime(summary.DiskUsed.LatestAt) {
+					at := summary.DiskUsed.LatestAt.UTC()
+					gauge.LatestSampleAt = &at
+				}
+				measured.Disk.Used = gauge
 			}
 		}
 	}
