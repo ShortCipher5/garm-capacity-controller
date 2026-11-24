@@ -8,9 +8,10 @@ import (
 
 var attributionFixtureStart = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
-// attributionFixtureClaim builds a fully proven claim. The origin is a
-// fixture-only stand-in for the independently verified original provider
-// allocation evidence that no documented source can yet produce.
+// attributionFixtureClaim builds a fully proven claim under an exact
+// enrolled repository scope. The origin is a fixture-only stand-in for the
+// independently verified original provider allocation evidence that no
+// documented source can yet produce.
 func attributionFixtureClaim() (JobAttributionClaim, time.Time) {
 	now := attributionFixtureStart.Add(30 * time.Second)
 	job := JobKey{Attempt: AttemptKey{Source: "fixture", RepositoryID: 1, WorkflowID: 2, RunID: 3, Attempt: 4}, JobID: 5}
@@ -30,7 +31,7 @@ func attributionFixtureClaim() (JobAttributionClaim, time.Time) {
 		Job: job, RunnerAgentID: row.AgentID, StartedAt: attributionFixtureStart, ObservedAt: now, State: StockJobObservedExecuting,
 	}
 	claim := JobAttributionClaim{
-		Job: job, Execution: execution, Row: row, Incarnation: incarnation,
+		Job: job, Enrolled: row.scope(), Execution: execution, Row: row, Incarnation: incarnation,
 		Origin: VerifiedProviderOrigin{
 			Row: row, Incarnation: incarnation, InstanceCreatedAt: incarnation.StartedAt.Add(-time.Second),
 			AllocationObservedAt: incarnation.StartedAt,
@@ -47,6 +48,7 @@ func TestVerifyJobAttributionAcceptsCoherentProvenClaim(t *testing.T) {
 	}
 	if got.Job != claim.Job || got.AgentID != claim.Row.AgentID || got.SourceID != claim.Row.SourceIdentity ||
 		got.PoolID != claim.Row.PoolID || got.RowID != claim.Row.RowID || got.Incarnation != claim.Incarnation ||
+		got.Enrolled != claim.Enrolled ||
 		!got.StartedAt.Equal(claim.Execution.StartedAt) || got.ExecutionEnds {
 		t.Fatalf("verified attribution does not retain the proven facts: %+v", got)
 	}
@@ -66,6 +68,18 @@ func TestVerifyJobAttributionRejectsMismatchedAndMalformedClaims(t *testing.T) {
 		"cross job":          func(c *JobAttributionClaim) { c.Execution.Job.JobID++ },
 		"cross attempt":      func(c *JobAttributionClaim) { c.Execution.Job.Attempt.Attempt++ },
 		"cross repository":   func(c *JobAttributionClaim) { c.Execution.Job.Attempt.RepositoryID++ },
+		"zero enrolled scope": func(c *JobAttributionClaim) {
+			c.Enrolled = EnrolledRowScope{}
+		},
+		"enrolled scope mismatch": func(c *JobAttributionClaim) {
+			// Fields still match the row; only the approved enrollment
+			// differs. Matching fields cannot substitute for enrollment.
+			c.Enrolled.PoolID = "77777777-7777-4777-8777-777777777778"
+		},
+		"row sighting predates job start": func(c *JobAttributionClaim) {
+			c.Row.ObservedAt = c.Execution.StartedAt.Add(-time.Nanosecond)
+			c.Origin.Row = c.Row
+		},
 		"reused instance in origin": func(c *JobAttributionClaim) {
 			c.Origin.Incarnation.UUID = "33333333-3333-4333-8333-333333333334"
 		},

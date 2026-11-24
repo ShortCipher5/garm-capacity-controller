@@ -28,6 +28,24 @@ type StockRowEvidence struct {
 	ObservedAt                  time.Time
 }
 
+// EnrolledRowScope is the caller's separately approved exact enrollment for
+// one source/controller/repository/pool/provider. Constructing it is not
+// enrollment; upstream approval authority mints it. A row observation only
+// counts when it matches this scope exactly — matching fields alone never
+// substitute for enrollment.
+type EnrolledRowScope struct {
+	SourceIdentity, ControllerID       string
+	RepositoryID, PoolID               string
+	ProviderName, OwnershipFingerprint string
+}
+
+func (row StockRowEvidence) scope() EnrolledRowScope {
+	return EnrolledRowScope{
+		SourceIdentity: row.SourceIdentity, ControllerID: row.ControllerID, RepositoryID: row.RepositoryID,
+		PoolID: row.PoolID, ProviderName: row.ProviderName, OwnershipFingerprint: row.OwnershipFingerprint,
+	}
+}
+
 // VerifiedProviderOrigin is the documented shape of independently verified
 // original provider allocation evidence: positive proof that one exact stock
 // row's original allocation created one immutable Incus incarnation. No
@@ -49,9 +67,11 @@ type VerifiedProviderOrigin struct {
 // JobAttributionClaim assembles the separately authenticated evidence reads
 // for one exact job. Every member must have been authenticated by its own
 // source; this package only checks internal consistency and the documented
-// join. The zero Origin carries no provider-origin proof.
+// join. The zero Origin carries no provider-origin proof and the zero
+// Enrolled carries no approved repository scope: both are mandatory.
 type JobAttributionClaim struct {
 	Job         JobKey
+	Enrolled    EnrolledRowScope
 	Execution   StockJobExecutionObservation
 	Row         StockRowEvidence
 	Incarnation StockRunnerIncarnation
@@ -59,10 +79,12 @@ type JobAttributionClaim struct {
 }
 
 // VerifiedAttribution is a claim the matrix and validators accepted: exact
-// job, positive registration, exact row, and one immutable incarnation all
-// proven consistent, with positive original-allocation evidence.
+// job, positive registration, exact enrolled row, and one immutable
+// incarnation all proven consistent, with positive original-allocation
+// evidence.
 type VerifiedAttribution struct {
 	Job           JobKey
+	Enrolled      EnrolledRowScope
 	AgentID       int64
 	SourceID      string
 	PoolID        string
@@ -104,10 +126,12 @@ func validVerifiedProviderOrigin(o VerifiedProviderOrigin, now time.Time) bool {
 // VerifyJobAttribution validates one assembled claim against the documented
 // capability matrix and fails closed. The exact job read must prove the job
 // identity and positive registration; the row evidence must prove the exact
-// row and agent; the incarnation must be well-formed; the agent identities
-// must agree; and the provider-origin join must be positively proven. An
-// absent or zero Origin cannot be replaced by a name, mutable provider label,
-// timing, or the separate TLS authentication of the two reads.
+// enrolled row and agent, positively observed no earlier than the job start;
+// the incarnation must be well-formed; the agent identities must agree; and
+// the provider-origin join must be positively proven. An absent or zero
+// Origin cannot be replaced by a name, mutable provider label, timing, or the
+// separate TLS authentication of the two reads, and a zero or mismatched
+// Enrolled scope cannot be replaced by fields that happen to match.
 func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributionClaim, now time.Time) (VerifiedAttribution, error) {
 	var none VerifiedAttribution
 	if !matrix.Supports(FactExactJobIdentity) || !matrix.Supports(FactPositiveRunnerRegistration) ||
@@ -130,6 +154,13 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 	if execution.State == StockJobObservedExecuting && !ended.IsZero() {
 		return none, ErrAttributionUnsupported
 	}
+	// The exact enrolled repository scope is mandatory: a row observed under
+	// any other enrollment, or before the job started, cannot positively
+	// place this runner on this job no matter how well the fields match.
+	if claim.Enrolled == (EnrolledRowScope{}) || row.scope() != claim.Enrolled ||
+		row.ObservedAt.UTC().Before(started) {
+		return none, ErrAttributionUnsupported
+	}
 	if !validStockRowEvidence(row, now) || row.AgentID != execution.RunnerAgentID {
 		return none, ErrAttributionUnsupported
 	}
@@ -144,7 +175,8 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 		return none, ErrAttributionUnsupported
 	}
 	return VerifiedAttribution{
-		Job: job, AgentID: row.AgentID, SourceID: row.SourceIdentity, PoolID: row.PoolID, RowID: row.RowID,
-		Incarnation: incarnation, Origin: origin, StartedAt: started, ExecutionEnds: execution.State == StockJobObservedEnded,
+		Job: job, Enrolled: claim.Enrolled, AgentID: row.AgentID, SourceID: row.SourceIdentity,
+		PoolID: row.PoolID, RowID: row.RowID, Incarnation: incarnation, Origin: origin,
+		StartedAt: started, ExecutionEnds: execution.State == StockJobObservedEnded,
 	}, nil
 }

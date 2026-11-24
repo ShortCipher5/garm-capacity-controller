@@ -105,3 +105,14 @@ func fixtureJoinMatrix() AttributionCapabilityMatrix {
 	})
 	return m
 }
+
+// fixtureFullMatrix additionally documents a source for per-instance disk
+// counters so disk display paths can be exercised offline.
+func fixtureFullMatrix() AttributionCapabilityMatrix {
+	m := fixtureJoinMatrix()
+	m.Sources = append(m.Sources, AttributionCapability{
+		Class:  "fixture_disk_source",
+		Proves: []AttributionFact{FactDiskCounters},
+	})
+	return m
+}
