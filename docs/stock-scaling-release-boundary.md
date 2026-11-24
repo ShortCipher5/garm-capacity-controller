@@ -30,6 +30,15 @@ enforce a physical quota, or make the preview safe to apply. Activation
 requires a separately qualified bounded stock API path and rollout; it must
 not be inferred from previews, local checks, or a successful image build.
 
+The durable stock-apply controller state added under plan 02 keeps that
+boundary: it records operator-reviewed proposals, maintenance pauses and
+interrupted-write uncertainty in a restart-safe journal, and renders every
+mutating command disabled with an explicit reason. A matching old or new
+settings readback is an observation only; `applied_when_proven` is reachable
+solely through an independently authoritative outcome, which no pinned stock
+interface can supply today. See
+[the recovery contract and compatibility gap](stock-apply-recovery-contract.md).
+
 ## Qualify a missed initial job webhook at zero idle
 
 This is a separate, unrun rollout scenario for an ordinary repository pool,
