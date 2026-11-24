@@ -31,6 +31,9 @@ type ReadPlan struct {
 	Pressure                 []PressureStatus          `json:"pressure,omitempty"`
 	StockMaximumPreview      *StockMaximumPreview      `json:"stock_maximum_preview,omitempty"`
 	StockMaximumBatchPreview *StockMaximumPreview      `json:"stock_maximum_batch_preview,omitempty"`
+	// Allocator is the observe-only cross-repository allocation proposal. It is
+	// present only when the reader opted into it; it authorizes no writes.
+	Allocator *AllocatorProposal `json:"allocator,omitempty"`
 }
 type ReadPlanPool struct {
 	Pool                 string                `json:"pool"`
@@ -58,6 +61,7 @@ type planReader struct {
 	stockMaximumPreview bool
 	scalingHistory      scalingPreviewHistory
 	maximumBatchHistory stockMaximumBatchHistory
+	allocatorProposal   bool
 }
 
 func (s *Service) ReadPlan(ctx context.Context) (ReadPlan, error) {
@@ -125,8 +129,8 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	plan, err := stock(snapshot, state.Policy, observed, opt, true)
 	baseline := plan
 	var pressure []PressureStatus
+	var blocked map[string]bool
 	if err == nil && p.pressure {
-		var blocked map[string]bool
 		pressure, blocked, err = p.readPressure(ctx, state, opt.Now)
 		if err == nil {
 			plan, err = advisoryStock(snapshot, state.Policy, observed, opt, blocked)
@@ -180,6 +184,13 @@ func (p *planReader) read(ctx context.Context) (_ ReadPlan, resultErr error) {
 	if p.stockIdlePreview {
 		result.StockIdlePreview = p.idleHistory.accept(idleSamples, idleErr, now, result.ExpiresAt)
 		result.StockIdleDecisionPreview = p.idleDecisionHistory.accept(idleDecision, idleDecisionErr, now, result.ExpiresAt)
+	}
+	if p.allocatorProposal {
+		proposal, err := p.allocatorSection(ctx, state, snapshot, observed, plan, identity, opt, blocked, now, result.ExpiresAt)
+		if err != nil {
+			return ReadPlan{}, err
+		}
+		result.Allocator = &proposal
 	}
 	return result, nil
 }
