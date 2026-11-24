@@ -30,7 +30,12 @@ func snapshotRoot(t *testing.T) (string, *os.Root) {
 
 func snapshotOpen(t *testing.T, root *os.Root, initialize bool) *History {
 	t.Helper()
-	h, err := OpenHistory(t.Context(), HistoryInput{Enabled: true, Root: root, Initialize: initialize})
+	return snapshotOpenMode(t, root, initialize, false)
+}
+
+func snapshotOpenMode(t *testing.T, root *os.Root, initialize, versioned bool) *History {
+	t.Helper()
+	h, err := OpenHistory(t.Context(), HistoryInput{Enabled: true, Root: root, Initialize: initialize, EnableVersionedObservations: versioned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +551,7 @@ func TestSnapshotHistoryRejectsAPageThatWouldLoseKnownConclusions(t *testing.T) 
 
 func TestSnapshotHistoryCompatibleResultsDoNotFillMissingIdentity(t *testing.T) {
 	_, root := snapshotRoot(t)
-	h := snapshotOpen(t, root, true)
+	h := snapshotOpenMode(t, root, true, true)
 	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	s := HistoryScope{"fixture", 9007199254740993, 44}
 	before := snapAttempt(s, 20, 1, now)
@@ -614,7 +619,7 @@ func TestHistoryIgnoresLiveJobCreationClock(t *testing.T) {
 // retained as their own versions, the latest one visibly incomplete.
 func TestSnapshotHistorySparseLaterObservationKeepsPriorMeasuredVersion(t *testing.T) {
 	path, root := snapshotRoot(t)
-	h := snapshotOpen(t, root, true)
+	h := snapshotOpenMode(t, root, true, true)
 	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	s := HistoryScope{"fixture", 9007199254740993, 44}
 	measured := snapAttempt(s, 20, 1, now)
@@ -666,7 +671,7 @@ func TestSnapshotHistorySparseLaterObservationKeepsPriorMeasuredVersion(t *testi
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-	h = snapshotOpen(t, root, false)
+	h = snapshotOpenMode(t, root, false, true)
 	if c, err := h.Cursor(t.Context(), s); err != nil || c != next {
 		t.Fatal("cursor advanced ahead of facts or was lost", c, err)
 	}
@@ -767,11 +772,12 @@ func TestSnapshotHistoryPurgesExpiredVersionsByObservationTime(t *testing.T) {
 // each selected attempt, never a partial group cut off at the limit.
 func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtAttemptLimit(t *testing.T) {
 	_, root := snapshotRoot(t)
-	h := snapshotOpen(t, root, true)
+	h := snapshotOpenMode(t, root, true, true)
 	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	now := base.Add(5 * time.Minute)
 	s := HistoryScope{"fixture", 9007199254740993, 44}
 	aNew := snapAttempt(s, 30, 1, base.Add(4*time.Minute))
+	aNew.Clock.StartedAt, aNew.Clock.CompletedAt = time.Time{}, time.Time{} // keep the older wall-time witness
 	b := snapAttempt(s, 31, 1, base.Add(3*time.Minute))
 	c := snapAttempt(s, 32, 1, base.Add(2*time.Minute))
 	aOld := snapAttempt(s, 30, 1, base.Add(time.Minute))
@@ -806,7 +812,7 @@ func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtAttemptLimit(t *testing
 // be included: the limit never splits a selected group.
 func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtRecordLimit(t *testing.T) {
 	_, root := snapshotRoot(t)
-	h := snapshotOpen(t, root, true)
+	h := snapshotOpenMode(t, root, true, true)
 	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	now := base.Add(5 * time.Minute)
 	s := HistoryScope{"fixture", 9007199254740993, 44}
@@ -815,6 +821,7 @@ func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtRecordLimit(t *testing.
 	}
 	big := sizedSnapAttempt(s, 99, base.Add(3*time.Minute), 1000, 9900) // 10,901 records.
 	aNew := small(30, base.Add(4*time.Minute))
+	aNew.Clock.StartedAt, aNew.Clock.CompletedAt = time.Time{}, time.Time{} // keep the older wall-time witness
 	c := small(32, base.Add(2*time.Minute))
 	aOld := small(30, base.Add(time.Minute))
 	if records := historyRecordCount(big); 2*historyRecordCount(aNew)+records > historyMaxPageRecords ||
@@ -850,5 +857,117 @@ func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtRecordLimit(t *testing.
 	}
 	if after, err := os.ReadFile(filepath.Join(root.Name(), historyFile)); err != nil || !bytes.Equal(before, after) {
 		t.Fatal("bounded selection changed retained snapshot bytes", err)
+	}
+}
+
+func TestSnapshotHistoryDefaultNeverUpgradesSparseObservation(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	start := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 901, 100}
+	full, sparse := snapAttempt(s, 1, 1, start), snapAttempt(s, 1, 1, start)
+	sparse.AsOf = start.Add(time.Minute)
+	sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{full}, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{sparse}, sparse.AsOf); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(filepath.Join(path, historyFile))
+	state, decodeErr := decodeHistory(payload)
+	if err != nil || decodeErr != nil || state.Format != historyFormat || len(state.Attempts) != 1 || !state.Attempts[0].AsOf.Equal(sparse.AsOf) {
+		t.Fatalf("default mode departed from v1: %+v, %v, %v", state, err, decodeErr)
+	}
+	h = snapshotOpen(t, root, false)
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != (HistoryCursor{2, 2}) {
+		t.Fatalf("default reopen cursor: %+v, %v", c, err)
+	}
+}
+
+func TestSnapshotHistoryVersionedSustainedPollingPreservesExactWitnessAndPeers(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	start := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s, otherScope := HistoryScope{"fixture", 901, 100}, HistoryScope{"fixture", 902, 100}
+	full, sibling := snapAttempt(s, 10, 1, start), snapAttempt(s, 20, 1, start)
+	other := snapAttempt(otherScope, 30, 1, start)
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{full, sibling}, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), otherScope, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{other}, start); err != nil {
+		t.Fatal(err)
+	}
+	now := start
+	for revision := int64(2); revision <= 130; revision++ {
+		now = now.Add(time.Second)
+		sparse := snapAttempt(s, 10, 1, start)
+		sparse.AsOf = now
+		sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+		if err := h.Apply(t.Context(), s, HistoryCursor{revision - 1, revision - 1}, HistoryCursor{revision, revision}, []AttemptFacts{sparse}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h.state.Format != historyFormatV2 || len(h.state.Attempts) != 4 {
+		t.Fatalf("sustained polling grew retained records: %s, %d", h.state.Format, len(h.state.Attempts))
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied, err := OpenHistory(t.Context(), HistoryInput{Enabled: true, Root: root}); denied != nil || !errors.Is(err, ErrHistory) {
+		t.Fatalf("non-opt-in reader accepted v2: %v, %v", denied, err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(after, before) {
+		t.Fatal("non-opt-in refusal changed v2 bytes", err)
+	}
+	h = snapshotOpenMode(t, root, false, true)
+	rows, err := h.Recent(t.Context(), s, 2, now)
+	if err != nil || len(rows) != 3 || rows[1].Key != sibling.Key || !rows[2].AsOf.Equal(start) {
+		t.Fatalf("polling displaced unrelated attempt or witness: %+v, %v", rows, err)
+	}
+	view, err := ProjectRetainedAttempt([]AttemptFacts{rows[0], rows[2]})
+	if err != nil || view.Wall.Current || view.Wall.Basis != ObservedEndpoints || !view.Wall.MeasuredAt.Equal(start) {
+		t.Fatalf("old measurement freshness changed: %+v, %v", view.Wall, err)
+	}
+	if rows, err := h.Recent(t.Context(), otherScope, 1, now); err != nil || len(rows) != 1 || rows[0].Key != other.Key {
+		t.Fatalf("polling displaced unrelated scope: %+v, %v", rows, err)
+	}
+}
+
+func TestSnapshotHistoryVersionedOverBudgetKeepsAcceptedFactsAndCursor(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpenMode(t, root, true, true)
+	s := HistoryScope{"fixture", 901, 100}
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	a := sizedSnapAttempt(s, 1, now, 700, 6000)
+	b := sizedSnapAttempt(s, 1, now.Add(time.Minute), 700, 6000)
+	b.Clock.StartedAt, b.Clock.CompletedAt = time.Time{}, time.Time{} // prior version is still needed
+	if size := historyRecordCount(a) + historyRecordCount(b); size <= historyMaxPageRecords {
+		t.Fatalf("fixture does not exceed the whole-group bound: %d", size)
+	}
+	current := HistoryCursor{1, 1}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, current, []AttemptFacts{a}, now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, current, HistoryCursor{2, 2}, []AttemptFacts{b}, b.AsOf); !errors.Is(err, ErrHistory) {
+		t.Fatalf("over-budget witness group did not fail closed: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("over-budget write changed accepted bytes: %v", err)
+	}
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != current {
+		t.Fatalf("over-budget write advanced the cursor: %+v, %v", c, err)
 	}
 }

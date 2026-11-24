@@ -23,6 +23,7 @@ const (
 	historyStage          = "ci-health-history-v1.stage"
 	historyIntent         = "ci-health-history-v1.intent"
 	historyFormat         = "garm-ci-health-history-v1"
+	historyFormatV2       = "garm-ci-health-history-v2"
 	historyRetention      = 30 * 24 * time.Hour
 	historyMaxRecords     = 50_000
 	historyMaxScopes      = 64
@@ -64,6 +65,10 @@ type HistoryInput struct {
 	// Old snapshots without conclusions remain readable. A binary predating
 	// that optional field will refuse snapshots that contain one.
 	Initialize bool
+	// EnableVersionedObservations opts in to v2 measurement retention.
+	// It is not enabled by gateway configuration. Without this explicit
+	// opt-in, writes stay v1 and existing v2 snapshots are refused.
+	EnableVersionedObservations bool
 	// Review opts into a reopen-only verification of the exact independently
 	// reviewed snapshot while it is owned/flocked. It never initializes.
 	Review *HistoryReopenReview
@@ -93,6 +98,7 @@ type History struct {
 	current   os.FileInfo
 	state     historyState
 	failed    bool
+	versioned bool
 }
 
 // OpenHistory is opt-in. Ordinary startup never opens it; the explicit
@@ -152,7 +158,7 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 		_ = root.Close()
 		return nil, ErrHistory
 	}
-	h := &History{root: root, dir: dir}
+	h := &History{root: root, dir: dir, versioned: in.EnableVersionedObservations}
 	ok := false
 	defer func() {
 		if !ok {
@@ -213,7 +219,7 @@ func openHistory(ctx context.Context, in HistoryInput, requireEmpty bool) (*Hist
 		if reviewed != nil && sha256.Sum256(payload) != expected {
 			return nil, ErrHistorySnapshotReview
 		}
-		if h.state, err = decodeHistory(payload); err != nil || !h.available(ctx) {
+		if h.state, err = decodeHistory(payload); err != nil || !h.versioned && h.state.Format == historyFormatV2 || !h.available(ctx) {
 			return nil, ErrHistory
 		}
 		if reviewed != nil {
@@ -436,7 +442,7 @@ func historyCopyAttempt(in AttemptFacts) (AttemptFacts, error) {
 
 func decodeHistory(payload []byte) (historyState, error) {
 	var s historyState
-	if len(payload) == 0 || len(payload) > historyMaxBytes || json.Unmarshal(payload, &s) != nil || s.Format != historyFormat ||
+	if len(payload) == 0 || len(payload) > historyMaxBytes || json.Unmarshal(payload, &s) != nil || (s.Format != historyFormat && s.Format != historyFormatV2) ||
 		s.Attempts == nil || s.Checkpoints == nil || len(s.Checkpoints) > historyMaxScopes || len(s.Attempts) > historyMaxRecords {
 		return historyState{}, ErrHistory
 	}
@@ -453,14 +459,18 @@ func decodeHistory(payload []byte) (historyState, error) {
 		as  time.Time
 	}
 	seen := make(map[version]bool, len(s.Attempts))
+	groupRecords := make(map[AttemptKey]int, len(s.Attempts))
 	total := 0
 	for i, in := range s.Attempts {
 		a, err := historyCopyAttempt(in)
 		if err != nil || !scopes[historyScope(a.Key)] || seen[version{a.Key, a.AsOf}] || i > 0 && !historyNewer(s.Attempts[i-1], a) {
 			return historyState{}, ErrHistory
 		}
-		total += historyRecordCount(a)
-		if total > historyMaxRecords {
+		count := historyRecordCount(a)
+		groupRecords[a.Key] += count
+		total += count
+		if total > historyMaxRecords || s.Format == historyFormat && groupRecords[a.Key] != count ||
+			s.Format == historyFormatV2 && groupRecords[a.Key] > historyMaxPageRecords {
 			return historyState{}, ErrHistory
 		}
 		seen[version{a.Key, a.AsOf}] = true
@@ -511,9 +521,10 @@ func (h *History) Cursor(ctx context.Context, scope HistoryScope) (HistoryCursor
 }
 
 // Apply seals a bounded coherent page and its CAS transition as one commit.
-// A newer observation of an exact retained attempt is kept as its own
-// version beside prior positive measurements, never merged into them or
-// silently dropped; a byte-identical version is an exact replay. No version
+// Default v1 retains the newest observation of each attempt. Explicit v2
+// retains only whole older observations still supplying the newest evidence
+// of a timing field, without moving their measurement timestamps to a newer
+// version. A byte-identical version is an exact replay. No version
 // can lose or contradict a known terminal conclusion on the exact retained
 // attempt, job, or step, and an older or out-of-scope version is refused.
 // It never merges absent children or infers coverage. I/O failure leaves the
@@ -574,7 +585,7 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 	if expected.Revision == 0 && len(h.state.Checkpoints) >= historyMaxScopes {
 		return ErrHistory
 	}
-	pending := historyState{Format: historyFormat, Checkpoints: append([]historyCheckpoint{}, h.state.Checkpoints...)}
+	pending := historyState{Format: h.state.Format, Checkpoints: append([]historyCheckpoint{}, h.state.Checkpoints...)}
 	if expected.Revision == 0 {
 		pending.Checkpoints = append(pending.Checkpoints, historyCheckpoint{})
 		copy(pending.Checkpoints[pos+1:], pending.Checkpoints[pos:])
@@ -610,22 +621,40 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 				}
 			}
 		}
+		// Legacy writes replace the previous observation exactly as v1 did.
+		if _, replaced := incoming[old.Key]; !h.versioned && replaced {
+			continue
+		}
 		if old.AsOf.After(cutoff) {
 			pending.Attempts = append(pending.Attempts, old)
 		}
 	}
 	for _, a := range attempts {
-		if !replayed[a.Key] {
+		if !h.versioned || !replayed[a.Key] {
 			pending.Attempts = append(pending.Attempts, a)
 		}
 	}
 	sort.Slice(pending.Attempts, func(i, j int) bool { return historyNewer(pending.Attempts[i], pending.Attempts[j]) })
-	total := 0
-	for i, a := range pending.Attempts {
-		total += historyRecordCount(a)
-		if total > historyMaxRecords {
-			pending.Attempts = pending.Attempts[:i]
-			break
+	if h.versioned {
+		// No partial group or accepted unexpired evidence is silently
+		// evicted under real capacity pressure; refuse the entire write.
+		var multiple bool
+		pending.Attempts, multiple, err = compactHistoryMeasurements(ctx, pending.Attempts)
+		if err != nil {
+			return err
+		}
+		if multiple {
+			pending.Format = historyFormatV2
+		}
+	} else {
+		// Preserve v1's original whole-attempt newest-first retention.
+		total := 0
+		for i, a := range pending.Attempts {
+			total += historyRecordCount(a)
+			if total > historyMaxRecords {
+				pending.Attempts = pending.Attempts[:i]
+				break
+			}
 		}
 	}
 	data, err := json.Marshal(pending)

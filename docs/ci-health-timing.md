@@ -207,16 +207,23 @@ Hitting a selection limit does not change the persisted facts, revisions, or
 future writes. The marker is about the bounded local read, not proof that a
 particular seven-day bucket lost observations.
 
-A later positive observation of an already retained exact attempt is kept as
-its own version beside the earlier one; the bounded read includes every
-retained version of a selected attempt and never splits one. The newest
-version is the status, result and last-observed window authority for that
-attempt, so a sparse later observation refreshes the attempt's window without
-blocking unrelated attempts. Endpoints its latest observation omitted stay
-visibly incomplete in the retained row instead of being copied forward: each
-rendered duration and each pooled mean or p95 sample remains attributed to
-the exact observation version that measured it, and a newer version can
-never remove or contradict a prior known terminal result. The view separately counts
+Existing gateway settings retain the original v1 snapshot format and its
+single newest observation per exact attempt. They do not turn on persistent
+measurement witnesses. A sparse later observation in v1 replaces the older
+one, so omitted endpoints remain unknown.
+
+The offline store supports a separate, explicit, disabled-by-default
+`HistoryInput.EnableVersionedObservations` opt-in, not a gateway setting.
+It preserves the latest status row and each still-needed older observation
+in its original bytes and time; repeated polls do not accumulate superseded
+samples. A bounded read includes whole retained groups. A newer observation
+cannot remove or contradict a known terminal result. The latest observation
+is the only row-set and last-observed window authority; past witnesses never
+refresh a measurement's age, and this is not an arbitrary point-in-time
+archive. If genuinely distinct unexpired evidence exceeds the whole-attempt
+read limit (12,000 records) or the store limits (50,000 records or 16 MiB),
+v2 refuses the entire update without advancing the cursor rather than silently
+discarding evidence. The view separately counts
 initial attempts and retry attempts and their distinct run IDs. It also
 counts initial attempt failures with an observed successful higher-numbered
 attempt for the same exact run, at most once per run. The count is shown in
@@ -267,11 +274,17 @@ facts may remain in the store within approved retention, but unobserved
 coverage stays unknown. Verify separately that withdrawing repository scope
 stops history visibility. A stored observation is not current authorization.
 
-The optional history snapshot reader accepts older rows with no result field.
-An older binary does not read new snapshots containing results. If enabling
-retained history for a deployment, preserve its data and requalify any
-rollback against the older reader; do not erase or reinitialize history to get
-around an incompatible snapshot.
+The optional v1 reader still accepts older rows with no result field. A binary
+predating result support can refuse result-bearing v1 snapshots; qualify the
+exact rollback version. For explicitly opted-in offline callers, the first
+write needing multiple witnesses changes the format marker to v2 in the same
+atomic slot. Old binaries and new non-opt-in readers refuse v2 without writing;
+successful v2 writes never downgrade the marker, even after older witnesses
+expire. Before any future activation, preserve and independently verify a v1
+backup or choose to run the older application with history disabled and the
+v2 data untouched. Disable writer ownership before reviewing or restoring a
+known-compatible snapshot. Do not erase, reinitialize, or auto-convert v2 to
+make an older reader open it. Production activation remains separate.
 
 ### Offline test-report format qualification
 
