@@ -19,7 +19,8 @@ function unavailableView(){
  return {state:'unavailable',reason:'view_unavailable',paused:false,drift:false,operation:null,
   charged:{runners:0,reason:'no_recorded_operation'},
   capability:{supported:false,refusals:[{code:'view_unavailable'}]},
-  actions:['apply','withdraw_proposal','pause','resume','resolve_outcome','rollback'].map(action=>({action,enabled:false,reason:'view_unavailable'}))};
+  actions:['apply','withdraw_proposal','pause','resume','resolve_outcome','rollback'].map(action=>({action,enabled:false,reason:'view_unavailable'})),
+  resume:{lift_pause:false,lift_reason:'not_paused',ready:false,reason:'view_unavailable'}};
 }
 
 function validOperation(raw){
@@ -34,7 +35,7 @@ function validOperation(raw){
 
 export function stockApplyView(raw){
  if(!raw||typeof raw!=='object'||Array.isArray(raw))return unavailableView();
- const baseKeys=['scope','state','reason','paused','drift','actions','charged','capability'];
+ const baseKeys=['scope','state','reason','paused','drift','actions','charged','capability','resume'];
  const keys=Object.keys(raw);
  if(keys.length!==baseKeys.length+(Object.hasOwn(raw,'operation')?1:0)||!baseKeys.every(k=>Object.hasOwn(raw,k)))return unavailableView();
  if(!scope(raw.scope)||!states.has(raw.state)||!reason(raw.reason)||typeof raw.paused!=='boolean'||typeof raw.drift!=='boolean'||raw.drift===true&&!raw.operation)return unavailableView();
@@ -58,11 +59,15 @@ export function stockApplyView(raw){
   seen.add(action.action);
  }
  if(seen.size!==actionNames.size)return unavailableView();
+ const resumeKeys=['lift_pause','ready'];
+ if(!exact(raw.resume,resumeKeys)&&!(exact(raw.resume,['lift_pause','lift_reason','ready'])||exact(raw.resume,['lift_pause','ready','reason'])||exact(raw.resume,['lift_pause','lift_reason','ready','reason'])))return unavailableView();
+ if(typeof raw.resume.lift_pause!=='boolean'||typeof raw.resume.ready!=='boolean'||
+    raw.resume.lift_reason!==undefined&&!reason(raw.resume.lift_reason)||raw.resume.reason!==undefined&&!reason(raw.resume.reason))return unavailableView();
  const operation=raw.operation===undefined?null:validOperation(raw.operation)?raw.operation:null;
  if(raw.operation!==undefined&&operation===null)return unavailableView();
  if(['proposed','applied_when_proven','outcome_unknown'].includes(raw.state)&&!operation)return unavailableView();
  return {state:raw.state,reason:raw.reason,paused:raw.paused,drift:raw.drift,operation,
-  charged:raw.charged,capability:{supported:raw.capability.supported,refusals},actions:raw.actions};
+  charged:raw.charged,capability:{supported:raw.capability.supported,refusals},actions:raw.actions,resume:raw.resume};
 }
 
 const refusalMessages={
@@ -87,5 +92,11 @@ export function stockApplyMessages(view){
  const detail=view.capability.refusals.find(refusal=>refusal.code==='requirement_unestablished');
  if(detail)refusals[view.capability.refusals.indexOf(detail)]=`A required adapter property is not established: ${detail.detail}.`;
  return {state,reason:view.reason,charged,refusals,
-  drift:view.drift?'Observed settings drifted from the journaled operation; apply stays blocked pending explicit operator review.':''};
+  drift:view.drift?'Observed settings drifted from the journaled operation; apply stays blocked pending explicit operator review.':'',
+  resumeLift:view.resume.lift_pause
+   ?'Lifting the local maintenance pause is available. It is a controller-local action only: it never clears, resolves or reclassifies a pending or unknown operation.'
+   :`Lifting the local maintenance pause is unavailable (${(view.resume.lift_reason||'unavailable').replaceAll('_',' ')}).`,
+  resumeReady:view.resume.ready
+   ?'Ready to resume apply work: the pause is lifted and every fresh drift check passes. No apply control is enabled here without a qualified adapter.'
+   :`Ready to resume apply work: no — ${(view.resume.reason||'unavailable').replaceAll('_',' ')}. Lifting a pause does not imply readiness; fresh drift checks run separately afterwards.`};
 }

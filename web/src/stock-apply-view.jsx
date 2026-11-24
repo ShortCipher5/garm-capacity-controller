@@ -14,6 +14,9 @@ export function StockApplyControllerView({ view }) {
     {messages.drift && <p className="drain-warning" role="alert">{messages.drift}</p>}
     {view.operation && <p>Recorded operation <code>{view.operation.operation_id}</code>: {view.operation.direction} pool <code>{view.operation.pool_id}</code> maximum from {view.operation.observed} to {view.operation.suggested} (durable state: <code>{view.operation.state}</code>).</p>}
     {messages.refusals.length > 0 && <ul>{messages.refusals.map((line, index) => <li key={index}>{line}</li>)}</ul>}
+    <h4>Pause and resume</h4>
+    <p>{messages.resumeLift}</p>
+    <p>{messages.resumeReady}</p>
     <h4>Operator commands</h4>
     <ul>
       {view.actions.map(action => <li key={action.action}>
