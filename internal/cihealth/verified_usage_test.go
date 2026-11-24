@@ -38,7 +38,7 @@ func usageFixtureSet(claim JobAttributionClaim, now time.Time, maxGap time.Durat
 func TestBuildVerifiedJobUsageProducesExpectedNumbersForProvenWindow(t *testing.T) {
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, MaxJobResourceGap)
-	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
+	record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, now)
 	if record.State != VerifiedUsageVerified || record.Reason != UsageOmissionNone {
 		t.Fatalf("proven window not verified: %+v", record)
 	}
@@ -66,7 +66,7 @@ func TestBuildVerifiedJobUsageProducesExpectedNumbersForProvenWindow(t *testing.
 func TestBuildVerifiedJobUsageReportsPartialCoverageAccurately(t *testing.T) {
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, 3*time.Second) // the 4s cadence gap loses the last interval
-	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
+	record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, now)
 	if record.State != VerifiedUsagePartial || record.Measured == nil {
 		t.Fatalf("incomplete sampling must be partial with numbers: %+v", record)
 	}
@@ -107,6 +107,16 @@ func TestBuildVerifiedJobUsageNeverAttributesAcrossUnsafeEvidence(t *testing.T) 
 			c.Row.ObservedAt = c.Row.ObservedAt.Add(time.Hour)
 			c.Origin.Row = c.Row
 		}, UsageOmissionStaleEvidence},
+		"stale row sighting before job start": {func(c *JobAttributionClaim, _ *VerifiedUsageSampleSet) {
+			c.Row.ObservedAt = c.Execution.StartedAt.Add(-time.Nanosecond)
+			c.Origin.Row = c.Row
+		}, UsageOmissionStaleEvidence},
+		"bracket names another garm row": {func(_ *JobAttributionClaim, s *VerifiedUsageSampleSet) {
+			s.Initial.StockInstanceUUID = "88888888-8888-4888-8888-888888888889"
+		}, UsageOmissionEvidenceMismatch},
+		"bracket runner identity differs": {func(_ *JobAttributionClaim, s *VerifiedUsageSampleSet) {
+			s.Initial.RunnerAgentID++
+		}, UsageOmissionEvidenceMismatch},
 		"unbracketed start": {func(_ *JobAttributionClaim, s *VerifiedUsageSampleSet) {
 			s.Initial.ObservedAt = s.Scope.StartedAt.Add(time.Second)
 		}, UsageOmissionUnbracketed},
@@ -135,7 +145,7 @@ func TestBuildVerifiedJobUsageNeverAttributesAcrossUnsafeEvidence(t *testing.T) 
 			claim, now := attributionFixtureClaim()
 			set := usageFixtureSet(claim, now, MaxJobResourceGap)
 			tc.alter(&claim, &set)
-			record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
+			record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, now)
 			if record.State != VerifiedUsageUnavailable || record.Reason != tc.want {
 				t.Fatalf("unsafe attribution produced %s/%s, want unavailable/%s: %+v", record.State, record.Reason, tc.want, record)
 			}
@@ -150,9 +160,27 @@ func TestBuildVerifiedJobUsageKeepsShortUncapturedJobUnavailableNotZero(t *testi
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, MaxJobResourceGap)
 	set.Samples = nil
-	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
+	record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, now)
 	if record.State != VerifiedUsageUnavailable || record.Reason != UsageOmissionJobTooShort || record.Measured != nil {
 		t.Fatalf("uncaptured short job must be unavailable, not zero: %+v", record)
+	}
+}
+
+func TestBuildVerifiedJobUsageKeepsDocumentedMatrixUnavailableEvenWhenFieldsMatch(t *testing.T) {
+	// Every field is coherent and would verify claim-level consistency, but
+	// the documented matrix still has no source that proves the join. The
+	// measured numbers must not come back on field coherence alone.
+	claim, now := attributionFixtureClaim()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	if _, err := VerifyJobAttribution(DocumentedMatrix(), claim, now); err != nil {
+		t.Fatalf("fixture fields must be claim-coherent for this regression: %v", err)
+	}
+	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
+	if record.State != VerifiedUsageUnavailable || record.Reason != UsageOmissionJoinUnsupported || record.Measured != nil {
+		t.Fatalf("documented matrix must stay unavailable even when fields match: %+v", record)
+	}
+	if decision := DecideCollection(DocumentedMatrix(), claim, set, fixtureHooks(), now); decision.Collect {
+		t.Fatalf("documented matrix must not authorize collection with hooks connected: %+v", decision)
 	}
 }
 
@@ -162,30 +190,76 @@ func TestBuildVerifiedJobUsageSeparatesIndependentlyBoundDisk(t *testing.T) {
 	for i := range set.Samples {
 		set.Samples[i].DiskReadBytes = knownResource([]uint64{5, 15, 55}[i])
 	}
-	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
+	record := BuildVerifiedJobUsage(fixtureFullMatrix(), claim, set, now)
 	if record.State != VerifiedUsageVerified || record.Measured == nil || record.Measured.DiskRead == nil ||
 		record.Measured.DiskRead.Bytes != 50 || !record.Measured.DiskRead.Coverage.Complete {
 		t.Fatalf("independently bound disk usage must be preserved: %+v", record.Measured)
 	}
-	wire := record.Wire()
+	wire := record.Wire(fixtureFullMatrix())
 	if wire.Measured == nil || wire.Measured.Disk.State != VerifiedUsageVerified || wire.Measured.Disk.ReadBytes != "50" {
 		t.Fatalf("disk wire projection must stay separate and positive: %+v", wire.Measured.Disk)
+	}
+	// No documented source supports per-instance disk counters: the same
+	// record projected under the stock matrix hides them with a reason
+	// instead of showing unsupported numbers.
+	stockWire := record.Wire(DocumentedMatrix())
+	if stockWire.Measured == nil || stockWire.Measured.Disk.State != VerifiedUsageUnavailable ||
+		stockWire.Measured.Disk.Reason != UsageOmissionDiskUnsupported || stockWire.Measured.Disk.ReadBytes != "" {
+		t.Fatalf("disk must hide without a documented source, not show zeros: %+v", stockWire.Measured.Disk)
+	}
+}
+
+type fixtureProducer struct{ class AttributionEvidenceClass }
+
+func (p fixtureProducer) EvidenceClass() AttributionEvidenceClass { return p.class }
+
+type fixtureHistory struct{ revision int64 }
+
+func (h fixtureHistory) RetainedRevision() int64 { return h.revision }
+
+func fixtureHooks() CollectionHooks {
+	return CollectionHooks{
+		Producer: fixtureProducer{class: "fixture_verified_origin"},
+		History:  fixtureHistory{revision: 1},
 	}
 }
 
 func TestDecideCollectionFailsClosedOnDocumentedMatrix(t *testing.T) {
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, MaxJobResourceGap)
-	decision := DecideCollection(DocumentedMatrix(), claim, set, now)
+	decision := DecideCollection(DocumentedMatrix(), claim, set, fixtureHooks(), now)
 	if decision.Collect || decision.Reason != UsageOmissionJoinUnsupported {
 		t.Fatalf("documented matrix must not authorize live collection: %+v", decision)
+	}
+}
+
+func TestDecideCollectionRequiresSupportedProducerAndRetainedHistory(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	matrix := fixtureJoinMatrix()
+	for name, hooks := range map[string]CollectionHooks{
+		"no hooks":                   {},
+		"producer only":              {Producer: fixtureHooks().Producer},
+		"history only":               {History: fixtureHooks().History},
+		"unsupported producer class": {Producer: fixtureProducer{class: EvidenceIncusRuntimeHealth}, History: fixtureHooks().History},
+		"stale retained revision":    {Producer: fixtureHooks().Producer, History: fixtureHistory{revision: -1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			decision := DecideCollection(matrix, claim, set, hooks, now)
+			if decision.Collect || decision.Reason != UsageOmissionCollectionUnavailable {
+				t.Fatalf("collection without supported hooks must stay unavailable: %+v", decision)
+			}
+		})
+	}
+	if decision := DecideCollection(matrix, claim, set, fixtureHooks(), now); !decision.Collect || decision.Reason != UsageOmissionNone {
+		t.Fatalf("supported hooks plus coherent evidence must collect: %+v", decision)
 	}
 }
 
 func TestDecideCollectionCollectsOnlyCoherentFixtureEvidence(t *testing.T) {
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, MaxJobResourceGap)
-	if decision := DecideCollection(fixtureJoinMatrix(), claim, set, now); !decision.Collect || decision.Reason != UsageOmissionNone {
+	if decision := DecideCollection(fixtureJoinMatrix(), claim, set, fixtureHooks(), now); !decision.Collect || decision.Reason != UsageOmissionNone {
 		t.Fatalf("coherent fixture evidence must be collectable: %+v", decision)
 	}
 	for name, alter := range map[string]func(*JobAttributionClaim, *VerifiedUsageSampleSet){
@@ -205,7 +279,7 @@ func TestDecideCollectionCollectsOnlyCoherentFixtureEvidence(t *testing.T) {
 			claim, now := attributionFixtureClaim()
 			set := usageFixtureSet(claim, now, MaxJobResourceGap)
 			alter(&claim, &set)
-			if decision := DecideCollection(fixtureJoinMatrix(), claim, set, now); decision.Collect {
+			if decision := DecideCollection(fixtureJoinMatrix(), claim, set, fixtureHooks(), now); decision.Collect {
 				t.Fatalf("unsafe window must not be collectable: %+v", decision)
 			}
 		})
@@ -213,15 +287,15 @@ func TestDecideCollectionCollectsOnlyCoherentFixtureEvidence(t *testing.T) {
 	// Even with join support, a claim without origin stays unsupported.
 	claim, now = attributionFixtureClaim()
 	claim.Origin = VerifiedProviderOrigin{}
-	if decision := DecideCollection(fixtureJoinMatrix(), claim, usageFixtureSet(claim, now, MaxJobResourceGap), now); decision.Collect || decision.Reason != UsageOmissionJoinUnsupported {
+	if decision := DecideCollection(fixtureJoinMatrix(), claim, usageFixtureSet(claim, now, MaxJobResourceGap), fixtureHooks(), now); decision.Collect || decision.Reason != UsageOmissionJoinUnsupported {
 		t.Fatalf("origin-free claim must stay unsupported: %+v", decision)
 	}
 }
 
 func TestVerifiedUsageWireProjection(t *testing.T) {
 	claim, now := attributionFixtureClaim()
-	verified := BuildVerifiedJobUsage(DocumentedMatrix(), claim, usageFixtureSet(claim, now, MaxJobResourceGap), now)
-	raw, err := json.Marshal(verified.Wire())
+	verified := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, usageFixtureSet(claim, now, MaxJobResourceGap), now)
+	raw, err := json.Marshal(verified.Wire(fixtureJoinMatrix()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +303,8 @@ func TestVerifiedUsageWireProjection(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded["state"] != "verified" || decoded["as_of"] == nil {
-		t.Fatalf("wire must project state and as_of: %s", raw)
+	if decoded["state"] != "verified" || decoded["as_of"] != "2026-01-02T03:04:35Z" {
+		t.Fatalf("wire must project state and the source observation as_of: %s", raw)
 	}
 	if _, ok := decoded["reason"]; ok {
 		t.Fatalf("verified wire must not carry a reason: %s", raw)
@@ -258,8 +332,8 @@ func TestVerifiedUsageWireProjection(t *testing.T) {
 
 	// Unavailable records project no numbers at all; stale records likewise.
 	claim.Origin = VerifiedProviderOrigin{}
-	unavailable := BuildVerifiedJobUsage(DocumentedMatrix(), claim, usageFixtureSet(claim, now, MaxJobResourceGap), now)
-	raw, err = json.Marshal(unavailable.Wire())
+	unavailable := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, usageFixtureSet(claim, now, MaxJobResourceGap), now)
+	raw, err = json.Marshal(unavailable.Wire(fixtureJoinMatrix()))
 	if err != nil {
 		t.Fatal(err)
 	}

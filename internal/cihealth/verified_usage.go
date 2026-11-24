@@ -23,15 +23,17 @@ const (
 type UsageOmissionReason string
 
 const (
-	UsageOmissionNone                 UsageOmissionReason = ""
-	UsageOmissionJoinUnsupported      UsageOmissionReason = "provider_origin_join_unsupported"
-	UsageOmissionEvidenceMismatch     UsageOmissionReason = "attribution_evidence_mismatch"
-	UsageOmissionStaleEvidence        UsageOmissionReason = "stale_evidence"
-	UsageOmissionUnbracketed          UsageOmissionReason = "unbracketed_samples"
-	UsageOmissionCounterDiscontinuity UsageOmissionReason = "counter_discontinuity"
-	UsageOmissionJobTooShort          UsageOmissionReason = "job_too_short_uncaptured"
-	UsageOmissionOverlap              UsageOmissionReason = "overlapping_jobs"
-	UsageOmissionDiskUnmeasured       UsageOmissionReason = "disk_not_independently_measured"
+	UsageOmissionNone                  UsageOmissionReason = ""
+	UsageOmissionJoinUnsupported       UsageOmissionReason = "provider_origin_join_unsupported"
+	UsageOmissionEvidenceMismatch      UsageOmissionReason = "attribution_evidence_mismatch"
+	UsageOmissionStaleEvidence         UsageOmissionReason = "stale_evidence"
+	UsageOmissionUnbracketed           UsageOmissionReason = "unbracketed_samples"
+	UsageOmissionCounterDiscontinuity  UsageOmissionReason = "counter_discontinuity"
+	UsageOmissionJobTooShort           UsageOmissionReason = "job_too_short_uncaptured"
+	UsageOmissionOverlap               UsageOmissionReason = "overlapping_jobs"
+	UsageOmissionDiskUnmeasured        UsageOmissionReason = "disk_not_independently_measured"
+	UsageOmissionDiskUnsupported       UsageOmissionReason = "disk_unsupported_by_sources"
+	UsageOmissionCollectionUnavailable UsageOmissionReason = "collection_unavailable"
 )
 
 // VerifiedJobUsageRecord is the exported per-attempt/job verified-usage
@@ -41,6 +43,9 @@ const (
 // Partial states, and it preserves the existing reducer's coverage, sample
 // counts and omission behavior exactly. Host free disk is not job usage:
 // disk metrics appear only when independently bound samples supplied them.
+// AsOf is the source observation time these facts rest on (the requested
+// window's AsOf, or the latest claim observation for rejected records),
+// never the render or evaluation time.
 type VerifiedJobUsageRecord struct {
 	Job      JobKey
 	State    VerifiedUsageState
@@ -63,14 +68,27 @@ type VerifiedUsageSampleSet struct {
 
 // BuildVerifiedJobUsage validates the assembled attribution claim and the
 // bounded sample set, then reduces the samples with the existing bound-job
-// gate. Independently proven assignment and runtime with positive coverage
-// produce the reducer's exact numbers under Verified or Partial; every
-// unsupported, mismatched, stale, unbracketed or discontinuous input produces
-// an explicit Unavailable or Stale record with a reason and no numbers.
+// gate. Measured usage is returned only when the capability matrix documents
+// a source that proves the provider-origin join AND the claim carries
+// positively verified origin evidence under the exact enrolled repository
+// scope AND both sampling brackets validate against that same verified GARM
+// row. The documented stock-source matrix proves none of these, so it stays
+// unavailable even when every supplied field happens to match. Independently
+// proven assignment and runtime with positive coverage produce the reducer's
+// exact numbers under Verified or Partial; every unsupported, mismatched,
+// stale, unbracketed or discontinuous input produces an explicit Unavailable
+// or Stale record with a reason and no numbers.
 func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttributionClaim, set VerifiedUsageSampleSet, now time.Time) VerifiedJobUsageRecord {
-	record := VerifiedJobUsageRecord{Job: claim.Job, State: VerifiedUsageUnavailable, AsOf: now.UTC()}
+	record := VerifiedJobUsageRecord{Job: claim.Job, State: VerifiedUsageUnavailable, AsOf: latestClaimObservation(claim, now)}
 	if now.IsZero() {
 		record.Reason = UsageOmissionEvidenceMismatch
+		return record
+	}
+	if !matrix.Supports(FactProviderOriginJoin) {
+		// Capability, not field coherence, decides: the documented matrix has
+		// no source that proves the provider-origin join, so no measured
+		// usage may be returned no matter how well the evidence matches.
+		record.Reason = UsageOmissionJoinUnsupported
 		return record
 	}
 	attribution, err := VerifyJobAttribution(matrix, claim, now)
@@ -82,6 +100,9 @@ func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttribut
 		record.State, record.Reason = verdict.state, verdict.reason
 		return record
 	}
+	// From here the record's freshness rests on the source observation time
+	// the caller bound to the requested window, never on evaluation time.
+	record.AsOf = set.Scope.AsOf.UTC()
 	summary, err := SummarizeBoundStockJobResources(set.Scope, set.Initial, set.Closing, set.Execution, set.Samples)
 	if err != nil {
 		record.Reason = UsageOmissionUnbracketed
@@ -102,6 +123,23 @@ func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttribut
 	return record
 }
 
+// latestClaimObservation picks the freshest source observation time the
+// rejected claim actually carries, so an unavailable record still reports
+// when its evidence was seen. Observations after now are dropped; a claim
+// with no valid observation falls back to the evaluation time.
+func latestClaimObservation(claim JobAttributionClaim, now time.Time) time.Time {
+	latest := time.Time{}
+	for _, at := range [...]time.Time{claim.Row.ObservedAt, claim.Execution.ObservedAt, claim.Origin.AllocationObservedAt} {
+		if validTime(at.UTC()) && !at.UTC().After(now.UTC()) && at.UTC().After(latest) {
+			latest = at.UTC()
+		}
+	}
+	if latest.IsZero() {
+		return now.UTC()
+	}
+	return latest
+}
+
 type omission struct {
 	state  VerifiedUsageState
 	reason UsageOmissionReason
@@ -119,7 +157,8 @@ func classifyAttributionFailure(claim JobAttributionClaim, now time.Time) UsageO
 	if wellFormedStockRowEvidence(claim.Row) && claim.Execution.State != StockJobExecutionUnknown &&
 		validTime(claim.Execution.StartedAt.UTC()) &&
 		(!validTime(claim.Execution.ObservedAt.UTC()) || claim.Execution.ObservedAt.UTC().After(now.UTC()) ||
-			claim.Row.ObservedAt.UTC().After(now.UTC())) {
+			claim.Row.ObservedAt.UTC().After(now.UTC()) ||
+			claim.Row.ObservedAt.UTC().Before(claim.Execution.StartedAt.UTC())) {
 		return UsageOmissionStaleEvidence
 	}
 	return UsageOmissionEvidenceMismatch
@@ -145,11 +184,13 @@ func classifySampleSet(a VerifiedAttribution, set VerifiedUsageSampleSet, now ti
 	if !validStockJobResourceBinding(initial) || !validStockJobResourceBinding(closing) {
 		return omission{VerifiedUsageUnavailable, UsageOmissionUnbracketed}
 	}
-	// The samples must belong to the verified incarnation and row: a reused
-	// instance, another runner, or another pool/attempt is never stitched on.
+	// Both sampling brackets must validate against the same verified GARM
+	// row: a reused instance, another runner, another pool/attempt, or a
+	// bracket naming a different row is never stitched on.
 	for _, binding := range [...]StockJobResourceBinding{*initial, *closing} {
 		if binding.Job != a.Job || binding.RunnerAgentID != a.AgentID || binding.StockSourceID != a.SourceID ||
-			binding.StockPoolUUID != a.PoolID || binding.Runtime != a.Incarnation ||
+			binding.StockPoolUUID != a.PoolID || binding.StockInstanceUUID != a.RowID ||
+			binding.Runtime != a.Incarnation ||
 			(scope.RunnerIncarnation != "" && binding.RunnerIncarnation != scope.RunnerIncarnation) {
 			return omission{VerifiedUsageUnavailable, UsageOmissionEvidenceMismatch}
 		}
@@ -232,6 +273,29 @@ func countersDecreased(previous, latest JobResourceSample) bool {
 	return false
 }
 
+// ReadOnlySampleProducer is the hook a qualified read-only collection source
+// implements before any live collection can be enabled. The matrix must
+// document its evidence class as proving the provider-origin join; no
+// repository runtime currently provides an implementation.
+type ReadOnlySampleProducer interface {
+	EvidenceClass() AttributionEvidenceClass
+}
+
+// ExactRetainedHistory is the hook that durably retains collected samples
+// against an exact, monotonically advancing revision before any live
+// collection can be enabled. No repository runtime currently provides an
+// implementation.
+type ExactRetainedHistory interface {
+	RetainedRevision() int64
+}
+
+// CollectionHooks carries the connections DecideCollection requires before
+// enabling collection. Either hook nil keeps every collection unavailable.
+type CollectionHooks struct {
+	Producer ReadOnlySampleProducer
+	History  ExactRetainedHistory
+}
+
 // CollectionDecision is the bounded read-only collector verdict for one
 // candidate job window.
 type CollectionDecision struct {
@@ -240,14 +304,21 @@ type CollectionDecision struct {
 }
 
 // DecideCollection decides whether a bounded read-only collection may run
-// for one candidate window under the documented capability matrix. It fails
-// closed: the documented matrix has no source that proves the provider-origin
-// join, so live collection is unsupported regardless of how coherent the
-// candidate evidence looks. A name, mutable provider label, timing, or
-// separate TLS on both reads cannot authorize collection.
-func DecideCollection(matrix AttributionCapabilityMatrix, claim JobAttributionClaim, set VerifiedUsageSampleSet, now time.Time) CollectionDecision {
+// for one candidate window. It fails closed at every layer: the documented
+// matrix must prove the provider-origin join, the claim must carry
+// positively verified origin evidence under the exact enrolled repository
+// scope, both sampling brackets must match the same verified GARM row, and
+// a supported read-only producer plus an exact retained-history hook must
+// both be connected. Without them, collection stays unavailable and the
+// explicit unavailable status is preserved. A name, mutable provider label,
+// timing, or separate TLS on both reads cannot authorize collection.
+func DecideCollection(matrix AttributionCapabilityMatrix, claim JobAttributionClaim, set VerifiedUsageSampleSet, hooks CollectionHooks, now time.Time) CollectionDecision {
 	if !matrix.Supports(FactProviderOriginJoin) {
 		return CollectionDecision{false, UsageOmissionJoinUnsupported}
+	}
+	if hooks.Producer == nil || hooks.History == nil || hooks.History.RetainedRevision() < 0 ||
+		!matrix.ClassProves(hooks.Producer.EvidenceClass(), FactProviderOriginJoin) {
+		return CollectionDecision{false, UsageOmissionCollectionUnavailable}
 	}
 	attribution, err := VerifyJobAttribution(matrix, claim, now)
 	if err != nil {
@@ -297,12 +368,15 @@ type DiskWire struct {
 	Complete   bool                `json:"complete,omitempty"`
 }
 
-// Wire projects the record for the CI Health UI. Unavailable and Stale
-// records project no measured block; Partial and Verified records project
-// exactly the reducer's coverage, sample counts, time-weighted RAM average,
-// sampled peak, and CPU consumption rates. Disk stays separate and reports
-// its own unmeasured state instead of zero.
-func (r VerifiedJobUsageRecord) Wire() Wire {
+// Wire projects the record for the CI Health UI under the documented
+// capability matrix. Unavailable and Stale records project no measured
+// block; Partial and Verified records project exactly the reducer's
+// coverage, sample counts, time-weighted RAM average, sampled peak, and CPU
+// consumption rates. Disk stays separate and reports its own unmeasured
+// state instead of zero; disk counters are only shown when some documented
+// source supports per-instance disk evidence and samples bound them. No
+// documented source does, so the stock matrix never shows disk numbers.
+func (r VerifiedJobUsageRecord) Wire(matrix AttributionCapabilityMatrix) Wire {
 	out := Wire{State: r.State, Reason: r.Reason, AsOf: r.AsOf.UTC()}
 	if r.Measured == nil || (r.State != VerifiedUsageVerified && r.State != VerifiedUsagePartial) {
 		return out
@@ -332,17 +406,24 @@ func (r VerifiedJobUsageRecord) Wire() Wire {
 	}
 	measured.Disk = DiskWire{State: VerifiedUsageUnavailable, Reason: UsageOmissionDiskUnmeasured}
 	if summary.DiskRead != nil || summary.DiskWrite != nil || summary.DiskUsed != nil {
-		measured.Disk = DiskWire{State: VerifiedUsageVerified}
-		if summary.DiskRead != nil {
-			measured.Disk.ReadBytes = strconv.FormatUint(summary.DiskRead.Bytes, 10)
-			measured.Disk.Covered = strconv.FormatUint(uint64(summary.DiskRead.Coverage.Duration), 10)
-			measured.Disk.Complete = summary.DiskRead.Coverage.Complete
-		}
-		if summary.DiskWrite != nil {
-			measured.Disk.WriteBytes = strconv.FormatUint(summary.DiskWrite.Bytes, 10)
-		}
-		if summary.DiskUsed != nil {
-			measured.Disk.UsedBytes = strconv.FormatUint(summary.DiskUsed.SampleMax, 10)
+		if !matrix.Supports(FactDiskCounters) {
+			// Disk counters arrived without any documented source that can
+			// supply them: keep them hidden with an explicit reason instead
+			// of showing numbers no source supports.
+			measured.Disk = DiskWire{State: VerifiedUsageUnavailable, Reason: UsageOmissionDiskUnsupported}
+		} else {
+			measured.Disk = DiskWire{State: VerifiedUsageVerified}
+			if summary.DiskRead != nil {
+				measured.Disk.ReadBytes = strconv.FormatUint(summary.DiskRead.Bytes, 10)
+				measured.Disk.Covered = strconv.FormatUint(uint64(summary.DiskRead.Coverage.Duration), 10)
+				measured.Disk.Complete = summary.DiskRead.Coverage.Complete
+			}
+			if summary.DiskWrite != nil {
+				measured.Disk.WriteBytes = strconv.FormatUint(summary.DiskWrite.Bytes, 10)
+			}
+			if summary.DiskUsed != nil {
+				measured.Disk.UsedBytes = strconv.FormatUint(summary.DiskUsed.SampleMax, 10)
+			}
 		}
 	}
 	out.Measured = measured
