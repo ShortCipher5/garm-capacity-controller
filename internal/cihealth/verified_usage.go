@@ -43,9 +43,9 @@ const (
 // Partial states, and it preserves the existing reducer's coverage, sample
 // counts and omission behavior exactly. Host free disk is not job usage:
 // disk metrics appear only when independently bound samples supplied them.
-// AsOf is the source observation time these facts rest on (the requested
-// window's AsOf, or the latest claim observation for rejected records),
-// never the render or evaluation time.
+// AsOf is the latest actual supporting source observation, or the latest
+// valid claim observation for a rejected record. It is zero if no source
+// time is known; it is never the render or evaluation time.
 type VerifiedJobUsageRecord struct {
 	Job      JobKey
 	State    VerifiedUsageState
@@ -100,9 +100,17 @@ func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttribut
 		record.State, record.Reason = verdict.state, verdict.reason
 		return record
 	}
-	// From here the record's freshness rests on the source observation time
-	// the caller bound to the requested window, never on evaluation time.
-	record.AsOf = set.Scope.AsOf.UTC()
+	at, fresh := usageObservationTime(claim, set, now)
+	if !at.IsZero() {
+		record.AsOf = at
+	}
+	if !fresh {
+		record.State, record.Reason = VerifiedUsageStale, UsageOmissionStaleEvidence
+		return record
+	}
+	// Preserve the same evidence time in the internal summary; downstream
+	// retained measurements must not inherit an artificial newer scope time.
+	set.Scope.AsOf = at
 	summary, err := SummarizeBoundStockJobResources(set.Scope, set.Initial, set.Closing, set.Execution, set.Samples)
 	if err != nil {
 		record.Reason = UsageOmissionUnbracketed
@@ -126,7 +134,7 @@ func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttribut
 // latestClaimObservation picks the freshest source observation time the
 // rejected claim actually carries, so an unavailable record still reports
 // when its evidence was seen. Observations after now are dropped; a claim
-// with no valid observation falls back to the evaluation time.
+// with no valid source observation retains an unknown time.
 func latestClaimObservation(claim JobAttributionClaim, now time.Time) time.Time {
 	latest := time.Time{}
 	for _, at := range [...]time.Time{claim.Row.ObservedAt, claim.Execution.ObservedAt, claim.Origin.AllocationObservedAt} {
@@ -134,10 +142,36 @@ func latestClaimObservation(claim JobAttributionClaim, now time.Time) time.Time 
 			latest = at.UTC()
 		}
 	}
-	if latest.IsZero() {
-		return now.UTC()
-	}
 	return latest
+}
+
+// usageObservationTime requires current independent row, execution and
+// closing observations for the direct verification path. The historical
+// allocation proof and opening counter bracket are not observations of
+// current execution. The declared window AsOf is only an upper bound;
+// re-evaluation or a new AsOf cannot refresh an old supporting read.
+func usageObservationTime(claim JobAttributionClaim, set VerifiedUsageSampleSet, now time.Time) (time.Time, bool) {
+	var latest time.Time
+	if set.Closing == nil || set.Execution == nil {
+		return latest, false
+	}
+	fresh := true
+	for _, obs := range [...]time.Time{claim.Row.ObservedAt, claim.Execution.ObservedAt, set.Closing.ObservedAt, set.Execution.ObservedAt} {
+		at := obs.UTC()
+		if !validTime(at) || at.After(now.UTC()) || at.After(set.Scope.AsOf.UTC()) {
+			fresh = false
+			continue
+		}
+		if at.After(latest) {
+			latest = at
+		}
+		// Reuse the maximum reviewed sampling gap as an exclusive bound:
+		// an observation exactly at the expiry no longer authorizes this view.
+		if !now.UTC().Before(at.Add(MaxJobResourceGap)) {
+			fresh = false
+		}
+	}
+	return latest, fresh
 }
 
 type omission struct {
@@ -327,6 +361,9 @@ func DecideCollection(matrix AttributionCapabilityMatrix, claim JobAttributionCl
 	if verdict := classifySampleSet(attribution, set, now); verdict != (omission{VerifiedUsageVerified, UsageOmissionNone}) {
 		return CollectionDecision{false, verdict.reason}
 	}
+	if _, fresh := usageObservationTime(claim, set, now); !fresh {
+		return CollectionDecision{false, UsageOmissionStaleEvidence}
+	}
 	return CollectionDecision{true, UsageOmissionNone}
 }
 
@@ -336,7 +373,7 @@ func DecideCollection(matrix AttributionCapabilityMatrix, claim JobAttributionCl
 type Wire struct {
 	State    VerifiedUsageState  `json:"state"`
 	Reason   UsageOmissionReason `json:"reason,omitempty"`
-	AsOf     time.Time           `json:"as_of"`
+	AsOf     *time.Time          `json:"as_of"`
 	Measured *MeasuredWire       `json:"measured,omitempty"`
 }
 
@@ -377,7 +414,11 @@ type DiskWire struct {
 // source supports per-instance disk evidence and samples bound them. No
 // documented source does, so the stock matrix never shows disk numbers.
 func (r VerifiedJobUsageRecord) Wire(matrix AttributionCapabilityMatrix) Wire {
-	out := Wire{State: r.State, Reason: r.Reason, AsOf: r.AsOf.UTC()}
+	out := Wire{State: r.State, Reason: r.Reason}
+	if validTime(r.AsOf) {
+		at := r.AsOf.UTC()
+		out.AsOf = &at
+	}
 	if r.Measured == nil || (r.State != VerifiedUsageVerified && r.State != VerifiedUsagePartial) {
 		return out
 	}

@@ -73,7 +73,9 @@ function validDisk(value, windowNs) {
 
 export function validateCIJobResourceUsage(value) {
   if (!exactKeys(value, ["state", "as_of"], ["reason", "measured"])) return null;
-  if (!usageStates.includes(value.state) || timestamp(value.as_of) === null) return null;
+  if (!usageStates.includes(value.state)) return null;
+  const withNoObservation = value.as_of === null && (value.state === "unavailable" || value.state === "stale");
+  if (!withNoObservation && timestamp(value.as_of) === null) return null;
   if (Object.hasOwn(value, "reason")) {
     if ((value.state !== "unavailable" && value.state !== "stale") || !usageReasons.includes(value.reason)) return null;
   } else if (value.state === "unavailable" || value.state === "stale") {

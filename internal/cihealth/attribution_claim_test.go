@@ -31,7 +31,7 @@ func attributionFixtureClaim() (JobAttributionClaim, time.Time) {
 		Job: job, RunnerAgentID: row.AgentID, StartedAt: attributionFixtureStart, ObservedAt: now, State: StockJobObservedExecuting,
 	}
 	claim := JobAttributionClaim{
-		Job: job, Enrolled: row.scope(), Execution: execution, Row: row, Incarnation: incarnation,
+		Job: job, Enrolled: row.scopeFor(job.Attempt.Source, job.Attempt.RepositoryID), Execution: execution, Row: row, Incarnation: incarnation,
 		Origin: VerifiedProviderOrigin{
 			Row: row, Incarnation: incarnation, InstanceCreatedAt: incarnation.StartedAt.Add(-time.Second),
 			AllocationObservedAt: incarnation.StartedAt,
@@ -42,7 +42,7 @@ func attributionFixtureClaim() (JobAttributionClaim, time.Time) {
 
 func TestVerifyJobAttributionAcceptsCoherentProvenClaim(t *testing.T) {
 	claim, now := attributionFixtureClaim()
-	got, err := VerifyJobAttribution(DocumentedMatrix(), claim, now)
+	got, err := VerifyJobAttribution(fixtureJoinMatrix(), claim, now)
 	if err != nil {
 		t.Fatalf("coherent proven claim rejected: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestVerifyJobAttributionAcceptsCoherentProvenClaim(t *testing.T) {
 func TestVerifyJobAttributionRejectsClaimWithoutOrigin(t *testing.T) {
 	claim, now := attributionFixtureClaim()
 	claim.Origin = VerifiedProviderOrigin{}
-	if _, err := VerifyJobAttribution(DocumentedMatrix(), claim, now); err != ErrAttributionUnsupported {
+	if _, err := VerifyJobAttribution(fixtureJoinMatrix(), claim, now); err != ErrAttributionUnsupported {
 		t.Fatalf("claim without origin must fail closed: %v", err)
 	}
 }
@@ -68,6 +68,17 @@ func TestVerifyJobAttributionRejectsMismatchedAndMalformedClaims(t *testing.T) {
 		"cross job":          func(c *JobAttributionClaim) { c.Execution.Job.JobID++ },
 		"cross attempt":      func(c *JobAttributionClaim) { c.Execution.Job.Attempt.Attempt++ },
 		"cross repository":   func(c *JobAttributionClaim) { c.Execution.Job.Attempt.RepositoryID++ },
+		"coherent other GitHub repository": func(c *JobAttributionClaim) {
+			c.Job.Attempt.RepositoryID++
+			c.Execution.Job = c.Job
+		},
+		"coherent other GitHub source": func(c *JobAttributionClaim) {
+			c.Job.Attempt.Source = "other_source"
+			c.Execution.Job = c.Job
+		},
+		"missing GitHub enrollment mapping": func(c *JobAttributionClaim) {
+			c.Enrolled.GitHubSource, c.Enrolled.GitHubRepositoryID = "", 0
+		},
 		"zero enrolled scope": func(c *JobAttributionClaim) {
 			c.Enrolled = EnrolledRowScope{}
 		},
@@ -118,7 +129,7 @@ func TestVerifyJobAttributionRejectsMismatchedAndMalformedClaims(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			claim, now := attributionFixtureClaim()
 			alter(&claim)
-			if _, err := VerifyJobAttribution(DocumentedMatrix(), claim, now); err != ErrAttributionUnsupported {
+			if _, err := VerifyJobAttribution(fixtureJoinMatrix(), claim, now); err != ErrAttributionUnsupported {
 				t.Fatalf("unsafe claim must fail closed: %v", err)
 			}
 		})

@@ -26,3 +26,19 @@ No live access or new sources are required for the offline work. Activating real
 
 ## Handoff and definition of done
 This draft contains the plan only. Take over this branch or split implementation into small reviewable commits/PRs referencing it. Identify the exact baseline and behavior already present, ship only the delta, and include offline automated regressions for the acceptance cases. Keep flags off where capabilities are unavailable, document rollback of the code change, and report outstanding dependencies explicitly. No live server changes, new access grants, production rollout, or operational rehearsal are assigned. See [original scope](https://github.com/ShortCipher5/garm-capacity-controller/issues/53) and [CI Health scope](https://github.com/ShortCipher5/garm-capacity-controller/issues/268); this plan and current stock-first code take precedence over older experimental notes.
+
+
+### Offline validation boundary
+
+The consistency validator requires an independently approved mapping from the
+exact GitHub source and immutable GitHub repository ID to the exact GARM
+enrollment. Equality of runner agent IDs or repository labels cannot supply
+that mapping. The validator does not create or authenticate an enrollment.
+
+For direct verification, the independently observed row, job execution and
+closing bracket must each be current within the maximum sampling gap. The
+latest actual supporting observation is shown; a new render time or declared
+window time cannot refresh old evidence, and no source observation is shown
+as unknown. Historical retention needs a separate verified history owner.
+This does not wire a producer or enable stock live per-job resource
+collection.

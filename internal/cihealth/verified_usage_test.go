@@ -63,6 +63,54 @@ func TestBuildVerifiedJobUsageProducesExpectedNumbersForProvenWindow(t *testing.
 	}
 }
 
+func TestVerifiedUsageUsesSupportingObservationsNotEvaluationOrDeclaredTime(t *testing.T) {
+	claim, observed := attributionFixtureClaim()
+	set := usageFixtureSet(claim, observed, MaxJobResourceGap)
+	evaluate := observed.Add(time.Second)
+	set.Scope.AsOf = evaluate
+	record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, evaluate)
+	if record.State != VerifiedUsageVerified || record.Measured == nil ||
+		!record.AsOf.Equal(observed) || !record.Measured.Scope.AsOf.Equal(observed) {
+		t.Fatalf("expected measurements with the actual source observation, got %+v", record)
+	}
+}
+
+func TestVerifiedUsageCannotRefreshExpiredClosingObservation(t *testing.T) {
+	claim, observed := attributionFixtureClaim()
+	set := usageFixtureSet(claim, observed, MaxJobResourceGap)
+	expires := set.Closing.ObservedAt.Add(MaxJobResourceGap)
+	// Both attribution observations are still recent and the caller can set a
+	// new cutoff for evaluation, but the old closing fact has not changed.
+	validAt := expires.Add(-time.Nanosecond)
+	set.Scope.AsOf = validAt
+	if record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, validAt); record.State != VerifiedUsageVerified {
+		t.Fatalf("fresh just before expiry: %+v", record)
+	}
+	set.Scope.AsOf = expires
+	record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, expires)
+	if record.State != VerifiedUsageStale || record.Reason != UsageOmissionStaleEvidence ||
+		record.Measured != nil || !record.AsOf.Equal(observed) {
+		t.Fatalf("expired evidence must not produce measurements or a fresh timestamp: %+v", record)
+	}
+	if decision := DecideCollection(fixtureJoinMatrix(), claim, set, fixtureHooks(), expires); decision.Collect ||
+		decision.Reason != UsageOmissionStaleEvidence {
+		t.Fatalf("expired evidence must not enable collection: %+v", decision)
+	}
+}
+
+func TestVerifiedUsageWithNoSourceTimestampDoesNotInventOne(t *testing.T) {
+	now := attributionFixtureStart
+	claim := JobAttributionClaim{
+		Row: StockRowEvidence{ObservedAt: now.Add(time.Second)}, // future does not count
+	}
+	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, VerifiedUsageSampleSet{}, now)
+	wire, err := json.Marshal(record.Wire(DocumentedMatrix()))
+	if err != nil || !record.AsOf.IsZero() || !strings.Contains(string(wire), `"as_of":null`) ||
+		strings.Contains(string(wire), `"measured"`) {
+		t.Fatalf("unknown observation must stay unknown: %s %v", wire, err)
+	}
+}
+
 func TestBuildVerifiedJobUsageReportsPartialCoverageAccurately(t *testing.T) {
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, 3*time.Second) // the 4s cadence gap loses the last interval
@@ -172,8 +220,11 @@ func TestBuildVerifiedJobUsageKeepsDocumentedMatrixUnavailableEvenWhenFieldsMatc
 	// measured numbers must not come back on field coherence alone.
 	claim, now := attributionFixtureClaim()
 	set := usageFixtureSet(claim, now, MaxJobResourceGap)
-	if _, err := VerifyJobAttribution(DocumentedMatrix(), claim, now); err != nil {
+	if _, err := VerifyJobAttribution(fixtureJoinMatrix(), claim, now); err != nil {
 		t.Fatalf("fixture fields must be claim-coherent for this regression: %v", err)
+	}
+	if _, err := VerifyJobAttribution(DocumentedMatrix(), claim, now); err != ErrAttributionUnsupported {
+		t.Fatalf("the documented matrix must deny a direct verified attribution: %v", err)
 	}
 	record := BuildVerifiedJobUsage(DocumentedMatrix(), claim, set, now)
 	if record.State != VerifiedUsageUnavailable || record.Reason != UsageOmissionJoinUnsupported || record.Measured != nil {

@@ -29,18 +29,31 @@ type StockRowEvidence struct {
 }
 
 // EnrolledRowScope is the caller's separately approved exact enrollment for
-// one source/controller/repository/pool/provider. Constructing it is not
+// one GitHub source and immutable repository ID mapped to one exact GARM
+// source/controller/repository/pool/provider. Constructing it is not
 // enrollment; upstream approval authority mints it. A row observation only
 // counts when it matches this scope exactly — matching fields alone never
 // substitute for enrollment.
 type EnrolledRowScope struct {
+	GitHubSource       string
+	GitHubRepositoryID int64
+
 	SourceIdentity, ControllerID       string
 	RepositoryID, PoolID               string
 	ProviderName, OwnershipFingerprint string
 }
 
-func (row StockRowEvidence) scope() EnrolledRowScope {
+func (e EnrolledRowScope) matches(job JobKey, row StockRowEvidence) bool {
+	if !validSource(e.GitHubSource) || e.GitHubRepositoryID <= 0 ||
+		e.GitHubSource != job.Attempt.Source || e.GitHubRepositoryID != job.Attempt.RepositoryID {
+		return false
+	}
+	return e == row.scopeFor(e.GitHubSource, e.GitHubRepositoryID)
+}
+
+func (row StockRowEvidence) scopeFor(githubSource string, githubRepositoryID int64) EnrolledRowScope {
 	return EnrolledRowScope{
+		GitHubSource: githubSource, GitHubRepositoryID: githubRepositoryID,
 		SourceIdentity: row.SourceIdentity, ControllerID: row.ControllerID, RepositoryID: row.RepositoryID,
 		PoolID: row.PoolID, ProviderName: row.ProviderName, OwnershipFingerprint: row.OwnershipFingerprint,
 	}
@@ -136,7 +149,7 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 	var none VerifiedAttribution
 	if !matrix.Supports(FactExactJobIdentity) || !matrix.Supports(FactPositiveRunnerRegistration) ||
 		!matrix.Supports(FactExactStockRow) || !matrix.Supports(FactPositiveStockRowAgent) ||
-		!matrix.Supports(FactIncusIncarnation) || now.IsZero() {
+		!matrix.Supports(FactIncusIncarnation) || !matrix.Supports(FactProviderOriginJoin) || now.IsZero() {
 		return none, ErrAttributionUnsupported
 	}
 	job := claim.Job
@@ -157,7 +170,7 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 	// The exact enrolled repository scope is mandatory: a row observed under
 	// any other enrollment, or before the job started, cannot positively
 	// place this runner on this job no matter how well the fields match.
-	if claim.Enrolled == (EnrolledRowScope{}) || row.scope() != claim.Enrolled ||
+	if !claim.Enrolled.matches(job, row) ||
 		row.ObservedAt.UTC().Before(started) {
 		return none, ErrAttributionUnsupported
 	}

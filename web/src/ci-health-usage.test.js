@@ -28,6 +28,9 @@ test("resource usage wire accepts every documented state", () => {
   assert.ok(validateCIJobResourceUsage({state: "stale", as_of: "2026-01-02T03:04:35Z", reason: "stale_evidence"}));
   assert.ok(validateCIJobResourceUsage({state: "partial", as_of: "2026-01-02T03:04:35Z", measured: {...measured, disk: {state: "verified", read_bytes: "50", covered_ns: "6000000000", complete: true}}}));
   assert.ok(validateCIJobResourceUsage({state: "partial", as_of: "2026-01-02T03:04:35Z", measured: {...measured, disk: {state: "unavailable", reason: "disk_unsupported_by_sources"}}}));
+  assert.ok(validateCIJobResourceUsage({state: "unavailable", as_of: null, reason: "provider_origin_join_unsupported"}));
+  assert.equal(validateCIJobResourceUsage({state: "verified", as_of: null, measured}), null);
+  assert.equal(validateCIJobResourceUsage({state: "partial", as_of: null, measured}), null);
   // Single-gauge RAM without a time-weighted mean stays valid.
   assert.ok(validateCIJobResourceUsage({state: "verified", as_of: "2026-01-02T03:04:35Z", measured: {...measured, ram: {sample_peak_bytes: "50", gauge_samples: 3}}}));
 });
