@@ -102,6 +102,32 @@ func TestIngestRefusesArchiveSetMismatch(t *testing.T) {
 	}
 }
 
+type unexpectedArchiveScope struct {
+	t *testing.T
+}
+
+func (s unexpectedArchiveScope) ReportIngestAuthorized(context.Context, cihealth.AttemptKey) bool {
+	s.t.Fatal("cardinality mismatch reached the scope callback")
+	return false
+}
+
+func TestIngestRejectsArchiveCardinalityBeforeScope(t *testing.T) {
+	manifest, archives := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{id: 500})
+	for name, input := range map[string][]ReportArchive{
+		"missing": nil,
+		"extra":   make([]ReportArchive, cihealth.MaxRetainedAttemptReports+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy(input, archives)
+			if got, err := IngestReports(t.Context(), IngestInput{
+				Scope: unexpectedArchiveScope{t}, Manifest: manifest, Archives: input,
+			}); !errors.Is(err, ErrReportIngest) || len(got.Proved) != 0 || len(got.Metadata) != 0 {
+				t.Fatalf("invalid archive count published evidence: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestIngestRefusesDigestMismatch(t *testing.T) {
 	manifest, archives := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{id: 500, job: 9001, shard: "unit"})
 	tampered := append([]ReportArchive(nil), archives...)

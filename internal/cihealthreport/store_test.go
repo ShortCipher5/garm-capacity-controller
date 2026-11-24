@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,6 +164,37 @@ func TestStoreRefusesForeignCorruptOrUnsafeFiles(t *testing.T) {
 	}
 	if _, err := OpenPublicationStore(dir); !errors.Is(err, ErrReportStore) {
 		t.Fatalf("directory must refuse: %v", err)
+	}
+}
+
+func TestReadPublicationSnapshotStopsAtBoundPlusOne(t *testing.T) {
+	for _, size := range []int{publicationStoreMaxBytes, publicationStoreMaxBytes + 16} {
+		reader := strings.NewReader(strings.Repeat(" ", size))
+		raw, err := readBoundedPublicationSnapshot(reader)
+		if size == publicationStoreMaxBytes {
+			if err != nil || len(raw) != size || reader.Len() != 0 {
+				t.Fatalf("snapshot at byte ceiling refused: length=%d unread=%d err=%v", len(raw), reader.Len(), err)
+			}
+		} else if !errors.Is(err, ErrReportStore) || raw != nil || reader.Len() != 15 {
+			t.Fatalf("overrun read past the sentinel byte or returned data: length=%d unread=%d err=%v", len(raw), reader.Len(), err)
+		}
+	}
+}
+
+func TestStoreRefusesOversizedSnapshotWithoutChangingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "publications.json")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, publicationStoreMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := OpenPublicationStore(path); store != nil || !errors.Is(err, ErrReportStore) {
+		t.Fatalf("oversized snapshot opened: store=%v err=%v", store, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() != publicationStoreMaxBytes+1 {
+		t.Fatalf("oversized snapshot changed: info=%v err=%v", info, err)
 	}
 }
 

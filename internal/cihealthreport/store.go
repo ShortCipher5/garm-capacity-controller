@@ -66,11 +66,11 @@ func openPublicationStore(path string, now func() time.Time) (*PublicationFileSt
 		if err := s.persist(); err != nil {
 			return nil, err
 		}
-	case err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0:
+	case err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > publicationStoreMaxBytes:
 		return nil, ErrReportStore
 	default:
-		raw, err := os.ReadFile(absolute)
-		if err != nil || len(raw) > publicationStoreMaxBytes {
+		raw, err := openBoundedPublicationSnapshot(absolute, info)
+		if err != nil {
 			return nil, ErrReportStore
 		}
 		var state publicationStoreState
@@ -83,6 +83,30 @@ func openPublicationStore(path string, now func() time.Time) (*PublicationFileSt
 	}
 	s.purge()
 	return s, nil
+}
+
+func openBoundedPublicationSnapshot(path string, expected os.FileInfo) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, ErrReportStore
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 ||
+		info.Size() > publicationStoreMaxBytes || !os.SameFile(expected, info) {
+		return nil, ErrReportStore
+	}
+	return readBoundedPublicationSnapshot(f)
+}
+
+func readBoundedPublicationSnapshot(r io.Reader) ([]byte, error) {
+	// The extra byte distinguishes a file exactly at the bound from a file
+	// that grew after stat without reading or allocating for the full file.
+	raw, err := io.ReadAll(io.LimitReader(r, publicationStoreMaxBytes+1))
+	if err != nil || len(raw) > publicationStoreMaxBytes {
+		return nil, ErrReportStore
+	}
+	return raw, nil
 }
 
 func validRetentionScope(scope cihealth.HistoryScope) bool {

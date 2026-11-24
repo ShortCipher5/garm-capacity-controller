@@ -85,7 +85,10 @@ type IngestedReports struct {
 // results; only bounded projections and pins leave this function.
 func IngestReports(ctx context.Context, in IngestInput) (IngestedReports, error) {
 	fail := func() (IngestedReports, error) { return IngestedReports{}, ErrReportIngest }
-	if ctx == nil || ctx.Err() != nil || in.Scope == nil || !in.Manifest.valid() {
+	// Validate cardinality before allocating the archive map or visiting any
+	// archive. Manifest validation supplies the fixed maximum artifact count.
+	if ctx == nil || ctx.Err() != nil || in.Scope == nil ||
+		len(in.Archives) != len(in.Manifest.Artifacts) || !in.Manifest.valid() {
 		return fail()
 	}
 	attempt := cihealth.AttemptKey{
@@ -106,9 +109,6 @@ func IngestReports(ctx context.Context, in IngestInput) (IngestedReports, error)
 	// manifest claims before any hashing or parsing. Metadata-only input is
 	// covered here too: an exact digest alone never substitutes for the
 	// advertised length, and no bytes are hashed before this pass succeeds.
-	if len(archives) != len(in.Manifest.Artifacts) {
-		return fail()
-	}
 	rows := make(map[int64]ReportManifestArtifact, len(in.Manifest.Artifacts))
 	for _, row := range in.Manifest.Artifacts {
 		rows[row.ArtifactID] = row

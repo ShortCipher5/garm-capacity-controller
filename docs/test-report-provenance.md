@@ -65,9 +65,10 @@ The contract is opt-in and fail-closed:
   `MaxJUnitZIPEntries`, `MaxReportBytes`, `MaxCases`, and at most
   `MaxRetainedAttemptReports` (32) artifacts per attempt. Archive count and
   actual byte length are validated against the manifest before any hashing,
-  for metadata-only rows too; oversized archives, unsafe members, duplicates,
-  digest mismatches and invalid XML refuse the entire ingestion; there is no
-  partial publication.
+  for metadata-only rows too. Archive count is checked before allocating the
+  archive index. Oversized archives, unsafe members, duplicates, digest
+  mismatches and invalid XML refuse the entire ingestion; there is no partial
+  publication.
 - No tokenized URLs, logs, command or environment output, report bodies or
   raw archive bytes are persisted. Retained records carry bounded projections
   (counts, outcomes, durations) plus private pins used only for idempotency
@@ -131,8 +132,9 @@ speculative pass/fail guessing.
   Run-only artifacts remain visible as metadata only.
 - Rollback: the change is additive and offline. Removing the configuration
   that points at a publication store file (or deleting that private file)
-  drops retained publications; no other state is touched. Opening a damaged
-  or foreign store file fails closed instead of truncating it.
+  drops retained publications; no other state is touched. Reopening the
+  offline snapshot reads at most 8 MiB plus one byte to detect an overrun.
+  Opening a damaged or foreign store file fails closed instead of truncating it.
 - Follow-up dependencies, outside this ticket: an already-authorized archive
   reader, an independent producer-binding enrollment, and the Plan 05
   durable lifecycle adopting the shared retention surface.
