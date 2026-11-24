@@ -269,16 +269,12 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 			}
 			return ErrReconciliation
 		}
-		// Recheck the evidence scope and reconciliation epoch at commit: a
-		// prevalidated recommendation is not authority.
-		if evidence.Identity.Epoch != epoch || evidence.Fence.Epoch != epoch {
-			decision.Status = SlotReuseStaleOrConflictingEvidence
-			return ErrSlotReuseEvidence
-		}
+		// The durable tombstone answers replay first: an identical replay
+		// returns the prior decision with zero additional credit even after a
+		// later reconciliation advanced the epoch. A mismatched replay is
+		// contradictory: the tombstone stands and the conflict is reported,
+		// never merged.
 		if prior, err := releaseRecord(tx, hold.Key); err == nil {
-			// Identical evidence replay returns the prior decision with zero
-			// additional credit. A mismatched replay is contradictory: the
-			// tombstone stands and the conflict is reported, never merged.
 			if prior.AbsenceDigest != digest {
 				decision.Status = SlotReuseStaleOrConflictingEvidence
 				return ErrConflict
@@ -290,6 +286,12 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 			return nil
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		// Recheck the evidence scope and reconciliation epoch at commit: a
+		// prevalidated recommendation is not authority.
+		if evidence.Identity.Epoch != epoch || evidence.Fence.Epoch != epoch {
+			decision.Status = SlotReuseStaleOrConflictingEvidence
+			return ErrSlotReuseEvidence
 		}
 		reservations, err := sqliteReservations(tx)
 		if err != nil {
