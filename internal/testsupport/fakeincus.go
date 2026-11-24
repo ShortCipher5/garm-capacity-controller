@@ -37,6 +37,18 @@ const FakeIncusDeleteOperation = "87654321-4321-4321-a321-cba987654321"
 const fakeInstanceUUID = "11111111-1111-4111-8111-111111111111"
 const fakeGeneration = "22222222-2222-4222-8222-222222222222"
 
+// fakeIncarnationFor derives a deterministic per-instance immutable
+// incarnation so several visible guests never alias one identity. The
+// historic runner-1 fixtures keep the original public constants.
+func fakeIncarnationFor(name, fixed string) string {
+	if name == "runner-1" {
+		return fixed
+	}
+	digest := sha256.Sum256([]byte("fake-incus-incarnation\x00" + name + "\x00" + fixed))
+	h := fmt.Sprintf("%x", digest)[:32]
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
 // fakeGuestUsage is one guest's measured instance-state utilization: cumulative
 // CPU time in nanoseconds plus current memory and disk usage in bytes.
 type fakeGuestUsage struct {
@@ -68,6 +80,7 @@ type FakeIncus struct {
 	usage            map[string]fakeGuestUsage
 	hostResources    fakeHostResources
 	guestVisible     bool
+	hidden           map[string]bool
 	deleteFaulty     bool
 	waitFaulty       bool
 	absenceLying     bool
@@ -93,6 +106,28 @@ func (f *FakeIncus) operationInstance() string {
 	return "runner-1"
 }
 
+// operationIDFor derives a deterministic per-instance operation identity so
+// several guests on one daemon never collide on a shared ledger. The historic
+// runner-1 fixtures keep the fixed public constants.
+func operationIDFor(name, fixed string) string {
+	if name == "runner-1" {
+		return fixed
+	}
+	digest := sha256.Sum256([]byte("fake-incus-operation\x00" + name + "\x00" + fixed))
+	h := fmt.Sprintf("%x", digest)[:32]
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// CreateOperationID is the operation identity the most recent create reports.
+func (f *FakeIncus) CreateOperationID() string {
+	return operationIDFor(f.operationInstance(), FakeIncusCreateOperation)
+}
+
+// DeleteOperationID is the operation identity the most recent delete reports.
+func (f *FakeIncus) DeleteOperationID() string {
+	return operationIDFor(f.operationInstance(), FakeIncusDeleteOperation)
+}
+
 // SetGuestUsage configures one guest's measured instance-state utilization:
 // cumulative CPU time in nanoseconds, current memory usage in bytes and
 // current disk usage in bytes. It is the fixture behind the /state route.
@@ -115,7 +150,7 @@ func (f *FakeIncus) SetHostResources(cpuTotal, memoryBytes int64, disks [][2]int
 // an already-constructed verified client (project "runners").
 func NewFakeIncus(t testing.TB, serverName string) *FakeIncus {
 	t.Helper()
-	fake := &FakeIncus{configs: map[string]map[string]string{}, createdAt: map[string]string{}, usage: map[string]fakeGuestUsage{}, guestVisible: true}
+	fake := &FakeIncus{configs: map[string]map[string]string{}, createdAt: map[string]string{}, usage: map[string]fakeGuestUsage{}, guestVisible: true, hidden: map[string]bool{}}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +195,15 @@ func incusClient(t testing.TB, server *httptest.Server, certificate tls.Certific
 		t.Fatal(err)
 	}
 	return client
+}
+
+// SetInstanceVisible controls whether one exact guest appears in named and
+// recursive reads; other guests are unaffected. Deletion hides only the
+// deleted guest.
+func (f *FakeIncus) SetInstanceVisible(name string, visible bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hidden[name] = !visible
 }
 
 // SetGuestVisible controls whether the guest still appears in named and
@@ -209,10 +253,10 @@ func (f *FakeIncus) guestRow(name string) (map[string]any, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	config, ok := f.configs[name]
-	if !ok || !f.guestVisible {
+	if !ok || !f.guestVisible || f.hidden[name] {
 		return nil, false
 	}
-	expanded := map[string]any{"volatile.uuid": fakeInstanceUUID, "volatile.uuid.generation": fakeGeneration}
+	expanded := map[string]any{"volatile.uuid": fakeIncarnationFor(name, fakeInstanceUUID), "volatile.uuid.generation": fakeIncarnationFor(name, fakeGeneration)}
 	if f.incarnationDrift {
 		expanded["volatile.uuid.generation"] = "33333333-3333-4333-8333-333333333333"
 	}
@@ -246,7 +290,8 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		f.createdAt[body.Name] = time.Now().UTC().Format(time.RFC3339Nano)
 		f.mu.Unlock()
 		f.opInstance.Store(body.Name)
-		_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + FakeIncusCreateOperation + "?project=runners", "metadata": map[string]any{"id": FakeIncusCreateOperation}})
+		createID := operationIDFor(body.Name, FakeIncusCreateOperation)
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + createID + "?project=runners", "metadata": map[string]any{"id": createID}})
 		return
 	}
 	if r.Method == http.MethodDelete && len(r.URL.Path) > len("/1.0/instances/") {
@@ -263,12 +308,13 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !f.waitFaulty && !f.absenceLying {
-			f.guestVisible = false
+			f.hidden[name] = true
 		}
 		f.mu.Unlock()
 		f.Deletes.Add(1)
 		f.opInstance.Store(name)
-		_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + FakeIncusDeleteOperation + "?project=runners", "metadata": map[string]any{"id": FakeIncusDeleteOperation}})
+		deleteID := operationIDFor(name, FakeIncusDeleteOperation)
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + deleteID + "?project=runners", "metadata": map[string]any{"id": deleteID}})
 		return
 	}
 	switch r.URL.Path {
@@ -313,28 +359,11 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.AbsenceReads.Add(1)
 		f.writeSync(w, map[string]any{})
-	case "/1.0/operations/" + FakeIncusCreateOperation + "/wait":
-		f.writeSync(w, map[string]any{"id": FakeIncusCreateOperation, "status_code": 200, "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}})
-	case "/1.0/operations/" + FakeIncusCreateOperation:
-		f.writeSync(w, map[string]any{"id": FakeIncusCreateOperation, "class": "task", "description": "Creating instance", "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}, "metadata": map[string]any{"private": "private-operation-metadata"}})
-	case "/1.0/operations/" + FakeIncusDeleteOperation:
-		f.DeletePolls.Add(1)
-		f.mu.Lock()
-		faulty, settled := f.waitFaulty, f.deleteSettled
-		if !faulty && !settled {
-			f.deleteSettled = true
-		}
-		f.mu.Unlock()
-		if faulty {
-			f.writeSync(w, map[string]any{"id": FakeIncusDeleteOperation, "class": "task", "description": "Deleting instance", "status_code": 400, "status": "Failure", "err": "private-delete-failure", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}})
+	default:
+		if strings.HasPrefix(r.URL.Path, "/1.0/operations/") {
+			f.serveOperation(w, r)
 			return
 		}
-		status := 200
-		if !settled {
-			status = 103
-		}
-		f.writeSync(w, map[string]any{"id": FakeIncusDeleteOperation, "class": "task", "description": "Deleting instance", "status_code": status, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}})
-	default:
 		if len(r.URL.Path) > len("/1.0/instances/") && strings.HasSuffix(r.URL.Path, "/state") {
 			name := r.URL.Path[len("/1.0/instances/") : len(r.URL.Path)-len("/state")]
 			if _, ok := f.guestRow(name); ok {
@@ -366,6 +395,43 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		http.NotFound(w, r)
 	}
+}
+
+// serveOperation answers exact create/delete operation reads for the most
+// recent operation's instance; unknown operation identities are a 404, never
+// a success or absence inference.
+func (f *FakeIncus) serveOperation(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/1.0/operations/")
+	id := strings.TrimSuffix(rest, "/wait")
+	name := f.operationInstance()
+	if id == operationIDFor(name, FakeIncusCreateOperation) {
+		if id != rest {
+			f.writeSync(w, map[string]any{"id": id, "status_code": 200, "resources": map[string][]string{"instances": {"/1.0/instances/" + name + "?project=runners"}}})
+			return
+		}
+		f.writeSync(w, map[string]any{"id": id, "class": "task", "description": "Creating instance", "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + name + "?project=runners"}}, "metadata": map[string]any{"private": "private-operation-metadata"}})
+		return
+	}
+	if id == operationIDFor(name, FakeIncusDeleteOperation) && id == rest {
+		f.DeletePolls.Add(1)
+		f.mu.Lock()
+		faulty, settled := f.waitFaulty, f.deleteSettled
+		if !faulty && !settled {
+			f.deleteSettled = true
+		}
+		f.mu.Unlock()
+		if faulty {
+			f.writeSync(w, map[string]any{"id": id, "class": "task", "description": "Deleting instance", "status_code": 400, "status": "Failure", "err": "private-delete-failure", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + name + "?project=runners"}}})
+			return
+		}
+		status := 200
+		if !settled {
+			status = 103
+		}
+		f.writeSync(w, map[string]any{"id": id, "class": "task", "description": "Deleting instance", "status_code": status, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + name + "?project=runners"}}})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (f *FakeIncus) rootMetadata() map[string]any {

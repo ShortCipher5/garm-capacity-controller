@@ -112,67 +112,100 @@ func newReuseFixture(t *testing.T, harness *reuseHarness, controller, pool, name
 	return newReuseFixtureAgent(t, harness, controller, pool, name, 17, repo)
 }
 
-func newReuseFixtureAgent(t *testing.T, harness *reuseHarness, controller, pool, name string, agentID int64, repo demandrepair.Repository) *reuseFixture {
-	t.Helper()
-	ctx := context.Background()
-	f := &reuseFixture{harness: harness, repo: repo, controller: controller, pool: pool, name: name}
-	harness.registrations[name] = repo
-	harness.agentIDs[name] = agentID
-	f.request = Request{Key: reuseRunnerKey(controller, pool, name), Pool: pool, Host: "a", Resources: Resources{CPU: 1000, RAM: 2048, Disk: 4096, Runners: 1}}
+func reuseFixtureConfig() Config {
 	config := fixture(time.Now())
 	delete(config.Hosts, "b")
 	for id, p := range config.Pools {
 		p.Hosts = []string{"a"}
 		config.Pools[id] = p
 	}
-	f.store = sqliteFixtureStore(t, config, false)
-	f.fake = testsupport.NewFakeIncus(t, "reuse-daemon")
-	physical, err := f.fake.Client.PhysicalIdentity(ctx)
+	return config
+}
+
+// reuseStoreFixture opens one ledger bound to one fake daemon with an empty
+// completed inventory, ready for provisioning several runners.
+func reuseStoreFixture(t *testing.T, config Config) (*SQLiteStore, *testsupport.FakeIncus) {
+	t.Helper()
+	ctx := context.Background()
+	store := sqliteFixtureStore(t, config, false)
+	fake := testsupport.NewFakeIncus(t, "reuse-daemon")
+	physical, err := fake.Client.PhysicalIdentity(ctx)
 	if err != nil {
-		t.Fatalf("fixture step 1: %v", err)
+		t.Fatal(err)
 	}
-	fence, err := f.store.BeginReconciliation(ctx)
+	fence, err := store.BeginReconciliation(ctx)
 	if err != nil {
-		t.Fatalf("fixture step 2: %v", err)
+		t.Fatal(err)
 	}
-	if err := f.store.BindHostIdentities(ctx, fence, []HostBinding{{Host: "a", ServerKeyFingerprint: physical.ServerKeyFingerprint(), OriginFingerprint: physical.OriginFingerprint(), ScopeFingerprint: physical.ScopeFingerprint(), ServerName: physical.ServerName(), ServerVersion: physical.ServerVersion(), ObservedAt: time.Now()}}); err != nil {
-		t.Fatalf("fixture step 3: %v", err)
+	if err := store.BindHostIdentities(ctx, fence, []HostBinding{{Host: "a", ServerKeyFingerprint: physical.ServerKeyFingerprint(), OriginFingerprint: physical.OriginFingerprint(), ScopeFingerprint: physical.ScopeFingerprint(), ServerName: physical.ServerName(), ServerVersion: physical.ServerVersion(), ObservedAt: time.Now()}}); err != nil {
+		t.Fatal(err)
 	}
-	if err := f.store.CompleteReconciliation(ctx, fence, InventorySnapshot{Hosts: observations(config, time.Now())}); err != nil {
-		t.Fatalf("fixture step 4: %v", err)
+	if err := store.CompleteReconciliation(ctx, fence, InventorySnapshot{Hosts: observations(config, time.Now())}); err != nil {
+		t.Fatal(err)
 	}
+	return store, fake
+}
+
+func newReuseFixtureAgent(t *testing.T, harness *reuseHarness, controller, pool, name string, agentID int64, repo demandrepair.Repository) *reuseFixture {
+	t.Helper()
+	store, fake := reuseStoreFixture(t, reuseFixtureConfig())
+	f := newReuseRunner(t, harness, store, fake, controller, pool, name, agentID, repo)
+	reconcileSQLite(t, store, []InventoryResource{f.inventoryRow()})
+	return f
+}
+
+// newReuseRunner registers one stock runner with the observation harness and
+// provisions its full charge: admission, dispatch, provider create, durable
+// create evidence and the retirement intent, on a shared ledger and daemon.
+func newReuseRunner(t *testing.T, harness *reuseHarness, store *SQLiteStore, fake *testsupport.FakeIncus, controller, pool, name string, agentID int64, repo demandrepair.Repository) *reuseFixture {
+	t.Helper()
+	harness.registrations[name] = repo
+	harness.agentIDs[name] = agentID
+	f := &reuseFixture{harness: harness, store: store, fake: fake, controller: controller, pool: pool, name: name, repo: repo,
+		request: Request{Key: reuseRunnerKey(controller, pool, name), Pool: pool, Host: "a", Resources: Resources{CPU: 1000, RAM: 2048, Disk: 4096, Runners: 1}}}
+	f.provision(t)
+	return f
+}
+
+func (f *reuseFixture) inventoryRow() InventoryResource {
+	return InventoryResource{ID: f.name, Host: "a", Pool: f.pool, ReservationKey: f.request.Key, Resources: f.request.Resources, State: "idle"}
+}
+
+// provision charges one runner end to end. It never reconciles inventory;
+// the caller supplies the complete bounded inventory afterwards.
+func (f *reuseFixture) provision(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
 	if _, err := f.store.Admit(ctx, f.request); err != nil {
-		t.Fatalf("fixture step 5: %v", err)
+		t.Fatal(err)
 	}
 	binding, err := f.store.LookupHostBinding(ctx, "a")
 	if err != nil {
-		t.Fatalf("fixture step 6: %v", err)
+		t.Fatal(err)
 	}
 	permit, err := f.store.ClaimDispatchBound(ctx, f.request, binding)
 	if err != nil {
-		t.Fatalf("fixture step 7: %v", err)
+		t.Fatal(err)
 	}
-	created, err := f.fake.Client.Create(ctx, incusapi.InstanceSpec{Name: name, Type: "container", Profiles: []string{"runner-base"}, ImageFingerprint: strings.Repeat("a", 64), CPUMillis: 1000, RAMMiB: 2048, UserData: "#cloud-config\nfixture-userdata", ControllerID: controller, PoolID: pool, ReservationKey: f.request.Key})
+	created, err := f.fake.Client.Create(ctx, incusapi.InstanceSpec{Name: f.name, Type: "container", Profiles: []string{"runner-base"}, ImageFingerprint: strings.Repeat("a", 64), CPUMillis: 1000, RAMMiB: 2048, UserData: "#cloud-config\nfixture-userdata", ControllerID: f.controller, PoolID: f.pool, ReservationKey: f.request.Key})
 	if err != nil {
-		t.Fatalf("create: %v", err)
+		t.Fatal(err)
 	}
 	if err := f.store.RecordDispatchOutcome(ctx, *permit, DispatchReceipt{State: "confirmed", OperationID: created.OperationID, ResourceID: created.ResourceID}); err != nil {
-		t.Fatalf("fixture step 8: %v", err)
+		t.Fatal(err)
 	}
-	reconcileSQLite(t, f.store, []InventoryResource{{ID: name, Host: "a", Pool: pool, ReservationKey: f.request.Key, Resources: f.request.Resources, State: "idle"}})
 	subject := f.mustObserveIdentity(t)
-	createProof, err := f.fake.Client.CaptureTerminalOperation(ctx, subject, testsupport.FakeIncusCreateOperation, incusapi.RecoveryCreate)
+	createProof, err := f.fake.Client.CaptureTerminalOperation(ctx, subject, f.fake.CreateOperationID(), incusapi.RecoveryCreate)
 	if err != nil {
-		t.Fatalf("capture create: %v", err)
+		t.Fatal(err)
 	}
 	f.creation, err = f.store.StoreCreateObservation(ctx, f.request, createProof)
 	if err != nil {
-		t.Fatalf("store create evidence: %v", err)
+		t.Fatal(err)
 	}
 	if _, err := f.store.RequestRetirement(ctx, f.request); err != nil {
-		t.Fatalf("fixture step 9: %v", err)
+		t.Fatal(err)
 	}
-	return f
 }
 
 func (f *reuseFixture) identityExpectation() incusapi.IdentityExpectation {
@@ -264,7 +297,7 @@ func (f *reuseFixture) teardownProof(t *testing.T) *reuse.InstanceTeardownProof 
 	if err := f.fake.Client.WaitDeletion(ctx, deletion); err != nil {
 		t.Fatal(err)
 	}
-	deleteProof, err := f.fake.Client.CaptureTerminalOperation(ctx, identity, testsupport.FakeIncusDeleteOperation, incusapi.RecoveryDelete)
+	deleteProof, err := f.fake.Client.CaptureTerminalOperation(ctx, identity, f.fake.DeleteOperationID(), incusapi.RecoveryDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
