@@ -237,9 +237,10 @@ func jobSizingDiskAdvice(samples []JobSizingSample) JobSizingDiskAdvice {
 			continue
 		}
 		out.Qualified++
-		if gauge := sample.Resources.DiskUsed; gauge != nil && gauge.Samples > 0 {
+		r := sample.Resources
+		if _, valid := jobSizingGaugeSpan(r, r.DiskUsed, r.Scope.StartedAt.UTC(), r.Scope.EndAt.UTC()); valid {
 			out.Samples++
-			out.Peak = max(out.Peak, gauge.SampleMax)
+			out.Peak = max(out.Peak, r.DiskUsed.SampleMax)
 		}
 	}
 	if out.Samples > 0 {

@@ -301,26 +301,41 @@ func jobSizingSamplingCeiling(r JobResourceSummary) (ResourceCoverage, bool) {
 	return ResourceCoverage{Intervals: pairs, Duration: duration}, true
 }
 
+// jobSizingGaugeSpan validates distinct readings against the overall sample
+// envelope and returns the longest interval those readings could cover.
+func jobSizingGaugeSpan(r JobResourceSummary, gauge *ResourceGaugeSummary, start, end time.Time) (time.Duration, bool) {
+	if gauge == nil || gauge.Samples < 1 || gauge.Samples > r.Samples || r.Samples > MaxJobResourceSamples ||
+		gauge.Latest > gauge.SampleMax || gauge.Samples == 1 && gauge.Latest != gauge.SampleMax ||
+		r.Window <= 0 || r.Window > MaxJobResourceWindow || r.Window != end.Sub(start) ||
+		r.Sampling.NoSamples != 0 || r.Sampling.BeforeFirstSample < 0 || r.Sampling.BeforeFirstSample > r.Window ||
+		r.Sampling.AfterLastSample < 0 || r.Sampling.AfterLastSample > r.Window-r.Sampling.BeforeFirstSample {
+		return 0, false
+	}
+	earliest := start.Add(r.Sampling.BeforeFirstSample)
+	latest := end.Add(-r.Sampling.AfterLastSample)
+	span := gauge.LatestAt.Sub(earliest)
+	if gauge.LatestAt.After(latest) || span < time.Duration(gauge.Samples-1)*time.Nanosecond ||
+		gauge.Samples == r.Samples && !gauge.LatestAt.Equal(latest) {
+		return 0, false
+	}
+	return span, true
+}
+
 // A RAM interval requires a gauge at both endpoints, so its summed
 // non-overlapping duration cannot extend beyond the latest RAM reading.
-// Individual gauges also occupy distinct timestamps in the overall series.
 func jobSizingRAMValid(r JobResourceSummary, start, end time.Time, cadence ResourceCoverage) bool {
 	gauge, mean := r.RAM, r.RAMMean
 	if gauge == nil {
 		return mean == nil
 	}
-	earliest := start.Add(r.Sampling.BeforeFirstSample)
-	latest := end.Add(-r.Sampling.AfterLastSample)
-	span := gauge.LatestAt.Sub(earliest)
-	if gauge.Samples < 1 || gauge.Samples > r.Samples || gauge.Latest > gauge.SampleMax ||
-		gauge.Samples == 1 && gauge.Latest != gauge.SampleMax ||
-		gauge.LatestAt.After(latest) || span < time.Duration(gauge.Samples-1)*time.Nanosecond {
+	span, valid := jobSizingGaugeSpan(r, gauge, start, end)
+	if !valid {
 		return false
 	}
 	if gauge.Samples == r.Samples {
-		// Every endpoint is known, so the last reading is the final
-		// sample and every cadence-eligible pair contributes to the mean.
-		if !gauge.LatestAt.Equal(latest) || (mean == nil) != (cadence.Intervals == 0) {
+		// Every endpoint is known and every cadence-eligible pair
+		// contributes to the mean.
+		if (mean == nil) != (cadence.Intervals == 0) {
 			return false
 		}
 		if mean != nil && (mean.Coverage.Intervals != cadence.Intervals || mean.Coverage.Duration != cadence.Duration) {
