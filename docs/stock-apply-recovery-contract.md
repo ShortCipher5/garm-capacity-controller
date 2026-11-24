@@ -35,6 +35,15 @@ inactive-by-default controller state per reviewed scope:
 capability inputs and the adapter contract assessment. The qualified
 interface registry is empty on purpose: every production claim fails closed.
 
+## What the authenticated dashboard shows
+
+The repository policy area explains that stock settings apply and its
+operation status are unavailable here. It does not poll a status route,
+open a journal, or derive charge, pause, or readiness from another
+dashboard endpoint. A missing operation charge is explicitly unknown, not
+zero; if an offline view has a recorded charge, it labels that value as
+last recorded, not current capacity. The dashboard offers no write controls.
+
 ## What the durable SQLite and lineage checks establish — and what they do not
 
 The stock-apply journal reuses the management journal's local durability

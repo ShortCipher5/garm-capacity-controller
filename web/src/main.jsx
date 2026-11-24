@@ -3,6 +3,7 @@ import {DemandObserverStatus} from "./demand-observer-status.jsx";
 import {MixPrefillProvider} from "./mix-prefill-context.jsx";
 import { PoolMappings } from "./broker-profiles.jsx";
 import { AllocatorStatus } from "./allocator-status.jsx";
+import { StockApplyControllerView } from "./stock-apply-view.jsx";
 import { Lifecycle } from "./lifecycle.jsx";
 import { CapacityStates } from "./capacity-states.jsx";
 import { BrokerPolicy } from "./broker-policy.jsx";
@@ -270,6 +271,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         <Profiles managementEnabled={data.management_enabled === true} readProfiles={readProfiles} readMix={readMix} hosts={data.hosts} />
         <DemandObserverStatus read={readDemandObserverStatus} />
         <BrokerPolicy readPolicy={readBrokerPolicy} readPlan={readAllocatorPlan} />
+        <StockApplyControllerView />
         <div className="bottom-grid">
           <CapacityStates read={readCapacityStates} />
           <AuditEvents events={data.events} />

@@ -577,6 +577,30 @@ func TestStockApplyHeldCapacityFollowsBaselineAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestStockApplyDelayedObservationCannotReplaceRecordedCharge(t *testing.T) {
+	controller, _, _, _ := stockApplyTestController(t)
+	plan, now := validatedStockApplyPlan(t, 1)
+	ctx := context.Background()
+	if err := controller.RecordProposal(ctx, plan, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	// Even a fresh observation with the same count advances the timestamp.
+	for _, n := range []time.Duration{2, 4} {
+		if err := controller.RecordObservation(ctx, plan.Scope, plan.Observed, 3, now.Add(n*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range []time.Duration{3, 4} {
+		if err := controller.RecordObservation(ctx, plan.Scope, plan.Observed+90, 0, now.Add(n*time.Second)); !errors.Is(err, ErrStockApplyConflict) {
+			t.Fatalf("accepted stale observation at +%ds: %v", n, err)
+		}
+	}
+	view, err := controller.View(ctx, plan.Scope, stockApplyEval(now.Add(5*time.Second), StockApplyCapabilityClaim{Interface: StockApplyStockInterface}, 0, nil, false))
+	if err != nil || view.Charged.Runners != 3 || view.Drift || !view.Operation.UpdatedAt.Equal(now.Add(4*time.Second)) {
+		t.Fatalf("stale observation changed recorded status: %+v, %v", view, err)
+	}
+}
+
 func TestStockApplyResumeDistinguishesPauseLiftFromFreshCheckReadiness(t *testing.T) {
 	enableStockApplyFixtureInterface(t)
 	controller, _, _, _ := stockApplyTestController(t)
@@ -625,6 +649,10 @@ func TestStockApplyResumeDistinguishesPauseLiftFromFreshCheckReadiness(t *testin
 	}
 	if staleView.Resume.Ready || staleView.Resume.Reason != "stale_evidence" {
 		t.Fatal("stale readiness", staleView.Resume)
+	}
+	missing, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(6*time.Second), claim, 1, nil, true))
+	if err != nil || missing.Resume.Ready || missing.Resume.Reason != "stale_evidence" {
+		t.Fatal("missing readback readiness", missing.Resume, err)
 	}
 	// A fresh readback that drifts from the journaled operation blocks readiness.
 	drifted := plan.Suggested + 50

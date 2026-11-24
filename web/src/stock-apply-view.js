@@ -15,12 +15,19 @@ const operationStates=new Set(['proposed','dispatched','outcome_unknown','applie
 const operationKeys=['operation_id','scope','pool_id','repository_id','source','fingerprint','observed','suggested','charged','direction','state','drift','plan_expires_at','created_at','updated_at'];
 const timestamp=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(v);
 
-function unavailableView(){
- return {state:'unavailable',reason:'view_unavailable',paused:false,drift:false,operation:null,
-  charged:{runners:0,reason:'no_recorded_operation'},
-  capability:{supported:false,refusals:[{code:'view_unavailable'}]},
-  actions:['apply','withdraw_proposal','pause','resume','resolve_outcome','rollback'].map(action=>({action,enabled:false,reason:'view_unavailable'})),
-  resume:{lift_pause:false,lift_reason:'not_paused',ready:false,reason:'view_unavailable'}};
+function unavailableView(code='view_unavailable'){
+ return {state:'unavailable',reason:code,paused:null,drift:null,operation:null,
+  charged:null,
+  capability:{supported:false,refusals:[{code}]},
+  actions:['apply','withdraw_proposal','pause','resume','resolve_outcome','rollback'].map(action=>({action,enabled:false,reason:code})),
+  resume:{lift_pause:false,ready:false,reason:code}};
+}
+
+// The dashboard has no qualified read-only source of operation status.
+// Show that limitation explicitly instead of constructing a scope, assuming
+// maintenance state, probing a route, or treating another count as its charge.
+export function stockApplyDiagnosticsUnavailable(){
+ return unavailableView('status_source_unavailable');
 }
 
 function validOperation(raw){
@@ -66,6 +73,8 @@ export function stockApplyView(raw){
  const operation=raw.operation===undefined?null:validOperation(raw.operation)?raw.operation:null;
  if(raw.operation!==undefined&&operation===null)return unavailableView();
  if(['proposed','applied_when_proven','outcome_unknown'].includes(raw.state)&&!operation)return unavailableView();
+ if(raw.resume.lift_pause!==raw.paused||raw.resume.ready&&
+    (!raw.capability.supported||raw.paused||raw.drift||raw.state!=='proposed'||operation?.state!=='proposed'||operation.drift))return unavailableView();
  return {state:raw.state,reason:raw.reason,paused:raw.paused,drift:raw.drift,operation,
   charged:raw.charged,capability:{supported:raw.capability.supported,refusals},actions:raw.actions,resume:raw.resume};
 }
@@ -78,7 +87,8 @@ const refusalMessages={
  late_writer_fence_unproven:'Missing verified evidence that delayed or concurrent external writers cannot still settle after an outcome is recorded.',
  requirement_unestablished:null,
  physical_allocation_teardown_out_of_scope:'The candidate adapter reaches into physical allocation or teardown; only verified settings are in scope.',
- view_unavailable:'The controller view payload was malformed or untrusted and is shown as unavailable.'};
+ view_unavailable:'The controller view payload was malformed or untrusted and is shown as unavailable.',
+ status_source_unavailable:'This console has no qualified read-only source for operation status.'};
 
 export function stockApplyMessages(view){
  const state=({
@@ -87,15 +97,18 @@ export function stockApplyMessages(view){
   paused_maintenance:'Controller settings changes are paused for maintenance. New work is blocked and pending or unknown operations are preserved, never silently cleared.',
   applied_when_proven:'The recorded change reached an independently proven outcome. That result describes the original request only; it is not a statement about current settings or released capacity.',
   outcome_unknown:'A settings change was interrupted and its outcome is unknown. A current read matching the old or new value is an observation, not proof of completion; the operation stays blocked and charged.'})[view.state]||'Stock settings apply is unavailable.';
- const charged=`Still charged: ${view.charged.runners} runner slot(s). ${view.charged.reason}`;
+ const charged=view.operation
+  ?`Last recorded runner charge: ${view.charged.runners} slot(s). Not a live capacity reading. ${view.charged.reason}`
+  :'Recorded runner charge: unavailable here. This is not a zero count.';
  const refusals=view.capability.refusals.map(refusal=>refusalMessages[refusal.code]??`Capability refused: ${refusal.code}.`);
  const detail=view.capability.refusals.find(refusal=>refusal.code==='requirement_unestablished');
  if(detail)refusals[view.capability.refusals.indexOf(detail)]=`A required adapter property is not established: ${detail.detail}.`;
  return {state,reason:view.reason,charged,refusals,
   drift:view.drift?'Observed settings drifted from the journaled operation; apply stays blocked pending explicit operator review.':'',
   resumeLift:view.resume.lift_pause
-   ?'Lifting the local maintenance pause is available. It is a controller-local action only: it never clears, resolves or reclassifies a pending or unknown operation.'
-   :`Lifting the local maintenance pause is unavailable (${(view.resume.lift_reason||'unavailable').replaceAll('_',' ')}).`,
+   ?'The recorded state allows lifting the local maintenance pause, but this panel cannot do it. Lifting it never clears, resolves or reclassifies a pending or unknown operation.'
+   :view.paused===null?'Local maintenance pause status: unavailable here.'
+    :`Lifting the local maintenance pause is unavailable (${(view.resume.lift_reason||'unavailable').replaceAll('_',' ')}).`,
   resumeReady:view.resume.ready
    ?'Ready to resume apply work: the pause is lifted and every fresh drift check passes. No apply control is enabled here without a qualified adapter.'
    :`Ready to resume apply work: no — ${(view.resume.reason||'unavailable').replaceAll('_',' ')}. Lifting a pause does not imply readiness; fresh drift checks run separately afterwards.`};

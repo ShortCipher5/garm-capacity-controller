@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { stockApplyView, stockApplyMessages } from './stock-apply-view.js';
+import { stockApplyView, stockApplyMessages, stockApplyDiagnosticsUnavailable } from './stock-apply-view.js';
 
 const scope='ab'.repeat(32);
 const operation={operation_id:'01'.repeat(16),scope,pool_id:'pool',repository_id:'repo',source:'checked-source',fingerprint:'checked-settings',observed:3,suggested:4,charged:2,direction:'increase',state:'proposed',drift:false,plan_expires_at:'2026-11-24T10:00:20Z',created_at:'2026-11-24T10:00:00Z',updated_at:'2026-11-24T10:00:00Z'};
@@ -36,6 +36,8 @@ test('malformed and untrusted payloads collapse to a conservative unavailable vi
   {...stockView,reason:'Upper Case'},
   {...stockView,resume:undefined},
   {...stockView,resume:{lift_pause:'yes',ready:false}},
+  {...stockView,resume:{lift_pause:false,ready:true}},
+  {...stockView,resume:{lift_pause:true,ready:false}},
   {...stockView,resume:{lift_pause:false,lift_reason:'bad reason',ready:false}}]){
   const view=stockApplyView(raw);
   assert.equal(view.state,'unavailable',JSON.stringify(raw).slice(0,120));
@@ -48,12 +50,13 @@ test('unknown state message warns that a matching read is not completion proof',
  const view=stockApplyView({...stockView,state:'outcome_unknown',reason:'outcome_uncertain_pending_resolution',operation:{...operation,state:'outcome_unknown'}});
  const messages=stockApplyMessages(view);
  assert.match(messages.state,/matching the old or new value is an observation, not proof of completion/);
- assert.match(messages.charged,/^Still charged: 2 runner slot\(s\)\./);
+ assert.match(messages.charged,/^Last recorded runner charge: 2 slot\(s\)\. Not a live capacity reading\./);
 });
 
 test('paused state message promises pending and unknown operations are preserved',()=>{
  const paused={...stockView,state:'paused_maintenance',reason:'operator_pause_active',paused:true,
-  actions:actions.map(a=>a.action==='pause'?{...a,enabled:false,reason:'already_paused'}:a)};
+  actions:actions.map(a=>a.action==='pause'?{...a,enabled:false,reason:'already_paused'}:a),
+  resume:resume(true,'',false,'pause_must_be_lifted_first')};
  delete paused.operation;
  const messages=stockApplyMessages(stockApplyView(paused));
  assert.match(messages.state,/pending or unknown operations are preserved, never silently cleared/);
@@ -74,10 +77,10 @@ test('pause lift and fresh-check readiness are reported as different states',()=
  assert.equal(view.resume.lift_pause,true);
  assert.equal(view.resume.ready,false);
  const messages=stockApplyMessages(view);
- assert.match(messages.resumeLift,/Lifting the local maintenance pause is available/);
+ assert.match(messages.resumeLift,/this panel cannot do it/);
  assert.match(messages.resumeLift,/never clears, resolves or reclassifies/);
  assert.match(messages.resumeReady,/pause must be lifted first/);
- const ready={...stockView,resume:resume(false,'not_paused',true,'')};
+ const ready={...stockView,capability:{supported:true,refusals:[]},resume:resume(false,'not_paused',true,'')};
  assert.match(stockApplyMessages(stockApplyView(ready)).resumeReady,/every fresh drift check passes/);
  assert.match(stockApplyMessages(stockApplyView({...stockView,resume:resume(false,'not_paused',false,'stale_evidence')})).resumeReady,/stale evidence/);
 });
@@ -87,4 +90,14 @@ test('adapter requirement and physical scope refusals are rendered with their de
  const messages=stockApplyMessages(view);
  assert.ok(messages.refusals.some(line=>/exclusive_authorized_change_boundary/.test(line)));
  assert.ok(messages.refusals.some(line=>/physical allocation or teardown/.test(line)));
+});
+
+test('missing charge stays unavailable and a recorded zero is explicit',()=>{
+ const unavailable=stockApplyDiagnosticsUnavailable();
+ assert.equal(unavailable.charged,null);
+ assert.equal(unavailable.paused,null);
+ assert.equal(unavailable.resume.ready,false);
+ assert.match(stockApplyMessages(unavailable).charged,/unavailable here. This is not a zero count/);
+ const zero=stockApplyView({...stockView,operation:{...operation,charged:0},charged:{...stockView.charged,runners:0}});
+ assert.match(stockApplyMessages(zero).charged,/Last recorded runner charge: 0 slot/);
 });

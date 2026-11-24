@@ -791,15 +791,21 @@ func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha
 		if err != nil {
 			return ErrStockApplyJournal
 		}
+		// Do not let an earlier or same-time observation replace the last
+		// recorded charge. This orders local records, not their authority.
+		if !now.After(op.UpdatedAt) {
+			return ErrStockApplyConflict
+		}
 		consistent := stockApplyReadbackConsistent(op, readback)
 		detail := strconv.FormatInt(readback, 10)
 		if err := stockApplyAudit(tx, key, op.OperationID, "observation", detail); err != nil {
 			return err
 		}
+		// Advance ordering even when the reported count is unchanged.
+		if _, err := tx.Exec("UPDATE stock_apply_operation SET charged=?,updated_at=? WHERE operation_id=?", charged, now.UTC().Format(time.RFC3339Nano), op.OperationID); err != nil {
+			return ErrStockApplyJournal
+		}
 		if charged != op.Charged {
-			if _, err := tx.Exec("UPDATE stock_apply_operation SET charged=?,updated_at=? WHERE operation_id=?", charged, now.UTC().Format(time.RFC3339Nano), op.OperationID); err != nil {
-				return ErrStockApplyJournal
-			}
 			if err := stockApplyAudit(tx, key, op.OperationID, "charge_updated", strconv.FormatInt(charged, 10)); err != nil {
 				return err
 			}
@@ -994,9 +1000,9 @@ func (c *StockApplyController) View(ctx context.Context, scope [sha256.Size]byte
 		view.Resume.Reason = firstRefusal
 	case op.Drift:
 		view.Resume.Reason = stockApplyReasonDriftDetected
-	case !eval.Fresh || !op.PlanExpires.After(eval.Now):
+	case !eval.Fresh || eval.Readback == nil || !op.PlanExpires.After(eval.Now):
 		view.Resume.Reason = stockApplyReasonStaleEvidence
-	case eval.Readback != nil && !stockApplyReadbackConsistent(*op, *eval.Readback):
+	case !stockApplyReadbackConsistent(*op, *eval.Readback):
 		view.Resume.Reason = stockApplyReasonDriftDetected
 	default:
 		view.Resume.Ready = true

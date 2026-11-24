@@ -27,7 +27,7 @@ test('controller state renders fully disabled with charges, reasons and no permi
   const html=render();
   assert.match(html,/Stock settings apply \(controller state\)/);
   assert.match(html,/grants no write authority/);
-  assert.match(html,/Still charged: 2 runner slot\(s\)\./);
+  assert.match(html,/Last recorded runner charge: 2 slot\(s\)\. Not a live capacity reading\./);
   assert.match(html,/neither conditional nor authoritative/);
   assert.match(html,/pool.*maximum from 3 to 4/);
   assert.match(html,/disabled/);
@@ -45,7 +45,7 @@ test('controller state renders fully disabled with charges, reasons and no permi
   delete paused.operation;
   const pausedHtml=render(paused);
   assert.match(pausedHtml,/pending or unknown operations are preserved, never silently cleared/);
-  assert.match(pausedHtml,/Lifting the local maintenance pause is available/);
+  assert.match(pausedHtml,/this panel cannot do it/);
   assert.match(pausedHtml,/never clears, resolves or reclassifies a pending or unknown operation/);
   assert.match(pausedHtml,/Ready to resume apply work: no — pause must be lifted first/);
   assert.match(pausedHtml,/Lifting a pause does not imply readiness/);
