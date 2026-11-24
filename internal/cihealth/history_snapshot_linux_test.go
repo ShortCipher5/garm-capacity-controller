@@ -577,10 +577,11 @@ func TestSnapshotHistoryCompatibleResultsDoNotFillMissingIdentity(t *testing.T) 
 		t.Fatal(err)
 	}
 	rows, err := h.Recent(t.Context(), s, 2, later)
-	if err != nil || len(rows) != 2 || rows[0].Key != retry.Key || rows[0].Clock.Conclusion != ConclusionSuccess ||
+	if err != nil || len(rows) != 3 || rows[0].Key != retry.Key || rows[0].Clock.Conclusion != ConclusionSuccess ||
 		!rows[1].AsOf.Equal(later) || rows[1].Key != after.Key || rows[1].Jobs[0].Clock.Conclusion != ConclusionFailure ||
-		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Key.Number != after.Jobs[0].Steps[0].Key.Number {
-		t.Fatalf("known result moved scope or missing child was filled: %+v / %v", rows, err)
+		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Key.Number != after.Jobs[0].Steps[0].Key.Number ||
+		!rows[2].AsOf.Equal(now) || rows[2].Key != after.Key || len(rows[2].Jobs[0].Steps) != 2 {
+		t.Fatalf("known result moved scope, filled a missing child, or dropped the prior version: %+v / %v", rows, err)
 	}
 }
 
@@ -605,5 +606,158 @@ func TestHistoryIgnoresLiveJobCreationClock(t *testing.T) {
 	}
 	if a.Jobs[0].CreatedAt.IsZero() {
 		t.Fatal("history normalization mutated the live snapshot")
+	}
+}
+
+// A later positive observation of the same exact attempt that omits its
+// endpoints must not destroy the previously measured result: both stay
+// retained as their own versions, the latest one visibly incomplete.
+func TestSnapshotHistorySparseLaterObservationKeepsPriorMeasuredVersion(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	measured := snapAttempt(s, 20, 1, now)
+	measured.Clock.Conclusion = ConclusionSuccess
+	measured.Jobs[0].Clock.Conclusion = ConclusionSuccess
+	measured.Jobs[0].Steps[0].Clock.Conclusion = ConclusionSuccess
+	prior, next := HistoryCursor{1, 20}, HistoryCursor{2, 21}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{measured}, now); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(2 * time.Minute)
+	sparse := measured
+	sparse.AsOf = later
+	sparse.Clock.StartedAt, sparse.Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].Clock.StartedAt, sparse.Jobs[0].Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].Steps[0].Clock.StartedAt, sparse.Jobs[0].Steps[0].Clock.CompletedAt = time.Time{}, time.Time{}
+	sparse.Jobs[0].CreatedAt = later // Live-only creation must not reach retained bytes.
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{sparse}, later); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := h.Recent(t.Context(), s, 1, later)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("expected exactly the sparse and measured versions: %+v, %v", rows, err)
+	}
+	if !rows[0].AsOf.Equal(later) || rows[0].Clock.Conclusion != ConclusionSuccess ||
+		!rows[0].Clock.StartedAt.IsZero() || !rows[0].Clock.CompletedAt.IsZero() ||
+		len(rows[0].Jobs) != 1 || !rows[0].Jobs[0].Clock.StartedAt.IsZero() {
+		t.Fatalf("latest row is not the visibly incomplete observation: %+v", rows[0])
+	}
+	if !rows[1].AsOf.Equal(now) || rows[1].Clock.StartedAt.IsZero() || rows[1].Clock.CompletedAt.IsZero() ||
+		len(rows[1].Jobs[0].Steps) != 1 || rows[1].Jobs[0].Steps[0].Clock.StartedAt.IsZero() {
+		t.Fatalf("previously measured result was not preserved as its own version: %+v", rows[1])
+	}
+	if timing, err := Measure(rows[1]); err != nil || timing.Wall != (Span{Basis: ObservedEndpoints, Duration: time.Minute}) {
+		t.Fatalf("prior measurement no longer measures: %+v, %v", timing, err)
+	}
+	// An exact replay of the accepted transition is a durable no-op.
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{sparse}, later); err != nil {
+		t.Fatalf("exact replay conflicted: %v", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(sealed, after) {
+		t.Fatal("replay mutated durable state", err)
+	}
+	// Restart around the committed versions preserves both and the cursor.
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h = snapshotOpen(t, root, false)
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != next {
+		t.Fatal("cursor advanced ahead of facts or was lost", c, err)
+	}
+	rows, err = h.Recent(t.Context(), s, 1, later)
+	if err != nil || len(rows) != 2 || !rows[0].AsOf.Equal(later) || !rows[1].AsOf.Equal(now) {
+		t.Fatalf("reopened store lost a version: %+v, %v", rows, err)
+	}
+	// The sparse row of one attempt never blocks unrelated facts in the same scope.
+	unrelated := snapAttempt(s, 21, 1, later)
+	if err := h.Apply(t.Context(), s, next, HistoryCursor{3, 22}, []AttemptFacts{unrelated}, later); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, later); err != nil || len(rows) != 3 || rows[0].Key.RunID != 21 {
+		t.Fatalf("unrelated observation was blocked by the sparse record: %+v, %v", rows, err)
+	}
+}
+
+func TestSnapshotHistoryVersionOrderingReplayAndPageRules(t *testing.T) {
+	path, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	first := snapAttempt(s, 20, 1, now)
+	first.Jobs[0].Steps[0].Clock.Conclusion = ConclusionSuccess
+	prior, next := HistoryCursor{1, 20}, HistoryCursor{2, 21}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{first}, now); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := os.ReadFile(filepath.Join(path, historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	older := snapAttempt(s, 20, 1, now.Add(-time.Second))
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{older}, now); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("out-of-order version accepted", err)
+	}
+	reworded := snapAttempt(s, 20, 1, now) // Same observation time, different facts.
+	reworded.Jobs = nil
+	if err := h.Apply(t.Context(), s, prior, HistoryCursor{2, 19}, []AttemptFacts{reworded}, now); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("same-time contradiction accepted", err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, prior, []AttemptFacts{first}, now); err != nil {
+		t.Fatal("exact replay conflicted", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(sealed, after) {
+		t.Fatal("replay mutated durable state", err)
+	}
+	if c, err := h.Cursor(t.Context(), s); err != nil || c != prior {
+		t.Fatal("replay moved the cursor", c, err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 21}, []AttemptFacts{snapAttempt(s, 21, 1, now)}, now); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("stale expected cursor accepted", err)
+	}
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{first, older}, now); !errors.Is(err, ErrHistory) {
+		t.Fatal("page with two versions of one attempt accepted", err)
+	}
+	// A newer version that regresses a known step conclusion is refused.
+	later := now.Add(time.Minute)
+	regressed := snapAttempt(s, 20, 1, later)
+	regressed.Jobs[0].Steps[0].Clock.Conclusion = ConclusionUnknown
+	if _, err := Measure(regressed); err != nil {
+		t.Fatalf("fixture failed basic validation: %v", err)
+	}
+	if err := h.Apply(t.Context(), s, prior, next, []AttemptFacts{regressed}, later); !errors.Is(err, ErrHistoryConflict) {
+		t.Fatal("terminal regression accepted", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(path, historyFile)); err != nil || !bytes.Equal(sealed, after) {
+		t.Fatal("rejected version mutated durable state", err)
+	}
+}
+
+func TestSnapshotHistoryPurgesExpiredVersionsByObservationTime(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	first := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{snapAttempt(s, 20, 1, first)}, first); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, first); err != nil || len(rows) != 1 || rows[0].Key.RunID != 20 {
+		t.Fatalf("fresh version not visible at its own observation time: %+v, %v", rows, err)
+	}
+	later := first.Add(historyRetention).Add(time.Hour)
+	current := snapAttempt(s, 21, 1, later)
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{current}, later); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, later); err != nil || len(rows) != 1 || rows[0].Key.RunID != 21 {
+		t.Fatalf("expired version was not purged by its own observation time: %+v, %v", rows, err)
+	}
+	if rows, err := h.Recent(t.Context(), s, 2, first); err != nil || len(rows) != 0 {
+		t.Fatalf("reading at an older wall resurrected purged data: %+v, %v", rows, err)
 	}
 }

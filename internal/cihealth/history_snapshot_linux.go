@@ -448,18 +448,22 @@ func decodeHistory(payload []byte) (historyState, error) {
 		}
 		scopes[c.Scope] = true
 	}
-	seen := make(map[AttemptKey]bool, len(s.Attempts))
+	type version struct {
+		key AttemptKey
+		as  time.Time
+	}
+	seen := make(map[version]bool, len(s.Attempts))
 	total := 0
 	for i, in := range s.Attempts {
 		a, err := historyCopyAttempt(in)
-		if err != nil || !scopes[historyScope(a.Key)] || seen[a.Key] || i > 0 && !historyNewer(s.Attempts[i-1], a) {
+		if err != nil || !scopes[historyScope(a.Key)] || seen[version{a.Key, a.AsOf}] || i > 0 && !historyNewer(s.Attempts[i-1], a) {
 			return historyState{}, ErrHistory
 		}
 		total += historyRecordCount(a)
 		if total > historyMaxRecords {
 			return historyState{}, ErrHistory
 		}
-		seen[a.Key] = true
+		seen[version{a.Key, a.AsOf}] = true
 		s.Attempts[i] = a
 	}
 	data, err := json.Marshal(s)
@@ -506,11 +510,14 @@ func (h *History) Cursor(ctx context.Context, scope HistoryScope) (HistoryCursor
 	return c.Cursor, nil
 }
 
-// Apply seals a bounded coherent page and its CAS transition as one version.
-// A replacement cannot lose or contradict a known terminal conclusion on the
-// exact retained attempt, job, or step. It never merges absent children or
-// infers coverage. I/O failure leaves the handle fenced without publishing
-// its in-memory cursor. ErrHistoryUncertain
+// Apply seals a bounded coherent page and its CAS transition as one commit.
+// A newer observation of an exact retained attempt is kept as its own
+// version beside prior positive measurements, never merged into them or
+// silently dropped; a byte-identical version is an exact replay. No version
+// can lose or contradict a known terminal conclusion on the exact retained
+// attempt, job, or step, and an older or out-of-scope version is refused.
+// It never merges absent children or infers coverage. I/O failure leaves the
+// handle fenced without publishing its in-memory cursor. ErrHistoryUncertain
 // means the durable outcome may have changed and must not be blindly retried.
 // Only the exact most recent accepted transition can be replayed.
 func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next HistoryCursor, page []AttemptFacts, now time.Time) error {
@@ -578,27 +585,40 @@ func (h *History) Apply(ctx context.Context, scope HistoryScope, expected, next 
 		incoming[a.Key] = a
 	}
 	pending.Attempts = make([]AttemptFacts, 0, len(h.state.Attempts)+len(attempts))
+	replayed := make(map[AttemptKey]bool, len(attempts))
+	compared := make(map[AttemptKey]bool, len(attempts))
 	for _, old := range h.state.Attempts {
 		if a, ok := incoming[old.Key]; ok {
-			if a.AsOf.Before(old.AsOf) {
-				return ErrHistoryConflict
-			}
-			if a.AsOf.Equal(old.AsOf) {
-				left, leftErr := json.Marshal(a)
-				right, rightErr := json.Marshal(old)
-				if leftErr != nil || rightErr != nil || !bytes.Equal(left, right) {
+			// Retained records are ordered newest first, so the first record of
+			// this attempt is its latest version: a newer version is appended
+			// alongside prior ones, an identical one is an exact replay, and a
+			// contradictory or out-of-order one refuses the whole page.
+			if !compared[old.Key] {
+				compared[old.Key] = true
+				switch {
+				case old.AsOf.After(a.AsOf):
+					return ErrHistoryConflict
+				case old.AsOf.Equal(a.AsOf):
+					left, leftErr := json.Marshal(a)
+					right, rightErr := json.Marshal(old)
+					if leftErr != nil || rightErr != nil || !bytes.Equal(left, right) {
+						return ErrHistoryConflict
+					}
+					replayed[old.Key] = true
+				case !historyPreservesConclusions(old, a):
 					return ErrHistoryConflict
 				}
-			} else if !historyPreservesConclusions(old, a) {
-				return ErrHistoryConflict
 			}
-			continue
 		}
 		if old.AsOf.After(cutoff) {
 			pending.Attempts = append(pending.Attempts, old)
 		}
 	}
-	pending.Attempts = append(pending.Attempts, attempts...)
+	for _, a := range attempts {
+		if !replayed[a.Key] {
+			pending.Attempts = append(pending.Attempts, a)
+		}
+	}
 	sort.Slice(pending.Attempts, func(i, j int) bool { return historyNewer(pending.Attempts[i], pending.Attempts[j]) })
 	total := 0
 	for i, a := range pending.Attempts {
@@ -687,8 +707,10 @@ func (h *History) Recent(ctx context.Context, s HistoryScope, limit int, now tim
 
 // RecentPrefix is the bounded aggregate read. It returns newest first, stops
 // before the first whole attempt that does not fit, and never skips one to
-// backfill a smaller older attempt. Only this surface treats excess matching
-// data as a partial selection rather than a storage error.
+// backfill a smaller older attempt. Every retained observation version of a
+// selected attempt is included, and the record budget counts all of them.
+// Only this surface treats excess matching data as a partial selection rather
+// than a storage error.
 func (h *History) RecentPrefix(ctx context.Context, s HistoryScope, limit int, now time.Time) (HistoryRecentPrefix, error) {
 	return h.recent(ctx, s, limit, now, true)
 }
@@ -704,8 +726,20 @@ func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now tim
 	if !h.available(ctx) {
 		return HistoryRecentPrefix{}, ErrHistory
 	}
+	records := make(map[AttemptKey]int, limit)
+	for _, a := range h.state.Attempts {
+		if !historyActive(ctx) {
+			return HistoryRecentPrefix{}, ErrHistory
+		}
+		if !a.AsOf.After(cutoff) {
+			break
+		}
+		if !a.AsOf.After(now) && historyScope(a.Key) == s {
+			records[a.Key] += historyRecordCount(a)
+		}
+	}
 	out := HistoryRecentPrefix{Attempts: make([]AttemptFacts, 0, limit)}
-	records := 0
+	used, selected := 0, make(map[AttemptKey]bool, limit)
 	for _, a := range h.state.Attempts {
 		if !historyActive(ctx) {
 			return HistoryRecentPrefix{}, ErrHistory
@@ -716,27 +750,26 @@ func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now tim
 		if a.AsOf.After(now) || historyScope(a.Key) != s {
 			continue
 		}
-		if len(out.Attempts) == limit {
-			out.Limited = HistorySelectionAttemptLimit
-			break
-		}
-		n := historyRecordCount(a)
-		if n > historyMaxPageRecords-records {
-			if !prefix {
-				return HistoryRecentPrefix{}, ErrHistory
+		if !selected[a.Key] {
+			if len(selected) == limit {
+				out.Limited = HistorySelectionAttemptLimit
+				break
 			}
-			out.Limited = HistorySelectionRecordLimit
-			break
+			if n := records[a.Key]; n > historyMaxPageRecords-used {
+				if !prefix {
+					return HistoryRecentPrefix{}, ErrHistory
+				}
+				out.Limited = HistorySelectionRecordLimit
+				break
+			}
+			selected[a.Key] = true
+			used += records[a.Key]
 		}
 		row, err := historyCopyAttempt(a)
 		if err != nil {
 			return HistoryRecentPrefix{}, err
 		}
 		out.Attempts = append(out.Attempts, row)
-		records += n
-		if !prefix && len(out.Attempts) == limit {
-			break
-		}
 	}
 	if !historyActive(ctx) || (prefix && !h.available(ctx)) {
 		return HistoryRecentPrefix{}, ErrHistory
