@@ -304,9 +304,9 @@ PYVERIFY
 # This does not copy a private installed configuration into CI.
 export PACKAGING_GARM_IMAGE=ghcr.io/cloudbase/garm:v0.2.1@sha256:5ccdc29c31084ed4f30ec85e09a57b5105cf3dcc5fa8c1aba9e68de461e7e635
 docker pull "$PACKAGING_GARM_IMAGE"
-python3 - "$work/provider/capacity-provider" "$results" <<'PY'
+python3 - "$work/provider/capacity-provider" "$results" "$ingress_tag" "$history_init_tag" <<'PY'
 import hashlib,json,os,pathlib,re,subprocess,sys
-provider,results=map(pathlib.Path,sys.argv[1:]); image=os.environ['PACKAGING_GARM_IMAGE']
+provider,results=map(pathlib.Path,sys.argv[1:3]); ingress_tag,history_init_tag=sys.argv[3:]; image=os.environ['PACKAGING_GARM_IMAGE']
 info=json.loads(subprocess.check_output(['docker','image','inspect',image]))[0]
 run=['docker','run','--rm','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','64','--memory','128m','--cpus','1']
 uid=subprocess.run(run+['--entrypoint','/bin/sh',image,'-c','id -u'],capture_output=True,text=True,timeout=30)
@@ -320,7 +320,24 @@ interpreter=match.group(1)
 loader=subprocess.run(run+['--entrypoint','/bin/sh',image,'-c','test -e "$1"','sh',interpreter],capture_output=True,timeout=30)
 record={'image':image,'os':info['Os'],'architecture':info['Architecture'],'image_default_uid':int(uid.stdout.strip()),'provider_interpreter':interpreter,'provider_interpreter_present':loader.returncode==0,'provider_interface_executable':compatible,'provider_exit_status':probe.returncode,'installed_stack_qualified':False,'reason':'Synthetic checks cannot qualify existing UID/capability isolation, exclusive physical scope, writer fencing, lineage or recovery.'}
 (results/'garm-compatibility.json').write_text(json.dumps(record,indent=2))
-(results/'generic-runtime.json').write_text(json.dumps({'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'gateway_image_id':json.loads(subprocess.check_output(['docker','image','inspect','capacity-gateway:qualification']))[0]['Id'],'ledger_tool_image_id':json.loads(subprocess.check_output(['docker','image','inspect','capacity-ledger:qualification']))[0]['Id'],'provider_sha256':hashlib.sha256(provider.read_bytes()).hexdigest(),'synthetic_gateway_checks_passed':True,'stock_ingress_image_checks_passed':True,'live_stack_changed':False,'deployment_authorized':False},indent=2))
+def image_id(tag):
+    value=subprocess.check_output(['docker','image','inspect','--format','{{.Id}}',tag],text=True).strip()
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}',value), 'invalid local image ID'
+    return value
+
+(results/'generic-runtime.json').write_text(json.dumps({
+    'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+    'gateway_image_id':image_id('capacity-gateway:qualification'),
+    'ledger_tool_image_id':image_id('capacity-ledger:qualification'),
+    'stock_ingress_image_id':image_id(ingress_tag),
+    'ci_history_init_tool_image_id':image_id(history_init_tag),
+    'provider_sha256':hashlib.sha256(provider.read_bytes()).hexdigest(),
+    'synthetic_gateway_checks_passed':True,
+    'stock_ingress_image_checks_passed':True,
+    'synthetic_ci_history_init_checks_passed':True,
+    'live_stack_changed':False,
+    'deployment_authorized':False,
+},indent=2))
 print('Exact-image provider executable:',compatible,'; image default UID:',record['image_default_uid'])
 print('Installed-stack qualification: BLOCKED; no provider or runtime change attempted')
 PY
