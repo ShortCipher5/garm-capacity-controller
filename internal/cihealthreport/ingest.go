@@ -87,15 +87,26 @@ func IngestReports(ctx context.Context, in IngestInput) (IngestedReports, error)
 		}
 		archives[archive.ArtifactID] = archive.Bytes
 	}
+	// Validate the archive set and every actual byte length against the
+	// manifest claims before any hashing or parsing. Metadata-only input is
+	// covered here too: an exact digest alone never substitutes for the
+	// advertised length, and no bytes are hashed before this pass succeeds.
 	if len(archives) != len(in.Manifest.Artifacts) {
 		return fail()
 	}
-	out := IngestedReports{}
+	rows := make(map[int64]ReportManifestArtifact, len(in.Manifest.Artifacts))
 	for _, row := range in.Manifest.Artifacts {
-		raw, ok := archives[row.ArtifactID]
-		if !ok {
+		rows[row.ArtifactID] = row
+	}
+	for id, raw := range archives {
+		row := rows[id]
+		if int64(len(raw)) != row.ArchiveBytes || len(raw) > MaxJUnitZIPBytes {
 			return fail()
 		}
+	}
+	out := IngestedReports{}
+	for _, row := range in.Manifest.Artifacts {
+		raw := archives[row.ArtifactID]
 		archiveDigest := sha256.Sum256(raw)
 		if subtle.ConstantTimeCompare(archiveDigest[:], row.ArchiveSHA256[:]) != 1 {
 			return fail()

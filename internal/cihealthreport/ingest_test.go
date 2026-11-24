@@ -227,3 +227,34 @@ func TestNewPublicationRejectsTamperedIngestion(t *testing.T) {
 		t.Fatalf("exact timed duration not retained: %+v %v", pub, err)
 	}
 }
+
+func TestIngestValidatesLengthsBeforeHashing(t *testing.T) {
+	// Metadata-only input: the digest pins the actual bytes, but the claimed
+	// length is smaller. Length validation must refuse before any digest
+	// comparison could silently bless the size claim.
+	manifest, archives := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{id: 500})
+	manifest.Artifacts[0].ArchiveBytes = int64(len(archives[0].Bytes)) - 1
+	if ingested, err := IngestReports(t.Context(), IngestInput{
+		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: manifest, Archives: archives,
+	}); err == nil || len(ingested.Metadata) != 0 {
+		t.Fatalf("metadata length mismatch must refuse before hashing: %+v %v", ingested, err)
+	}
+
+	// A claim above the archive ceiling refuses even with matching bytes.
+	huge := manifest
+	huge.Artifacts[0].ArchiveBytes = MaxJUnitZIPBytes + 1
+	if _, err := IngestReports(t.Context(), IngestInput{
+		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: huge, Archives: archives,
+	}); err == nil {
+		t.Fatal("oversized archive claim reached hashing")
+	}
+
+	// Job rows with a length claim larger than the actual archive refuse too.
+	jobManifest, jobArchives := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{id: 501, job: 9001, shard: "unit"})
+	jobManifest.Artifacts[0].ArchiveBytes = int64(len(jobArchives[0].Bytes)) + 1
+	if ingested, err := IngestReports(t.Context(), IngestInput{
+		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: jobManifest, Archives: jobArchives,
+	}); err == nil || len(ingested.Proved) != 0 {
+		t.Fatalf("job row length mismatch must refuse: %+v %v", ingested, err)
+	}
+}
