@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -565,10 +566,20 @@ func allocatorPlanned(s capacitybroker.Snapshot, plan capacitybroker.JobPlan, he
 	}
 	for _, a := range plan.Assignments {
 		pool, ok := s.Pools[a.Pool]
-		if !ok {
+		if !ok || a.Resources != pool.Size || pool.Size[0] <= 0 || pool.Size[1] <= 0 || pool.Size[2] <= 0 || pool.Size[3] != 1 ||
+			a.Warm != (a.JobID == "") {
 			return allocatorHeldView{}, capacitybroker.ErrSnapshot
 		}
-		if _, ok := s.Hosts[a.Host]; !ok {
+		host, ok := s.Hosts[a.Host]
+		if !ok || !host.AcceptNew || !slices.Contains(pool.Hosts, a.Host) {
+			return allocatorHeldView{}, capacitybroker.ErrSnapshot
+		}
+		// The input revision is a correlation tag, not a digest of these
+		// assignments. Recheck each increment against retained charges AND
+		// prior awards. Unchanged overbudget debt is still reportable.
+		if !allocatorFits(out.global, a.Resources, s.Global) ||
+			!allocatorFits(out.hosts[a.Host], a.Resources, host.Budget) ||
+			pool.Budget != nil && !allocatorFits(out.pools[a.Pool], a.Resources, *pool.Budget) {
 			return allocatorHeldView{}, capacitybroker.ErrSnapshot
 		}
 		var okAdd bool
