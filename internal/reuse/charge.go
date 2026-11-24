@@ -28,10 +28,9 @@ type StockBinding struct {
 	PoolID             string `json:"pool_id"`
 	// GitHubURL is the exact "https://host/owner/name" repository the runner
 	// registered for. Two competing repositories never share a charge.
-	GitHubURL    string `json:"github_url"`
-	RunnerName   string `json:"runner_name"`
-	RunnerID     int64  `json:"runner_id"`
-	MetadataHost string `json:"metadata_host"`
+	GitHubURL  string `json:"github_url"`
+	RunnerName string `json:"runner_name"`
+	RunnerID   int64  `json:"runner_id"`
 }
 
 // ProviderBinding is the enrolled daemon, project and member whose
@@ -84,7 +83,7 @@ func (c ChargeIdentity) valid() bool {
 		return false
 	}
 	if !digest64(c.Stock.RegistrationDigest) || !label(c.Stock.ControllerID) || !label(c.Stock.PoolID) ||
-		!label(c.Stock.RunnerName) || c.Stock.RunnerID <= 0 || !label(c.Stock.MetadataHost) {
+		!label(c.Stock.RunnerName) || c.Stock.RunnerID <= 0 {
 		return false
 	}
 	if _, _, _, ok := parseGitHubURL(c.Stock.GitHubURL); !ok {
@@ -92,7 +91,8 @@ func (c ChargeIdentity) valid() bool {
 	}
 	if !digest64(c.Provider.BackendKeyFingerprint) || !digest64(c.Provider.OriginFingerprint) ||
 		!digest64(c.Provider.ScopeFingerprint) || !label(c.Provider.ServerName) ||
-		c.Provider.ServerVersion != "6.0.4" || !label(c.Provider.Project) || !label(c.Provider.Member) {
+		c.Provider.ServerVersion != "6.0.4" || !label(c.Provider.Project) ||
+		(c.Provider.Member != "" && !label(c.Provider.Member)) {
 		return false
 	}
 	if !instanceName(c.Incarnation.Name) || !incarnationID(c.Incarnation.UUID) ||

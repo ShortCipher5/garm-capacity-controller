@@ -49,7 +49,6 @@ func reuseTestCharge() ChargeIdentity {
 			GitHubURL:          "https://github.example/owner/repo",
 			RunnerName:         "runner-1",
 			RunnerID:           17,
-			MetadataHost:       "garm.example",
 		},
 		Provider: ProviderBinding{
 			BackendKeyFingerprint: subject.BackendKeyFingerprint,
