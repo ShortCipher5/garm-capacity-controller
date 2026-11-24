@@ -61,7 +61,7 @@ func TestOwnerCIJobLookupIsScopedByGenerationAndSource(t *testing.T) {
 	}
 	publish := func() (string, string) {
 		t.Helper()
-		if err := s.publishTiming(now, ciJobLinkFacts(now), false, selectLink); err != nil {
+		if err := s.publishTiming(now, ciJobLinkFacts(now), false, selectLink, nil); err != nil {
 			t.Fatal(err)
 		}
 		w := call("GET", path, token, "", "")
@@ -138,7 +138,7 @@ func TestOwnerCIJobLookupLinearizesBeforeTerminalClose(t *testing.T) {
 			return "https://github.com/synthetic/fixture/actions/runs/9223372036854775807/job/9007199254740994", true
 		}, true
 	}
-	if err := s.publishTiming(at, ciJobLinkFacts(at)[:1], false, resolver); err != nil {
+	if err := s.publishTiming(at, ciJobLinkFacts(at)[:1], false, resolver, nil); err != nil {
 		t.Fatal(err)
 	}
 	var handle string
@@ -162,7 +162,7 @@ func TestOwnerCIJobLookupLinearizesBeforeTerminalClose(t *testing.T) {
 	<-stopped
 	next := time.Now()
 	if s.resolveCIJobLink(t.Context(), handle) != nil ||
-		s.publishTiming(next, ciJobLinkFacts(next), false, resolver) == nil {
+		s.publishTiming(next, ciJobLinkFacts(next), false, resolver, nil) == nil {
 		t.Fatal("terminal stop permitted resolution or a new publication")
 	}
 }
@@ -184,7 +184,7 @@ func TestOwnerCIJobLookupRechecksSourceAndCallerBeforeAuthorization(t *testing.T
 				}
 				return "https://github.com/synthetic/fixture/actions/runs/9223372036854775807/job/9007199254740994", calls == 1
 			}, true
-		}); err != nil {
+		}, nil); err != nil {
 			cancel()
 			t.Fatal(err)
 		}

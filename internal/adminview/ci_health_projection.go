@@ -29,18 +29,19 @@ type ciTimingView struct {
 }
 
 type ciAttemptView struct {
-	Source     string              `json:"source"`
-	RepoID     string              `json:"repository_id"`
-	Workflow   string              `json:"workflow_id"`
-	Run        string              `json:"run_id"`
-	Attempt    string              `json:"attempt"`
-	AsOf       string              `json:"observed_at"`
-	StatusAt   string              `json:"status_observed_at,omitempty"`
-	Status     string              `json:"status"`
-	Conclusion cihealth.Conclusion `json:"conclusion,omitempty"`
-	Wall       *ciSpanView         `json:"wall,omitempty"`
-	Elapsed    *ciSpanView         `json:"elapsed,omitempty"`
-	Jobs       []ciJobView         `json:"jobs"`
+	Source        string              `json:"source"`
+	RepoID        string              `json:"repository_id"`
+	Workflow      string              `json:"workflow_id"`
+	Run           string              `json:"run_id"`
+	Attempt       string              `json:"attempt"`
+	RunLinkHandle string              `json:"run_link_handle,omitempty"`
+	AsOf          string              `json:"observed_at"`
+	StatusAt      string              `json:"status_observed_at,omitempty"`
+	Status        string              `json:"status"`
+	Conclusion    cihealth.Conclusion `json:"conclusion,omitempty"`
+	Wall          *ciSpanView         `json:"wall,omitempty"`
+	Elapsed       *ciSpanView         `json:"elapsed,omitempty"`
+	Jobs          []ciJobView         `json:"jobs"`
 }
 
 type ciJobView struct {
