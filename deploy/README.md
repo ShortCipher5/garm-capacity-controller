@@ -72,6 +72,22 @@ ledger/inventory size. An OOM/limit failure does not prove resources disappeared
 The 45-second stop grace exceeds the two sequential 15-second listener shutdown
 budgets plus overhead; forced termination still requires conservative recovery.
 
+For an operator stop of the reviewed **read-only preview**, verify the exact
+Compose project and that its gateway has no write-capability opt-ins, stock
+provider, or production lifecycle wiring. Stop only its `capacity-gateway`
+service, then confirm that the gateway process exited, both gateway listeners
+closed, and no supervisor starts it again. Do not stop or recreate `garm`, stop
+runners, edit pools, or remove the gateway private configuration and ledger.
+The dashboard and gateway-side observation stop along with the service; this
+is not a dashboard maintenance toggle.
+
+A stop request is not proof of exit, and a stopped gateway proves neither
+runner cleanup nor completion or fencing of requests accepted elsewhere. Keep
+all outstanding charges and unknown state. Do not enable stock editing, infer
+released capacity, or restart automatically from a stop result. This procedure
+does not cover a writer-enabled installation; see the
+[stock scaling release boundary](../docs/stock-scaling-release-boundary.md).
+
 If sharing a namespace conflicts with the stack's security boundary, run the
 services as separate native Linux OS identities on the same machine, or use a
 reviewed end-to-end authenticated private tunnel. A normal Compose bridge cannot
