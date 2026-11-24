@@ -46,3 +46,18 @@ func TestStockIdlePreviewConfigurationDefaultOff(t *testing.T) {
 		t.Fatal("idle bypassed existing managed scope")
 	}
 }
+
+func TestAllocatorProposalConfigurationDefaultOffAndSourceBound(t *testing.T) {
+	var c allocatorAdvisoryConfiguration
+	if err := json.Unmarshal([]byte(`{"repository_ids":["repo"],"interval_seconds":30}`), &c); err != nil || c.AllocatorProposal {
+		t.Fatal(c, err)
+	}
+	if err := json.Unmarshal([]byte(`{"allocator_proposal":true}`), &c); err != nil || !c.AllocatorProposal {
+		t.Fatal(c, err)
+	}
+	// The proposal stays on the read-only advisory transport: the same managed
+	// source validation applies and the writer path stays unreachable.
+	if source, err := allocatorAdvisorySource(configuration{AllocatorAdvisory: &c}); err == nil || source != nil {
+		t.Fatal("allocator proposal bypassed managed read-only advisory configuration")
+	}
+}

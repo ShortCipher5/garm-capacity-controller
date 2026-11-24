@@ -41,3 +41,19 @@ shows monitoring diagnostics and suppression separately from observed supply.
 
 This is advisory sizing, not automatic cross-repository scaling or a claim of
 production host enforcement. Existing positive-write/runtime guards are intact.
+
+`allocator_advisory.allocator_proposal` additionally attaches the observe-only
+cross-repository allocation proposal to each cached read served at
+`/admin/api/v1/allocator-plan`. It reuses the same bounded tick, plan and
+cache: awards carry pool, repository, exact host destination, the complete
+budgeted runner profile, per-pool decisions with fixed reason codes, retained
+held capacity and outstanding durable commitments, plus input version
+(source, ledger sequence, policy revision, demand digest and their combined
+revision) and risks. Per-repository weights are read by repository UUID from
+the revisioned SQLite `broker_policy` document; a repository without an entry
+defaults to weight one. Destinations are marked established only when an
+independently verified stock provider route produced the plan; the eligible
+host list alone never establishes placement, and an unestablished award is
+flagged as a risk rather than as physical enforcement. The section never
+enables the `allocator_loop` writer path, issues grants, changes pool
+settings, retires resources or releases charges.
