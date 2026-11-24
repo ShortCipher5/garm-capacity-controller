@@ -129,6 +129,8 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			provision := scenario.provision
+			readOnlyStop := !provision && !scenario.remoteDisk
+			const heldRunner = "runner-held-for-stop"
 			keys := credentials(t)
 			var garmFailure atomic.Bool
 			var creates atomic.Int32
@@ -180,6 +182,15 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 				}
 				if r.URL.Path == "/api/v1/pools/pool-a" {
 					_ = json.NewEncoder(w).Encode(sourcePoolMetadataFixture("pool-a"))
+					return
+				}
+				if readOnlyStop {
+					// Import one synthetic existing charge via the existing
+					// read path, with no admission or physical create.
+					_ = json.NewEncoder(w).Encode([]map[string]any{{
+						"name": heldRunner, "provider_id": heldRunner, "provider_name": "capacity",
+						"pool_id": "pool-a", "status": "pending_create",
+					}})
 					return
 				}
 				_, _ = w.Write([]byte(`[]`))
@@ -404,7 +415,31 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			if creates.Load() != 0 {
 				t.Fatal("admission/read paths dispatched a physical create")
 			}
-			if !provision && !scenario.remoteDisk {
+			readCharge := func() admission.InventoryResource {
+				t.Helper()
+				state, err := admission.OpenRuntimeSQLite(config.Database, config.IdentityFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer state.Close()
+				snapshot, err := state.ReadSnapshot(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(snapshot.Inventory) != 1 || len(snapshot.Reservations) != 0 {
+					t.Fatalf("unexpected synthetic stop accounting: inventory=%+v reservations=%+v", snapshot.Inventory, snapshot.Reservations)
+				}
+				resource := snapshot.Inventory[0]
+				want := admission.Resources{CPU: 1000, RAM: 1024, Runners: 1}
+				if resource.ID != heldRunner || resource.Host != "a" || resource.Pool != "pool-a" || resource.Resources != want ||
+					snapshot.Allocated.Global != want || snapshot.Allocated.Hosts["a"] != want || snapshot.Allocated.Pools["pool-a"] != want {
+					t.Fatalf("synthetic held charge missing: inventory=%+v charged=%+v", resource, snapshot.Allocated)
+				}
+				return resource
+			}
+			var beforeStop admission.InventoryResource
+			if readOnlyStop {
+				beforeStop = readCharge()
 				// A verified TLS connection that has not finished its first HTTP header is
 				// StateNew. net/http deliberately grants it a >5s quiescence window during
 				// graceful Shutdown; do not impose a shorter test deadline than the server.
@@ -437,6 +472,14 @@ func TestServiceActualTLSStartupReconcileReadOnlyAndShutdown(t *testing.T) {
 			if err == nil {
 				connection.Close()
 				t.Fatal("listener remained open after shutdown")
+			}
+			if creates.Load() != 0 {
+				t.Fatal("gateway shutdown sent a mutating Incus request")
+			}
+			if readOnlyStop {
+				if afterStop := readCharge(); afterStop != beforeStop {
+					t.Fatalf("gateway shutdown changed the retained resource: before=%+v after=%+v", beforeStop, afterStop)
+				}
 			}
 		})
 	}

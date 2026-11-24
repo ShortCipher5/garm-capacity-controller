@@ -27,6 +27,14 @@ Read `docs/{physical-retirement-proof-boundary,retirement-safety-hold}.md`. Reus
 - An incomplete inventory or failed read cannot convert an unknown into free capacity. No reduction alone funds growth.
 - Local fixtures cover released and retained cases with two competing repos; code does not touch hosts or add runner deletion.
 
+## Stock delete receipt gap
+
+Pinned GARM v0.2.1 [discards external delete stdout and accepts provider not-found](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/providers/v0.1.1/external.go#L134-L167); a [forced deletion can remove the GARM row even on provider error](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/pool/pool.go#L1680-L1697). The [standalone Incus provider v0.1.5](https://github.com/cloudbase/garm-provider-incus/blob/f3ae31910c6443c31d841de268a377985e7c60a5/provider/incus.go#L335-L388) waits internally and returns no operation UUID. That is standalone source evidence, not proof of the behavior of the provider bytes bundled in a GARM image.
+
+Incus [6.0.4](https://github.com/lxc/incus/blob/a99413afd0c742da3bba10eb4f75d639f9dbbd32/internal/server/operations/operations.go#L227-L259) and [7.0.2](https://github.com/lxc/incus/blob/01f81e5e607bbb5818410318e4b3496ad1820824/internal/server/operations/operations.go#L250-L281) schedule terminal operation removal after five seconds. The controller's [typed reader](../../internal/incusapi/terminal_evidence.go) accepts only reported version 6.0.4 and can corroborate a known original operation UUID for a previously verified incarnation. It cannot recover a missing receipt or establish the required fences or volume cleanup. [Project absence reads](../physical-retirement-proof-boundary.md) are non-atomic and do not prove physical release.
+
+**Keep the charge held whenever the original qualified receipt is unavailable**, even if the runner really was torn down and the receipt was missed. A success return, missing row, expired operation or later matching absence cannot substitute for that independent proof.
+
 ## Deferred production work
 
 Keep the existing hold when stock/provider proof is unavailable. Production reuse requires independently recorded original stock registration and volume identity, supported evidence of cleanup of that exact allocation, and a terminal operation matched to the original durable retirement intent and its required safety fences. None of those facts may be replaced by compatible field shapes, a missing row, a non-atomic absence read, or a synthetic positive.
