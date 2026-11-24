@@ -28,7 +28,7 @@ const reasonText = {
 const warningText = {
   sustained_cpu_pressure: "Sustained CPU pressure: at least half of the qualifying samples nearly saturated the installed CPU profile.",
   sustained_ram_pressure: "Sustained memory pressure: at least half of the qualifying samples nearly saturated the installed memory profile.",
-  insufficient_spare_capacity: "Insufficient spare capacity: the advised increase would consume a large share of the remaining host headroom.",
+  insufficient_spare_capacity: "Insufficient spare capacity: one additional runner at the advised size would consume more than half of the reported CPU or memory headroom.",
 };
 const rejectionText = {
   incomparable_identity: "different matrix, profile or revision",
@@ -72,6 +72,8 @@ function Dimension({label, dimension, unit}) {
 export function CISizingAdvisory({snapshot}) {
   const sizing = snapshot.sizing;
   const freshness = sizing.freshness;
+  const additionalRunnerFit = sizing.advisory_version === "job-sizing-advisory/v2";
+  const warnings = additionalRunnerFit ? sizing.warnings : sizing.warnings.filter((warning) => warning !== "insufficient_spare_capacity");
   const rejectedByReason = {};
   for (const rejection of sizing.rejected) {
     rejectedByReason[rejection.reason] = (rejectedByReason[rejection.reason] ?? 0) + 1;
@@ -109,13 +111,15 @@ export function CISizingAdvisory({snapshot}) {
           <div><dt>CPU budget / used / headroom</dt><dd><code>{sizing.host.cpu_budget_milli}</code> / <code>{sizing.host.cpu_allocated_milli}</code> / <code>{sizing.host.cpu_headroom_milli}</code> millicores</dd></div>
           <div><dt>Memory budget / used / headroom</dt><dd><code>{sizing.host.ram_budget_bytes}</code> / <code>{sizing.host.ram_allocated_bytes}</code> / <code>{sizing.host.ram_headroom_bytes}</code> bytes</dd></div>
         </dl>
-        {sizing.host.fit === "does_not_fit"
-          ? <p role="alert" className="ci-sizing-fit-failure"><strong>Does not fit the reviewed host budget context.</strong> This is a hard fit failure, not a warning.</p>
-          : <p className="muted">The reviewed profile and advice fit within the supplied host budget context.</p>}
+        {additionalRunnerFit && sizing.host.fit === "does_not_fit"
+          ? <p role="alert" className="ci-sizing-fit-failure"><strong>One additional runner does not fit the supplied host headroom.</strong> This includes any advised increase and assumes no existing runner is freed.</p>
+          : additionalRunnerFit && sizing.host.fit === "fits"
+            ? <p className="muted">One additional runner at the reviewed size, including any advised increase, fits the supplied host headroom. No existing runner is assumed to be freed.</p>
+            : <p className="muted">Fit for one additional runner cannot be assessed.</p>}
       </> : <p className="muted">Host budget and headroom context unavailable; fit cannot be assessed.</p>}
-      {sizing.warnings.length > 0 && <>
+      {warnings.length > 0 && <>
         <h4>Warnings</h4>
-        <ul>{sizing.warnings.map((warning) => <li key={warning}>{warningText[warning] ?? warning}</li>)}</ul>
+        <ul>{warnings.map((warning) => <li key={warning}>{warningText[warning] ?? warning}</li>)}</ul>
       </>}
       <h4>Disk</h4>
       {sizing.disk.state === "observed"
