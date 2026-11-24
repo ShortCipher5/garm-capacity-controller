@@ -5,6 +5,7 @@ import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
 import {focusCIJob, focusCIStep} from "./ci-health-step-navigation.js";
 import {CIHealthHistory} from "./ci-health-history.jsx";
+import {ciByteText, ciUsageCoverage, ciUsageReasonText, ciUsageStateLabel} from "./ci-health-usage.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -72,6 +73,30 @@ function StepRows({attempt, job, stepId}) {
     </div>
   );
 }
+function ResourceUsage({usage}) {
+  const measured = usage.measured;
+  const covered = measured ? (measured.cpu ? measured.cpu.covered_ns : measured.ram && measured.ram.covered_ns ? measured.ram.covered_ns : "0") : "0";
+  return <div>
+    <dt>Resource usage</dt>
+    <dd>
+      <span className="pill">{ciUsageStateLabel(usage.state)}</span>
+      {" "}
+      <span className="muted">
+        {usage.state === "verified" || usage.state === "partial"
+          ? "Independently attributed to this exact attempt and job."
+          : ciUsageReasonText(usage.reason)}
+      </span>
+      {measured && <dl className="ci-health-facts">
+        <div><dt>Samples</dt><dd>{measured.samples} over {ciUsageCoverage(covered, measured.window_ns) ?? "unknown"} of the job window</dd></div>
+        {measured.cpu && <div><dt>CPU</dt><dd>average {measured.cpu.average_millicpu} mCPU, interval peak {measured.cpu.peak_interval_millicpu} mCPU{measured.cpu.complete ? "" : " (partial coverage)"}</dd></div>}
+        {measured.ram && <div><dt>RAM</dt><dd>time-weighted mean {measured.ram.mean_bytes !== undefined ? ciByteText(measured.ram.mean_bytes) : "unknown"}, sampled peak {measured.ram.sample_peak_bytes !== undefined ? ciByteText(measured.ram.sample_peak_bytes) : "unknown"}</dd></div>}
+        <div><dt>Disk</dt><dd>{measured.disk.state === "verified"
+          ? <>attributable usage: {["read_bytes", "write_bytes"].filter((key) => measured.disk[key]).map((key) => measured.disk[key] && `${key === "read_bytes" ? "read" : "written"} ${ciByteText(measured.disk[key])}`).filter(Boolean).join(", ") || "measured"}</>
+          : ciUsageReasonText(measured.disk.reason)}</dd></div>
+      </dl>}
+    </dd>
+  </div>;
+}
 function JobRow({attempt, job, jobId, stepId, openJob}) {
   const skip = job.status === "skipped";
   return (
@@ -91,6 +116,7 @@ function JobRow({attempt, job, jobId, stepId, openJob}) {
         {job.status === "running"
           ? <div><dt>Execution elapsed when observed</dt><dd><Timing span={job.elapsed} /></dd></div>
           : <div><dt>Execution</dt><dd><Timing span={job.execution} skipped={skip} /></dd></div>}
+        {job.resource_usage && <ResourceUsage usage={job.resource_usage} />}
       </dl>
       {job.steps.length > 0
         ? <details data-ci-job-steps=""><summary>Numbered steps ({job.steps.length} observed)</summary><StepRows attempt={attempt} job={job} stepId={stepId} /></details>
@@ -296,7 +322,9 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
         This is a bounded observation, not the full GitHub queue or history. “At least” is a lower bound from a queue observation. Missing timing is unknown, not zero. Job creation to start does not measure queue wait.
       </p>
       {attempts.some((attempt) => attempt.jobs.length > 0) &&
-        <p className="muted">Per-job CPU, memory, and disk usage are unavailable. Timing alone cannot show resource use.</p>}
+        (attempts.some((a) => a.jobs.some((job) => job.resource_usage))
+          ? <p className="muted">Per-job resource usage below is exact attempt/job attribution with explicit unavailable, stale and partial states. It is read-only advisory evidence, never a sizing or scaling input. Missing coverage is unknown, not zero.</p>
+          : <p className="muted">Per-job CPU, memory, and disk usage are unavailable: no documented source proves the runner's original provider allocation. Timing alone cannot show resource use.</p>)}
       {attempts.length === 0 && <p>No attempts were included in this snapshot.</p>}
       {attempts.length > 0 && <>
         <ActiveJobs attempts={attempts} jobId={jobId} viewJob={viewJob} />
