@@ -96,7 +96,7 @@ func TestCISizingPublishServesExactReviewedAdviceOnly(t *testing.T) {
 	}
 	body := res.Body.String()
 	for _, want := range []string{
-		`"state":"observed"`, `"policy_version":"job-sizing-cohort-policy/v1"`, `"advisory_version":"job-sizing-advisory/v1"`,
+		`"state":"observed"`, `"policy_version":"job-sizing-cohort-policy/v1"`, `"advisory_version":"job-sizing-advisory/v2"`,
 		`"outcome":"increase_advised"`, `"workflow_id":"44"`, `"matrix":"ubuntu-24.04"`, `"age_ns":"1800000000000"`, `"fresh":true`,
 		`"eligible":20`, `"qualifying_cpu":20`, `"cpu_peak_milli":"900"`, `"ram_peak_bytes":"96"`, `"cpu_saturated":3`,
 		`"cpu_milli":"1000"`, `"suggested":"1125"`, `"uncertainty":"sampled_peak_bound"`, `"cpu_headroom_milli":"60000"`,

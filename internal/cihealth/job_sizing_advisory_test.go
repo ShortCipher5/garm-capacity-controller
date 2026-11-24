@@ -119,7 +119,7 @@ func TestReviewJobSizingAdvisoryHostFitAndSpareCapacityWarnings(t *testing.T) {
 	if !reflect.DeepEqual(comfortable.Warnings, []string{JobSizingWarningSustainedCPUPressure, JobSizingWarningSustainedRAMPressure}) {
 		t.Fatalf("unexpected warnings: %+v", comfortable.Warnings)
 	}
-	tight := advisoryFixture(t, host(63800), base, window)
+	tight := advisoryFixture(t, host(62800), base, window)
 	if tight.Host.Fit != JobSizingHostFitFits || !containsString(tight.Warnings, JobSizingWarningInsufficientSpareCapacity) {
 		t.Fatalf("spare capacity warning not raised on a fitting host: %+v", tight)
 	}
@@ -348,5 +348,30 @@ func TestReviewJobSizingAdvisoryPreservesSingleMeasuredZeroDiskReading(t *testin
 	got := advisoryFixture(t, JobSizingHostContext{}, in, sizingReviewWindowFixture(in))
 	if got.Disk.State != JobSizingDiskObserved || got.Disk.Samples != 1 || got.Disk.Qualified != 20 || got.Disk.Peak != 0 {
 		t.Fatalf("one genuine zero reading must stay distinguishable from unavailable: %+v", got.Disk)
+	}
+}
+
+func TestJobSizingHostFitNeedsFullAdditionalRunnerHeadroom(t *testing.T) {
+	installed := JobSizingShape{CPUMilli: 1000, RAMBytes: 100}
+	cpu, ram := uint64(1125), uint64(120)
+	for _, tc := range []struct {
+		name                 string
+		host                 JobSizingHostContext
+		cpuTarget, ramTarget *uint64
+		want                 string
+	}{
+		{"exact full target fits", JobSizingHostContext{Known: true, CPUBudgetMilli: 2125, RAMBudgetBytes: 220, CPUAllocatedMilli: 1000, RAMAllocatedBytes: 100}, &cpu, &ram, JobSizingHostFitFits},
+		{"CPU one millicore short", JobSizingHostContext{Known: true, CPUBudgetMilli: 2124, RAMBudgetBytes: 220, CPUAllocatedMilli: 1000, RAMAllocatedBytes: 100}, &cpu, &ram, JobSizingHostFitDoesNotFit},
+		{"RAM one byte short", JobSizingHostContext{Known: true, CPUBudgetMilli: 2125, RAMBudgetBytes: 219, CPUAllocatedMilli: 1000, RAMAllocatedBytes: 100}, &cpu, &ram, JobSizingHostFitDoesNotFit},
+		{"no advice still needs the installed footprint", JobSizingHostContext{Known: true, CPUBudgetMilli: 2000, RAMBudgetBytes: 200, CPUAllocatedMilli: 1000, RAMAllocatedBytes: 101}, nil, nil, JobSizingHostFitDoesNotFit},
+		{"unchanged RAM still needs headroom", JobSizingHostContext{Known: true, CPUBudgetMilli: 2125, RAMBudgetBytes: 199, CPUAllocatedMilli: 1000, RAMAllocatedBytes: 100}, &cpu, nil, JobSizingHostFitDoesNotFit},
+		{"headroom at numeric maximum", JobSizingHostContext{Known: true, CPUBudgetMilli: ^uint64(0), RAMBudgetBytes: ^uint64(0)}, &cpu, &ram, JobSizingHostFitFits},
+		{"unknown host stays unknown", JobSizingHostContext{}, &cpu, &ram, JobSizingHostFitUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jobSizingHostView(tc.host, installed, tc.cpuTarget, tc.ramTarget); got.Fit != tc.want {
+				t.Fatalf("host fit = %q, want %q", got.Fit, tc.want)
+			}
+		})
 	}
 }

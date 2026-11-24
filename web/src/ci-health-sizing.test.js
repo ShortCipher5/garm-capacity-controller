@@ -10,7 +10,7 @@ import {createServer} from "vite";
 const at = "2026-01-01T00:00:00Z";
 function sizingSnapshot(overrides = {}) {
   const sizing = {
-    policy_version: "job-sizing-cohort-policy/v1", advisory_version: "job-sizing-advisory/v1",
+    policy_version: "job-sizing-cohort-policy/v1", advisory_version: "job-sizing-advisory/v2",
     outcome: "increase_advised",
     scope: {source: "registry_1", repository_id: "9007199254740993", workflow_id: "17"},
     identity: {matrix: "ubuntu-24.04", profile: "small", revision: "rev-1"},
@@ -68,7 +68,7 @@ test("advisory runner sizing renders only qualified advice and never an apply ac
     assert.match(html, /CPU<\/dt>\s*<dd>\s*<strong>Increase advised<\/strong> — suggested <code>1125<\/code> millicores/);
     assert.match(html, /Memory<\/dt>\s*<dd>\s*<strong>No change advised<\/strong>/);
     assert.match(html, /Caller-supplied display context for host <code>host-a<\/code>/);
-    assert.match(html, /The reviewed profile and advice fit within the supplied host budget context\./);
+    assert.match(html, /One additional runner.*fits the supplied host headroom\. No existing runner is assumed to be freed\./);
     assert.match(html, /Sustained CPU pressure/);
     assert.match(html, /Disk advice unavailable: no independently attributable disk data supports it\./);
     assert.match(html, /2 in-scope candidates were incomparable \(different matrix, profile or revision\) and were not combined\./);
@@ -81,10 +81,18 @@ test("advisory runner sizing renders only qualified advice and never an apply ac
       warnings: ["insufficient_spare_capacity"],
       host: {known: true, host: "host-a", cpu_budget_milli: "64000", cpu_allocated_milli: "63900", cpu_headroom_milli: "100", ram_budget_bytes: "68719476736", ram_allocated_bytes: "4294967296", ram_headroom_bytes: "64424509440", fit: "does_not_fit"},
     }));
-    assert.match(failure, /role="alert".*Does not fit the reviewed host budget context\..*hard fit failure, not a warning/s);
+    assert.match(failure, /role="alert".*One additional runner does not fit the supplied host headroom\..*assumes no existing runner is freed/s);
     assert.match(failure, /Insufficient spare capacity/);
     assert.match(failure, /The implied change exceeds the reviewed advisory bounds\./);
     assert.doesNotMatch(failure, /suggested <code>/);
+    const unknownFit = sizingSnapshot();
+    unknownFit.sizing.host.fit = "unknown";
+    const unknownHtml = render(unknownFit);
+    assert.match(unknownHtml, /Fit for one additional runner cannot be assessed\./);
+    assert.doesNotMatch(unknownHtml, /fits the supplied host headroom/);
+    const legacyHtml = render(sizingSnapshot({advisory_version: "job-sizing-advisory/v1", warnings: ["insufficient_spare_capacity"]}));
+    assert.match(legacyHtml, /Fit for one additional runner cannot be assessed\./);
+    assert.doesNotMatch(legacyHtml, /fits the supplied host headroom|Insufficient spare capacity/);
 
     // Neutral no-recommendation stays neutral and distinguishes missing from low.
     const neutral = render(sizingSnapshot({

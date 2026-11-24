@@ -6,7 +6,7 @@ import "time"
 // applied on top of the reviewed sizing window. A recommendation is only
 // reproducible under the advisory and cohort policy versions that produced
 // it together with the exact source facts carried here.
-const JobSizingAdvisoryVersion = "job-sizing-advisory/v1"
+const JobSizingAdvisoryVersion = "job-sizing-advisory/v2"
 
 // JobSizingMinChangeDivisor suppresses oscillation: an advised increase must
 // exceed the installed shape by more than installed/Divisor before it is
@@ -327,20 +327,24 @@ func jobSizingHostView(host JobSizingHostContext, installed JobSizingShape, cpuS
 	out.CPUHeadroomMilli = host.CPUBudgetMilli - host.CPUAllocatedMilli
 	out.RAMHeadroomBytes = host.RAMBudgetBytes - host.RAMAllocatedBytes
 	out.Fit = JobSizingHostFitFits
-	if installed.CPUMilli > host.CPUBudgetMilli || installed.RAMBytes > host.RAMBudgetBytes {
-		out.Fit = JobSizingHostFitDoesNotFit
-	}
-	cpuTarget, ramTarget := installed.CPUMilli, installed.RAMBytes
-	if cpuSuggested != nil {
-		cpuTarget = *cpuSuggested
-	}
-	if ramSuggested != nil {
-		ramTarget = *ramSuggested
-	}
-	if cpuTarget > installed.CPUMilli+out.CPUHeadroomMilli || ramTarget > installed.RAMBytes+out.RAMHeadroomBytes {
+	// This host context does not prove that it includes a releasable
+	// charge for the installed profile. Compare the full additional
+	// runner footprint, never a replacement delta.
+	target := jobSizingTargetShape(installed, cpuSuggested, ramSuggested)
+	if target.CPUMilli > out.CPUHeadroomMilli || target.RAMBytes > out.RAMHeadroomBytes {
 		out.Fit = JobSizingHostFitDoesNotFit
 	}
 	return out
+}
+
+func jobSizingTargetShape(installed JobSizingShape, cpuSuggested, ramSuggested *uint64) JobSizingShape {
+	if cpuSuggested != nil {
+		installed.CPUMilli = *cpuSuggested
+	}
+	if ramSuggested != nil {
+		installed.RAMBytes = *ramSuggested
+	}
+	return installed
 }
 
 // jobSizingWarnings derives pressure and headroom warnings from attributable
@@ -354,14 +358,8 @@ func jobSizingWarnings(s JobSizingSummary, installed JobSizingShape, cpu, ram Jo
 		warnings = append(warnings, JobSizingWarningSustainedRAMPressure)
 	}
 	if host.Known && (cpu.Suggested != nil || ram.Suggested != nil) {
-		cpuDelta, ramDelta := uint64(0), uint64(0)
-		if cpu.Suggested != nil {
-			cpuDelta = *cpu.Suggested - installed.CPUMilli
-		}
-		if ram.Suggested != nil {
-			ramDelta = *ram.Suggested - installed.RAMBytes
-		}
-		if cpuDelta > host.CPUHeadroomMilli/2 || ramDelta > host.RAMHeadroomBytes/2 {
+		target := jobSizingTargetShape(installed, cpu.Suggested, ram.Suggested)
+		if target.CPUMilli > host.CPUHeadroomMilli/2 || target.RAMBytes > host.RAMHeadroomBytes/2 {
 			warnings = append(warnings, JobSizingWarningInsufficientSpareCapacity)
 		}
 	}
