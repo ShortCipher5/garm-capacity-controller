@@ -46,15 +46,19 @@ type retainedTrendSamples struct {
 }
 
 // SummarizeRetainedTrends reduces one exact workflow's bounded local history.
-// A missing row never creates a count or establishes completeness. Invalid,
-// duplicate, future, or foreign evidence invalidates the whole result,
-// including rows older than the selected windows.
+// Rows may carry several observation versions of one exact attempt; the
+// newest version is the status, result and window authority, while a timing
+// value it omitted is recovered from the newest earlier version that
+// measured it, attributed to that observation. A missing row never creates a
+// count or establishes completeness. Invalid, duplicate, future, or foreign
+// evidence invalidates the whole result, including rows older than the
+// selected windows.
 func SummarizeRetainedTrends(scope TrendScope, observedAt time.Time, rows []AttemptFacts) (RetainedTrends, error) {
 	observedAt = observedAt.UTC()
 	cutover := observedAt.Add(-retainedTrendWindow)
 	begin := cutover.Add(-retainedTrendWindow)
 	if !validSource(scope.Source) || scope.RepositoryID <= 0 || scope.WorkflowID <= 0 ||
-		!validTime(observedAt) || !validTime(begin) || len(rows) > MaxRetainedTrendAttempts {
+		!validTime(observedAt) || !validTime(begin) {
 		return RetainedTrends{}, ErrTrendFacts
 	}
 	out := RetainedTrends{
@@ -64,33 +68,46 @@ func SummarizeRetainedTrends(scope TrendScope, observedAt time.Time, rows []Atte
 	buckets := [...]*RetainedTrendBucket{&out.Previous.Initial, &out.Previous.Retries, &out.Current.Initial, &out.Current.Retries}
 	var samples [len(buckets)]retainedTrendSamples
 	var runs [len(buckets)]map[int64]bool
-	seen := make(map[AttemptKey]bool, len(rows))
-	failedInitial := make(map[int64]int)
-	successfulRetry := make(map[int64]bool)
+	versions := make(map[AttemptKey][]AttemptFacts, len(rows))
+	seen := make(map[AttemptKey]map[time.Time]bool, len(rows))
 	for _, row := range rows {
 		key := row.Key
 		if key.Source != scope.Source || key.RepositoryID != scope.RepositoryID || key.WorkflowID != scope.WorkflowID ||
-			seen[key] || row.AsOf.After(observedAt) {
+			row.AsOf.After(observedAt) {
 			return RetainedTrends{}, ErrTrendFacts
 		}
-		seen[key] = true
-		measured, err := Measure(row)
+		if seen[key] == nil {
+			seen[key] = make(map[time.Time]bool)
+		}
+		if seen[key][row.AsOf] {
+			return RetainedTrends{}, ErrTrendFacts
+		}
+		seen[key][row.AsOf] = true
+		versions[key] = append(versions[key], row)
+	}
+	if len(versions) > MaxRetainedTrendAttempts {
+		return RetainedTrends{}, ErrTrendFacts
+	}
+	failedInitial := make(map[int64]int)
+	successfulRetry := make(map[int64]bool)
+	for key, rows := range versions {
+		view, err := ProjectRetainedAttempt(rows)
 		if err != nil {
 			return RetainedTrends{}, ErrTrendFacts
 		}
-		if row.AsOf.Before(begin) {
+		if view.AsOf.Before(begin) {
 			continue
 		}
 		i := 0
-		if !row.AsOf.Before(cutover) {
+		if !view.AsOf.Before(cutover) {
 			i += 2
 		}
 		if key.Attempt > 1 {
 			i++
-			if measured.Conclusion == ConclusionSuccess {
+			if view.Conclusion == ConclusionSuccess {
 				successfulRetry[key.RunID] = true
 			}
-		} else if measured.Conclusion == ConclusionFailure {
+		} else if view.Conclusion == ConclusionFailure {
 			failedInitial[key.RunID] = i / 2
 		}
 		b, d := buckets[i], &samples[i]
@@ -98,11 +115,11 @@ func SummarizeRetainedTrends(scope TrendScope, observedAt time.Time, rows []Atte
 			runs[i] = make(map[int64]bool)
 		}
 		runs[i][key.RunID] = true
-		recordRetainedMetric(&b.Attempts, &d.attempts, measured.Phase, measured.Conclusion, measured.Wall)
-		for _, job := range measured.Jobs {
-			recordRetainedMetric(&b.Jobs, &d.jobs, job.Phase, job.Conclusion, job.Execution)
+		recordRetainedMetric(&b.Attempts, &d.attempts, view.Phase, view.Conclusion, view.Wall.Span)
+		for _, job := range view.Jobs {
+			recordRetainedMetric(&b.Jobs, &d.jobs, job.Phase, job.Conclusion, job.Execution.Span)
 			for _, step := range job.Steps {
-				recordRetainedMetric(&b.Steps, &d.steps, step.Phase, step.Conclusion, step.Duration)
+				recordRetainedMetric(&b.Steps, &d.steps, step.Phase, step.Conclusion, step.Duration.Span)
 			}
 		}
 	}
