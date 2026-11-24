@@ -88,11 +88,13 @@ type MetadataView struct {
 
 // PublicationView is the deterministic rendering of one stored publication.
 // Rows are ordered by artifact identity; unverifiable results are omitted or
-// explicitly labelled.
+// explicitly labelled. Live stays unavailable until producer trust and the
+// exact unexpired parent attempt are independently verified.
 type PublicationView struct {
 	Link             ReportLink
 	ReceivedAt       time.Time
 	JobLevelEvidence bool
+	Live             LiveAvailability
 	Coverage         ReportCoverage
 	All, Initial     ReportSample
 	Retry            ReportSample
@@ -115,6 +117,7 @@ func RenderPublication(pub StoredPublication, expected []ExpectedShardSlot) (Pub
 	view := PublicationView{
 		Link: link, ReceivedAt: pub.ReceivedAt,
 		JobLevelEvidence: len(pub.Reports) > 0,
+		Live:             CheckLiveAvailability(nil, pub.Attempt),
 		Reports:          make([]ReportView, 0, len(pub.Reports)),
 		Metadata:         make([]MetadataView, 0, len(pub.Metadata)),
 	}
