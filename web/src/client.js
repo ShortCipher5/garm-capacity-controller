@@ -3,6 +3,7 @@ import {validateDemandObserverStatus} from "./demand-observer-status.js";
 import { mixHost, validateMixView } from "./runner-mix-client.js";
 import {validateCollectionView,validateEnrollmentView} from "./native-setup-client.js";
 import {validateNativeRetirementStatus} from "./native-retirement-status.js";
+import {validateReuseStatus} from "./verified-reuse-status.js";
 import {validateAllocatorPlan,AllocatorReadinessError} from "./allocator-plan.js";
 import { validatePoolMappings } from "./broker-profiles-client.js";
 import { validateAllocatorStatus } from "./allocator-status.js";
@@ -108,6 +109,8 @@ export class ReadSession {
  #planGeneration=0;
   #retirementRequest;
   #retirementGeneration=0;
+  #reuseRequest;
+  #reuseGeneration=0;
   #allocatorRequest;
   #allocatorGeneration=0;
   #token = "";
@@ -144,6 +147,7 @@ export class ReadSession {
  this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
  this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
     this.#retirementGeneration++;this.#retirementRequest?.abort();this.#retirementRequest=undefined;
+ this.#reuseGeneration++;this.#reuseRequest?.abort();this.#reuseRequest=undefined;
  this.#planGeneration++;this.#planRequest?.abort();this.#planRequest=undefined;
     this.#allocatorGeneration++; this.#allocatorRequest?.abort(); this.#allocatorRequest=undefined;
     this.#entityGeneration++;
@@ -401,6 +405,22 @@ export class ReadSession {
       if(!response.ok)throw new Error('Native retirement status unavailable.');
       const result=validateNativeRetirementStatus(await response.json());
       if(generation!==this.#retirementGeneration||controller.signal.aborted)throw new SessionEnded();
+      return result;
+    } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
+  }
+  async reuseStatusSnapshot({signal}={}) {
+    if(!this.#token) throw new SessionEnded();
+    this.#reuseRequest?.abort(); const generation=++this.#reuseGeneration;
+    const controller=new AbortController();this.#reuseRequest=controller;
+    const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timeout=setTimeout(abort,15000);
+    try {
+      const response=await this.fetcher('/admin/api/v1/reuse-status',{method:'GET',headers:{Authorization:`Bearer ${this.#token}`,Accept:'application/json'},credentials:'omit',cache:'no-store',redirect:'error',signal:controller.signal});
+      if(generation!==this.#reuseGeneration||controller.signal.aborted)throw new SessionEnded();
+      if(response.status===401){this.disconnect();throw new SessionEnded('Read authorization ended. Reconnect to the admin service.');}
+      if(!response.ok)throw new Error('Verified reuse status unavailable.');
+      const result=validateReuseStatus(await response.json());
+      if(generation!==this.#reuseGeneration||controller.signal.aborted)throw new SessionEnded();
       return result;
     } finally {clearTimeout(timeout);signal?.removeEventListener('abort',abort);}
   }
