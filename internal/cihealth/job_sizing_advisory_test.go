@@ -290,3 +290,63 @@ func TestReviewJobSizingAdvisoryRejectsInconsistentInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewJobSizingAdvisoryOmitsImpossibleDiskGauges(t *testing.T) {
+	for name, change := range map[string]func(*JobResourceSummary){
+		"too many readings": func(r *JobResourceSummary) {
+			r.DiskUsed.Samples = r.Samples + 1
+		},
+		"reading after last sample": func(r *JobResourceSummary) {
+			r.DiskUsed.LatestAt = r.Scope.EndAt
+		},
+		"all readings reported before final sample": func(r *JobResourceSummary) {
+			r.DiskUsed.LatestAt = r.DiskUsed.LatestAt.Add(-time.Nanosecond)
+		},
+		"reading before first sample": func(r *JobResourceSummary) {
+			r.DiskUsed.LatestAt = r.Scope.StartedAt.Add(-time.Nanosecond)
+		},
+		"latest exceeds peak": func(r *JobResourceSummary) {
+			r.DiskUsed.Latest = r.DiskUsed.SampleMax + 1
+		},
+		"one reading disagrees with peak": func(r *JobResourceSummary) {
+			r.DiskUsed.Samples = 1
+			r.DiskUsed.SampleMax++
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := advisoryCohortFixture(t, 20, JobSizingShape{CPUMilli: 1000, RAMBytes: 100}, 900, 96, true, MinJobSizingHistory, 9*time.Second)
+			window := sizingReviewWindowFixture(in)
+			change(&in.Samples[19].Resources)
+			got := advisoryFixture(t, JobSizingHostContext{}, in, window)
+			if got.Disk.State != JobSizingDiskObserved || got.Disk.Samples != 19 || got.Disk.Qualified != 20 || got.Disk.Peak != 1118 {
+				t.Fatalf("impossible gauge counted as measured disk: %+v", got.Disk)
+			}
+			if got.CPU.State != JobSizingAdvisoryIncreaseAdvised || got.RAM.State != JobSizingAdvisoryIncreaseAdvised {
+				t.Fatalf("invalid disk evidence affected independent CPU/RAM advice: %+v %+v", got.CPU, got.RAM)
+			}
+			for i := range in.Samples[:19] {
+				in.Samples[i].Resources.DiskUsed = nil
+			}
+			got = advisoryFixture(t, JobSizingHostContext{}, in, window)
+			if got.Disk.State != JobSizingDiskUnavailable || got.Disk.Samples != 0 || got.Disk.Qualified != 20 || got.Disk.Peak != 0 {
+				t.Fatalf("no valid gauge must leave disk unavailable: %+v", got.Disk)
+			}
+		})
+	}
+}
+
+func TestReviewJobSizingAdvisoryPreservesSingleMeasuredZeroDiskReading(t *testing.T) {
+	in := advisoryCohortFixture(t, 20, JobSizingShape{CPUMilli: 1000, RAMBytes: 100}, 900, 96, false, MinJobSizingHistory, 9*time.Second)
+	scope := in.Samples[19].Resources.Scope
+	first, last := resourceSampleFixture(scope, 0), resourceSampleFixture(scope, 9*time.Second)
+	first.DiskUsedBytes = knownResource(0)
+	r, err := SummarizeJobResources(scope, []JobResourceSample{first, last})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Samples[19].Resources = r
+	got := advisoryFixture(t, JobSizingHostContext{}, in, sizingReviewWindowFixture(in))
+	if got.Disk.State != JobSizingDiskObserved || got.Disk.Samples != 1 || got.Disk.Qualified != 20 || got.Disk.Peak != 0 {
+		t.Fatalf("one genuine zero reading must stay distinguishable from unavailable: %+v", got.Disk)
+	}
+}
