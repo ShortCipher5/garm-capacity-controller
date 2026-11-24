@@ -309,18 +309,20 @@ func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, readback := range []int64{plan.Suggested, plan.Observed, plan.Suggested} {
-		if err := controller.RecordObservation(context.Background(), plan.Scope, readback, now.Add(time.Duration(3+i)*time.Second)); err != nil {
+		// The ledger baseline moves while the operation is open; the held
+		// capacity display must follow it without touching the outcome.
+		if err := controller.RecordObservation(context.Background(), plan.Scope, readback, int64(5+i), now.Add(time.Duration(3+i)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		view, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(time.Duration(3+i)*time.Second), claim, 2, &readback, true))
+		view, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(time.Duration(3+i)*time.Second), claim, 5, &readback, true))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if view.State != StockApplyStateOutcomeUnknown || view.Drift {
 			t.Fatal("readback changed the durable outcome", readback, view.State, view.Drift)
 		}
-		if view.Charged.Runners != 2 || view.Charged.Reason != stockApplyChargedUncertain {
-			t.Fatal("readback released charges", view.Charged)
+		if view.Charged.Runners != int64(5+i) || view.Charged.Reason != stockApplyChargedUncertain {
+			t.Fatal("current charged baseline not reflected", view.Charged)
 		}
 	}
 	proof := StockApplyOutcomeProof{OperationID: viewOperationID(t, controller, plan.Scope), ReceiptDigest: sha256.Sum256([]byte("authoritative receipt")), ChallengeDigest: sha256.Sum256([]byte("fence challenge"))}
@@ -331,19 +333,22 @@ func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.State != StockApplyStateAppliedWhenProven || view.Charged.Reason != stockApplyChargedProven || view.Charged.Runners != 2 {
+	if view.State != StockApplyStateAppliedWhenProven || view.Charged.Reason != stockApplyChargedProven || view.Charged.Runners != 7 {
 		t.Fatal("proven outcome", view.State, view.Charged)
 	}
 	old := plan.Observed
-	if err := controller.RecordObservation(context.Background(), plan.Scope, old, now.Add(12*time.Second)); err != nil {
+	if err := controller.RecordObservation(context.Background(), plan.Scope, old, 9, now.Add(12*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	view, err = controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(12*time.Second), claim, 2, &old, true))
+	view, err = controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(12*time.Second), claim, 9, &old, true))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if view.State != StockApplyStateAppliedWhenProven || !view.Drift {
 		t.Fatal("late matching observation reverted or hid the proven outcome", view.State, view.Drift)
+	}
+	if view.Charged.Runners != 9 || view.Charged.Reason != stockApplyChargedProven {
+		t.Fatal("proven charge does not reflect the current baseline", view.Charged)
 	}
 }
 
@@ -355,7 +360,7 @@ func TestStockApplyDriftBlocksDispatchWithVisibleReason(t *testing.T) {
 	if err := controller.RecordProposal(context.Background(), plan, 1, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.RecordObservation(context.Background(), plan.Scope, 99, now.Add(time.Second)); err != nil {
+	if err := controller.RecordObservation(context.Background(), plan.Scope, 99, 1, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	view, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(2*time.Second), claim, 1, nil, true))
@@ -372,7 +377,7 @@ func TestStockApplyDriftBlocksDispatchWithVisibleReason(t *testing.T) {
 		t.Fatal("drifted proposal dispatched", err)
 	}
 	// Drift is sticky: a matching readback afterwards does not silently clear it.
-	if err := controller.RecordObservation(context.Background(), plan.Scope, plan.Observed, now.Add(4*time.Second)); err != nil {
+	if err := controller.RecordObservation(context.Background(), plan.Scope, plan.Observed, 1, now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	view, err = controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(4*time.Second), claim, 1, nil, true))
@@ -486,11 +491,17 @@ func TestStockApplyObservationAndViewInputBounds(t *testing.T) {
 	if err := controller.RecordProposal(context.Background(), plan, 1, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.RecordObservation(context.Background(), scope, -1, now); !errors.Is(err, ErrStockApplyConflict) {
+	if err := controller.RecordObservation(context.Background(), scope, -1, 0, now); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("negative readback admitted", err)
 	}
-	if err := controller.RecordObservation(context.Background(), scope, 1000001, now); !errors.Is(err, ErrStockApplyConflict) {
+	if err := controller.RecordObservation(context.Background(), scope, 1000001, 0, now); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("unbounded readback admitted", err)
+	}
+	if err := controller.RecordObservation(context.Background(), scope, 1, -1, now); !errors.Is(err, ErrStockApplyConflict) {
+		t.Fatal("negative charged baseline admitted", err)
+	}
+	if err := controller.RecordObservation(context.Background(), scope, 1, 100001, now); !errors.Is(err, ErrStockApplyConflict) {
+		t.Fatal("unbounded charged baseline admitted", err)
 	}
 	if _, err := controller.View(context.Background(), scope, stockApplyEval(time.Time{}, StockApplyCapabilityClaim{}, 0, nil, true)); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("zero evaluation time admitted", err)
@@ -544,4 +555,106 @@ func TestStockApplyJournalRejectsSwapAndWrongIdentity(t *testing.T) {
 		t.Fatal("malformed identity admitted")
 	}
 	mismatch.Close()
+}
+
+func TestStockApplyHeldCapacityFollowsBaselineAcrossRestart(t *testing.T) {
+	controller, _, path, lineage := stockApplyTestController(t)
+	plan, now := validatedStockApplyPlan(t, 1)
+	if err := controller.RecordProposal(context.Background(), plan, 2, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.RecordObservation(context.Background(), plan.Scope, plan.Observed, 6, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	controller.Close()
+	reopened := reopenStockApplyController(t, path, lineage)
+	view, err := reopened.View(context.Background(), plan.Scope, stockApplyEval(now.Add(2*time.Second), StockApplyCapabilityClaim{Interface: StockApplyStockInterface}, 2, nil, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != StockApplyStateProposed || view.Charged.Runners != 6 {
+		t.Fatal("charged baseline did not persist across restart", view.State, view.Charged)
+	}
+}
+
+func TestStockApplyResumeDistinguishesPauseLiftFromFreshCheckReadiness(t *testing.T) {
+	enableStockApplyFixtureInterface(t)
+	controller, _, _, _ := stockApplyTestController(t)
+	plan, now := validatedStockApplyPlan(t, 1)
+	claim := stockApplyFixtureClaim()
+	assertResume := func(at time.Time, wantLift bool, wantLiftReason string, wantReady bool, wantReason string) StockApplyView {
+		t.Helper()
+		readback := plan.Observed
+		view, err := controller.View(context.Background(), plan.Scope, stockApplyEval(at, claim, 1, &readback, true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.Resume.LiftPause != wantLift || view.Resume.LiftReason != wantLiftReason || view.Resume.Ready != wantReady || view.Resume.Reason != wantReason {
+			t.Fatalf("resume view at %s = %+v; want lift %v/%q ready %v/%q", at, view.Resume, wantLift, wantLiftReason, wantReady, wantReason)
+		}
+		return view
+	}
+	assertResume(now, false, "not_paused", false, "no_open_operation")
+	if err := controller.RecordProposal(context.Background(), plan, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh evidence matches the journaled observed value: with a hypothetically
+	// supported capability all drift checks pass, so readiness is true.
+	assertResume(now.Add(time.Second), false, "not_paused", true, "")
+	if enabled, reason := actionReason(assertResume(now.Add(time.Second), false, "not_paused", true, ""), "resume"); enabled || reason != "not_paused" {
+		t.Fatal("resume action outside pause", enabled, reason)
+	}
+	if err := controller.Pause(context.Background(), plan.Scope, "operator maintenance window", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// Lifting the local pause is available, but readiness is explicitly NOT
+	// implied: fresh drift checks still have to run afterwards.
+	paused := assertResume(now.Add(3*time.Second), true, "", false, "pause_must_be_lifted_first")
+	if enabled, reason := actionReason(paused, "resume"); !enabled || reason != "lifts_local_pause_only" {
+		t.Fatal("pause lift action", enabled, reason)
+	}
+	if err := controller.Resume(context.Background(), plan.Scope, "maintenance complete", now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertResume(now.Add(5*time.Second), false, "not_paused", true, "")
+	// Stale evidence blocks readiness even with the pause lifted.
+	stale := plan.Observed
+	staleView, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(6*time.Second), claim, 1, &stale, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleView.Resume.Ready || staleView.Resume.Reason != "stale_evidence" {
+		t.Fatal("stale readiness", staleView.Resume)
+	}
+	// A fresh readback that drifts from the journaled operation blocks readiness.
+	drifted := plan.Suggested + 50
+	driftView, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(7*time.Second), claim, 1, &drifted, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driftView.Resume.Ready || driftView.Resume.Reason != "settings_drift_detected" {
+		t.Fatal("drifted readiness", driftView.Resume)
+	}
+	// The stock capability can never be ready; it names the interface refusal.
+	stockView, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(8*time.Second), StockApplyCapabilityClaim{Interface: StockApplyStockInterface}, 1, &stale, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stockView.Resume.Ready || stockView.Resume.Reason != string(StockApplyRefusalStockObserveOnly) {
+		t.Fatal("stock readiness", stockView.Resume)
+	}
+	// An unknown outcome blocks readiness with the conservative reason.
+	if err := controller.MarkDispatched(context.Background(), plan.Scope, claim, now.Add(9*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.MarkOutcomeUncertain(context.Background(), plan.Scope, now.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	unknownView, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(11*time.Second), claim, 1, &stale, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknownView.Resume.Ready || unknownView.Resume.Reason != "outcome_uncertain_pending_resolution" {
+		t.Fatal("unknown readiness", unknownView.Resume)
+	}
 }

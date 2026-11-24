@@ -101,6 +101,10 @@ const (
 	stockApplyReasonNotPaused         = "not_paused"
 	stockApplyReasonReceiptResolution = "receipt_resolution_unavailable"
 	stockApplyReasonRollbackSafety    = "rollback_requires_original_outcome_and_current_state"
+	stockApplyReasonPauseLiftOnly     = "lifts_local_pause_only"
+	stockApplyReasonPauseLiftFirst    = "pause_must_be_lifted_first"
+	stockApplyReasonNoOpenOperation   = "no_open_operation"
+	stockApplyReasonOperationProven   = "operation_already_proven"
 	stockApplyReasonWithdrawNone      = "no_proposal_to_withdraw"
 	stockApplyReasonDriftFlag         = "observed_settings_differ_from_journaled_operation"
 )
@@ -745,13 +749,30 @@ func (c *StockApplyController) RecordProvenOutcome(ctx context.Context, scope [s
 	})
 }
 
+// stockApplyReadbackConsistent reports whether one read-only settings value
+// agrees with the journaled operation for its state. Consistency is drift
+// bookkeeping only; it is never completion evidence.
+func stockApplyReadbackConsistent(op StockApplyOperation, readback int64) bool {
+	switch op.State {
+	case "dispatched", "outcome_unknown":
+		return readback == op.Observed || readback == op.Suggested
+	case "applied_when_proven":
+		return readback == op.Suggested
+	default:
+		return readback == op.Observed
+	}
+}
+
 // RecordObservation records one read-only settings observation for the scope's
-// unresolved operation. Matching the old or the new value is retained as an
-// audit observation only; it never changes the operation state and never
-// releases a charge. A readback inconsistent with the journaled operation
-// raises a sticky drift flag that blocks dispatch until the operator reviews.
-func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, readback int64, now time.Time) error {
-	if now.IsZero() || readback < 0 || readback > 1000000 {
+// open or proven operation. Matching the old or the new value is retained as
+// an audit observation only; it never changes the operation state and never
+// releases a charge. Charged is the CURRENT ledger-charged runner baseline:
+// it is stored durably so the held-capacity display keeps reflecting live
+// charging, including baseline movements while an operation is open. A
+// readback inconsistent with the journaled operation raises a sticky drift
+// flag that blocks dispatch until the operator reviews.
+func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, readback, charged int64, now time.Time) error {
+	if now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -770,16 +791,18 @@ func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha
 		if err != nil {
 			return ErrStockApplyJournal
 		}
-		consistent := readback == op.Observed
-		switch op.State {
-		case "dispatched", "outcome_unknown":
-			consistent = readback == op.Observed || readback == op.Suggested
-		case "applied_when_proven":
-			consistent = readback == op.Suggested
-		}
+		consistent := stockApplyReadbackConsistent(op, readback)
 		detail := strconv.FormatInt(readback, 10)
 		if err := stockApplyAudit(tx, key, op.OperationID, "observation", detail); err != nil {
 			return err
+		}
+		if charged != op.Charged {
+			if _, err := tx.Exec("UPDATE stock_apply_operation SET charged=?,updated_at=? WHERE operation_id=?", charged, now.UTC().Format(time.RFC3339Nano), op.OperationID); err != nil {
+				return ErrStockApplyJournal
+			}
+			if err := stockApplyAudit(tx, key, op.OperationID, "charge_updated", strconv.FormatInt(charged, 10)); err != nil {
+				return err
+			}
 		}
 		if consistent || op.Drift {
 			return nil
@@ -818,6 +841,19 @@ type StockApplyChargedView struct {
 	Reason  string `json:"reason"`
 }
 
+// StockApplyResumeView separates the two different things an operator can do
+// after maintenance. LiftPause is the LOCAL pause control: available whenever
+// the scope is paused, and it never clears or resolves pending or unknown
+// state. Ready is readiness to resume APPLY work, which additionally demands
+// fresh, drift-free evidence for the open operation. Lifting a pause is
+// therefore never presented as readiness to resume apply work.
+type StockApplyResumeView struct {
+	LiftPause  bool   `json:"lift_pause"`
+	LiftReason string `json:"lift_reason,omitempty"`
+	Ready      bool   `json:"ready"`
+	Reason     string `json:"reason,omitempty"`
+}
+
 // StockApplyView is the conservative operator contract: the controller state,
 // why each action is disabled, and what capacity remains charged.
 type StockApplyView struct {
@@ -829,6 +865,7 @@ type StockApplyView struct {
 	Operation  *StockApplyOperation        `json:"operation,omitempty"`
 	Actions    []StockApplyActionView      `json:"actions"`
 	Charged    StockApplyChargedView       `json:"charged"`
+	Resume     StockApplyResumeView        `json:"resume"`
 	Capability StockApplyCapabilityVerdict `json:"capability"`
 }
 
@@ -935,11 +972,40 @@ func (c *StockApplyController) View(ctx context.Context, scope [sha256.Size]byte
 		}
 		return stockApplyReasonRollbackSafety
 	}
+	// The local pause control and apply readiness are different states:
+	// lifting a pause is always available while paused and changes nothing
+	// about the operation, while readiness additionally requires lifted
+	// pause, a known-or-proposed operation, supported capability and fresh
+	// drift-free evidence. Ready stays false on every production path.
+	view.Resume = StockApplyResumeView{
+		LiftPause:  mode.paused,
+		LiftReason: map[bool]string{true: "", false: stockApplyReasonNotPaused}[mode.paused],
+	}
+	switch {
+	case mode.paused:
+		view.Resume.Reason = stockApplyReasonPauseLiftFirst
+	case op == nil:
+		view.Resume.Reason = stockApplyReasonNoOpenOperation
+	case op.State == "dispatched" || op.State == "outcome_unknown":
+		view.Resume.Reason = view.Reason
+	case op.State == "applied_when_proven":
+		view.Resume.Reason = stockApplyReasonOperationProven
+	case !verdict.Supported:
+		view.Resume.Reason = firstRefusal
+	case op.Drift:
+		view.Resume.Reason = stockApplyReasonDriftDetected
+	case !eval.Fresh || !op.PlanExpires.After(eval.Now):
+		view.Resume.Reason = stockApplyReasonStaleEvidence
+	case eval.Readback != nil && !stockApplyReadbackConsistent(*op, *eval.Readback):
+		view.Resume.Reason = stockApplyReasonDriftDetected
+	default:
+		view.Resume.Ready = true
+	}
 	view.Actions = append(view.Actions,
 		StockApplyActionView{Action: "apply", Enabled: false, Reason: applyReason()},
 		StockApplyActionView{Action: "withdraw_proposal", Enabled: withdrawReason() == "", Reason: withdrawReason()},
 		StockApplyActionView{Action: "pause", Enabled: !mode.paused, Reason: map[bool]string{true: "", false: stockApplyReasonAlreadyPaused}[!mode.paused]},
-		StockApplyActionView{Action: "resume", Enabled: mode.paused, Reason: map[bool]string{true: "", false: stockApplyReasonNotPaused}[mode.paused]},
+		StockApplyActionView{Action: "resume", Enabled: mode.paused, Reason: map[bool]string{true: stockApplyReasonPauseLiftOnly, false: stockApplyReasonNotPaused}[mode.paused]},
 		StockApplyActionView{Action: "resolve_outcome", Enabled: false, Reason: resolveReason()},
 		StockApplyActionView{Action: "rollback", Enabled: false, Reason: rollbackReason()},
 	)
