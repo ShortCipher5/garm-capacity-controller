@@ -368,15 +368,20 @@ func TestCycleHistoryLateCorrectionAndResumableBackfillAcrossRestart(t *testing.
 		t.Fatalf("resumed backfill did not commit from the durable cursor: %+v, %v", receipt, err)
 	}
 
-	// Both versions survive: the terminal correction is the status authority
-	// and the running observation keeps its own measured result visible.
+	// The owned service still uses rollback-compatible v1. The exact
+	// terminal correction replaces the running row without opening the
+	// separately opted-in measurement-witness format.
+	var snapshot struct{ Format string }
+	if err := json.Unmarshal(durable(), &snapshot); err != nil || snapshot.Format != "garm-ci-health-history-v1" {
+		t.Fatalf("owned history silently changed its snapshot format: %+v, %v", snapshot, err)
+	}
 	rows, err := history.cell.history.Recent(ctx, scopeID, 1)
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("late correction was not retained as its own version: %+v, %v", rows, err)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("owned v1 history must retain only the corrected row: %+v, %v", rows, err)
 	}
 	if rows[0].Clock.Phase != cihealth.Completed || rows[0].Clock.Conclusion != cihealth.ConclusionSuccess ||
-		!rows[0].AsOf.After(rows[1].AsOf) || rows[1].Clock.Phase != cihealth.Running {
-		t.Fatalf("versions out of order or terminal result lost: %+v", rows)
+		!rows[0].AsOf.Equal(second.Facts()[0].AsOf) || !rows[0].AsOf.After(first.Facts()[0].AsOf) {
+		t.Fatalf("exact terminal correction lost: %+v", rows)
 	}
 	view, err := cihealth.ProjectRetainedAttempt(rows)
 	if err != nil {
@@ -389,8 +394,8 @@ func TestCycleHistoryLateCorrectionAndResumableBackfillAcrossRestart(t *testing.
 	if !job.Execution.Current || job.Execution.MeasuredAt != rows[0].AsOf || job.Execution.Duration != 30*time.Second {
 		t.Fatalf("measured execution missing its provenance: %+v", job.Execution)
 	}
-	if job.Active.Current || job.Active.MeasuredAt != rows[1].AsOf || job.Active.Basis != cihealth.ObservedEndpoints {
-		t.Fatalf("prior active measurement not recovered from the running version: %+v", job.Active)
+	if job.Active.Current || !job.Active.MeasuredAt.IsZero() || job.Active.Basis != cihealth.Unavailable {
+		t.Fatalf("v1 inferred an older running measurement: %+v", job.Active)
 	}
 	trends, err := cihealth.SummarizeRetainedTrends(cihealth.TrendScope(scopeID), rows[0].AsOf, rows)
 	if err != nil {
@@ -399,7 +404,7 @@ func TestCycleHistoryLateCorrectionAndResumableBackfillAcrossRestart(t *testing.
 	bucket := trends.Current.Initial
 	if bucket.Runs != 1 || bucket.Attempts.Observed != 1 || bucket.Attempts.Success != 1 || bucket.Attempts.Completed != 1 ||
 		bucket.Jobs.Duration == nil || bucket.Jobs.Duration.Samples != 1 || bucket.Steps.Duration == nil || bucket.Steps.Duration.Samples != 1 {
-		t.Fatalf("versioned attempt double-counted or lost: %+v", bucket)
+		t.Fatalf("corrected attempt double-counted or lost: %+v", bucket)
 	}
 	if err := history.Close(); err != nil {
 		t.Fatal(err)
@@ -409,7 +414,8 @@ func TestCycleHistoryLateCorrectionAndResumableBackfillAcrossRestart(t *testing.
 	if len(expected) != 1 || expected[0].Cursor != (cihealth.HistoryCursor{Revision: 2}) {
 		t.Fatalf("second restart lost the cursor: %+v", expected)
 	}
-	if rows, err := history.cell.history.Recent(ctx, scopeID, 1); err != nil || len(rows) != 2 || rows[0].Clock.Phase != cihealth.Completed {
-		t.Fatalf("second restart lost a version: %+v, %v", rows, err)
+	if rows, err := history.cell.history.Recent(ctx, scopeID, 1); err != nil || len(rows) != 1 ||
+		rows[0].Clock.Phase != cihealth.Completed || !rows[0].AsOf.Equal(second.Facts()[0].AsOf) {
+		t.Fatalf("second restart lost the exact v1 correction: %+v, %v", rows, err)
 	}
 }
