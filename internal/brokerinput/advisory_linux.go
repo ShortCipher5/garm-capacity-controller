@@ -34,6 +34,18 @@ func NewAdvisoryReaderWithStockPreviews(store *admission.SQLiteStore, source *ga
 	}
 	return r, err
 }
+
+// NewAdvisoryReaderWithAllocatorProposal opts the bounded advisory tick into
+// the additional observe-only cross-repository allocator proposal. The
+// proposal reuses the same plan, lifecycle and cache; it adds no writer,
+// poller or grant lifecycle.
+func NewAdvisoryReaderWithAllocatorProposal(store *admission.SQLiteStore, source *garmapi.DemandClient, maximum, idle bool) (*AdvisoryReader, error) {
+	r, err := NewAdvisoryReaderWithStockPreviews(store, source, maximum, idle)
+	if err == nil {
+		r.reader.allocatorProposal = true
+	}
+	return r, err
+}
 func newAdvisoryReader(store *admission.SQLiteStore, source *garmapi.DemandClient, preview bool) (*AdvisoryReader, error) {
 	if store == nil || source == nil {
 		return nil, capacitybroker.ErrSnapshot
@@ -291,6 +303,10 @@ func cloneReadPlan(v ReadPlan) ReadPlan {
 		copy.Proposals = append([]StockIdleProposal{}, copy.Proposals...)
 		v.StockIdlePreview = &copy
 	}
+	if v.Allocator != nil {
+		copy := cloneAllocatorProposal(*v.Allocator)
+		v.Allocator = &copy
+	}
 	v.StockMaximumPreview = cloneStockMaximumPreview(v.StockMaximumPreview)
 	v.StockMaximumBatchPreview = cloneStockMaximumPreview(v.StockMaximumBatchPreview)
 	v.Pressure = append([]PressureStatus(nil), v.Pressure...)
@@ -300,6 +316,27 @@ func cloneReadPlan(v ReadPlan) ReadPlan {
 			s := *v.Pools[i].Supply
 			v.Pools[i].Supply = &s
 		}
+	}
+	return v
+}
+
+func cloneAllocatorProposal(v AllocatorProposal) AllocatorProposal {
+	v.Awards = append([]AllocatorAward(nil), v.Awards...)
+	v.Decisions = append([]AllocatorPoolDecision(nil), v.Decisions...)
+	v.Risks = append([]string(nil), v.Risks...)
+	if v.Held.Repositories != nil {
+		repositories := make(map[string]admission.Resources, len(v.Held.Repositories))
+		for id, used := range v.Held.Repositories {
+			repositories[id] = used
+		}
+		v.Held.Repositories = repositories
+	}
+	if v.Held.Pools != nil {
+		pools := make(map[string]admission.Resources, len(v.Held.Pools))
+		for id, used := range v.Held.Pools {
+			pools[id] = used
+		}
+		v.Held.Pools = pools
 	}
 	return v
 }
