@@ -23,6 +23,7 @@ import { Usage, dimensions, allocationText } from "./usage-bars.jsx";
 import { validateProfilesList } from "./profiles-client.js";
 import { validateUsageHistory } from "./usage-client.js";
 import { CIHealthPanel, ciHealthNavigationAvailable } from "./ci-health.jsx";
+import { CISizingPanel, ciSizingNavigationAvailable } from "./ci-health-sizing.jsx";
 
 const fmt = (n) => n.toLocaleString();
 const date = (value) => new Date(value).toLocaleString();
@@ -72,13 +73,14 @@ function CapacityWarnings({ data }) {
     </div>
   );
 }
-export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readMix, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readDemandObserverStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment, readRetirementStatus, ciHealthAvailable, readCIHealth }) {
+export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboarding, readEntityInventory, readProfiles, readMix, readUsage, readBrokerPolicy, readCapacityStates, readPoolMappings, readAllocatorStatus, readDemandObserverStatus, readAllocatorPlan, readOverheadRefresh, readNativeEnrollment, readRetirementStatus, ciHealthAvailable, readCIHealth, ciHealthSizingAvailable, readCISizing }) {
   const entityReaders = useMemo(() => typeof readEntityInventory === "function" ? createEntityInventoryReader(readEntityInventory) : {}, [readEntityInventory]);
   const [hostFilter, setHostFilter] = useState("all");
   const visibleHosts = filterHosts(data.hosts, hostFilter);
   // The authenticated overview must explicitly advertise an attached source;
   // do not probe the optional route when the marker is absent.
   const showCIHealth = ciHealthNavigationAvailable(ciHealthAvailable, readCIHealth);
+  const showCISizing = ciSizingNavigationAvailable(ciHealthSizingAvailable, readCISizing);
   return (
     <MixPrefillProvider>
       <aside className="sidebar">
@@ -98,6 +100,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
           </a>
         ))}
         {showCIHealth && <a className="nav" href="#ci-health">CI Health</a>}
+        {showCISizing && <a className="nav" href="#ci-health-sizing">Runner sizing</a>}
         <div className="sidebar-bottom">
           <span className="pill amber">Experimental ledger</span>
           <p>
@@ -146,6 +149,7 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         </div>
         <AllocatorStatus read={readAllocatorStatus} />
         {showCIHealth && <CIHealthPanel enabled={ciHealthAvailable} read={readCIHealth} />}
+        {showCISizing && <CISizingPanel enabled={ciHealthSizingAvailable} read={readCISizing} />}
         <Lifecycle data={data} readRetirementStatus={readRetirementStatus} />
         <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
@@ -313,6 +317,12 @@ export function App() {
     }
     catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
   }, [disconnect]);
+  const readCISizing = useCallback(async (options) => {
+    try {
+      return await session.current.ciHealthSizingSnapshot(options);
+    }
+    catch (error) { if (error instanceof SessionEnded && error.message) { disconnect(); setError(error.message); } throw error; }
+  }, [disconnect]);
   // Refresh measured history once per committed overview snapshot, not on busy
   // transitions. Stable identity also prevents unrelated renders aborting reads.
   const readUsage = useCallback(async (host, options) => {
@@ -353,6 +363,8 @@ export function App() {
         readRetirementStatus={readRetirementStatus}
         ciHealthAvailable={data.ci_health_available === true}
         readCIHealth={readCIHealth}
+        ciHealthSizingAvailable={data.ci_health_sizing_available === true}
+        readCISizing={readCISizing}
         busy={busy}
         refresh={() => load()}
         disconnect={disconnect}

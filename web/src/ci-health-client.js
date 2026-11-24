@@ -270,7 +270,7 @@ export async function readCIRunDestinationBody(response, signal, selection) {
   return validateCIRunDestination(await readCIHealthJSON(response, signal, 1024), selection);
 }
 
-async function readCIHealthJSON(response, signal, limit) {
+export async function readCIHealthJSON(response, signal, limit) {
   if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? "") || !response.body) {
     throw new Error("CI Health response unavailable.");
   }

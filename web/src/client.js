@@ -12,7 +12,8 @@ import { validateOnboardingDiscovery, OnboardingResponseError } from "./onboardi
 import { validateGarm } from "./garm-client.js";
 import { validateProfilesList } from "./profiles-client.js";
 import { validateUsageHistory } from "./usage-client.js";
-import { ciHealthEndpoint, ciHealthFresh, readCIHealthBody, ciJobHandleHeader, ciRunHandleHeader, readCIJobDestinationBody, readCIRunDestinationBody, validCIJobHandle, validCIRunHandle } from "./ci-health-client.js";
+import { ciHealthEndpoint, ciHealthFresh, readCIHealthBody, ciJobHandleHeader, ciRunHandleHeader, readCIJobDestinationBody, readCIRunDestinationBody, validCIJobHandle, validCIRunHandle, readCIHealthJSON } from "./ci-health-client.js";
+import { ciSizingEndpoint, readCISizingBody, validateCISizingSnapshot } from "./ci-health-sizing-client.js";
 
 // This client has no persistence and no configurable remote endpoint.
 export const endpoint = "/admin/api/v1/overview";
@@ -40,6 +41,7 @@ export function validateOverview(value) {
     value.mode !== "experimental-ledger" ||
     !bool(value.management_enabled) ||
     (Object.hasOwn(value, "ci_health_available") && !bool(value.ci_health_available)) ||
+    (Object.hasOwn(value, "ci_health_sizing_available") && !bool(value.ci_health_sizing_available)) ||
     typeof value.policy_revision !== "string" ||
     !/^[0-9a-f]{64}$/.test(value.policy_revision) ||
     !bool(value.experimental_provisioning_enabled) ||
@@ -99,6 +101,7 @@ export class ReadSession {
   #ciHealthRequest;
   #ciJobLinkRequest;
   #ciRunLinkRequest;
+  #ciSizingRequest;
  #demandObserverRequest;
  #demandObserverGeneration=0;
  #enrollmentRequest;
@@ -143,6 +146,8 @@ export class ReadSession {
     this.#ciJobLinkRequest = undefined;
     this.#ciRunLinkRequest?.abort();
     this.#ciRunLinkRequest = undefined;
+    this.#ciSizingRequest?.abort();
+    this.#ciSizingRequest = undefined;
  this.#demandObserverGeneration++;this.#demandObserverRequest?.abort();this.#demandObserverRequest=undefined;
  this.#enrollmentGeneration++;this.#enrollmentRequest?.abort();this.#enrollmentRequest=undefined;
  this.#collectionGeneration++;this.#collectionRequest?.abort();this.#collectionRequest=undefined;
@@ -336,6 +341,43 @@ export class ReadSession {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
       if (this.#ciHealthRequest === controller) this.#ciHealthRequest = undefined;
+    }
+  }
+  async ciHealthSizingSnapshot({signal} = {}) {
+    if (!this.#token || signal?.aborted) throw new SessionEnded();
+    this.#ciSizingRequest?.abort();
+    const controller = new AbortController();
+    this.#ciSizingRequest = controller;
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, {once: true});
+    const timeout = setTimeout(abort, 15000);
+    const active = () => {
+      if (this.#ciSizingRequest !== controller || controller.signal.aborted) throw new SessionEnded();
+    };
+    try {
+      const response = await this.fetcher(ciSizingEndpoint, {
+        method: "GET",
+        headers: {Authorization: `Bearer ${this.#token}`, Accept: "application/json"},
+        credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal,
+      });
+      active();
+      if (response.status === 401) {
+        this.disconnect();
+        throw new SessionEnded("Read authorization ended. Reconnect to the admin service.");
+      }
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error("CI sizing response unavailable.");
+      const result = await readCISizingBody(response, controller.signal);
+      active();
+      return ciHealthFresh(result, Date.now()) || result.state === "unavailable" ? result : null;
+    } catch (error) {
+      if (error instanceof SessionEnded) throw error;
+      active();
+      throw new Error("CI sizing response unavailable.");
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      if (this.#ciSizingRequest === controller) this.#ciSizingRequest = undefined;
     }
   }
   async ciHealthJobDestination(selection, {signal} = {}) {
