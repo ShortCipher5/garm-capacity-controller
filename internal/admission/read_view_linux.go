@@ -120,7 +120,11 @@ func (s *SQLiteStore) ReadSnapshot(ctx context.Context) (SQLiteSnapshot, error) 
 		if err != nil {
 			return err
 		}
-		result.Allocated, err = sqliteAllocationsWithGrants(tx, result.Config, result.Reservations, result.Inventory, released)
+		freed, err := sqliteReuseFreed(tx)
+		if err != nil {
+			return err
+		}
+		result.Allocated, err = sqliteAllocationsWithGrants(tx, result.Config, result.Reservations, result.Inventory, released, freed)
 		if err != nil {
 			return err
 		}

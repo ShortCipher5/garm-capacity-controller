@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/reuse"
 	"reflect"
 	"time"
 )
@@ -53,6 +54,7 @@ type BrokerGrantState struct {
 	Reservations      map[string]Reservation
 	Inventory         []InventoryResource
 	Released          map[string]bool
+	Reuse             map[string]reuse.Dimensions
 	Grants            []BrokerGrant
 }
 
@@ -154,8 +156,8 @@ func sqliteBrokerGrants(tx *sql.Tx) ([]BrokerGrant, error) {
 // Every canonical DB allocation consumer uses this wrapper. Expired-but-unused
 // grants remain charged until a durable terminal transition. Clock movement
 // alone cannot release capacity.
-func sqliteAllocationsWithGrants(tx *sql.Tx, c Config, r map[string]Reservation, i []InventoryResource, released map[string]bool) (Allocations, error) {
-	out, e := sqliteAllocations(c, r, i, released)
+func sqliteAllocationsWithGrants(tx *sql.Tx, c Config, r map[string]Reservation, i []InventoryResource, released map[string]bool, freed map[string]reuse.Dimensions) (Allocations, error) {
+	out, e := sqliteAllocations(c, r, i, released, freed)
 	if e != nil {
 		return out, e
 	}
@@ -282,6 +284,9 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		if v.Released, e = sqliteReleasedKeys(tx); e != nil {
 			return e
 		}
+		if v.Reuse, e = sqliteReuseFreed(tx); e != nil {
+			return e
+		}
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
 			return e
 		}
@@ -291,7 +296,7 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		if v.DomainOverheads, e = sqliteNativeDomainOverheads(tx); e != nil {
 			return e
 		}
-		if v.Allocated, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released); e != nil {
+		if v.Allocated, e = sqliteAllocationsWithGrants(tx, v.Config, v.Reservations, v.Inventory, v.Released, v.Reuse); e != nil {
 			return e
 		}
 		v.ExecutionPlans = map[string]ExecutionPlan{}
@@ -404,7 +409,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		if e != nil {
 			return e
 		}
-		allocated, e := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
+		freed, e := sqliteReuseFreed(tx)
+		if e != nil {
+			return e
+		}
+		allocated, e := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
 		if e != nil {
 			return e
 		}

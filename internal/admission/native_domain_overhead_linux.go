@@ -240,9 +240,13 @@ func (s *SQLiteStore) RecordNativeDomainOverhead(ctx context.Context, bindingSeq
 		if e != nil {
 			return e
 		}
+		freed, e := sqliteReuseFreed(tx)
+		if e != nil {
+			return e
+		}
 		// Reject arithmetic overflow atomically, but retain genuine over-budget
 		// charges: exceeding a configured budget is not permission to erase debt.
-		_, e = sqliteAllocationsWithGrants(tx, c, reservations, inventory, released)
+		_, e = sqliteAllocationsWithGrants(tx, c, reservations, inventory, released, freed)
 		return e
 	})
 	if e != nil {

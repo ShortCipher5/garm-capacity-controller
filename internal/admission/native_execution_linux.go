@@ -321,7 +321,11 @@ func validateNativeDispatch(tx *sql.Tx, p ExecutionPlan, permit string, b Native
 			return ErrNativeExecution
 		}
 	}
-	allocations, e := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
+	freed, e := sqliteReuseFreed(tx)
+	if e != nil {
+		return e
+	}
+	allocations, e := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
 	if e != nil {
 		return e
 	}

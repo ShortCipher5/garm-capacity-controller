@@ -260,7 +260,11 @@ func (s *SQLiteStore) RecordNativeArtifactOverhead(ctx context.Context, bindingS
 		if e != nil {
 			return e
 		}
-		_, e = sqliteAllocationsWithGrants(tx, c, r, i, released)
+		freed, e := sqliteReuseFreed(tx)
+		if e != nil {
+			return e
+		}
+		_, e = sqliteAllocationsWithGrants(tx, c, r, i, released, freed)
 		return e
 	})
 	if e != nil {

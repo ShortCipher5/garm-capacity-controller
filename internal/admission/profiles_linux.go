@@ -298,7 +298,11 @@ func (s *SQLiteStore) ProfileEstimate(ctx context.Context, host, profile string)
 		if err != nil {
 			return err
 		}
-		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
+		freed, err := sqliteReuseFreed(tx)
+		if err != nil {
+			return err
+		}
+		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
 		if err != nil {
 			return err
 		}

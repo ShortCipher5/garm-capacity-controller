@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/reuse"
 	"sort"
 	"time"
 )
@@ -23,7 +24,7 @@ type CapacityStateRow struct {
 	Resources Resources `json:"resources"`
 }
 
-func capacityStates(reservations map[string]Reservation, inventory []InventoryResource, released map[string]bool) ([]CapacityStateRow, Resources, error) {
+func capacityStates(reservations map[string]Reservation, inventory []InventoryResource, released map[string]bool, freed map[string]reuse.Dimensions) ([]CapacityStateRow, Resources, error) {
 	states := map[string]Resources{}
 	linked := map[string]InventoryResource{}
 	add := func(state string, resources Resources) error {
@@ -49,6 +50,9 @@ func capacityStates(reservations map[string]Reservation, inventory []InventoryRe
 			continue
 		}
 		size, state := r.Request.Resources, r.State
+		if dimensions, ok := freed[key]; ok {
+			size = remainingCharge(size, dimensions)
+		}
 		if physical, ok := linked[key]; ok {
 			size.CPU = max(size.CPU, physical.Resources.CPU)
 			size.RAM = max(size.RAM, physical.Resources.RAM)
@@ -105,11 +109,15 @@ func (s *SQLiteStore) ReadCapacityStates(ctx context.Context) (CapacityStateView
 		if err != nil {
 			return err
 		}
-		allocations, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
+		freed, err := sqliteReuseFreed(tx)
 		if err != nil {
 			return err
 		}
-		out.Rows, out.Total, err = capacityStates(reservations, inventory, released)
+		allocations, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released, freed)
+		if err != nil {
+			return err
+		}
+		out.Rows, out.Total, err = capacityStates(reservations, inventory, released, freed)
 		if err != nil {
 			return err
 		}

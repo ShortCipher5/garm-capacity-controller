@@ -81,6 +81,16 @@ type FakeIncus struct {
 	AbsenceReads  atomic.Int32
 	StateReads    atomic.Int32
 	ResourceReads atomic.Int32
+	opInstance    atomic.Value
+}
+
+// operationInstance is the instance name the most recent create or delete
+// operation routes report; fixed fixtures default to runner-1.
+func (f *FakeIncus) operationInstance() string {
+	if name, ok := f.opInstance.Load().(string); ok && name != "" {
+		return name
+	}
+	return "runner-1"
 }
 
 // SetGuestUsage configures one guest's measured instance-state utilization:
@@ -235,6 +245,7 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		f.configs[body.Name] = body.Config
 		f.createdAt[body.Name] = time.Now().UTC().Format(time.RFC3339Nano)
 		f.mu.Unlock()
+		f.opInstance.Store(body.Name)
 		_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + FakeIncusCreateOperation + "?project=runners", "metadata": map[string]any{"id": FakeIncusCreateOperation}})
 		return
 	}
@@ -256,6 +267,7 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		f.Deletes.Add(1)
+		f.opInstance.Store(name)
 		_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "status_code": 100, "operation": "/1.0/operations/" + FakeIncusDeleteOperation + "?project=runners", "metadata": map[string]any{"id": FakeIncusDeleteOperation}})
 		return
 	}
@@ -302,9 +314,9 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		f.AbsenceReads.Add(1)
 		f.writeSync(w, map[string]any{})
 	case "/1.0/operations/" + FakeIncusCreateOperation + "/wait":
-		f.writeSync(w, map[string]any{"id": FakeIncusCreateOperation, "status_code": 200, "resources": map[string][]string{"instances": {"/1.0/instances/runner-1?project=runners"}}})
+		f.writeSync(w, map[string]any{"id": FakeIncusCreateOperation, "status_code": 200, "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}})
 	case "/1.0/operations/" + FakeIncusCreateOperation:
-		f.writeSync(w, map[string]any{"id": FakeIncusCreateOperation, "class": "task", "description": "Creating instance", "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "resources": map[string][]string{"instances": {"/1.0/instances/runner-1?project=runners"}}, "metadata": map[string]any{"private": "private-operation-metadata"}})
+		f.writeSync(w, map[string]any{"id": FakeIncusCreateOperation, "class": "task", "description": "Creating instance", "status_code": 200, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}, "metadata": map[string]any{"private": "private-operation-metadata"}})
 	case "/1.0/operations/" + FakeIncusDeleteOperation:
 		f.DeletePolls.Add(1)
 		f.mu.Lock()
@@ -314,14 +326,14 @@ func (f *FakeIncus) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		if faulty {
-			f.writeSync(w, map[string]any{"id": FakeIncusDeleteOperation, "class": "task", "description": "Deleting instance", "status_code": 400, "status": "Failure", "err": "private-delete-failure", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/runner-1?project=runners"}}})
+			f.writeSync(w, map[string]any{"id": FakeIncusDeleteOperation, "class": "task", "description": "Deleting instance", "status_code": 400, "status": "Failure", "err": "private-delete-failure", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}})
 			return
 		}
 		status := 200
 		if !settled {
 			status = 103
 		}
-		f.writeSync(w, map[string]any{"id": FakeIncusDeleteOperation, "class": "task", "description": "Deleting instance", "status_code": status, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/runner-1?project=runners"}}})
+		f.writeSync(w, map[string]any{"id": FakeIncusDeleteOperation, "class": "task", "description": "Deleting instance", "status_code": status, "status": "Success", "err": "", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "resources": map[string][]string{"instances": {"/1.0/instances/" + f.operationInstance() + "?project=runners"}}})
 	default:
 		if len(r.URL.Path) > len("/1.0/instances/") && strings.HasSuffix(r.URL.Path, "/state") {
 			name := r.URL.Path[len("/1.0/instances/") : len(r.URL.Path)-len("/state")]
