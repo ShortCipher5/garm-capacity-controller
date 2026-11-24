@@ -211,3 +211,47 @@ func TestStoreBoundsRetainedScopes(t *testing.T) {
 		t.Fatalf("scope ceiling must refuse: %v", err)
 	}
 }
+
+func TestStoreEnforcesRetentionAtReadTimeOnIdleStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "publications.json")
+	clock := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	store, err := openPublicationStore(path, func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := fixturePublication(t, fixtureAttemptKey, fixtureArtifact{id: 500, job: 9001, shard: "unit"})
+	saved, err := store.SavePublication(t.Context(), pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One second before the cutoff the record is still readable.
+	clock = saved.Record.ReceivedAt.Add(cihealth.HistoryRetentionWindow - time.Second)
+	if _, found, err := store.LoadPublication(t.Context(), fixtureAttemptKey); err != nil || !found {
+		t.Fatalf("in-window record must stay readable on an idle store: found=%v err=%v", found, err)
+	}
+	// Exactly at the cutoff it is excluded, with no save or restart in between.
+	clock = saved.Record.ReceivedAt.Add(cihealth.HistoryRetentionWindow)
+	if _, found, err := store.LoadPublication(t.Context(), fixtureAttemptKey); err != nil || found {
+		t.Fatalf("record at the cutoff must be excluded at read time: found=%v err=%v", found, err)
+	}
+	// Scoped bulk reads enforce the same cutoff.
+	scope := cihealth.HistoryScope{Source: "fixture_source", RepositoryID: 10, WorkflowID: 11}
+	pubs, _, err := store.LoadScopePublications(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pubs) != 0 {
+		t.Fatalf("expired record leaked through scoped read: %+v", pubs)
+	}
+	clock = saved.Record.ReceivedAt.Add(cihealth.HistoryRetentionWindow - time.Second)
+	pubs, _, err = store.LoadScopePublications(t.Context(), scope)
+	if err != nil || len(pubs) != 1 {
+		t.Fatalf("in-window scoped read must return the record: %+v %v", pubs, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.LoadScopePublications(t.Context(), scope); err == nil {
+		t.Fatal("closed store scoped read must refuse")
+	}
+}

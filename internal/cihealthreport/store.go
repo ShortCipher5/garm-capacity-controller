@@ -2,6 +2,7 @@ package cihealthreport
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -212,7 +213,9 @@ func (s *PublicationFileStore) wouldExceedScopes(scope cihealth.HistoryScope) bo
 	return len(seen) > publicationStoreMaxScopes
 }
 
-// LoadPublication returns the retained record for one exact attempt.
+// LoadPublication returns the retained record for one exact attempt. Records
+// at or past the retention cutoff are excluded even on an idle store: no
+// save or restart is required for retention to take effect.
 func (s *PublicationFileStore) LoadPublication(_ context.Context, attempt cihealth.AttemptKey) (StoredPublication, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,7 +223,7 @@ func (s *PublicationFileStore) LoadPublication(_ context.Context, attempt ciheal
 		return StoredPublication{}, false, ErrReportStore
 	}
 	for _, pub := range s.state.Publications {
-		if pub.Attempt == attempt {
+		if pub.Attempt == attempt && !s.expired(pub.ReceivedAt) {
 			loaded := pub
 			loaded.Reports = slices.Clone(pub.Reports)
 			loaded.Metadata = slices.Clone(pub.Metadata)
@@ -228,6 +231,34 @@ func (s *PublicationFileStore) LoadPublication(_ context.Context, attempt ciheal
 		}
 	}
 	return StoredPublication{}, false, nil
+}
+
+// LoadScopePublications returns the in-window publications for one exact
+// retention scope, ordered by attempt identity for deterministic reads.
+// Expired records are excluded here too, without requiring a save or restart.
+func (s *PublicationFileStore) LoadScopePublications(_ context.Context, scope cihealth.HistoryScope) ([]StoredPublication, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || !validRetentionScope(scope) {
+		return nil, false, ErrReportStore
+	}
+	out := make([]StoredPublication, 0, len(s.state.Publications))
+	for _, pub := range s.state.Publications {
+		if pub.Scope != scope || s.expired(pub.ReceivedAt) {
+			continue
+		}
+		loaded := pub
+		loaded.Reports = slices.Clone(pub.Reports)
+		loaded.Metadata = slices.Clone(pub.Metadata)
+		out = append(out, loaded)
+	}
+	slices.SortFunc(out, func(a, b StoredPublication) int {
+		return cmp.Or(
+			cmp.Compare(a.Attempt.RunID, b.Attempt.RunID),
+			cmp.Compare(a.Attempt.Attempt, b.Attempt.Attempt),
+		)
+	})
+	return out, true, nil
 }
 
 // Close releases the store. It is idempotent and never writes on close.
@@ -238,13 +269,21 @@ func (s *PublicationFileStore) Close() error {
 	return nil
 }
 
+// expired reports whether a record is at or past the shared retention
+// cutoff. A record exactly at the cutoff is expired: retention must not
+// depend on when the next save or restart happens to fall.
+func (s *PublicationFileStore) expired(received time.Time) bool {
+	return !received.After(s.now().UTC().Add(-cihealth.HistoryRetentionWindow))
+}
+
 // purge drops publications past the shared retention window. Retention is
-// scoped: purging one repository never touches another's records.
+// scoped: purging one repository never touches another's records. Reads
+// enforce the same cutoff independently, so an idle store never serves an
+// expired record even between purges.
 func (s *PublicationFileStore) purge() {
-	cutoff := s.now().UTC().Add(-cihealth.HistoryRetentionWindow)
 	kept := s.state.Publications[:0]
 	for _, pub := range s.state.Publications {
-		if !pub.ReceivedAt.Before(cutoff) {
+		if !s.expired(pub.ReceivedAt) {
 			kept = append(kept, pub)
 		}
 	}
