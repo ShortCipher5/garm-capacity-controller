@@ -30,6 +30,48 @@ enforce a physical quota, or make the preview safe to apply. Activation
 requires a separately qualified bounded stock API path and rollout; it must
 not be inferred from previews, local checks, or a successful image build.
 
+## Qualify a missed initial job webhook at zero idle
+
+This is a separate, unrun rollout scenario for an ordinary repository pool,
+not part of the approved single-job connectivity smoke. It describes a known
+stock behavior, not an observed outage or live acceptance result. The pinned
+[stock queue consumer](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/pool/pool.go#L2045-L2084)
+reacts to jobs already recorded in its database. Its stale-queue check
+reconciles existing rows; it does not import a missing job. At zero minimum
+idle, an otherwise eligible GitHub job can therefore stay queued if its
+initial `workflow_job: queued` delivery never reached GARM.
+
+1. In a separately authorized disposable test, start with the exact pool
+   at zero minimum idle and independently verify no idle eligible runner.
+   Record the exact GARM build, pool, and GitHub repository/run/attempt/job
+   identity. Establish that the initial delivery never reached the handler,
+   that GitHub still reports that job queued, and that a complete scoped
+   GARM queue read lacks the corresponding row. A response timeout, failed
+   read, or incomplete queue view leaves receipt unknown; it does not prove
+   absence. This is not the [provider refusal case](stock-garm-provider-capacity-behavior.md#what-the-existing-full-capacity-qualification-must-demonstrate),
+   where GARM already knows the job and creation is attempted.
+2. If separately authorized and supported in the exact setup, exercise
+   normal redelivery of that exact original event or one bounded warm runner.
+   Do not substitute a synthetic webhook, rerun, or second job. The
+   [read-only demand reconciliation](demand-repair.md) can flag a discrepancy,
+   but it does not feed the stock queue or prove recovery.
+3. For the redelivery path, if the delivery mechanism supports it and its
+   use is separately authorized, verify duplicate queued delivery does not
+   multiply queue entries or runner creation for the same job. Once the
+   terminal event is confirmed recorded, verify a late redelivery of the same
+   queued event does not reopen that job or create another runner. Record
+   unsupported, unapproved, or unobservable replay cases as unqualified.
+4. Count recovery only if GitHub shows the same repository/run/attempt/job
+   assigned to the expected runner, started, and completed within the
+   predeclared observation window. A successful delivery response, new GARM
+   row, ready runner, or a different job is not a pass. If neither recovery
+   path is supported and authorized, or exact completion is not observed,
+   record recovery as unproven. For a temporary warm runner, restore and
+   verify the original zero-idle setting and independently verify teardown of
+   that exact runner and its allocation before counting capacity as free.
+   An absent GARM row alone does not prove teardown. This requirement does
+   not authorize changes to fleet settings, security controls, or live rollout.
+
 ## Pool settings ownership and maintenance
 
 **Agreed operating model, not implemented or enabled.** The controller UI is

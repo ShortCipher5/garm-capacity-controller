@@ -13,8 +13,8 @@ import (
 )
 
 func TestRoutedStockSixOrdinaryPoolsShareProviderAndRetainedBudget(t *testing.T) {
-	const source, provider = "stock-source", "shared-provider"
-	_, _, _, opt := fixture()
+	const provider = "shared-provider"
+	_, observation, source, opt := enrolledCycleFixture(t)
 	unit := capacitybroker.Resources{1000, 1000, 1000, 1}
 	six := capacitybroker.Resources{6000, 6000, 6000, 6}
 	four := capacitybroker.Resources{4000, 4000, 4000, 4}
@@ -29,7 +29,10 @@ func TestRoutedStockSixOrdinaryPoolsShareProviderAndRetainedBudget(t *testing.T)
 		Hosts: map[string]capacitybroker.Host{"a": {Budget: six, AcceptNew: true}, "b": {Budget: six, AcceptNew: true}},
 		Pools: map[string]capacitybroker.Pool{}, Repositories: map[string]capacitybroker.Repository{},
 	}
-	observation := garmapi.DemandObservation{StartedAt: opt.Now, FinishedAt: opt.Now, Digest: "modeled"}
+	// Keep the independent source stamp; the remaining fields are modeled
+	// to exercise six pools with one shared provider in the offline calculation.
+	observation.StartedAt, observation.FinishedAt, observation.Digest = opt.Now, opt.Now, "modeled"
+	observation.Pools, observation.Supply, observation.Jobs = nil, nil, nil
 	for i := 1; i <= 6; i++ {
 		r := fmt.Sprintf("11111111-1111-4111-8111-%012d", i)
 		p := fmt.Sprintf("22222222-2222-4222-8222-%012d", i)

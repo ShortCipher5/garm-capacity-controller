@@ -2,6 +2,7 @@ package demandrepair
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
 )
 
 const ciAssignmentFixtureRunner = int64(9007199254740999)
@@ -212,6 +215,164 @@ func TestCIRunnerAssignmentRequiresPositiveCoherentNumericEvidence(t *testing.T)
 				if !valid || f.RunnerID != ciAssignmentFixtureRunner {
 					t.Fatal("lost exact numeric registration")
 				}
+			}
+		})
+	}
+}
+
+func TestCIRunnerAssignmentCompletedExecution(t *testing.T) {
+	// A read today can positively report a historical completion; the
+	// observation must not move either boundary to the time of projection.
+	observed := time.Now()
+	started, ended := observed.UTC().Add(-24*time.Hour), observed.UTC().Add(-24*time.Hour+time.Minute)
+	source := &CIHealthSource{id: strings.Repeat("a", 64)}
+	attempt := CIAttempt{
+		source: source, repository: CIRepository{GitHubID: 9007199254740993},
+		run: CIRun{WorkflowID: 9007199254740995, RunID: 9007199254740997, Attempt: 2},
+		at:  observed.UTC().Add(-time.Second), minted: observed.Add(-time.Second),
+		runnerAssignmentSeal: &ciRunnerAssignmentSeal{1},
+	}
+	wire := ciJobWire{
+		ID: 9007199254741001, RunID: attempt.run.RunID, RunAttempt: &attempt.run.Attempt,
+		RunnerID: ciAssignmentFixtureRunner, Status: "completed", Conclusion: "failure",
+		StartedAt: &started, CompletedAt: &ended,
+	}
+	receipt, ok := mintCIRunnerAssignment(attempt, wire, observed)
+	if !ok {
+		t.Fatal("invalid completed receipt fixture")
+	}
+	want := cihealth.StockJobExecutionObservation{
+		Job: cihealth.JobKey{
+			Attempt: cihealth.AttemptKey{
+				Source: source.id, RepositoryID: 9007199254740993, WorkflowID: 9007199254740995,
+				RunID: 9007199254740997, Attempt: 2,
+			},
+			JobID: 9007199254741001,
+		},
+		RunnerAgentID: ciAssignmentFixtureRunner, State: cihealth.StockJobObservedEnded,
+		StartedAt: started, EndedAt: ended, ObservedAt: observed.UTC(),
+	}
+	if got, ok := receipt.CompletedExecution(attempt); !ok || got != want {
+		t.Fatalf("completed fact changed on projection: %+v %t", got, ok)
+	}
+
+	differentAttempt := attempt
+	differentAttempt.runnerAssignmentSeal = &ciRunnerAssignmentSeal{1}
+	for _, tc := range []struct {
+		name    string
+		receipt CIRunnerAssignmentReceipt
+		attempt CIAttempt
+		at      time.Time
+	}{
+		{"unsealed", CIRunnerAssignmentReceipt{}, attempt, observed},
+		{"no attempt", receipt, CIAttempt{}, observed},
+		{"other attempt with same IDs", receipt, differentAttempt, observed},
+		{"before observation", receipt, attempt, observed.Add(-time.Nanosecond)},
+		{"at expiry", receipt, attempt, observed.Add(ciRunnerAssignmentLifetime)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := tc.receipt.completedExecutionAt(tc.attempt, tc.at); ok || got != (cihealth.StockJobExecutionObservation{}) {
+				t.Fatalf("unverified receipt produced a fact: %+v %t", got, ok)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		job  ciJobWire
+	}{
+		{"active", ciJobWire{
+			ID: wire.ID, RunID: wire.RunID, RunAttempt: wire.RunAttempt, RunnerID: wire.RunnerID,
+			Status: "in_progress", StartedAt: wire.StartedAt,
+		}},
+		{"completed with equal start and end", ciJobWire{
+			ID: wire.ID, RunID: wire.RunID, RunAttempt: wire.RunAttempt, RunnerID: wire.RunnerID,
+			Status: wire.Status, Conclusion: wire.Conclusion, StartedAt: wire.StartedAt, CompletedAt: wire.StartedAt,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := mintCIRunnerAssignment(attempt, tc.job, observed)
+			if !ok {
+				t.Fatal("assignment should remain available to existing callers")
+			}
+			if got, ok := r.completedExecutionAt(attempt, observed); ok || got != (cihealth.StockJobExecutionObservation{}) {
+				t.Fatalf("unproven positive duration produced a fact: %+v %t", got, ok)
+			}
+		})
+	}
+}
+
+func TestCIRunnerAssignmentCompletedExecutionComposesWithBoundResources(t *testing.T) {
+	// Fully synthetic: the runtime binding and samples are independent
+	// fixture inputs, not facts that the GitHub receipt can mint.
+	start := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	end := start.Add(time.Minute)
+	key := cihealth.JobKey{
+		Attempt: cihealth.AttemptKey{
+			Source: strings.Repeat("a", 64), RepositoryID: 9007199254740993,
+			WorkflowID: 9007199254740995, RunID: 9007199254740997, Attempt: 2,
+		},
+		JobID: 9007199254741001,
+	}
+	first := cihealth.StockJobResourceBinding{
+		Job: key, RunnerIncarnation: strings.Repeat("b", 64), RunnerAgentID: ciAssignmentFixtureRunner,
+		StockSourceID: strings.Repeat("c", 64), StockInstanceUUID: "11111111-1111-4111-8111-111111111111",
+		StockPoolUUID: "22222222-2222-4222-8222-222222222222",
+		Runtime: cihealth.StockRunnerIncarnation{
+			PeerFingerprint: strings.Repeat("d", 64), Member: "member-a", Project: "test-project",
+			InstanceName: "test-runner", UUID: "33333333-3333-4333-8333-333333333333",
+			Generation: "44444444-4444-8444-8444-444444444444", BootID: "55555555-5555-4555-8555-555555555555",
+			ProcessStartTicks: 123, StartedAt: start.Add(-time.Minute),
+		},
+		ObservedAt: start.Add(-time.Second), State: cihealth.StockRunnerObservedRunning,
+	}
+	closing := first
+	closing.ObservedAt = end.Add(time.Second)
+	samples := []cihealth.JobResourceSample{
+		{Job: key, RunnerIncarnation: first.RunnerIncarnation, At: start,
+			CPUTimeNanos: cihealth.ResourceValue{Known: true, Value: uint64(time.Second)}},
+		{Job: key, RunnerIncarnation: first.RunnerIncarnation, At: end,
+			CPUTimeNanos: cihealth.ResourceValue{Known: true, Value: uint64(31 * time.Second)}},
+	}
+	for _, tc := range []struct {
+		name     string
+		runnerID int64
+		delay    time.Duration
+		want     bool
+	}{
+		{"matching exact runner and cutoff", ciAssignmentFixtureRunner, time.Second, true},
+		{"other registration above exact JavaScript range", ciAssignmentFixtureRunner + 1, time.Second, false},
+		{"fresh receipt reports observation beyond resource cutoff gap", ciAssignmentFixtureRunner, cihealth.MaxJobResourceGap + time.Nanosecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := end.Add(tc.delay)
+			attempt := CIAttempt{
+				source: &CIHealthSource{id: key.Attempt.Source}, repository: CIRepository{GitHubID: key.Attempt.RepositoryID},
+				run: CIRun{WorkflowID: key.Attempt.WorkflowID, RunID: key.Attempt.RunID, Attempt: key.Attempt.Attempt},
+				at:  observed.Add(-time.Second), minted: observed.Add(-time.Second),
+				runnerAssignmentSeal: &ciRunnerAssignmentSeal{1},
+			}
+			receipt, ok := mintCIRunnerAssignment(attempt, ciJobWire{
+				ID: key.JobID, RunID: key.Attempt.RunID, RunAttempt: &attempt.run.Attempt,
+				RunnerID: tc.runnerID, Status: "completed", Conclusion: "success", StartedAt: &start, CompletedAt: &end,
+			}, observed)
+			if !ok {
+				t.Fatal("invalid sealed fixture")
+			}
+			execution, ok := receipt.completedExecutionAt(attempt, observed)
+			if !ok || !execution.ObservedAt.Equal(observed) {
+				t.Fatal("fixture must project a fresh receipt without replacing its observation time")
+			}
+			scope := cihealth.JobResourceScope{
+				Job: key, RunnerIncarnation: first.RunnerIncarnation, StartedAt: start, EndAt: end,
+				AsOf: observed, MaxGap: cihealth.MaxJobResourceGap,
+			}
+			got, err := cihealth.SummarizeBoundStockJobResources(scope, &first, &closing, &execution, samples)
+			if tc.want {
+				if err != nil || got.CPU == nil || got.CPU.AverageMilliCPU != 500 || !got.CPU.Coverage.Complete {
+					t.Fatalf("verified simulated window did not produce its exact CPU rate: %+v %v", got, err)
+				}
+			} else if !errors.Is(err, cihealth.ErrJobResourceFacts) || got != (cihealth.JobResourceSummary{}) {
+				t.Fatalf("insufficient simulated evidence attributed a metric: %+v %v", got, err)
 			}
 		})
 	}
