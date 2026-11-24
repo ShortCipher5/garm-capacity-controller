@@ -35,6 +35,53 @@ inactive-by-default controller state per reviewed scope:
 capability inputs and the adapter contract assessment. The qualified
 interface registry is empty on purpose: every production claim fails closed.
 
+## What the durable SQLite and lineage checks establish — and what they do not
+
+The stock-apply journal reuses the management journal's local durability
+model. Its checks are LOCAL guarantees about this controller's state file;
+they say nothing about the upstream Garm service.
+
+Established, locally:
+
+- **Owner-private storage.** The journal is created exactly once with mode
+  0600 inside a 0700 directory owned by the invoking uid; group/other-writable
+  parents and non-regular files are refused before any write. Initialization
+  never adopts an existing file, even an empty one, or one with WAL/SHM
+  sidecars already present.
+- **Atomic, serialized mutation.** One connection, WAL, `synchronous=FULL`,
+  busy timeout, and every state transition plus its audit row committed in a
+  single `BEGIN IMMEDIATE` transaction. A crash mid-transition cannot
+  half-apply a change, and concurrent local writers serialize on the gate.
+- **Schema and identity pinning.** A fixed `application_id`/`user_version`,
+  the exact column set, and a 64-hex random lineage recorded at creation and
+  supplied from trusted configuration at open. A swapped, recreated, legacy,
+  or foreign file fails closed before any mutation; a different lineage is
+  rejected. After first use the journal is additionally bound to one
+  controller instance identity, so a second instance cannot silently adopt
+  the restrictive state.
+- **One open operation per scope.** A partial unique index enforces at most
+  one unresolved operation per reviewed scope, and drift flags, pause flags,
+  charged baselines and the audit trail persist across restart exactly as
+  recorded.
+
+Not established — by design and by limitation:
+
+- **Nothing upstream.** The checks prove nothing about write outcomes,
+  completion, exclusive settings ownership, or fencing of native Garm UI/CLI,
+  direct database sessions, delayed requests, or other controllers. A local
+  journal cannot supply the adapter requirements above.
+- **Lineage match is not recency.** A same-lineage raw historical copy could
+  lack the newest committed rows; matching lineage detects a *different*
+  journal, not a stale replay of the same one. No supported operation
+  activates such a copy.
+- **No anti-rollback proof against the owner.** A privileged local owner who
+  substitutes an older same-lineage file or edits rows directly is not
+  detected; these checks resist accident and casual tampering, not the owner.
+- **Stored charging is faithfully persisted caller accounting.** The journal
+  stores the caller-supplied current ledger-charged baseline durably — it
+  does not verify it against physical allocation, and it never converts a
+  settings observation into a capacity release.
+
 ## Capability inputs and refusal reasons
 
 `StockApplyCapabilityClaim` presents the verified evidence an upstream
