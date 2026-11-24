@@ -1,3 +1,5 @@
+import {validateCIJobResourceUsage} from "./ci-health-usage.js";
+
 const maxInt64 = "9223372036854775807";
 const maxSize = 1 << 20;
 const phases = ["queued", "running", "completed", "skipped", "unknown"];
@@ -185,9 +187,10 @@ export function validateCIHealthSnapshot(value) {
     jobCount += a.jobs.length;
     const jobs = new Set();
     for (const j of a.jobs) {
-      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion", "job_link_handle", "status_observed_at"]) ||
+      if (!exactKeys(j, ["id", "status", "steps"], ["queue", "waiting", "creation_to_start", "execution", "elapsed", "conclusion", "job_link_handle", "status_observed_at", "resource_usage"]) ||
           !validStatusObservation(j, at) ||
           (Object.hasOwn(j, "job_link_handle") && (!validCIJobHandle(j.job_link_handle) || handles.has(j.job_link_handle))) ||
+          (Object.hasOwn(j, "resource_usage") && validateCIJobResourceUsage(j.resource_usage) === null) ||
           !decimal(j.id) || jobs.has(j.id) || !phases.includes(j.status) || !validConclusion(j) ||
           !validSpan(j, "queue", ["running", "completed"].includes(j.status), true) ||
           !validSpan(j, "waiting", j.status === "queued", true) ||

@@ -97,7 +97,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     assert.match(html, /Not applicable \(skipped\)/);
     assert.match(html, /not the full GitHub queue or history/);
     assert.match(html, /Coverage is unknown/);
-    const resourceUnavailable = /Per-job CPU, memory, and disk usage are unavailable\./g;
+    const resourceUnavailable = /Per-job CPU, memory, and disk usage are unavailable: no documented source proves the runner.{0,8}s original provider allocation\./g;
     assert.equal([...html.matchAll(resourceUnavailable)].length, 1);
     assert.doesNotMatch(render({...snapshot, timing: {attempts: [previous]}}), resourceUnavailable);
     assert.doesNotMatch(render({...snapshot, timing: {attempts: []}}), resourceUnavailable);
