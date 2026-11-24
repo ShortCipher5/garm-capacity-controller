@@ -1,6 +1,10 @@
 package demandrepair
 
-import "time"
+import (
+	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
+)
 
 const ciRunnerAssignmentLifetime = 30 * time.Second
 
@@ -42,6 +46,34 @@ func (p CIJobPage) RunnerAssignment(attempt CIAttempt, jobID int64) (CIRunnerAss
 // revive a receipt. Only this call releases the immutable numeric projection.
 func (r CIRunnerAssignmentReceipt) Evidence(attempt CIAttempt) (CIRunnerAssignmentFacts, bool) {
 	return r.evidence(attempt, time.Now())
+}
+
+// CompletedExecution projects an exact, still-current sealed receipt at read
+// time. It does not mint a stock binding or authorize sampling. The extracted
+// fact is historical; the resource reducer must independently validate the
+// requested cutoff, runtime binding, and samples. An active jobs-page response
+// does not establish that the job was still running at read completion.
+func (r CIRunnerAssignmentReceipt) CompletedExecution(attempt CIAttempt) (cihealth.StockJobExecutionObservation, bool) {
+	return r.completedExecutionAt(attempt, time.Now())
+}
+
+func (r CIRunnerAssignmentReceipt) completedExecutionAt(attempt CIAttempt, now time.Time) (cihealth.StockJobExecutionObservation, bool) {
+	facts, ok := r.evidence(attempt, now)
+	if !ok || facts.EndedAt.IsZero() || !facts.EndedAt.After(facts.StartedAt) || facts.EndedAt.After(facts.ObservedAt) {
+		return cihealth.StockJobExecutionObservation{}, false
+	}
+	return cihealth.StockJobExecutionObservation{
+		Job: cihealth.JobKey{
+			Attempt: cihealth.AttemptKey{
+				Source: facts.SourceID, RepositoryID: facts.RepositoryID, WorkflowID: facts.WorkflowID,
+				RunID: facts.RunID, Attempt: facts.Attempt,
+			},
+			JobID: facts.JobID,
+		},
+		RunnerAgentID: facts.RunnerID,
+		StartedAt:     facts.StartedAt, EndedAt: facts.EndedAt, ObservedAt: facts.ObservedAt,
+		State: cihealth.StockJobObservedEnded,
+	}, true
 }
 
 func (r CIRunnerAssignmentReceipt) evidence(a CIAttempt, now time.Time) (CIRunnerAssignmentFacts, bool) {
