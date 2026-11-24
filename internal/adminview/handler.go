@@ -222,6 +222,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCapacityStates(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/v1/reuse-status" {
+		h.serveReuseStatus(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/v1/inventory-key-rotation" {
 		h.serveManagedRotation(w, r)
 		return
