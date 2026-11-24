@@ -33,10 +33,10 @@ func TestJobResourcesRatesWeightedGaugesAndOptionalDisk(t *testing.T) {
 	out, err := SummarizeJobResources(scope, samples)
 	full := ResourceCoverage{Intervals: 2, Duration: 6 * time.Second, Complete: true}
 	if err != nil || out.Window != 6*time.Second || out.Samples != 3 || out.Sampling != (ResourceSamplingCoverage{}) || out.CPU == nil || *out.CPU != (JobCPURates{1000, 1250, full}) ||
-		out.RAMMean == nil || *out.RAMMean != (JobRAMAverage{33, full}) || out.RAM == nil || *out.RAM != (ResourceGaugeSummary{3, 50, 50, scope.EndAt}) ||
+		out.RAMMean == nil || *out.RAMMean != (JobRAMAverage{33, full}) || out.RAM == nil || *out.RAM != (ResourceGaugeSummary{3, 50, 50, scope.EndAt, scope.EndAt}) ||
 		out.DiskRead == nil || *out.DiskRead != (JobResourceCounterDelta{50, full}) ||
 		out.DiskWrite == nil || *out.DiskWrite != (JobResourceCounterDelta{0, ResourceCoverage{Intervals: 1, Duration: 4 * time.Second}}) ||
-		out.DiskUsed == nil || *out.DiskUsed != (ResourceGaugeSummary{3, 100, 20, scope.EndAt}) {
+		out.DiskUsed == nil || *out.DiskUsed != (ResourceGaugeSummary{3, 100, 20, scope.StartedAt, scope.EndAt}) {
 		t.Fatalf("unexpected resource summary: %+v, %v", out, err)
 	}
 }

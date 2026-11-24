@@ -51,17 +51,47 @@ function validMetric(value, kinds, windowNs) {
   return true;
 }
 
-function validDisk(value, windowNs) {
-  if (!exactKeys(value, ["state"], ["reason", "read_bytes", "write_bytes", "used_sample_peak_bytes", "covered_ns", "complete"])) return false;
+function validDiskCounter(value, windowNs) {
+  if (!exactKeys(value, ["bytes", "covered_ns", "complete"])) return false;
+  if (!decimal(value.bytes) || !decimal(value.covered_ns) || typeof value.complete !== "boolean") return false;
+  const covered = BigInt(value.covered_ns);
+  return covered <= windowNs && value.complete === (covered === windowNs);
+}
+
+function validDiskGauge(value, samples) {
+  if (!exactKeys(value, ["sample_peak_bytes", "gauge_samples"], ["peak_at", "latest_sample_at"])) return false;
+  if (!decimal(value.sample_peak_bytes)) return false;
+  if (!Number.isInteger(value.gauge_samples) || value.gauge_samples < 1 || value.gauge_samples > samples) return false;
+  return ["peak_at", "latest_sample_at"].every((key) => !Object.hasOwn(value, key) || timestamp(value[key]) !== null);
+}
+
+const legacyDiskKeys = ["read_bytes", "write_bytes", "used_sample_peak_bytes", "covered_ns", "complete"];
+
+function validDisk(value, windowNs, samples) {
+  if (!exactKeys(value, ["state"], ["reason", "version", "read", "write", "used", ...legacyDiskKeys])) return false;
   if (value.state !== "unavailable" && value.state !== "verified") return false;
   if (Object.hasOwn(value, "reason") && !usageReasons.includes(value.reason)) return false;
   if (value.state === "unavailable") {
-    return !Object.hasOwn(value, "read_bytes") && !Object.hasOwn(value, "write_bytes") &&
-      !Object.hasOwn(value, "used_sample_peak_bytes") && !Object.hasOwn(value, "covered_ns") &&
-      !Object.hasOwn(value, "complete") && Object.hasOwn(value, "reason");
+    return !["version", "read", "write", "used", ...legacyDiskKeys].some((key) => Object.hasOwn(value, key)) &&
+      Object.hasOwn(value, "reason");
   }
+  if (Object.hasOwn(value, "reason")) return false; // measured disk carries no omission reason
+  if (Object.hasOwn(value, "version")) {
+    // Versioned measured shape: read/write counters carry independent
+    // coverage; the used gauge is a separate sampled peak. Legacy mixed
+    // fields must never be blended into the versioned shape.
+    if (value.version !== "disk-measured/v2" || legacyDiskKeys.some((key) => Object.hasOwn(value, key))) return false;
+    if (!["read", "write", "used"].some((key) => Object.hasOwn(value, key))) return false;
+    if (Object.hasOwn(value, "read") && !validDiskCounter(value.read, windowNs)) return false;
+    if (Object.hasOwn(value, "write") && !validDiskCounter(value.write, windowNs)) return false;
+    return !Object.hasOwn(value, "used") || validDiskGauge(value.used, samples);
+  }
+  // Legacy unversioned mixed shape (migration branch). Its shared coverage
+  // pair was measured on the read counter only; it is meaningless without
+  // read_bytes and is never assigned to writes.
   const quantities = ["read_bytes", "write_bytes", "used_sample_peak_bytes"].filter((key) => Object.hasOwn(value, key));
   if (quantities.length === 0 || !quantities.every((key) => decimal(value[key]))) return false;
+  if (!Object.hasOwn(value, "read_bytes") && (Object.hasOwn(value, "covered_ns") || Object.hasOwn(value, "complete"))) return false;
   if (Object.hasOwn(value, "covered_ns")) {
     if (!decimal(value.covered_ns)) return false;
     const covered = BigInt(value.covered_ns);
@@ -103,7 +133,7 @@ export function validateCIJobResourceUsage(value) {
     if (Object.hasOwn(ram, "sample_peak_bytes") &&
         (!Number.isInteger(ram.gauge_samples) || ram.gauge_samples < 1 || ram.gauge_samples > measured.samples)) return null;
   }
-  if (!validDisk(measured.disk, windowNs)) return null;
+  if (!validDisk(measured.disk, windowNs, measured.samples)) return null;
   return value;
 }
 
@@ -121,6 +151,38 @@ const reasonTexts = {
 
 export function ciUsageStateLabel(state) { return stateLabels[state] ?? "Unavailable"; }
 export function ciUsageReasonText(reason) { return reasonTexts[reason] ?? "Verified usage is not available for this job."; }
+
+// ciUsageDiskView normalizes the versioned and legacy measured disk shapes
+// into one display model. Read and write keep independent coverage; the
+// used-space gauge is a sampled peak without interval coverage. For legacy
+// mixed payloads the shared coverage pair was measured on the read counter
+// only: it is shown for reads and is never assigned to writes, and the
+// legacy gauge has no sample count or peak time to show.
+export function ciUsageDiskView(disk) {
+  if (!object(disk) || disk.state !== "verified") {
+    return {state: "unavailable", reason: object(disk) && typeof disk.reason === "string" ? disk.reason : undefined};
+  }
+  if (disk.version === "disk-measured/v2") {
+    return {
+      state: "verified",
+      read: object(disk.read) ? {bytes: disk.read.bytes, covered: disk.read.covered_ns, complete: disk.read.complete} : null,
+      write: object(disk.write) ? {bytes: disk.write.bytes, covered: disk.write.covered_ns, complete: disk.write.complete} : null,
+      used: object(disk.used) ? {
+        peak: disk.used.sample_peak_bytes, samples: disk.used.gauge_samples,
+        peakAt: typeof disk.used.peak_at === "string" ? disk.used.peak_at : null,
+        latestAt: typeof disk.used.latest_sample_at === "string" ? disk.used.latest_sample_at : null,
+      } : null,
+    };
+  }
+  return {
+    state: "verified",
+    read: Object.hasOwn(disk, "read_bytes")
+      ? {bytes: disk.read_bytes, covered: Object.hasOwn(disk, "covered_ns") ? disk.covered_ns : null, complete: Object.hasOwn(disk, "complete") ? disk.complete : null}
+      : null,
+    write: Object.hasOwn(disk, "write_bytes") ? {bytes: disk.write_bytes, covered: null, complete: null} : null,
+    used: Object.hasOwn(disk, "used_sample_peak_bytes") ? {peak: disk.used_sample_peak_bytes, samples: null, peakAt: null, latestAt: null} : null,
+  };
+}
 
 export function ciUsageCoverage(coveredNanoseconds, windowNanoseconds) {
   const covered = BigInt(coveredNanoseconds), window = BigInt(windowNanoseconds);
