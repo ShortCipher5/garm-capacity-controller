@@ -24,10 +24,44 @@ test("resource usage wire accepts every documented state", () => {
   assert.ok(validateCIJobResourceUsage({state: "verified", as_of: "2026-01-02T03:04:35Z", measured}));
   assert.ok(validateCIJobResourceUsage({state: "partial", as_of: "2026-01-02T03:04:35Z", measured: {...measured, cpu: {covered_ns: "2000000000", complete: false, average_millicpu: "500", peak_interval_millicpu: "500"}}}));
   assert.ok(validateCIJobResourceUsage({state: "unavailable", as_of: "2026-01-02T03:04:35Z", reason: "provider_origin_join_unsupported"}));
+  assert.ok(validateCIJobResourceUsage({state: "unavailable", as_of: "2026-01-02T03:04:35Z", reason: "collection_unavailable"}));
   assert.ok(validateCIJobResourceUsage({state: "stale", as_of: "2026-01-02T03:04:35Z", reason: "stale_evidence"}));
   assert.ok(validateCIJobResourceUsage({state: "partial", as_of: "2026-01-02T03:04:35Z", measured: {...measured, disk: {state: "verified", read_bytes: "50", covered_ns: "6000000000", complete: true}}}));
+  assert.ok(validateCIJobResourceUsage({state: "partial", as_of: "2026-01-02T03:04:35Z", measured: {...measured, disk: {state: "unavailable", reason: "disk_unsupported_by_sources"}}}));
   // Single-gauge RAM without a time-weighted mean stays valid.
   assert.ok(validateCIJobResourceUsage({state: "verified", as_of: "2026-01-02T03:04:35Z", measured: {...measured, ram: {sample_peak_bytes: "50", gauge_samples: 3}}}));
+});
+
+test("resource usage wire rejects malformed metric values at the boundary", () => {
+  const reject = (value) => assert.equal(validateCIJobResourceUsage(value), null);
+  const at = "2026-01-02T03:04:35Z";
+  const cpu = (over = {}) => ({covered_ns: "6000000000", complete: true, average_millicpu: "1000", peak_interval_millicpu: "1250", ...over});
+  const ram = (over = {}) => ({covered_ns: "6000000000", complete: true, mean_bytes: "33", sample_peak_bytes: "50", gauge_samples: 3, ...over});
+  const disk = (over = {}) => ({state: "unavailable", reason: "disk_not_independently_measured", ...over});
+  const usage = (measuredOver = {}, cpuOver, ramOver, diskOver) => validateCIJobResourceUsage({
+    state: "verified", as_of: at,
+    measured: {samples: 3, window_ns: "6000000000", cpu: cpu(cpuOver), ram: ram(ramOver), disk: disk(diskOver), ...measuredOver},
+  });
+  // Sample counts: measured usage with zero samples invents a series.
+  assert.equal(usage({samples: 0}), null);
+  assert.equal(usage({samples: 4097}), null);
+  // Coverage can never exceed the window, and complete must mean exactly full.
+  assert.ok(usage());
+  assert.equal(usage({}, {covered_ns: "6000000001"}), null);
+  assert.equal(usage({}, {covered_ns: "2000000000"}), null); // complete but not full
+  assert.equal(usage({}, {covered_ns: "6000000000", complete: false}), null); // full but not complete
+  // CPU average cannot exceed the interval peak.
+  assert.equal(usage({}, {average_millicpu: "1251"}), null);
+  assert.equal(usage({}, {average_millicpu: "2000", peak_interval_millicpu: "1000"}), null);
+  // RAM coverage consistency and gauge count bounded by the sample series.
+  assert.equal(usage({}, undefined, {covered_ns: "7000000000"}), null);
+  assert.equal(usage({}, undefined, {covered_ns: "6000000000", complete: false}), null);
+  assert.equal(usage({}, undefined, {gauge_samples: 4}), null);
+  assert.equal(usage({}, undefined, {gauge_samples: 0}), null);
+  // Disk coverage and completeness must agree with the window too.
+  assert.equal(usage({}, undefined, undefined, {state: "verified", read_bytes: "50", covered_ns: "6000000001"}), null);
+  assert.equal(usage({}, undefined, undefined, {state: "verified", read_bytes: "50", covered_ns: "2000000000", complete: true}), null);
+  assert.equal(usage({}, undefined, undefined, {state: "verified", read_bytes: "50", covered_ns: "6000000000", complete: false}), null);
 });
 
 test("resource usage wire rejects hidden or invented numbers", () => {

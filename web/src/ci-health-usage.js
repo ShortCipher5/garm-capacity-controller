@@ -13,6 +13,8 @@ const usageReasons = [
   "job_too_short_uncaptured",
   "overlapping_jobs",
   "disk_not_independently_measured",
+  "disk_unsupported_by_sources",
+  "collection_unavailable",
 ];
 const maxInt64 = "9223372036854775807";
 const maxUsageSamples = 4096;
@@ -34,15 +36,22 @@ function timestamp(value) {
   const seconds = Date.parse(m[1] + "Z");
   return Number.isFinite(seconds) ? value : null;
 }
-const count = (n) => Number.isInteger(n) && n >= 0 && n <= maxUsageSamples;
 
-function validMetric(value, kinds) {
+function validMetric(value, kinds, windowNs) {
   if (!exactKeys(value, ["covered_ns", "complete"], kinds)) return false;
-  return decimal(value.covered_ns) && typeof value.complete === "boolean" &&
-    kinds.every((key) => Object.hasOwn(value, key) && decimal(value[key]));
+  if (!decimal(value.covered_ns) || typeof value.complete !== "boolean" ||
+      !kinds.every((key) => Object.hasOwn(value, key) && decimal(value[key]))) return false;
+  // Cross-field consistency: coverage can never exceed the window, and the
+  // completeness flag must agree with exact full coverage. A malformed pair
+  // hides holes or invents coverage, so the boundary refuses it.
+  const covered = BigInt(value.covered_ns);
+  if (covered > windowNs || value.complete !== (covered === windowNs)) return false;
+  if (Object.hasOwn(value, "average_millicpu") && Object.hasOwn(value, "peak_interval_millicpu") &&
+      BigInt(value.average_millicpu) > BigInt(value.peak_interval_millicpu)) return false;
+  return true;
 }
 
-function validDisk(value) {
+function validDisk(value, windowNs) {
   if (!exactKeys(value, ["state"], ["reason", "read_bytes", "write_bytes", "used_sample_peak_bytes", "covered_ns", "complete"])) return false;
   if (value.state !== "unavailable" && value.state !== "verified") return false;
   if (Object.hasOwn(value, "reason") && !usageReasons.includes(value.reason)) return false;
@@ -53,7 +62,12 @@ function validDisk(value) {
   }
   const quantities = ["read_bytes", "write_bytes", "used_sample_peak_bytes"].filter((key) => Object.hasOwn(value, key));
   if (quantities.length === 0 || !quantities.every((key) => decimal(value[key]))) return false;
-  if (Object.hasOwn(value, "covered_ns") && !decimal(value.covered_ns)) return false;
+  if (Object.hasOwn(value, "covered_ns")) {
+    if (!decimal(value.covered_ns)) return false;
+    const covered = BigInt(value.covered_ns);
+    if (covered > windowNs) return false;
+    if (Object.hasOwn(value, "complete") && typeof value.complete === "boolean" && value.complete !== (covered === windowNs)) return false;
+  }
   return !Object.hasOwn(value, "complete") || typeof value.complete === "boolean";
 }
 
@@ -70,18 +84,24 @@ export function validateCIJobResourceUsage(value) {
     return Object.hasOwn(value, "measured") ? null : value;
   }
   if (!exactKeys(measured, ["samples", "window_ns", "disk"], ["cpu", "ram"])) return null;
-  if (!count(measured.samples) || !decimal(measured.window_ns, false)) return null;
-  if (Object.hasOwn(measured, "cpu") && !validMetric(measured.cpu, ["average_millicpu", "peak_interval_millicpu"])) return null;
+  if (!Number.isInteger(measured.samples) || measured.samples < 1 || measured.samples > maxUsageSamples) return null;
+  if (!decimal(measured.window_ns, false)) return null;
+  const windowNs = BigInt(measured.window_ns);
+  if (Object.hasOwn(measured, "cpu") && !validMetric(measured.cpu, ["average_millicpu", "peak_interval_millicpu"], windowNs)) return null;
   if (Object.hasOwn(measured, "ram")) {
     const ram = measured.ram;
     const optional = [];
     if (Object.hasOwn(ram, "covered_ns")) optional.push("covered_ns", "complete", "mean_bytes");
     if (Object.hasOwn(ram, "sample_peak_bytes")) optional.push("sample_peak_bytes", "gauge_samples");
     if (!exactKeys(ram, [], optional) || optional.length === 0) return null;
-    if (Object.hasOwn(ram, "covered_ns") && (!decimal(ram.covered_ns) || typeof ram.complete !== "boolean" || !decimal(ram.mean_bytes))) return null;
-    if (Object.hasOwn(ram, "sample_peak_bytes") && (!Number.isInteger(ram.gauge_samples) || ram.gauge_samples < 1)) return null;
+    if (Object.hasOwn(ram, "covered_ns")) {
+      if (!decimal(ram.covered_ns) || typeof ram.complete !== "boolean" || !decimal(ram.mean_bytes)) return null;
+      if (BigInt(ram.covered_ns) > windowNs || ram.complete !== (BigInt(ram.covered_ns) === windowNs)) return null;
+    }
+    if (Object.hasOwn(ram, "sample_peak_bytes") &&
+        (!Number.isInteger(ram.gauge_samples) || ram.gauge_samples < 1 || ram.gauge_samples > measured.samples)) return null;
   }
-  if (!validDisk(measured.disk)) return null;
+  if (!validDisk(measured.disk, windowNs)) return null;
   return value;
 }
 
