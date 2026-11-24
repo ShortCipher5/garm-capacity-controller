@@ -162,6 +162,13 @@ func TestReleaseRetiredSlotReleasesOnceAndReplaysWithoutCredit(t *testing.T) {
 	if err != nil || !replay.Replay || replay.EvidenceDigest != decision.EvidenceDigest {
 		t.Fatalf("restart replay must return the prior decision: %+v %v", replay, err)
 	}
+	// A later reconciliation advancing the epoch does not invalidate the
+	// committed decision: the tombstone, not the epoch, answers replay.
+	reconcileSQLite(t, reopened, nil)
+	replay, err = reopened.ReleaseRetiredSlot(ctx, req, evidence)
+	if err != nil || !replay.Replay || replay.EvidenceDigest != decision.EvidenceDigest {
+		t.Fatalf("replay after epoch advance must return the prior decision: %+v %v", replay, err)
+	}
 	// A mismatched replay is contradictory: refused, and the tombstone and
 	// accounting stay exactly as committed.
 	conflicting := slotReuseFixtureEvidence(req, epoch, now)
