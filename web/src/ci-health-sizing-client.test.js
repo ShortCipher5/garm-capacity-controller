@@ -34,6 +34,8 @@ function snapshot(overrides = {}) {
     disk: {state: "unavailable", peak_bytes: null, samples: 0, qualified: 20},
     rejected: [{source: "registry_1", repository_id: "9007199254740993", workflow_id: "17", run_id: "7", attempt: "1", job_id: "100", reason: "stale"}],
     incomparable: 2,
+    unverifiable: 0,
+    foreign: 0,
     ...overrides,
   };
   return {state: "observed", observed_at: at, sizing};
@@ -85,9 +87,15 @@ test("missing facts are null, unknown states and relaxed counts reject", () => {
   bad({disk: {state: "observed", peak_bytes: null, samples: 1, qualified: 20}});
   bad({disk: {state: "unavailable", peak_bytes: "10", samples: 0, qualified: 20}});
   bad({rejected: [{source: "registry_1", repository_id: "9007199254740993", workflow_id: "17", run_id: "7", attempt: "1", job_id: "100", reason: "joined_anyway"}]});
+  // Out-of-scope identifiers are never retained: these reasons only count,
+  // and a rejection record outside the advisory scope is refused.
+  bad({rejected: [{source: "registry_1", repository_id: "9007199254740993", workflow_id: "17", run_id: "7", attempt: "1", job_id: "100", reason: "foreign_scope"}]});
+  bad({rejected: [{source: "registry_1", repository_id: "9007199254740994", workflow_id: "17", run_id: "7", attempt: "1", job_id: "100", reason: "stale"}]});
   bad({window: {from: at, as_of: at, latest_completion_max_age_ns: "3600000000000"}});
   const unknownHost = snapshot({host: {known: false, host: "", cpu_budget_milli: null, cpu_allocated_milli: null, cpu_headroom_milli: null, ram_budget_bytes: null, ram_allocated_bytes: null, ram_headroom_bytes: null, fit: "unknown"}});
   assert.equal(validateCISizingSnapshot(unknownHost).sizing.host.known, false);
+  const omitted = snapshot({unverifiable: 1, foreign: 3});
+  assert.equal(validateCISizingSnapshot(omitted).sizing.foreign, 3);
 });
 
 test("sizing read is authorized, optional and fails closed", async () => {

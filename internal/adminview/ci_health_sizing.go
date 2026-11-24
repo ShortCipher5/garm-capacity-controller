@@ -309,7 +309,8 @@ type ciSizingRejectionView struct {
 
 // ciSizingView is the deterministic owner-view projection of one advisory.
 // All exact numeric values are decimal strings; missing facts are null, not
-// zero.
+// zero. Rejection records only ever carry in-scope identifiers; omitted
+// candidates appear as aggregate counts.
 type ciSizingView struct {
 	PolicyVersion   string                  `json:"policy_version"`
 	AdvisoryVersion string                  `json:"advisory_version"`
@@ -330,6 +331,8 @@ type ciSizingView struct {
 	Disk            ciSizingDiskView        `json:"disk"`
 	Rejected        []ciSizingRejectionView `json:"rejected"`
 	Incomparable    int                     `json:"incomparable"`
+	Unverifiable    int                     `json:"unverifiable"`
+	Foreign         int                     `json:"foreign"`
 }
 
 func ciSizingViewFor(a cihealth.JobSizingAdvisory) ciSizingView {
@@ -367,6 +370,8 @@ func ciSizingViewFor(a cihealth.JobSizingAdvisory) ciSizingView {
 			Samples: a.Disk.Samples, Qualified: a.Disk.Qualified},
 		Rejected:     make([]ciSizingRejectionView, 0, len(a.Rejected)),
 		Incomparable: a.Incomparable,
+		Unverifiable: a.Unverifiable,
+		Foreign:      a.Foreign,
 	}
 	if !a.Freshness.LatestPrimaryCompletion.IsZero() {
 		latest := a.Freshness.LatestPrimaryCompletion

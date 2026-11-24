@@ -28,6 +28,8 @@ function sizingSnapshot(overrides = {}) {
     disk: {state: "unavailable", peak_bytes: null, samples: 0, qualified: 20},
     rejected: [{source: "registry_1", repository_id: "9007199254740993", workflow_id: "17", run_id: "7", attempt: "1", job_id: "100", reason: "stale"}],
     incomparable: 2,
+    unverifiable: 0,
+    foreign: 0,
     ...overrides,
   };
   return {state: "observed", observed_at: at, sizing};
@@ -70,8 +72,7 @@ test("advisory runner sizing renders only qualified advice and never an apply ac
     assert.match(html, /Sustained CPU pressure/);
     assert.match(html, /Disk advice unavailable: no independently attributable disk data supports it\./);
     assert.match(html, /2 in-scope candidates were incomparable \(different matrix, profile or revision\) and were not combined\./);
-    assert.match(html, /Rejected: <span>1 outside the review window \(stale\)<\/span>/);
-    assert.doesNotMatch(html, /<form|Apply|apply change/i);
+    assert.match(html, /Rejected: <span>1 outside the review window \(stale\)<\/span>/);    assert.doesNotMatch(html, /<form|Apply|apply change/i);
 
     // A hard fit failure is visible as a failure, never converted to a warning.
     const failure = render(sizingSnapshot({
@@ -107,7 +108,11 @@ test("advisory runner sizing renders only qualified advice and never an apply ac
       warnings: [],
     }));
     assert.match(lowUsage, /<code>100<\/code> millicores/);
-    assert.match(lowUsage, /Reductions are never advised automatically\./);
+    assert.match(lowUsage, /upward-only: reductions are never advised automatically, and smaller-profile advice is deferred until a verified current-workload source is wired\./);
+
+    const omitted = render(sizingSnapshot({unverifiable: 1, foreign: 2}));
+    assert.match(omitted, /1 candidate had an unverifiable identity and was omitted; its identifiers are not retained\./);
+    assert.match(omitted, /2 out-of-scope candidates were omitted; out-of-scope \(cross-tenant\) identifiers are never retained or displayed\./);
 
     const disk = render(sizingSnapshot({
       outcome: "unchanged",

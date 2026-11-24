@@ -31,12 +31,10 @@ const warningText = {
   insufficient_spare_capacity: "Insufficient spare capacity: the advised increase would consume a large share of the remaining host headroom.",
 };
 const rejectionText = {
-  unverifiable_identity: "unverifiable identity",
-  foreign_scope: "different repository or source (cross-tenant)",
   incomparable_identity: "different matrix, profile or revision",
   profile_changed: "changed runner profile shape",
   stale: "outside the review window (stale)",
-  duplicate: "duplicate execution",
+  duplicate: "conflicting duplicate execution",
 };
 
 export function ciSizingNavigationAvailable(enabled, read) {
@@ -98,7 +96,7 @@ export function CISizingAdvisory({snapshot}) {
         <div><dt>Freshness</dt><dd>{freshness.latest_primary_completion === null ? <span className="muted">No confirmed primary completion</span> : <><At value={freshness.latest_primary_completion} /> ({displayAge(freshness.age_ns)} old{freshness.fresh ? ", fresh" : ", stale"})</>}</dd></div>
       </dl>
       {sizing.uncertainty === "sampled_peak_bound" &&
-        <p className="muted">Observed peaks are sampled-interval values; a sampled peak is not a complete upper bound for unmeasured load. Reductions are never advised automatically.</p>}
+        <p className="muted">Observed peaks are sampled-interval values; a sampled peak is not a complete upper bound for unmeasured load. This view is upward-only: reductions are never advised automatically, and smaller-profile advice is deferred until a verified current-workload source is wired.</p>}
       <h4>Recommendation</h4>
       <dl className="ci-health-facts">
         <Dimension label="CPU" dimension={sizing.cpu} unit="millicores" />
@@ -123,11 +121,13 @@ export function CISizingAdvisory({snapshot}) {
       {sizing.disk.state === "observed"
         ? <p>Observed disk usage peak <code>{sizing.disk.peak_bytes}</code> bytes across {sizing.disk.samples} of {sizing.disk.qualified} qualifying samples with independently attributable disk gauges.</p>
         : <p className="muted">Disk advice unavailable: no independently attributable disk data supports it.</p>}
-      {(sizing.incomparable > 0 || sizing.rejected.length > 0) && <>
+      {(sizing.incomparable > 0 || sizing.unverifiable > 0 || sizing.foreign > 0 || sizing.rejected.length > 0) && <>
         <h4>Not combined</h4>
         <p className="muted">
           {sizing.incomparable > 0 && <>{sizing.incomparable} in-scope {sizing.incomparable === 1 ? "candidate was" : "candidates were"} incomparable (different matrix, profile or revision) and {sizing.incomparable === 1 ? "was" : "were"} not combined. </>}
-          {sizing.rejected.length > 0 && <>Rejected: {Object.entries(rejectedByReason).map(([reason, count], index) => <span key={reason}>{index > 0 && ", "}{count} {rejectionText[reason] ?? reason}</span>)}.</>}
+          {sizing.rejected.length > 0 && <>Rejected: {Object.entries(rejectedByReason).map(([reason, count], index) => <span key={reason}>{index > 0 && ", "}{count} {rejectionText[reason] ?? reason}</span>)}. </>}
+          {sizing.unverifiable > 0 && <>{sizing.unverifiable} {sizing.unverifiable === 1 ? "candidate had" : "candidates had"} an unverifiable identity and {sizing.unverifiable === 1 ? "was" : "were"} omitted; its identifiers are not retained. </>}
+          {sizing.foreign > 0 && <>{sizing.foreign} out-of-scope {sizing.foreign === 1 ? "candidate was" : "candidates were"} omitted; out-of-scope (cross-tenant) identifiers are never retained or displayed.</>}
         </p>
       </>}
     </div>

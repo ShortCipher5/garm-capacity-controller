@@ -6,7 +6,7 @@ const maxSize = 1 << 20;
 const outcomes = ["unreviewed", "increase_advised", "unchanged", "needs_manual_review", "needs_risk_or_outcome_review", "cohort_incomplete", "coverage_unavailable", "insufficient_history", "stale_history"];
 const reasons = ["not_reviewed", "incomplete_cohort_coverage", "risk_evidence_present", "unsuccessful_jobs_present", "outcome_or_risk_unknown", "insufficient_primary_attempts", "insufficient_history_span", "missing_metric_coverage", "no_fresh_primary_completion", "change_exceeds_reviewed_bound", "within_oscillation_suppression_band"];
 const warnings = ["sustained_cpu_pressure", "sustained_ram_pressure", "insufficient_spare_capacity"];
-const rejectionReasons = ["unverifiable_identity", "foreign_scope", "incomparable_identity", "profile_changed", "stale", "duplicate"];
+const rejectionReasons = ["incomparable_identity", "profile_changed", "stale", "duplicate"];
 
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function exactKeys(value, required, optional = []) {
@@ -46,7 +46,7 @@ export function validateCISizingSnapshot(value) {
   const observed = timestamp(value.observed_at);
   if (value.state !== "observed" || !observed || !object(value.sizing)) fail();
   const s = value.sizing;
-  if (!exactKeys(s, ["policy_version", "advisory_version", "outcome", "scope", "identity", "window", "freshness", "coverage", "samples", "observed", "installed", "cpu", "ram", "uncertainty", "host", "warnings", "disk", "rejected", "incomparable"]) ||
+  if (!exactKeys(s, ["policy_version", "advisory_version", "outcome", "scope", "identity", "window", "freshness", "coverage", "samples", "observed", "installed", "cpu", "ram", "uncertainty", "host", "warnings", "disk", "rejected", "incomparable", "unverifiable", "foreign"]) ||
       typeof s.policy_version !== "string" || !s.policy_version ||
       typeof s.advisory_version !== "string" || !s.advisory_version ||
       !outcomes.includes(s.outcome) ||
@@ -111,9 +111,11 @@ export function validateCISizingSnapshot(value) {
     if (!exactKeys(r, ["source", "repository_id", "workflow_id", "run_id", "attempt", "job_id", "reason"]) ||
         typeof r.source !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(r.source) ||
         !decimal(r.repository_id) || !decimal(r.workflow_id) || !decimal(r.run_id) || !decimal(r.attempt) || !decimal(r.job_id) ||
-        !rejectionReasons.includes(r.reason)) fail();
+        !rejectionReasons.includes(r.reason) ||
+        // Rejection records must stay inside the authorized scope.
+        r.source !== s.scope.source || r.repository_id !== s.scope.repository_id || r.workflow_id !== s.scope.workflow_id) fail();
   }
-  if (!count(s.incomparable, 1000)) fail();
+  if (!count(s.incomparable, 1000) || !count(s.unverifiable, 1000) || !count(s.foreign, 1000)) fail();
   return value;
 }
 
