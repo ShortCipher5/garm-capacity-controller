@@ -2,6 +2,7 @@ package cihealth
 
 import (
 	"cmp"
+	"encoding/json"
 	"slices"
 	"time"
 )
@@ -12,13 +13,13 @@ import (
 const JobSizingCohortPolicyVersion = "job-sizing-cohort-policy/v1"
 
 // SizingRejectionReason names why one offered candidate is not eligible for
-// the reviewed cohort. Nothing is silently dropped: every rejected candidate
-// stays visible in the projection with its exact job key.
+// the reviewed cohort. Rejection records stay inside the authorized scope:
+// only in-scope candidates with well-formed exact identities carry their job
+// key. Foreign-scope and unverifiable-identity candidates are counted, never
+// recorded, so out-of-scope identifiers are not retained or displayed.
 type SizingRejectionReason string
 
 const (
-	SizingRejectionUnverifiableIdentity SizingRejectionReason = "unverifiable_identity"
-	SizingRejectionForeignScope         SizingRejectionReason = "foreign_scope"
 	SizingRejectionIncomparableIdentity SizingRejectionReason = "incomparable_identity"
 	SizingRejectionProfileChanged       SizingRejectionReason = "profile_changed"
 	SizingRejectionStale                SizingRejectionReason = "stale"
@@ -49,7 +50,9 @@ type SizingCandidate struct {
 	Sample   JobSizingSample
 }
 
-// SizingRejection keeps one rejected candidate visible with its reason.
+// SizingRejection keeps one rejected in-scope candidate visible with its
+// reason and exact job key. Out-of-scope and unverifiable candidates never
+// reach a rejection record; they are only counted on the projection.
 type SizingRejection struct {
 	Job    JobKey
 	Reason SizingRejectionReason
@@ -58,8 +61,9 @@ type SizingRejection struct {
 // SizingCohortProjection is the deterministic result of applying the
 // eligibility policy to the offered candidates. The cohort contains exactly
 // the eligible samples for the requested scope, identity and installed
-// shape; Incomparable counts in-scope candidates that belong to a different
-// trusted identity and were not combined.
+// shape. Incomparable, Unverifiable and Foreign count offered candidates
+// that were not combined; only in-scope rejections carry identifiers, so
+// cross-tenant or malformed identities are never retained or displayed.
 type SizingCohortProjection struct {
 	Version      string
 	Scope        TrendScope
@@ -68,6 +72,8 @@ type SizingCohortProjection struct {
 	Cohort       JobSizingCohort
 	Rejected     []SizingRejection
 	Incomparable int
+	Unverifiable int
+	Foreign      int
 }
 
 // ProjectJobSizingCohort applies the explicit eligibility policy before the
@@ -75,11 +81,14 @@ type SizingCohortProjection struct {
 // well formed, it belongs to the requested source/repository/workflow scope,
 // it carries the requested trusted matrix/profile/revision identity, it
 // matches the reviewed installed shape, it falls fully inside the review
-// window, and it is not a duplicate execution. Stale, foreign, unverifiable
-// or incomparable candidates are reported, never joined and never silently
-// dropped, so sparse or cross-tenant input cannot manufacture a confident
-// cohort. Eligible samples are sorted by exact job key, making the
-// projection deterministic for any input order.
+// window, and it is not a conflicting duplicate execution. Conflicting
+// duplicates resolve identically for any input order: the most recently
+// observed candidate wins under a total content order, and the losers are
+// reported as duplicates. Stale, foreign, unverifiable or incomparable
+// candidates are reported, never joined and never silently dropped, so
+// sparse or cross-tenant input cannot manufacture a confident cohort.
+// Eligible samples and keyed rejections are sorted by exact job key, making
+// the projection deterministic for any input order.
 func ProjectJobSizingCohort(scope TrendScope, identity SizingCohortIdentity, installed JobSizingShape, coverage TrendCoverage, reviewed bool, window JobSizingReviewWindow, candidates []SizingCandidate) (SizingCohortProjection, error) {
 	if !validSource(scope.Source) || scope.RepositoryID <= 0 || scope.WorkflowID <= 0 ||
 		coverage > TrendCoverageComplete || installed.CPUMilli == 0 || installed.RAMBytes == 0 ||
@@ -103,47 +112,111 @@ func ProjectJobSizingCohort(scope TrendScope, identity SizingCohortIdentity, ins
 		out.Cohort.Comparability = JobSizingReviewedComparable
 	}
 	window.From, window.AsOf = window.From.UTC(), window.AsOf.UTC()
-	seenKey, seenJob := make(map[AttemptKey]bool, len(candidates)), make(map[int64]bool, len(candidates))
-	samples := make([]JobSizingSample, 0, len(candidates))
+	survivors := make([]SizingCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		job := candidate.Sample.Resources.Scope.Job
-		reject := func(reason SizingRejectionReason) {
-			out.Rejected = append(out.Rejected, SizingRejection{Job: job, Reason: reason})
-		}
 		if !validKey(job.Attempt) || job.JobID <= 0 || !validSizingIdentity(candidate.Identity) {
-			reject(SizingRejectionUnverifiableIdentity)
+			out.Unverifiable++
 			continue
 		}
-		key := job.Attempt
-		if key.Source != scope.Source || key.RepositoryID != scope.RepositoryID || key.WorkflowID != scope.WorkflowID {
-			reject(SizingRejectionForeignScope)
+		if job.Attempt.Source != scope.Source || job.Attempt.RepositoryID != scope.RepositoryID || job.Attempt.WorkflowID != scope.WorkflowID {
+			out.Foreign++
 			continue
 		}
 		if candidate.Identity != identity {
-			reject(SizingRejectionIncomparableIdentity)
+			out.Rejected = append(out.Rejected, SizingRejection{Job: job, Reason: SizingRejectionIncomparableIdentity})
 			out.Incomparable++
 			continue
 		}
 		if candidate.Sample.Shape != installed {
-			reject(SizingRejectionProfileChanged)
+			out.Rejected = append(out.Rejected, SizingRejection{Job: job, Reason: SizingRejectionProfileChanged})
 			continue
 		}
-		s := candidate.Sample.Resources.Scope
-		if sizingCandidateStale(s, candidate.Sample.Completion, window) {
-			reject(SizingRejectionStale)
+		if sizingCandidateStale(candidate.Sample.Resources.Scope, candidate.Sample.Completion, window) {
+			out.Rejected = append(out.Rejected, SizingRejection{Job: job, Reason: SizingRejectionStale})
 			continue
 		}
-		if seenKey[key] || seenJob[job.JobID] {
-			reject(SizingRejectionDuplicate)
+		survivors = append(survivors, candidate)
+	}
+	// Resolve conflicting duplicates under a total content order so the same
+	// candidate wins for any input order: the most recently observed
+	// candidate is kept, tie-broken by completion observation, window bounds,
+	// incarnation and measured content, then by exact job key and canonical
+	// sample encoding.
+	slices.SortStableFunc(survivors, func(a, b SizingCandidate) int {
+		return sizingCandidateConflictRank(a, b)
+	})
+	seenKey, seenJob := make(map[AttemptKey]bool, len(survivors)), make(map[int64]bool, len(survivors))
+	samples := make([]JobSizingSample, 0, len(survivors))
+	for _, candidate := range survivors {
+		job := candidate.Sample.Resources.Scope.Job
+		if seenKey[job.Attempt] || seenJob[job.JobID] {
+			out.Rejected = append(out.Rejected, SizingRejection{Job: job, Reason: SizingRejectionDuplicate})
 			continue
 		}
-		seenKey[key], seenJob[job.JobID] = true, true
+		seenKey[job.Attempt], seenJob[job.JobID] = true, true
 		samples = append(samples, candidate.Sample)
 	}
 	slices.SortFunc(samples, func(a, b JobSizingSample) int { return compareJobKey(a.Resources.Scope.Job, b.Resources.Scope.Job) })
 	slices.SortFunc(out.Rejected, func(a, b SizingRejection) int { return compareJobKey(a.Job, b.Job) })
 	out.Cohort.Samples = samples
 	return out, nil
+}
+
+// sizingCandidateConflictRank orders candidates most-recently-observed first
+// with total, content-derived tie-breakers. It never reads input position,
+// so sorting by it makes duplicate resolution input-order independent.
+func sizingCandidateConflictRank(a, b SizingCandidate) int {
+	as, bs := a.Sample.Resources.Scope, b.Sample.Resources.Scope
+	if c := bs.AsOf.UTC().Compare(as.AsOf.UTC()); c != 0 {
+		return c
+	}
+	if c := b.Sample.Completion.ObservedAt.UTC().Compare(a.Sample.Completion.ObservedAt.UTC()); c != 0 {
+		return c
+	}
+	if c := bs.EndAt.UTC().Compare(as.EndAt.UTC()); c != 0 {
+		return c
+	}
+	if c := bs.StartedAt.UTC().Compare(as.StartedAt.UTC()); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(bs.RunnerIncarnation, as.RunnerIncarnation); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(sizingCandidateCPUPeak(b.Sample), sizingCandidateCPUPeak(a.Sample)); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(sizingCandidateRAMPeak(b.Sample), sizingCandidateRAMPeak(a.Sample)); c != 0 {
+		return c
+	}
+	if c := compareJobKey(bs.Job, as.Job); c != 0 {
+		return c
+	}
+	// Identical rank and key means identical content: either choice is the
+	// same projection. A canonical encoding keeps even distinct full ties
+	// input-order independent.
+	return cmp.Compare(sizingCandidateEncoding(b.Sample), sizingCandidateEncoding(a.Sample))
+}
+
+// sizingCandidateEncoding is the deterministic canonical encoding used only
+// as the last duplicate-resolution tie-break.
+func sizingCandidateEncoding(sample JobSizingSample) string {
+	encoded, _ := json.Marshal(sample)
+	return string(encoded)
+}
+
+func sizingCandidateCPUPeak(sample JobSizingSample) uint64 {
+	if sample.Resources.CPU == nil {
+		return 0
+	}
+	return sample.Resources.CPU.PeakIntervalMilliCPU
+}
+
+func sizingCandidateRAMPeak(sample JobSizingSample) uint64 {
+	if sample.Resources.RAM == nil {
+		return 0
+	}
+	return sample.Resources.RAM.SampleMax
 }
 
 // validSizingIdentity accepts the trusted labels only in the bounded opaque

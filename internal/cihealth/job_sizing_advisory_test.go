@@ -232,6 +232,27 @@ func TestReviewJobSizingAdvisoryDistinguishesLowUsageFromMissingSamples(t *testi
 	}
 }
 
+func TestReviewJobSizingAdvisoryCountsOmittedCandidatesWithoutRetainingIdentifiers(t *testing.T) {
+	base := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	window := sizingReviewWindowFixture(base)
+	foreign := SizingCandidate{Identity: sizingTestIdentity, Sample: base.Samples[0]}
+	foreign.Sample.Resources.Scope.Job.Attempt.RepositoryID = 4242
+	foreign.Sample.Resources.Scope.Job.JobID = 9999
+	unverifiable := SizingCandidate{Identity: SizingCohortIdentity{}, Sample: base.Samples[1]}
+	proj, err := ProjectJobSizingCohort(base.Scope, sizingTestIdentity, base.Shape, base.Coverage, true, window,
+		append(sizingCandidatesFor(sizingTestIdentity, base), foreign, unverifiable))
+	if err != nil {
+		t.Fatalf("projection: %v", err)
+	}
+	got, err := ReviewJobSizingAdvisory(proj, window, JobSizingHostContext{})
+	if err != nil || got.Foreign != 1 || got.Unverifiable != 1 || len(got.Rejected) != 0 {
+		t.Fatalf("omitted candidates were not counted without retained identifiers: %+v, %v", got, err)
+	}
+	if got.Samples.Eligible != 20 || got.Outcome != JobSizingAdvisoryIncreaseAdvised {
+		t.Fatalf("omitted candidates changed the reviewed cohort: %+v", got.Samples)
+	}
+}
+
 func TestReviewJobSizingAdvisoryDiskAdviceOnlyWithAttributableData(t *testing.T) {
 	withDisk := advisoryCohortFixture(t, 20, JobSizingShape{CPUMilli: 1000, RAMBytes: 100000}, 100, 10, true, MinJobSizingHistory, 9*time.Second)
 	got := advisoryFixture(t, JobSizingHostContext{}, withDisk, sizingReviewWindowFixture(withDisk))

@@ -82,19 +82,21 @@ func TestProjectJobSizingCohortNeverCombinesDistinctIdentitiesOrProfiles(t *test
 	foreign := SizingCandidate{Identity: sizingTestIdentity, Sample: base.Samples[3]}
 	foreign.Sample.Resources.Scope.Job.Attempt.RepositoryID = 99
 	proj := sizingProjectionFixture(t, true, window, otherMatrix, otherProfile, changedShape, foreign)
-	if len(proj.Cohort.Samples) != 20 || proj.Incomparable != 2 {
+	if len(proj.Cohort.Samples) != 20 || proj.Incomparable != 2 || proj.Foreign != 1 || proj.Unverifiable != 0 {
 		t.Fatalf("incomparable identities were combined or hidden: %+v", proj)
 	}
+	// Out-of-scope identifiers are never retained: the cross-tenant candidate
+	// is only counted, and every keyed rejection stays inside the authorized
+	// repository scope.
 	want := map[SizingRejectionReason]int{
 		SizingRejectionIncomparableIdentity: 2,
 		SizingRejectionProfileChanged:       1,
-		SizingRejectionForeignScope:         1,
 	}
 	got := map[SizingRejectionReason]int{}
 	for _, r := range proj.Rejected {
 		got[r.Reason]++
-		if r.Job.JobID <= 0 {
-			t.Fatalf("rejection lost its exact job identity: %+v", r)
+		if r.Job.JobID <= 0 || r.Job.Attempt.RepositoryID != base.Scope.RepositoryID || r.Job.Attempt.Source != base.Scope.Source {
+			t.Fatalf("keyed rejection left the authorized scope: %+v", r)
 		}
 	}
 	if !reflect.DeepEqual(want, got) {
@@ -122,17 +124,19 @@ func TestProjectJobSizingCohortReportsStaleDuplicateAndUnverifiableCandidates(t 
 	badKey := SizingCandidate{Identity: sizingTestIdentity, Sample: base.Samples[3]}
 	badKey.Sample.Resources.Scope.Job.JobID = 0
 	proj := sizingProjectionFixture(t, true, window, stale, duplicate, unverifiable, badKey)
-	if len(proj.Cohort.Samples) != 20 {
-		t.Fatalf("ineligible candidates entered the cohort: %+v", proj)
+	if len(proj.Cohort.Samples) != 20 || proj.Unverifiable != 2 {
+		t.Fatalf("ineligible candidates entered the cohort or unverifiable identities were retained: %+v", proj)
 	}
 	want := map[SizingRejectionReason]int{
-		SizingRejectionStale:                1,
-		SizingRejectionDuplicate:            1,
-		SizingRejectionUnverifiableIdentity: 2,
+		SizingRejectionStale:     1,
+		SizingRejectionDuplicate: 1,
 	}
 	got := map[SizingRejectionReason]int{}
 	for _, r := range proj.Rejected {
 		got[r.Reason]++
+		if r.Job.JobID <= 0 {
+			t.Fatalf("rejection lost its exact job identity: %+v", r)
+		}
 	}
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("rejection reasons = %+v, want %+v", got, want)
@@ -140,6 +144,54 @@ func TestProjectJobSizingCohortReportsStaleDuplicateAndUnverifiableCandidates(t 
 	review, err := ReviewJobSizingWindow(proj.Cohort, window)
 	if err != nil || review.Summary.Successful != 20 || review.Summary.CPU.State != JobSizingIncreaseAdvised {
 		t.Fatalf("review did not see only the eligible selection: %+v, %v", review, err)
+	}
+}
+
+func TestProjectJobSizingCohortResolvesConflictingDuplicatesInEitherInputOrder(t *testing.T) {
+	base := jobSizingFixture(t, 20, MinJobSizingHistory, 9*time.Second)
+	window := sizingReviewWindowFixture(base)
+	// A conflicting re-submission of an eligible execution: identical exact
+	// job key, different observation time and measured content.
+	conflicting := SizingCandidate{Identity: sizingTestIdentity, Sample: base.Samples[0]}
+	conflicting.Sample.Resources.Scope.AsOf = conflicting.Sample.Resources.Scope.AsOf.Add(time.Minute)
+	conflicting.Sample.Resources.RAM = &ResourceGaugeSummary{Samples: 2, SampleMax: 99, Latest: 99, LatestAt: base.Samples[0].Resources.RAM.LatestAt}
+	project := func(candidates ...SizingCandidate) SizingCohortProjection {
+		t.Helper()
+		proj, err := ProjectJobSizingCohort(base.Scope, sizingTestIdentity, base.Shape, base.Coverage, true, window, candidates)
+		if err != nil {
+			t.Fatalf("projection: %v", err)
+		}
+		return proj
+	}
+	eligible := sizingCandidatesFor(sizingTestIdentity, base)
+	tailFirst := project(append(append([]SizingCandidate{}, eligible...), conflicting)...)
+	tailLast := project(append([]SizingCandidate{conflicting}, eligible...)...)
+	if !reflect.DeepEqual(tailFirst, tailLast) {
+		t.Fatalf("input order changed the conflicting-duplicate resolution:\n%+v\n%+v", tailFirst, tailLast)
+	}
+	if len(tailFirst.Cohort.Samples) != 20 || len(tailFirst.Rejected) != 1 || tailFirst.Rejected[0].Reason != SizingRejectionDuplicate {
+		t.Fatalf("conflicting duplicate was not reported exactly once: %+v", tailFirst.Rejected)
+	}
+	kept := tailFirst.Cohort.Samples[0]
+	if !kept.Resources.Scope.AsOf.Equal(base.Samples[0].Resources.Scope.AsOf.Add(time.Minute)) || kept.Resources.RAM.SampleMax != 99 {
+		t.Fatalf("the most recently observed candidate did not win: %+v", kept.Resources.Scope)
+	}
+	// A conflicting job ID across distinct runs resolves the same way: the
+	// later observation wins regardless of input order.
+	conflictingID := SizingCandidate{Identity: sizingTestIdentity, Sample: base.Samples[1]}
+	conflictingID.Sample.Resources.Scope.Job.Attempt.RunID = 500
+	conflictingID.Sample.Resources.Scope.AsOf = conflictingID.Sample.Resources.Scope.AsOf.Add(2 * time.Minute)
+	idTailFirst := project(append(append([]SizingCandidate{}, eligible...), conflictingID)...)
+	idTailLast := project(append([]SizingCandidate{conflictingID}, eligible...)...)
+	if !reflect.DeepEqual(idTailFirst, idTailLast) {
+		t.Fatalf("input order changed the conflicting job-id resolution:\n%+v\n%+v", idTailFirst, idTailLast)
+	}
+	if len(idTailFirst.Cohort.Samples) != 20 || len(idTailFirst.Rejected) != 1 {
+		t.Fatalf("conflicting job-id duplicate was not reported exactly once: %+v", idTailFirst.Rejected)
+	}
+	loser := idTailFirst.Rejected[0]
+	if loser.Reason != SizingRejectionDuplicate || loser.Job.Attempt.RunID != 2 {
+		t.Fatalf("conflicting job-id duplicate was not reported against the losing execution: %+v", loser)
 	}
 }
 

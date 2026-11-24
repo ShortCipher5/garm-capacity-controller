@@ -135,6 +135,14 @@ type JobSizingDiskAdvice struct {
 // the eligibility rejections) so any recommendation can be reproduced from
 // them under the recorded versions. It has no apply action and never
 // changes scaling settings.
+//
+// Smaller-profile (downgrade) advice is deliberately deferred: this advisory
+// is upward-only and never recommends reducing CPU or memory, even with
+// complete clean evidence, because a sampled peak is not a complete upper
+// bound and no verified current-workload source is wired. Reductions require
+// a future policy revision on top of the verified history producers
+// (Plans 04/05) with their own floors and suppression; until then the only
+// conservative smaller-profile outcome is the neutral "unchanged" state.
 type JobSizingAdvisory struct {
 	Version, PolicyVersion string
 	Outcome                string
@@ -153,6 +161,8 @@ type JobSizingAdvisory struct {
 	Disk                   JobSizingDiskAdvice
 	Rejected               []SizingRejection
 	Incomparable           int
+	Unverifiable           int
+	Foreign                int
 }
 
 // ReviewJobSizingAdvisory runs the reviewed window over the projected
@@ -180,6 +190,8 @@ func ReviewJobSizingAdvisory(proj SizingCohortProjection, window JobSizingReview
 		Installed:     review.Installed,
 		Rejected:      proj.Rejected,
 		Incomparable:  proj.Incomparable,
+		Unverifiable:  proj.Unverifiable,
+		Foreign:       proj.Foreign,
 		Warnings:      []string{},
 	}
 	summary := review.Summary
