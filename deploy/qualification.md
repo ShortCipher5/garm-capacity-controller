@@ -157,5 +157,11 @@ full browser interaction, image-layer secret canary scanning, power-loss durabil
 all-negative ownership/symlink cases, legacy charged-ledger upgrades or any actual
 physical-host/job-safe lifecycle. Existing Go/browser tests cover their documented
 local contracts separately. Do not convert a missing automated gate into a pass.
+The generic runtime artifact ties the tested gateway, recovery, stock ingress and
+CI history initializer images to the source commit using local image IDs. These
+are not registry manifest digests or evidence of a qualified installed stack.
+The artifact may upload even when later steps fail. Its positive fields report
+only checks completed before it was emitted, not the later joined-service checks
+or the result of the overall packaging workflow.
 The shell harness requires a disposable runner and removes only its generated
 Compose project/test directory; do not point it at an existing host or stack.
