@@ -15,6 +15,10 @@ test('reuse status dispositions stay conservative and never claim deletion',()=>
  assert.equal(validateReuseStatus(partial),partial);
  const charged=view([row({state:'idle',disposition:'charged',reasons:[]})]);
  assert.equal(validateReuseStatus(charged),charged);
+ const historic=view([row({disposition:'released_historic',remaining:{cpu_millis:0,ram_mib:0,disk_mib:0,runners:0},reasons:['historic_release_requires_review']})]);
+ assert.equal(validateReuseStatus(historic),historic);
+ assert.match(reuseDispositionLabel('released_historic'),/Historic release/);
+ assert.match(reuseReasonLabel('historic_release_requires_review'),/never reversed/);
 });
 test('reuse status validator rejects unsupported shapes and false reuse claims',()=>{
  for(const invalid of [
@@ -23,6 +27,9 @@ test('reuse status validator rejects unsupported shapes and false reuse claims',
   view([row({disposition:'pending_cleanup',reasons:[]})]),
   view([row({reasons:['awaiting_completed_workload','awaiting_completed_workload']})]),
   view([row({reasons:['not_a_reason']})]),
+  view([row({disposition:'released_historic',reusable:{cpu:true,ram:false,runners:false,disk:false}})]),
+  view([row({disposition:'released_historic',remaining:{cpu_millis:1,ram_mib:0,disk_mib:0,runners:0}})]),
+  view([row({disposition:'released_historic',reasons:['released_verified_teardown']})]),
   view([row({reusable:{cpu:'yes',ram:false,runners:false,disk:false}})]),
   view([row({remaining:{cpu_millis:-1,ram_mib:0,disk_mib:0,runners:0}})]),
   view([row({request_key:''})]),

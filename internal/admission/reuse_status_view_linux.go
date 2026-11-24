@@ -15,8 +15,14 @@ const (
 	ReuseStatusPendingCleanup    = "pending_cleanup"
 	ReuseStatusPartiallyReusable = "partially_reusable"
 	ReuseStatusVerifiedReusable  = "verified_reusable"
-	reuseStatusAwaitingEvidence  = "awaiting_qualified_terminal_evidence"
-	reuseStatusReleasedReason    = "released_verified_teardown"
+	// ReuseStatusReleasedHistoric marks charges excluded from accounting by a
+	// pre-verification release path. They are NOT verified reusable capacity:
+	// this controller never re-verifies or reverses them; they need explicit
+	// accounting and physical inventory review.
+	ReuseStatusReleasedHistoric = "released_historic"
+	reuseStatusAwaitingEvidence = "awaiting_qualified_terminal_evidence"
+	reuseStatusReleasedReason   = "released_verified_teardown"
+	reuseStatusHistoricReason   = "historic_release_requires_review"
 )
 
 // ReuseStatusRow is one charge's operator-visible reuse state: what remains
@@ -66,6 +72,10 @@ func (s *SQLiteStore) ReadReuseStatus(ctx context.Context) (ReuseStatusView, err
 		if err != nil {
 			return err
 		}
+		historic, err := sqliteHistoricReleaseKeys(tx)
+		if err != nil {
+			return err
+		}
 		rows, err := tx.Query("SELECT request_key,cpu,ram,runners,disk FROM verified_reuse")
 		if err != nil {
 			return err
@@ -93,6 +103,10 @@ func (s *SQLiteStore) ReadReuseStatus(ctx context.Context) (ReuseStatusView, err
 				Reasons:    []string{},
 			}
 			switch {
+			case released[key] && historic[key]:
+				row.Disposition = ReuseStatusReleasedHistoric
+				row.Remaining = Resources{}
+				row.Reasons = []string{reuseStatusHistoricReason}
 			case released[key]:
 				row.Disposition = ReuseStatusVerifiedReusable
 				row.Remaining = Resources{}
