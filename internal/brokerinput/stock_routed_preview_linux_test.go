@@ -10,7 +10,7 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 )
 
-func routedStockFixture(t *testing.T) (admission.BrokerGrantState, capacitybroker.Snapshot, garmapi.DemandObservation, capacitybroker.Options, []verifiedStockProviderRoute) {
+func routedStockFixture(t *testing.T) (admission.BrokerGrantState, capacitybroker.Snapshot, garmapi.DemandObservation, capacitybroker.Options, []VerifiedStockProviderRoute) {
 	t.Helper()
 	snapshot, policy, _, _ := fixture()
 	_, observation, source, opt := enrolledCycleFixture(t)
@@ -30,7 +30,7 @@ func routedStockFixture(t *testing.T) (admission.BrokerGrantState, capacitybroke
 				Authority: admission.StockProviderAuthority{PoolID: pool, ProviderName: observed.ProviderName}},
 		},
 	}
-	return state, snapshot, observation, opt, []verifiedStockProviderRoute{{source, observed.ProviderName, "a", 3, opt.Now.Add(-time.Second)}}
+	return state, snapshot, observation, opt, []VerifiedStockProviderRoute{{Source: source, Provider: observed.ProviderName, Host: "a", HostBindingSequence: 3, ObservedAt: opt.Now.Add(-time.Second)}}
 }
 
 func TestRoutedStockPreviewRequiresCurrentEnrolledDestination(t *testing.T) {
@@ -62,12 +62,12 @@ func TestRoutedStockPreviewDoesNotBorrowSpareOnWrongHost(t *testing.T) {
 		t.Fatalf("fixture did not model spare on B: %+v %v", ordinary, err)
 	}
 	routed, expiry, err := planRoutedStockPreview(state, snapshot, observation, observation.SourceIdentity(), opt, routes)
-	if err != nil || len(routed.Assignments) != 0 || len(routed.RemainingJobs) != 1 || !expiry.Equal(routes[0].observedAt.Add(opt.MaxAge)) {
+	if err != nil || len(routed.Assignments) != 0 || len(routed.RemainingJobs) != 1 || !expiry.Equal(routes[0].ObservedAt.Add(opt.MaxAge)) {
 		t.Fatalf("borrowed B or dropped blocked job: %+v %v %v", routed, expiry, err)
 	}
 	// With verified B routing, A's old charge retains its host and remains
 	// charged to the same pool and global budget.
-	routes[0].host, routes[0].hostBindingSequence = "b", 4
+	routes[0].Host, routes[0].HostBindingSequence = "b", 4
 	routed, _, err = planRoutedStockPreview(state, snapshot, observation, observation.SourceIdentity(), opt, routes)
 	if err != nil || len(routed.Assignments) != 1 || routed.Assignments[0].Host != "b" ||
 		!reflect.DeepEqual(snapshot.Pools[pool].Hosts, []string{"a", "b"}) || snapshot.Charges[0].Host != "a" {
@@ -81,27 +81,27 @@ func TestRoutedStockPreviewDoesNotBorrowSpareOnWrongHost(t *testing.T) {
 }
 
 func TestRoutedStockPreviewRejectsUnverifiedRoutes(t *testing.T) {
-	for name, edit := range map[string]func(*capacitybroker.Snapshot, *[]verifiedStockProviderRoute, capacitybroker.Options){
-		"missing": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, _ capacitybroker.Options) { *r = nil },
-		"provider mismatch": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, _ capacitybroker.Options) {
-			(*r)[0].provider = "stock-b"
+	for name, edit := range map[string]func(*capacitybroker.Snapshot, *[]VerifiedStockProviderRoute, capacitybroker.Options){
+		"missing": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, _ capacitybroker.Options) { *r = nil },
+		"provider mismatch": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, _ capacitybroker.Options) {
+			(*r)[0].Provider = "stock-b"
 		},
-		"host mismatch": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, _ capacitybroker.Options) {
-			(*r)[0].host = "b"
+		"host mismatch": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, _ capacitybroker.Options) {
+			(*r)[0].Host = "b"
 		},
-		"wrong source": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, _ capacitybroker.Options) {
-			(*r)[0].source = "other"
+		"wrong source": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, _ capacitybroker.Options) {
+			(*r)[0].Source = "other"
 		},
-		"expired": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, o capacitybroker.Options) {
-			(*r)[0].observedAt = o.Now.Add(-o.MaxAge)
+		"expired": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, o capacitybroker.Options) {
+			(*r)[0].ObservedAt = o.Now.Add(-o.MaxAge)
 		},
-		"future": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, o capacitybroker.Options) {
-			(*r)[0].observedAt = o.Now.Add(time.Nanosecond)
+		"future": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, o capacitybroker.Options) {
+			(*r)[0].ObservedAt = o.Now.Add(time.Nanosecond)
 		},
-		"duplicate": func(_ *capacitybroker.Snapshot, r *[]verifiedStockProviderRoute, _ capacitybroker.Options) {
+		"duplicate": func(_ *capacitybroker.Snapshot, r *[]VerifiedStockProviderRoute, _ capacitybroker.Options) {
 			*r = append(*r, (*r)[0])
 		},
-		"outside allowlist": func(s *capacitybroker.Snapshot, _ *[]verifiedStockProviderRoute, _ capacitybroker.Options) {
+		"outside allowlist": func(s *capacitybroker.Snapshot, _ *[]VerifiedStockProviderRoute, _ capacitybroker.Options) {
 			p := s.Pools[pool]
 			p.Hosts = []string{"b"}
 			s.Pools[pool] = p
@@ -143,10 +143,10 @@ func TestRoutedStockPreviewKeepsSpareForActuallyRoutedPool(t *testing.T) {
 	if _, _, err := planRoutedStockPreview(state, snapshot, observation, observation.SourceIdentity(), opt, routes); err != capacitybroker.ErrSnapshot {
 		t.Fatal("incomplete route map trusted", err)
 	}
-	routes = append(routes, verifiedStockProviderRoute{observation.SourceIdentity(), "stock-b", "b", 4, opt.Now.Add(-2 * time.Second)})
+	routes = append(routes, VerifiedStockProviderRoute{Source: observation.SourceIdentity(), Provider: "stock-b", Host: "b", HostBindingSequence: 4, ObservedAt: opt.Now.Add(-2 * time.Second)})
 	plan, expiry, err := planRoutedStockPreview(state, snapshot, observation, observation.SourceIdentity(), opt, routes)
 	if err != nil || len(plan.Assignments) != 1 || plan.Assignments[0].Pool != poolB || plan.Assignments[0].Host != "b" ||
-		len(plan.RemainingJobs) != 1 || plan.RemainingJobs[0].ID != repo+":1" || !expiry.Equal(routes[1].observedAt.Add(opt.MaxAge)) {
+		len(plan.RemainingJobs) != 1 || plan.RemainingJobs[0].ID != repo+":1" || !expiry.Equal(routes[1].ObservedAt.Add(opt.MaxAge)) {
 		t.Fatalf("misallocated pooled spare capacity: %+v %v %v", plan, expiry, err)
 	}
 }
@@ -176,7 +176,7 @@ func TestRoutedStockPreviewBoundsExpiryByDemandAndCapacity(t *testing.T) {
 func TestRoutedStockPreviewRequiresDemandFromSameSource(t *testing.T) {
 	state, snapshot, observation, opt, routes := routedStockFixture(t)
 	source := observation.SourceIdentity()
-	routes[0].host, routes[0].hostBindingSequence = "b", 4
+	routes[0].Host, routes[0].HostBindingSequence = "b", 4
 	_, other, otherSource, later := enrolledCycleFixture(t)
 	if source == "" || otherSource == "" || otherSource == source ||
 		observation.Pools[0].OwnershipFingerprint != other.Pools[0].OwnershipFingerprint {
