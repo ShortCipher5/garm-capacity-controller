@@ -48,6 +48,7 @@ reviewed out of band before ingestion:
 | producer job | `job.job_id` | required for job-level rows; absent rows stay run-only metadata |
 | shard / retry | `job.shard`, `job.retry` | reviewer-bound atoms; `retry: 0` is a known initial execution |
 | report entry | `entry_name`, `entry_bytes`, `entry_sha256` | exact extracted XML bytes; required exactly when `job` is present |
+| case bindings | `cases: [{occurrence, case_id}]` | optional with `job`; reviewer-bound numeric case identity per occurrence |
 
 The contract is opt-in and fail-closed:
 
@@ -62,22 +63,32 @@ The contract is opt-in and fail-closed:
   evidence reuse is refused at retention time by the store.
 - Ceilings are inherited from the bounded parsers: `MaxJUnitZIPBytes`,
   `MaxJUnitZIPEntries`, `MaxReportBytes`, `MaxCases`, and at most
-  `MaxRetainedAttemptReports` (32) artifacts per attempt. Oversized archives,
-  unsafe members, duplicates, digest mismatches and invalid XML refuse the
-  entire ingestion; there is no partial publication.
+  `MaxRetainedAttemptReports` (32) artifacts per attempt. Archive count and
+  actual byte length are validated against the manifest before any hashing,
+  for metadata-only rows too; oversized archives, unsafe members, duplicates,
+  digest mismatches and invalid XML refuse the entire ingestion; there is no
+  partial publication.
 - No tokenized URLs, logs, command or environment output, report bodies or
   raw archive bytes are persisted. Retained records carry bounded projections
   (counts, outcomes, durations) plus private pins used only for idempotency
-  and reuse rejection.
+  and reuse rejection, and optionally reviewer-bound per-case observations
+  (`StoredCaseObservation`, bounded by `MaxCases` per report) so retry
+  histories and rankings have real per-case data to work from.
 
 ## Normalization and retention
 
 `NewPublication` converts a validated ingestion into the retained form:
-per-report totals, timed counts, exact mean/P95 durations and the exact total
-timed duration, each tagged with artifact, job, shard and retry. Case IDs,
-class names, files and display names are not retained; identity for
-cross-run comparison remains the reviewer-bound numeric cohort identity used
-by `CompareReviewedCase` and `RankReviewedCaseImpact`.
+per-report totals, timed counts, exact mean/P95 durations, the exact total
+timed duration, and any reviewer-bound per-case observations, each tagged
+with artifact, job, shard and retry. Case IDs, class names, files and display
+names are not retained; identity for cross-run comparison remains the
+reviewer-bound numeric cohort identity used by `CompareReviewedCase` and
+`RankReviewedCaseImpact`.
+
+Retention is enforced at read time, not only by purge-on-write: a record at
+or past the shared cutoff is excluded by `LoadPublication` and
+`LoadScopePublications` even on an idle store with no save or restart since
+it aged out.
 
 A first execution (`retry: 0`) is stored and rendered separately from
 framework retries, so a failed first run that eventually passes stays visible
@@ -103,8 +114,14 @@ or credential), sample counts, coverage (proved vs metadata-only vs missing
 slots), exact aggregate means, and failure/error rates whose zero denominator
 explicitly means "insufficient observations." `RenderCaseRankings` keeps
 comparisons within one verified category; incompatible cohorts refuse rather
-than merge, and the same display name can never join two cohorts. There is no
-AI analysis, no deployment advice and no speculative pass/fail guessing.
+than merge, and the same display name can never join two cohorts. From
+retained publications, `RankStoredCases` and `CaseHistories` give
+deterministic rankings and per-case retry histories over the reviewer-bound
+case observations (mixed scopes and over-ceiling observation sets refuse).
+`CheckLiveAvailability` keeps live display disabled until producer trust and
+the exact unexpired parent attempt are independently verified; rendered views
+carry that gate label. There is no AI analysis, no deployment advice and no
+speculative pass/fail guessing.
 
 ## Unavailable behavior and rollback
 
@@ -121,5 +138,9 @@ AI analysis, no deployment advice and no speculative pass/fail guessing.
   durable lifecycle adopting the shared retention surface.
 
 See the fixture regressions in `internal/cihealthreport/{provenance,manifest,
-ingest,store,render}_test.go`; they use synthetic in-memory ZIP/XML fixtures
-only and never contact GitHub, GARM, Incus or any runner infrastructure.
+ingest,store,render,history}_test.go`; they use synthetic in-memory ZIP/XML
+fixtures only and never contact GitHub, GARM, Incus or any runner
+infrastructure. `TestEndToEndReportToRanking` proves the full chain from
+reviewed manifest and exact bytes through retention to deterministic
+rankings and retry histories, including that a tampered archive breaks the
+chain at ingestion and that run-only metadata never ranks.
