@@ -200,7 +200,18 @@ would exceed either limit, the read stops before it and marks the selection
 limited. It never splits an attempt or skips past it to fit smaller rows.
 Hitting a selection limit does not change the persisted facts, revisions, or
 future writes. The marker is about the bounded local read, not proof that a
-particular seven-day bucket lost observations. The view separately counts
+particular seven-day bucket lost observations.
+
+A later positive observation of an already retained exact attempt is kept as
+its own version beside the earlier one; the bounded read includes every
+retained version of a selected attempt and never splits one. The newest
+version is the status, result and last-observed window authority for that
+attempt, so a sparse later observation refreshes the attempt's window without
+blocking unrelated attempts. Endpoints its latest observation omitted stay
+visibly incomplete in the retained row instead of being copied forward: each
+rendered duration and each pooled mean or p95 sample remains attributed to
+the exact observation version that measured it, and a newer version can
+never remove or contradict a prior known terminal result. The view separately counts
 initial attempts and retry attempts and their distinct run IDs. It also
 counts initial attempt failures with an observed successful higher-numbered
 attempt for the same exact run, at most once per run. The count is shown in

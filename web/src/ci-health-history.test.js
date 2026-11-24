@@ -210,6 +210,8 @@ test("retained view labels coverage, actual denominator, unsupported tests and m
     assert.match(markup, /Steps \(pooled\).*<td>1 of 1<\/td><td>0 s<\/td><td>0 s<\/td>/);
     assert.match(markup, /<td>0 of 2<\/td><td><span class="muted">Unavailable<\/span><\/td>/);
     assert.match(markup, /<td>0 of 0<\/td><td><span class="muted">Unavailable<\/span><\/td>/);
+    assert.match(markup, /A completed row whose latest observation omitted its endpoints stays counted but untimed/);
+    assert.match(markup, /attributed to that observation rather than refreshed as new/);
     const old = fixture();
     delete old.history.workflows[0].current.initial.jobs.completed;
     assert.equal(validateCIHealthSnapshot(old), old);

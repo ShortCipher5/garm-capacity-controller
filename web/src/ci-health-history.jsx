@@ -55,6 +55,9 @@ export function CIHealthHistory({history, durationText}) {
       Earlier or unavailable observations are not counted. This is not complete workflow history.</p>
     <p className="muted">Failure share is failure divided by recorded success plus failure.
       Timing coverage counts only observed completed rows; skipped and active rows are not included.
+      A completed row whose latest observation omitted its endpoints stays counted but untimed;
+      a pooled duration may then come from an earlier retained observation of the same exact attempt,
+      attributed to that observation rather than refreshed as new.
       Mean and P95 use only rows with both endpoints. Jobs and steps are pooled, not grouped by equivalent definitions.
       A run can appear in both attempt types. Verified test reports are unavailable.</p>
     {history.workflows.some((w) => Object.hasOwn(w.current, "recovered_initial_failures")) &&
