@@ -57,7 +57,11 @@ otherwise the same growth is published as `hypothetical` with the
 `destination_unestablished` risk, never as verified placement or enforceable
 capacity. The measured-usage pressure veto applies identically on both paths:
 a vetoed host is never selected for growth, routed or unrouted, and pressure
-or route evidence changes the proposal revision. Destinations are marked
+or route evidence changes the proposal revision. The offline routed
+calculation explains hold decisions using only the verified destination,
+without moving any existing charges. When a pressure veto applies, that
+calculation requires the earliest expiry of the active vetoes and cannot
+outlive it or the other input validity bounds. Destinations are marked
 established only when an independently verified stock provider route produced
 the plan; the eligible host list alone never establishes placement. The
 section never enables the `allocator_loop` writer path, issues grants,

@@ -1072,6 +1072,7 @@ func TestAllocatorRoutedPressureVetoNeverSelectsHost(t *testing.T) {
 	// vetoed host is never selected. Retained charges are untouched.
 	vetoed := in
 	vetoed.Blocked = map[string]bool{"b": true}
+	vetoed.RoutedPressureValidUntil = opt.Now.Add(time.Second)
 	proposal, err = PlanRoutedAllocatorProposal(state, vetoed, routes)
 	if err != nil {
 		t.Fatal(err)
@@ -1093,6 +1094,7 @@ func TestAllocatorRoutedPressureVetoNeverSelectsHost(t *testing.T) {
 	// A veto on an unrelated host does not disable the verified destination.
 	unrelated := in
 	unrelated.Blocked = map[string]bool{"a": true}
+	unrelated.RoutedPressureValidUntil = opt.Now.Add(time.Second)
 	proposal, err = PlanRoutedAllocatorProposal(state, unrelated, routes)
 	if err != nil || len(proposal.Awards) != 1 || proposal.Awards[0].Host != "b" {
 		t.Fatalf("unrelated veto suppressed the verified route: %+v %v", proposal.Awards, err)
@@ -1156,6 +1158,7 @@ func TestAllocatorEvidenceRevisionDistinguishesRouteAndPressure(t *testing.T) {
 	// Pressure evidence distinguishes revisions on both paths.
 	vetoed := base
 	vetoed.Blocked = map[string]bool{"b": true}
+	vetoed.RoutedPressureValidUntil = opt.Now.Add(time.Second)
 	routedVetoed, err := PlanRoutedAllocatorProposal(state, vetoed, routes)
 	if err != nil || routedVetoed.InputRevision == first.InputRevision {
 		t.Fatal("routed pressure evidence not distinguished")
@@ -1166,5 +1169,75 @@ func TestAllocatorEvidenceRevisionDistinguishesRouteAndPressure(t *testing.T) {
 	}
 	if unroutedVetoed.InputRevision == routedVetoed.InputRevision {
 		t.Fatal("route and pressure evidence collapsed into one revision")
+	}
+}
+
+func TestAllocatorRoutedPressureReasonIgnoresHealthyUnroutedSpare(t *testing.T) {
+	state, snapshot, observation, opt, routes := routedStockFixture(t)
+	routes[0].Host, routes[0].HostBindingSequence = "b", 4
+	// Host a retains the original charge but also has room for another runner.
+	// It would fund hypothetical growth, but it is not the verified route.
+	a := snapshot.Hosts["a"]
+	for dimension := range a.Budget {
+		a.Budget[dimension] *= 2
+	}
+	snapshot.Hosts["a"] = a
+	in := AllocatorInput{
+		Source: observation.SourceIdentity(), Snapshot: snapshot, Policy: state.Policy,
+		Observation: observation, Options: opt, CapturedAt: opt.Now,
+		Blocked: map[string]bool{"b": true}, RoutedPressureValidUntil: opt.Now.Add(time.Second),
+	}
+	ordinary, err := PlanAllocatorProposal(in)
+	if err != nil || len(ordinary.Awards) != 1 || ordinary.Awards[0].Host != "a" {
+		t.Fatalf("fixture requires spare on unrouted host a: %+v %v", ordinary.Awards, err)
+	}
+	routed, err := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || len(routed.Awards) != 0 || allocatorDecision(routed, pool).Reason != allocatorDecisionBlockedPressure {
+		t.Fatalf("only the verified route should explain blocked growth: %+v %v", routed, err)
+	}
+	if routed.Held.Global.Runners != 1 || routed.Held.Pools[pool].Runners != 1 {
+		t.Fatalf("routing changed retained charges: %+v", routed.Held)
+	}
+}
+
+func TestAllocatorRoutedProposalPressureExpiryIsExclusiveAndBound(t *testing.T) {
+	state, snapshot, observation, opt, routes := routedStockFixture(t)
+	routes[0].Host, routes[0].HostBindingSequence = "b", 4
+	in := AllocatorInput{
+		Source: observation.SourceIdentity(), Snapshot: snapshot, Policy: state.Policy,
+		Observation: observation, Options: opt, CapturedAt: opt.Now,
+	}
+	unblocked, err := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || !unblocked.ExpiresAt.After(opt.Now.Add(2*time.Second)) {
+		t.Fatalf("fixture requires longer route validity: %+v %v", unblocked, err)
+	}
+	a, err := PlanRoutedAllocatorProposal(state, in, routes)
+	in.Blocked = map[string]bool{"b": false}
+	b, errB := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || errB != nil || a.InputRevision != b.InputRevision {
+		t.Fatalf("inactive map entry changed pressure identity: %v %v", err, errB)
+	}
+	in.Blocked["b"] = true
+	for _, deadline := range []time.Time{{}, opt.Now.Add(-time.Nanosecond), opt.Now, opt.Now.Add(pressureAge + time.Nanosecond)} {
+		in.RoutedPressureValidUntil = deadline
+		out, err := PlanRoutedAllocatorProposal(state, in, routes)
+		if err != capacitybroker.ErrSnapshot || out.InputRevision != "" {
+			t.Fatalf("unusable veto validity %v returned advice: %+v %v", deadline, out, err)
+		}
+	}
+	in.RoutedPressureValidUntil = opt.Now.Add(time.Second)
+	earlier, err := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || !earlier.ExpiresAt.Equal(in.RoutedPressureValidUntil) || len(earlier.Awards) != 0 {
+		t.Fatalf("pressure validity did not cap routed proposal: %+v %v", earlier, err)
+	}
+	in.RoutedPressureValidUntil = opt.Now.Add(2 * time.Second)
+	later, err := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || !later.ExpiresAt.Equal(in.RoutedPressureValidUntil) || earlier.InputRevision == later.InputRevision {
+		t.Fatalf("different pressure validity did not change revision: %+v %v", later, err)
+	}
+	in.RoutedPressureValidUntil = opt.Now.Add(pressureAge)
+	otherwiseBounded, err := PlanRoutedAllocatorProposal(state, in, routes)
+	if err != nil || !otherwiseBounded.ExpiresAt.Equal(unblocked.ExpiresAt) {
+		t.Fatalf("later pressure limit lengthened route/demand/capacity validity: %+v %v", otherwiseBounded, err)
 	}
 }

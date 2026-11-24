@@ -61,6 +61,10 @@ type AllocatorInput struct {
 	Weights map[string]uint32
 	// Blocked hosts carry fresh high measured usage and may not fund an increase.
 	Blocked map[string]bool
+	// RoutedPressureValidUntil is the earliest exclusive expiry of the
+	// active pressure vetoes in Blocked, supplied by the advisory evidence
+	// owner. Routed calculations with an active veto require this bound.
+	RoutedPressureValidUntil time.Time
 	// Commitments is the number of outstanding unused durable grants already
 	// persisted in the ledger. They are held capacity, never free capacity.
 	Commitments int64
@@ -186,6 +190,15 @@ func PlanRoutedAllocatorProposal(state admission.BrokerGrantState, in AllocatorI
 	if err != nil {
 		return fail()
 	}
+	if len(allocatorBlockedHosts(in.Blocked)) != 0 {
+		deadline := in.RoutedPressureValidUntil
+		if !deadline.After(in.Options.Now) || deadline.After(in.Options.Now.Add(pressureAge)) {
+			return fail()
+		}
+		if deadline.Before(expiry) {
+			expiry = deadline
+		}
+	}
 	in.destinationsEstablished = true
 	in.routes = routes
 	return ExplainAllocatorPlan(in, plan, expiry)
@@ -243,22 +256,34 @@ func allocatorEvidenceRevision(in AllocatorInput, planRevision string) string {
 			return routes[i].Host < routes[j].Host
 		})
 	}
-	var blocked []string
-	for host := range in.Blocked {
-		blocked = append(blocked, host)
+	blocked := allocatorBlockedHosts(in.Blocked)
+	var pressureDeadline string
+	if in.destinationsEstablished && len(blocked) > 0 {
+		pressureDeadline = in.RoutedPressureValidUntil.UTC().Format(time.RFC3339Nano)
 	}
-	sort.Strings(blocked)
 	raw, err := json.Marshal(struct {
-		Version  string
-		Plan     string
-		Routes   []VerifiedStockProviderRoute
-		Pressure []string
-	}{"allocator-proposal-v1", planRevision, routes, blocked})
+		Version       string
+		Plan          string
+		Routes        []VerifiedStockProviderRoute
+		Pressure      []string
+		PressureUntil string `json:",omitempty"`
+	}{"allocator-proposal-v1", planRevision, routes, blocked, pressureDeadline})
 	if err != nil {
 		return ""
 	}
 	hash := sha256.Sum256(raw)
 	return hex.EncodeToString(hash[:])
+}
+
+func allocatorBlockedHosts(blocked map[string]bool) []string {
+	var hosts []string
+	for host, active := range blocked {
+		if active {
+			hosts = append(hosts, host)
+		}
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 // ExplainAllocatorPlan translates one completed stock cycle plan into the
@@ -283,6 +308,12 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 			return fail()
 		}
 		observed[remote.ID] = remote
+	}
+	routedHost := make(map[string]string, len(in.routes))
+	if in.destinationsEstablished {
+		for _, route := range in.routes {
+			routedHost[route.Provider] = route.Host
+		}
 	}
 	held, err := allocatorHeld(in.Snapshot)
 	if err != nil {
@@ -321,7 +352,10 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 		if !ok || a.Host == "" {
 			return fail()
 		}
-		if _, ok := in.Snapshot.Hosts[a.Host]; !ok {
+		if _, ok := in.Snapshot.Hosts[a.Host]; !ok || in.Blocked[a.Host] {
+			return fail()
+		}
+		if in.destinationsEstablished && routedHost[observed[a.Pool].ProviderName] != a.Host {
 			return fail()
 		}
 		counts[a.Pool]++
@@ -398,6 +432,15 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 				DeferredByInflight: deferred[poolID],
 				RemainingQueued:    remaining[poolID],
 			}
+			if in.destinationsEstablished {
+				host := routedHost[remote.ProviderName]
+				if host == "" {
+					return fail()
+				}
+				// Narrow explanations exactly like routed placement; retain the
+				// accounting of charges on other hosts in the same pool.
+				pool.Hosts = []string{host}
+			}
 			decision.Reason = allocatorDecisionReason(in.Snapshot, planned, pool, remote, in.Blocked, decision)
 			out.Decisions = append(out.Decisions, decision)
 		}
@@ -413,7 +456,7 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 	} else if len(out.Awards) > 0 {
 		out.Risks = append(out.Risks, allocatorRiskDestinationUnestablished)
 	}
-	if len(in.Blocked) > 0 {
+	if len(allocatorBlockedHosts(in.Blocked)) > 0 {
 		out.Risks = append(out.Risks, allocatorRiskHostPressureSuppressed)
 	}
 	if len(out.Risks) > 8 {
