@@ -23,6 +23,7 @@ type fixtureArtifact struct {
 	retry uint16
 	entry string
 	xml   []byte
+	cases []ReportManifestCase
 }
 
 func fixtureAttempt(source string, repo, workflow, run, attempt int64) cihealth.AttemptKey {
@@ -55,6 +56,7 @@ func fixtureManifest(t *testing.T, attempt cihealth.AttemptKey, artifacts ...fix
 		if artifact.job > 0 {
 			row.Job = &ReportManifestJob{JobID: artifact.job, Shard: artifact.shard, Retry: artifact.retry}
 			row.EntryName, row.EntryBytes, row.EntrySHA256 = entry, int64(len(body)), sha256.Sum256(body)
+			row.Cases = artifact.cases
 		}
 		manifest.Artifacts = append(manifest.Artifacts, row)
 		archives = append(archives, ReportArchive{ArtifactID: artifact.id, Bytes: archive})

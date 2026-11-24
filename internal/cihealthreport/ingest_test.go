@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,5 +258,95 @@ func TestIngestValidatesLengthsBeforeHashing(t *testing.T) {
 		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: jobManifest, Archives: jobArchives,
 	}); err == nil || len(ingested.Proved) != 0 {
 		t.Fatalf("job row length mismatch must refuse: %+v %v", ingested, err)
+	}
+}
+
+func TestIngestRetainsReviewerBoundCases(t *testing.T) {
+	manifest, archives := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{
+		id: 500, job: 9001, shard: "unit",
+		xml:   []byte(`<testsuite><testcase name="a" time="1"/><testcase name="b"><failure/></testcase></testsuite>`),
+		cases: []ReportManifestCase{{Occurrence: 1, CaseID: 41}, {Occurrence: 2, CaseID: 42}},
+	})
+	ingested, err := IngestReports(t.Context(), IngestInput{
+		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: manifest, Archives: archives,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ingested.Proved) != 1 || len(ingested.Proved[0].Cases) != 2 {
+		t.Fatalf("bound cases not projected: %+v", ingested.Proved)
+	}
+	first, second := ingested.Proved[0].Cases[0], ingested.Proved[0].Cases[1]
+	if first.CaseID != 41 || first.Occurrence != 1 || first.Outcome != Pass || !first.Timed || first.Duration != time.Second {
+		t.Fatalf("first case observation wrong: %+v", first)
+	}
+	if second.CaseID != 42 || second.Outcome != Failure {
+		t.Fatalf("second case observation wrong: %+v", second)
+	}
+	pub, err := NewPublication(ingested)
+	if err != nil || len(pub.Reports[0].Cases) != 2 || pub.Reports[0].Cases[1].CaseID != 42 {
+		t.Fatalf("cases not retained in publication: %+v %v", pub, err)
+	}
+	store, err := OpenPublicationStore(filepath.Join(t.TempDir(), "publications.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.SavePublication(t.Context(), pub); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := store.LoadPublication(t.Context(), fixtureAttemptKey)
+	if err != nil || !found || len(loaded.Reports[0].Cases) != 2 ||
+		loaded.Reports[0].Cases[0].Outcome != Pass || loaded.Reports[0].Cases[1].Outcome != Failure {
+		t.Fatalf("cases not durable: %+v %v", loaded, err)
+	}
+	// Mutating a loaded case must not corrupt retained state.
+	loaded.Reports[0].Cases[0].Outcome = Failure
+	reloaded, _, err := store.LoadPublication(t.Context(), fixtureAttemptKey)
+	if err != nil || reloaded.Reports[0].Cases[0].Outcome != Pass {
+		t.Fatalf("case slices alias retained state: %+v %v", reloaded, err)
+	}
+}
+
+func TestIngestRefusesCaseBindingsOutsideReport(t *testing.T) {
+	manifest, archives := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{
+		id: 500, job: 9001, shard: "unit",
+		xml:   []byte(`<testsuite><testcase name="a"/></testsuite>`),
+		cases: []ReportManifestCase{{Occurrence: 2, CaseID: 41}},
+	})
+	if ingested, err := IngestReports(t.Context(), IngestInput{
+		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: manifest, Archives: archives,
+	}); err == nil || len(ingested.Proved) != 0 {
+		t.Fatalf("binding outside the report must refuse: %+v %v", ingested, err)
+	}
+
+	// Summary-only reports (no bindings) still ingest and retain no cases.
+	manifest2, archives2 := fixtureManifest(t, fixtureAttemptKey, fixtureArtifact{id: 501, job: 9001, shard: "unit"})
+	ingested2, err := IngestReports(t.Context(), IngestInput{
+		Scope: fixtureScope{fixtureAttemptKey: true}, Manifest: manifest2, Archives: archives2,
+	})
+	if err != nil || len(ingested2.Proved) != 1 || len(ingested2.Proved[0].Cases) != 0 {
+		t.Fatalf("summary-only report must ingest without cases: %+v %v", ingested2, err)
+	}
+}
+
+func TestParseReportManifestCaseValidation(t *testing.T) {
+	job := jobRowJSON(500, 9001, "unit", 0)
+	withCases := strings.Replace(manifestDoc(job), `"job": {"job_id": 9001, "shard": "unit", "retry": 0}`,
+		`"job": {"job_id": 9001, "shard": "unit", "retry": 0}, "cases": [{"occurrence": 1, "case_id": 41}]`, 1)
+	parsed, err := ParseReportManifest([]byte(withCases))
+	if err != nil || len(parsed.Artifacts[0].Cases) != 1 || parsed.Artifacts[0].Cases[0].CaseID != 41 {
+		t.Fatalf("valid case bindings refused: %+v %v", parsed, err)
+	}
+	bad := map[string]string{
+		"cases_without_job": manifestDoc(metadataRowJSON(500)[:len(metadataRowJSON(500))-1] + `,"cases":[{"occurrence":1,"case_id":41}]}`),
+		"zero_case_id":      strings.Replace(withCases, `"case_id": 41`, `"case_id": 0`, 1),
+		"dup_occurrence": strings.Replace(withCases, `[{"occurrence": 1, "case_id": 41}]`,
+			`[{"occurrence": 1, "case_id": 41}, {"occurrence": 1, "case_id": 42}]`, 1),
+	}
+	for name, doc := range bad {
+		if _, err := ParseReportManifest([]byte(doc)); err == nil {
+			t.Fatalf("%s: invalid case bindings accepted", name)
+		}
 	}
 }

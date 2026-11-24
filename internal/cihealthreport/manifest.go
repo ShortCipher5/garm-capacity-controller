@@ -35,6 +35,14 @@ type ReportManifestJob struct {
 	Retry uint16 // zero is a known initial execution of this shard
 }
 
+// ReportManifestCase binds one occurrence in the extracted report to a
+// reviewer-established numeric case identity. Case IDs never come from
+// report names, class names or files; unbound occurrences stay summary-only.
+type ReportManifestCase struct {
+	Occurrence int
+	CaseID     int64
+}
+
 // ReportManifestArtifact pins one artifact's bytes and, only when the
 // producer is independently proved, its extracted report entry.
 type ReportManifestArtifact struct {
@@ -49,6 +57,9 @@ type ReportManifestArtifact struct {
 	EntryName   string
 	EntryBytes  int64
 	EntrySHA256 [sha256.Size]byte
+	// Cases is populated exactly when Job is non-nil; empty means the
+	// reviewer bound no case identities and only summaries are retained.
+	Cases []ReportManifestCase
 }
 
 // ReportManifest is one exact attempt's reviewed claim set. It binds the
@@ -98,19 +109,25 @@ type reportManifestWire struct {
 }
 
 type reportManifestArtifactWire struct {
-	ArtifactID    int64                  `json:"artifact_id"`
-	ArchiveBytes  int64                  `json:"archive_bytes"`
-	ArchiveSHA256 string                 `json:"archive_sha256"`
-	Job           *reportManifestJobWire `json:"job"`
-	EntryName     string                 `json:"entry_name"`
-	EntryBytes    int64                  `json:"entry_bytes"`
-	EntrySHA256   string                 `json:"entry_sha256"`
+	ArtifactID    int64                    `json:"artifact_id"`
+	ArchiveBytes  int64                    `json:"archive_bytes"`
+	ArchiveSHA256 string                   `json:"archive_sha256"`
+	Job           *reportManifestJobWire   `json:"job"`
+	EntryName     string                   `json:"entry_name"`
+	EntryBytes    int64                    `json:"entry_bytes"`
+	EntrySHA256   string                   `json:"entry_sha256"`
+	Cases         []reportManifestCaseWire `json:"cases"`
 }
 
 type reportManifestJobWire struct {
 	JobID int64  `json:"job_id"`
 	Shard string `json:"shard"`
 	Retry uint16 `json:"retry"`
+}
+
+type reportManifestCaseWire struct {
+	Occurrence int   `json:"occurrence"`
+	CaseID     int64 `json:"case_id"`
 }
 
 func (w reportManifestWire) validate() (ReportManifest, bool) {
@@ -154,9 +171,9 @@ func (w reportManifestArtifactWire) validate() (ReportManifestArtifact, manifest
 	}
 	row := ReportManifestArtifact{ArtifactID: w.ArtifactID, ArchiveBytes: w.ArchiveBytes, ArchiveSHA256: archive}
 	if w.Job == nil {
-		// A run-only row pins the archive only; entry claims without a
-		// producer proof are inconsistent, not a partial proof.
-		if w.EntryName != "" || w.EntryBytes != 0 || w.EntrySHA256 != "" {
+		// A run-only row pins the archive only; entry or case claims without
+		// a producer proof are inconsistent, not a partial proof.
+		if w.EntryName != "" || w.EntryBytes != 0 || w.EntrySHA256 != "" || len(w.Cases) != 0 {
 			return fail()
 		}
 		return row, manifestSlot{}, true
@@ -170,7 +187,33 @@ func (w reportManifestArtifactWire) validate() (ReportManifestArtifact, manifest
 	}
 	row.Job = &ReportManifestJob{JobID: w.Job.JobID, Shard: w.Job.Shard, Retry: w.Job.Retry}
 	row.EntryName, row.EntryBytes, row.EntrySHA256 = w.EntryName, w.EntryBytes, entry
+	cases, ok := validateManifestCases(w.Cases)
+	if !ok {
+		return fail()
+	}
+	row.Cases = cases
 	return row, manifestSlot{w.Job.Shard, w.Job.Retry}, true
+}
+
+// validateManifestCases bounds reviewer-bound case identities: positive IDs,
+// in-range occurrences, no repeated occurrence per artifact row.
+func validateManifestCases(wire []reportManifestCaseWire) ([]ReportManifestCase, bool) {
+	if len(wire) == 0 {
+		return nil, true
+	}
+	if len(wire) > MaxCases {
+		return nil, false
+	}
+	out := make([]ReportManifestCase, 0, len(wire))
+	seen := make(map[int]bool, len(wire))
+	for _, c := range wire {
+		if c.Occurrence <= 0 || c.Occurrence > MaxCases || c.CaseID <= 0 || seen[c.Occurrence] {
+			return nil, false
+		}
+		seen[c.Occurrence] = true
+		out = append(out, ReportManifestCase{Occurrence: c.Occurrence, CaseID: c.CaseID})
+	}
+	return out, true
 }
 
 func manifestSHA256(s string) ([sha256.Size]byte, bool) {

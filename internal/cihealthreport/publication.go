@@ -11,10 +11,22 @@ import (
 
 var ErrReportStore = errors.New("report publication store refused")
 
+// StoredCaseObservation is one bounded per-case observation retained with
+// its report. Case identity is the reviewer-bound numeric ID; report names,
+// classes and files are never retained.
+type StoredCaseObservation struct {
+	CaseID     int64
+	Occurrence int
+	Outcome    Outcome
+	Timed      bool
+	Duration   time.Duration
+}
+
 // StoredReport is the durable, display-safe projection of one proved
 // job-level report. Pins are retained only to enforce idempotency and to
 // reject cross-attempt reuse; they are never rendered. Report bodies, labels,
-// logs and URLs are not retained.
+// logs and URLs are not retained. Cases stays empty for summary-only
+// reports that bound no reviewer case identities.
 type StoredReport struct {
 	ArtifactID    int64
 	JobID         int64
@@ -28,6 +40,7 @@ type StoredReport struct {
 	// TotalTimedDuration is the exact sum of timed case durations, so
 	// aggregate sample means stay exact across reports.
 	TotalTimedDuration time.Duration
+	Cases              []StoredCaseObservation
 }
 
 // StoredMetadata is one run-only artifact retained as metadata. It carries
@@ -75,12 +88,17 @@ func NewPublication(in IngestedReports) (Publication, error) {
 				total += c.Duration
 			}
 		}
+		cases, ok := storedCaseObservations(proved.Cases)
+		if !ok {
+			return Publication{}, ErrReportIngest
+		}
 		out.Attempt = p.Attempt
 		out.Reports = append(out.Reports, StoredReport{
 			ArtifactID: p.ArtifactID, JobID: p.Job.JobID, Shard: p.Shard, Retry: *p.Retry,
 			ArchiveSHA256: p.ArchiveSHA256, EntrySHA256: p.EntrySHA256,
 			Totals: summary.Totals, Timed: summary.Timed, Mean: summary.Mean, P95: summary.P95,
 			TotalTimedDuration: total,
+			Cases:              cases,
 		})
 	}
 	for _, metadata := range in.Metadata {
@@ -96,6 +114,33 @@ func NewPublication(in IngestedReports) (Publication, error) {
 		return Publication{}, ErrReportIngest
 	}
 	return out, nil
+}
+
+// storedCaseObservations validates and converts reviewer-bound case
+// observations into their retained form. Anything invalid refuses the
+// publication rather than silently dropping cases.
+func storedCaseObservations(in []BoundCaseObservation) ([]StoredCaseObservation, bool) {
+	if len(in) == 0 {
+		return nil, true
+	}
+	out := make([]StoredCaseObservation, 0, len(in))
+	seen := make(map[int]bool, len(in))
+	for _, c := range in {
+		if c.CaseID <= 0 || c.Occurrence <= 0 || c.Occurrence > MaxCases || seen[c.Occurrence] ||
+			c.Duration < 0 || c.Duration > MaxDuration || !c.Timed && c.Duration != 0 {
+			return nil, false
+		}
+		switch c.Outcome {
+		case Pass, Failure, Error, Skipped:
+		default:
+			return nil, false
+		}
+		seen[c.Occurrence] = true
+		out = append(out, StoredCaseObservation{
+			CaseID: c.CaseID, Occurrence: c.Occurrence, Outcome: c.Outcome, Timed: c.Timed, Duration: c.Duration,
+		})
+	}
+	return out, true
 }
 
 // SaveResult reports whether a save created a new record or returned the

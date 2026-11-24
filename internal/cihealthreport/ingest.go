@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/cihealth"
 )
@@ -40,10 +41,24 @@ type IngestInput struct {
 
 // ProvedReport is one job-level report whose producer, shard, retry and
 // exact bytes were independently established. Only these may drive
-// test-level results.
+// test-level results. Cases carries the reviewer-bound per-case observations
+// when the manifest bound case identities; it stays empty for
+// summary-only reports.
 type ProvedReport struct {
 	Provenance ReportProvenance
 	Report     Report
+	Cases      []BoundCaseObservation
+}
+
+// BoundCaseObservation is one reviewer-bound per-case observation from a
+// proved report. Case identity is the reviewer's numeric ID; report names,
+// classes and files are never retained.
+type BoundCaseObservation struct {
+	CaseID     int64
+	Occurrence int
+	Outcome    Outcome
+	Timed      bool
+	Duration   time.Duration
 }
 
 // MetadataReport is one run-only artifact retained as metadata. It carries
@@ -138,7 +153,11 @@ func IngestReports(ctx context.Context, in IngestInput) (IngestedReports, error)
 		if err != nil {
 			return fail()
 		}
-		out.Proved = append(out.Proved, ProvedReport{Provenance: p, Report: report})
+		bound, ok := boundCaseObservations(report, row.Cases)
+		if !ok {
+			return fail()
+		}
+		out.Proved = append(out.Proved, ProvedReport{Provenance: p, Report: report, Cases: bound})
 	}
 	if ctx.Err() != nil {
 		return fail()
@@ -146,6 +165,31 @@ func IngestReports(ctx context.Context, in IngestInput) (IngestedReports, error)
 	slices.SortFunc(out.Proved, func(a, b ProvedReport) int { return cmp.Compare(a.Provenance.ArtifactID, b.Provenance.ArtifactID) })
 	slices.SortFunc(out.Metadata, func(a, b MetadataReport) int { return cmp.Compare(a.Provenance.ArtifactID, b.Provenance.ArtifactID) })
 	return out, nil
+}
+
+// boundCaseObservations projects reviewer-bound case identities onto the
+// exact parsed occurrences. An occurrence outside the report refuses the
+// whole ingestion: a binding that cannot be located is not a partial proof.
+func boundCaseObservations(report Report, bindings []ReportManifestCase) ([]BoundCaseObservation, bool) {
+	if len(bindings) == 0 {
+		return nil, true
+	}
+	cases := report.Cases()
+	out := make([]BoundCaseObservation, 0, len(bindings))
+	for _, binding := range bindings {
+		if binding.Occurrence <= 0 || binding.Occurrence > len(cases) || binding.CaseID <= 0 {
+			return nil, false
+		}
+		c := cases[binding.Occurrence-1]
+		if c.Occurrence != binding.Occurrence {
+			return nil, false
+		}
+		out = append(out, BoundCaseObservation{
+			CaseID: binding.CaseID, Occurrence: binding.Occurrence,
+			Outcome: c.Outcome, Timed: c.Timed, Duration: c.Duration,
+		})
+	}
+	return out, true
 }
 
 // valid re-checks a manifest value independent of how it was decoded, so a
@@ -173,14 +217,35 @@ func (m ReportManifest) valid() bool {
 		if !p.valid() || artifacts[row.ArtifactID] {
 			return false
 		}
-		artifacts[row.ArtifactID] = true
 		if row.Job != nil {
+			if !validManifestCases(row.Cases) {
+				return false
+			}
 			slot := manifestSlot{row.Job.Shard, row.Job.Retry}
 			if slots[slot] {
 				return false
 			}
 			slots[slot] = true
+		} else if len(row.Cases) != 0 {
+			return false
 		}
+		artifacts[row.ArtifactID] = true
+	}
+	return true
+}
+
+// validManifestCases re-checks reviewer-bound case identities for hand-built
+// manifests: positive IDs, in-range occurrences, no repeated occurrence.
+func validManifestCases(cases []ReportManifestCase) bool {
+	if len(cases) > MaxCases {
+		return false
+	}
+	seen := make(map[int]bool, len(cases))
+	for _, c := range cases {
+		if c.Occurrence <= 0 || c.Occurrence > MaxCases || c.CaseID <= 0 || seen[c.Occurrence] {
+			return false
+		}
+		seen[c.Occurrence] = true
 	}
 	return true
 }

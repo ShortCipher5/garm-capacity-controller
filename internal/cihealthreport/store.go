@@ -123,6 +123,19 @@ func validStoredPublication(pub StoredPublication) bool {
 			report.ArchiveSHA256 == ([sha256.Size]byte{}) || report.EntrySHA256 == ([sha256.Size]byte{}) || artifacts[report.ArtifactID] {
 			return false
 		}
+		occurrences := make(map[int]bool, len(report.Cases))
+		for _, c := range report.Cases {
+			if c.CaseID <= 0 || c.Occurrence <= 0 || c.Occurrence > MaxCases || len(report.Cases) > MaxCases ||
+				occurrences[c.Occurrence] || c.Duration < 0 || c.Duration > MaxDuration || !c.Timed && c.Duration != 0 {
+				return false
+			}
+			switch c.Outcome {
+			case Pass, Failure, Error, Skipped:
+			default:
+				return false
+			}
+			occurrences[c.Occurrence] = true
+		}
 		artifacts[report.ArtifactID] = true
 	}
 	for _, metadata := range pub.Metadata {
@@ -145,7 +158,7 @@ func (s *PublicationFileStore) SavePublication(ctx context.Context, pub Publicat
 	}
 	stored := StoredPublication{
 		Scope: pub.Scope, Attempt: pub.Attempt, ReceivedAt: s.now().UTC(),
-		Reports: slices.Clone(pub.Reports), Metadata: slices.Clone(pub.Metadata),
+		Reports: cloneStoredReports(pub.Reports), Metadata: slices.Clone(pub.Metadata),
 	}
 	if !validStoredPublication(stored) {
 		return fail()
@@ -164,7 +177,7 @@ func (s *PublicationFileStore) SavePublication(ctx context.Context, pub Publicat
 			return fail() // A changed claim for one exact attempt is a conflict.
 		}
 		existing := prior
-		existing.Reports = slices.Clone(prior.Reports)
+		existing.Reports = cloneStoredReports(prior.Reports)
 		existing.Metadata = slices.Clone(prior.Metadata)
 		return SaveResult{Record: existing, Created: false}, nil
 	}
@@ -225,7 +238,7 @@ func (s *PublicationFileStore) LoadPublication(_ context.Context, attempt ciheal
 	for _, pub := range s.state.Publications {
 		if pub.Attempt == attempt && !s.expired(pub.ReceivedAt) {
 			loaded := pub
-			loaded.Reports = slices.Clone(pub.Reports)
+			loaded.Reports = cloneStoredReports(pub.Reports)
 			loaded.Metadata = slices.Clone(pub.Metadata)
 			return loaded, true, nil
 		}
@@ -248,7 +261,7 @@ func (s *PublicationFileStore) LoadScopePublications(_ context.Context, scope ci
 			continue
 		}
 		loaded := pub
-		loaded.Reports = slices.Clone(pub.Reports)
+		loaded.Reports = cloneStoredReports(pub.Reports)
 		loaded.Metadata = slices.Clone(pub.Metadata)
 		out = append(out, loaded)
 	}
@@ -259,6 +272,16 @@ func (s *PublicationFileStore) LoadScopePublications(_ context.Context, scope ci
 		)
 	})
 	return out, true, nil
+}
+
+// cloneStoredReports copies report rows and their per-case slices so callers
+// cannot mutate retained state through shared backing arrays.
+func cloneStoredReports(in []StoredReport) []StoredReport {
+	out := slices.Clone(in)
+	for i := range out {
+		out[i].Cases = slices.Clone(out[i].Cases)
+	}
+	return out
 }
 
 // Close releases the store. It is idempotent and never writes on close.
