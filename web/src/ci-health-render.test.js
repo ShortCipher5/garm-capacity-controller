@@ -44,7 +44,7 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     ]};
     const previous = {...common, attempt: "1", status: "completed", jobs: []};
     const snapshot = {state: "observed", observed_at: observed, timing: {attempts: [first, previous]}};
-    const render = (value, at = now) => renderToStaticMarkup(React.createElement(CIHealthTiming, {snapshot: value, now: at}));
+    const render = (value, at = now) => renderToStaticMarkup(React.createElement(CIHealthTiming, {snapshot: value, now: at, openRun: () => {}}));
     const html = render(snapshot);
     assert.match(html, /Active jobs in this snapshot/);
     assert.match(html, /Queued jobs \(1 observed\)/);
@@ -83,6 +83,14 @@ test("native timing shows only verified evidence and explicitly guarded navigati
     delete olderJob.creation_to_start;
     const older = render({...snapshot, timing: {attempts: [{...first, jobs: [olderJob]}, previous]}});
     assert.match(older, /<dt>Job creation to start<\/dt><dd><span class="muted">Unknown<\/span><\/dd>/);
+
+    // Exact run navigation exists only as a verified handle: the snapshot
+    // never carries a destination, and an attempt without a handle renders
+    // no control rather than an inferred link.
+    assert.doesNotMatch(html, /Open exact run on GitHub/);
+    const runHandled = render({...snapshot, timing: {attempts: [{...first, run_link_handle: "A".repeat(43)}, previous]}});
+    assert.match(runHandled, /Open exact run on GitHub/);
+    assert.doesNotMatch(runHandled, /https:\/\/github\.com/);
 
     assert.match(html, /Step 2/);
     assert.match(html, /Step 7/);

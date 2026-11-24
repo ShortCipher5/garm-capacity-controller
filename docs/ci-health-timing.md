@@ -107,7 +107,12 @@ focus the numbered row in the same snapshot, without another request.
 
 For exact observed jobs on a supported GitHub.com enrollment, **Open exact
 job on GitHub** rechecks the original observation and local reader at click
-time through the same owner-authenticated CI Health route. The snapshot
+time through the same owner-authenticated CI Health route. **Open exact run
+on GitHub** works the same way for the logical workflow-run destination of an
+exact observed attempt: the snapshot carries only an opaque handle, the
+lookup mints the canonical run URL only while the observation and reader
+remain current, and an attempt without a supported, current locator renders
+the navigation as unavailable rather than inferring a destination. The snapshot
 contains only temporary in-memory handles, not job destinations. No GitHub
 request is made by this lookup; opening a destination still requires the
 browser user's own GitHub access. Reload the timing snapshot if a handle

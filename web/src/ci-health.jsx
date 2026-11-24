@@ -1,5 +1,5 @@
 import React, {useEffect, useId, useRef, useState} from "react";
-import {ciAttemptKey, ciHealthExpiry, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, qualifiedCIJobURL, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciAttemptKey, ciHealthExpiry, ciHealthLease, ciHealthLeaseRemaining, ciHistoryLease, ciJobKey, ciStepKey, qualifiedCIJobURL, qualifiedCIRunURL, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {ciHealthWorkflowCounts, ciWorkflowKey} from "./ci-health-counts.js";
 import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
@@ -98,10 +98,11 @@ function JobRow({attempt, job, jobId, stepId, openJob}) {
     </li>
   );
 }
-function AttemptRow({attempt: a, jobId, stepId, openJob}) {
+function AttemptRow({attempt: a, jobId, stepId, openJob, openRun}) {
   return (
     <details className="ci-health-attempt" data-ci-attempt="" open={activeAttempt(a) || undefined}>
-      <summary><strong>Run <code>{a.run_id}</code>, attempt <code>{a.attempt}</code></strong> <Phase status={a.status} /></summary>
+      <summary><strong>Run <code>{a.run_id}</code>, attempt <code>{a.attempt}</code></strong> <Phase status={a.status} />
+        {a.run_link_handle && openRun && <button type="button" onClick={() => openRun(a)}>Open exact run on GitHub</button>}</summary>
       <dl className="ci-health-facts">
         <div><dt>Repository ID</dt><dd><code>{a.repository_id}</code></dd></div>
         <div><dt>Workflow ID</dt><dd><code>{a.workflow_id}</code></dd></div>
@@ -262,7 +263,7 @@ function RetainedWorkflowCoverage({groups, history}) {
   </>;
 }
 
-export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHistory = false, openJob}) {
+export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHistory = false, openJob, openRun}) {
   const prefix = useId();
   const root = useRef(null);
   const groups = ciHealthWorkflowCounts(snapshot, now);
@@ -307,9 +308,9 @@ export function CIHealthTiming({snapshot, now = Date.now(), canNavigate, showHis
         </>}
         <LongestSteps attempts={attempts} stepId={stepId} viewStep={viewStep} />
         <h3>Active attempts at observation</h3>
-        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} />) : <p>No active attempts in this snapshot.</p>}
+        {active.length ? active.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} openRun={openRun} />) : <p>No active attempts in this snapshot.</p>}
         <h3>Other observed attempts</h3>
-        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} />) : <p>No other attempts in this snapshot.</p>}
+        {other.length ? other.map((a) => <AttemptRow key={ciAttemptKey(a)} attempt={a} jobId={jobId} stepId={stepId} openJob={openJob} openRun={openRun} />) : <p>No other attempts in this snapshot.</p>}
       </>}
     </div>
   );
@@ -322,6 +323,7 @@ export function CIHealthPanel({enabled, read}) {
   const [view, setView] = useState(null);
   const request = useRef(null);
   const jobRequest = useRef(null);
+  const runRequest = useRef(null);
   const owner = useRef(null);
   const [jobStatus, setJobStatus] = useState("");
   const refreshGeneration = useRef(0);
@@ -338,6 +340,8 @@ export function CIHealthPanel({enabled, read}) {
     request.current = null;
     jobRequest.current?.abort();
     jobRequest.current = null;
+    runRequest.current?.abort();
+    runRequest.current = null;
   }, [available, read]);
 
   useEffect(() => {
@@ -348,6 +352,7 @@ export function CIHealthPanel({enabled, read}) {
       const remaining = ciHealthLeaseRemaining(snapshot, lease);
       if (remaining < 1) {
         jobRequest.current?.abort();
+        runRequest.current?.abort();
         setView((current) => current?.lease === lease ? {owner: current.owner, state: "expired"} : current);
       } else {
         timeout = setTimeout(expire, Math.floor(remaining));
@@ -410,10 +415,35 @@ export function CIHealthPanel({enabled, read}) {
     }
   }
 
+  async function openRun(a) {
+    if (!currentView() || !a.run_link_handle) return;
+    runRequest.current?.abort();
+    const controller = new AbortController();
+    runRequest.current = controller;
+    const active = () => runRequest.current === controller && !controller.signal.aborted && currentView();
+    const runLink = {
+      handle: a.run_link_handle, source: a.source, repository_id: a.repository_id,
+      workflow_id: a.workflow_id, run_id: a.run_id, attempt: a.attempt,
+    };
+    setJobStatus("Resolving exact GitHub run…");
+    try {
+      const raw = await read({signal: controller.signal, runLink});
+      if (!active()) return;
+      const href = qualifiedCIRunURL(raw, runLink.run_id);
+      if (href) window.location.assign(href);
+      else setJobStatus("GitHub run destination unavailable. Load a fresh timing snapshot.");
+    } catch {
+      if (active()) setJobStatus("GitHub run destination unavailable. Load a fresh timing snapshot.");
+    } finally {
+      if (runRequest.current === controller) runRequest.current = null;
+    }
+  }
+
   async function refresh() {
     if (!available) return;
     request.current?.abort();
     jobRequest.current?.abort();
+    runRequest.current?.abort();
     setJobStatus("");
     const generation = ++refreshGeneration.current;
     const controller = new AbortController();
@@ -459,7 +489,7 @@ export function CIHealthPanel({enabled, read}) {
       {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && jobStatus && <p role="status">{jobStatus}</p>}
       {snapshot && ciHealthLeaseRemaining(snapshot, lease) > 0 && <CIHealthTiming key={current.generation} snapshot={snapshot}
         showHistory={ciHealthLeaseRemaining(snapshot, historyLease) > 0}
-        openJob={openJob} canNavigate={currentView} />}
+        openJob={openJob} openRun={openRun} canNavigate={currentView} />}
     </section>
   );
 }
