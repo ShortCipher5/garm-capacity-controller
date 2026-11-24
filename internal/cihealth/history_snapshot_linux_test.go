@@ -761,3 +761,94 @@ func TestSnapshotHistoryPurgesExpiredVersionsByObservationTime(t *testing.T) {
 		t.Fatalf("reading at an older wall resurrected purged data: %+v, %v", rows, err)
 	}
 }
+
+// Versions of different attempts interleave in the stored newest-first order.
+// At the attempt limit the scan must still return every retained version of
+// each selected attempt, never a partial group cut off at the limit.
+func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtAttemptLimit(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	now := base.Add(5 * time.Minute)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	aNew := snapAttempt(s, 30, 1, base.Add(4*time.Minute))
+	b := snapAttempt(s, 31, 1, base.Add(3*time.Minute))
+	c := snapAttempt(s, 32, 1, base.Add(2*time.Minute))
+	aOld := snapAttempt(s, 30, 1, base.Add(time.Minute))
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{aOld, c}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{aNew, b}, now); err != nil {
+		t.Fatal(err)
+	}
+	p, err := h.RecentPrefix(t.Context(), s, 2, now)
+	if err != nil || p.Limited != HistorySelectionAttemptLimit || len(p.Attempts) != 3 {
+		t.Fatalf("expected two complete groups with the third reported limited: %+v, %v", p, err)
+	}
+	versions := map[int64]int{}
+	for _, row := range p.Attempts {
+		versions[row.Key.RunID]++
+		if row.Key.RunID == 32 {
+			t.Fatal("unselected attempt leaked into the selection")
+		}
+	}
+	if versions[30] != 2 || versions[31] != 1 {
+		t.Fatalf("interleaved older version of a selected attempt was dropped: %+v", p.Attempts)
+	}
+	rows, err := h.Recent(t.Context(), s, 2, now)
+	if err != nil || len(rows) != 3 || rows[2].Key.RunID != 30 || !rows[2].AsOf.Equal(base.Add(time.Minute)) {
+		t.Fatalf("strict bounded read did not return the complete groups: %+v, %v", rows, err)
+	}
+}
+
+// At the record limit a group that does not fit stops the selection, but
+// older versions of already selected attempts that sort after it must still
+// be included: the limit never splits a selected group.
+func TestSnapshotHistoryRecentPrefixInterleavedVersionsAtRecordLimit(t *testing.T) {
+	_, root := snapshotRoot(t)
+	h := snapshotOpen(t, root, true)
+	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	now := base.Add(5 * time.Minute)
+	s := HistoryScope{"fixture", 9007199254740993, 44}
+	small := func(run int64, at time.Time) AttemptFacts {
+		return sizedSnapAttempt(s, run, at, 100, 396) // 497 records.
+	}
+	big := sizedSnapAttempt(s, 99, base.Add(3*time.Minute), 1000, 9900) // 10,901 records.
+	aNew := small(30, base.Add(4*time.Minute))
+	c := small(32, base.Add(2*time.Minute))
+	aOld := small(30, base.Add(time.Minute))
+	if records := historyRecordCount(big); 2*historyRecordCount(aNew)+records > historyMaxPageRecords ||
+		2*historyRecordCount(aNew)+records+historyRecordCount(c) <= historyMaxPageRecords {
+		t.Fatalf("fixture no longer brackets the record budget: %d", records)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{}, HistoryCursor{1, 1}, []AttemptFacts{aOld, c}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Apply(t.Context(), s, HistoryCursor{1, 1}, HistoryCursor{2, 2}, []AttemptFacts{aNew, big}, now); err != nil {
+		t.Fatal(err)
+	}
+	p, err := h.RecentPrefix(t.Context(), s, 64, now)
+	if err != nil || p.Limited != HistorySelectionRecordLimit || len(p.Attempts) != 3 {
+		t.Fatalf("expected two complete groups with the third reported limited: %+v, %v", p, err)
+	}
+	versions := map[int64]int{}
+	for _, row := range p.Attempts {
+		versions[row.Key.RunID]++
+		if row.Key.RunID == 32 {
+			t.Fatal("unselected attempt leaked into the selection")
+		}
+	}
+	if versions[30] != 2 || versions[99] != 1 {
+		t.Fatalf("interleaved older version of a selected attempt was dropped: %+v", p.Attempts)
+	}
+	before, err := os.ReadFile(filepath.Join(root.Name(), historyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RecentPrefix(t.Context(), s, 64, now); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := os.ReadFile(filepath.Join(root.Name(), historyFile)); err != nil || !bytes.Equal(before, after) {
+		t.Fatal("bounded selection changed retained snapshot bytes", err)
+	}
+}

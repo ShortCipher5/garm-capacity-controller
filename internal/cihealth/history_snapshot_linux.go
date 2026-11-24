@@ -705,12 +705,13 @@ func (h *History) Recent(ctx context.Context, s HistoryScope, limit int, now tim
 	return p.Attempts, err
 }
 
-// RecentPrefix is the bounded aggregate read. It returns newest first, stops
-// before the first whole attempt that does not fit, and never skips one to
-// backfill a smaller older attempt. Every retained observation version of a
-// selected attempt is included, and the record budget counts all of them.
-// Only this surface treats excess matching data as a partial selection rather
-// than a storage error.
+// RecentPrefix is the bounded aggregate read. It selects whole attempt
+// groups first, newest first, stops before the first group that would exceed
+// the attempt or record limit, and never skips one to backfill a smaller
+// older group. Every retained observation version of a selected attempt is
+// included even when versions of different attempts interleave in the stored
+// order, and the record budget counts all of them. Only this surface treats
+// excess matching data as a partial selection rather than a storage error.
 func (h *History) RecentPrefix(ctx context.Context, s HistoryScope, limit int, now time.Time) (HistoryRecentPrefix, error) {
 	return h.recent(ctx, s, limit, now, true)
 }
@@ -726,20 +727,13 @@ func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now tim
 	if !h.available(ctx) {
 		return HistoryRecentPrefix{}, ErrHistory
 	}
+	// First pass: eligible attempts in newest-first order with the combined
+	// record count of every retained version. Versions of one attempt can
+	// interleave with other attempts in the global order, so selection and
+	// emission are separate: a group is either fully included or not selected.
+	order := make([]AttemptKey, 0, limit)
+	seen := make(map[AttemptKey]bool, limit)
 	records := make(map[AttemptKey]int, limit)
-	for _, a := range h.state.Attempts {
-		if !historyActive(ctx) {
-			return HistoryRecentPrefix{}, ErrHistory
-		}
-		if !a.AsOf.After(cutoff) {
-			break
-		}
-		if !a.AsOf.After(now) && historyScope(a.Key) == s {
-			records[a.Key] += historyRecordCount(a)
-		}
-	}
-	out := HistoryRecentPrefix{Attempts: make([]AttemptFacts, 0, limit)}
-	used, selected := 0, make(map[AttemptKey]bool, limit)
 	for _, a := range h.state.Attempts {
 		if !historyActive(ctx) {
 			return HistoryRecentPrefix{}, ErrHistory
@@ -750,20 +744,38 @@ func (h *History) recent(ctx context.Context, s HistoryScope, limit int, now tim
 		if a.AsOf.After(now) || historyScope(a.Key) != s {
 			continue
 		}
-		if !selected[a.Key] {
-			if len(selected) == limit {
-				out.Limited = HistorySelectionAttemptLimit
-				break
+		if !seen[a.Key] {
+			seen[a.Key] = true
+			order = append(order, a.Key)
+		}
+		records[a.Key] += historyRecordCount(a)
+	}
+	out := HistoryRecentPrefix{Attempts: make([]AttemptFacts, 0, limit)}
+	used, selected := 0, make(map[AttemptKey]bool, limit)
+	for _, key := range order {
+		if len(selected) == limit {
+			out.Limited = HistorySelectionAttemptLimit
+			break
+		}
+		if n := records[key]; n > historyMaxPageRecords-used {
+			if !prefix {
+				return HistoryRecentPrefix{}, ErrHistory
 			}
-			if n := records[a.Key]; n > historyMaxPageRecords-used {
-				if !prefix {
-					return HistoryRecentPrefix{}, ErrHistory
-				}
-				out.Limited = HistorySelectionRecordLimit
-				break
-			}
-			selected[a.Key] = true
-			used += records[a.Key]
+			out.Limited = HistorySelectionRecordLimit
+			break
+		}
+		selected[key] = true
+		used += records[key]
+	}
+	for _, a := range h.state.Attempts {
+		if !historyActive(ctx) {
+			return HistoryRecentPrefix{}, ErrHistory
+		}
+		if !a.AsOf.After(cutoff) {
+			break
+		}
+		if a.AsOf.After(now) || !selected[a.Key] {
+			continue
 		}
 		row, err := historyCopyAttempt(a)
 		if err != nil {
