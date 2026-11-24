@@ -142,3 +142,14 @@ func canonicalDigest(value any) string {
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
 }
+
+// VolumeBindingDigest is the canonical, independently recomputable binding of
+// one exact charged volume to the enrolled provider scope. Assemblers and the
+// ledger derive it from recorded identity facts; a caller-supplied digest
+// that does not recompute from the enrolled scope and exact name never
+// validates.
+func VolumeBindingDigest(scopeFingerprint, name string) string {
+	return canonicalDigest(struct {
+		Scope, Name string
+	}{scopeFingerprint, name})
+}

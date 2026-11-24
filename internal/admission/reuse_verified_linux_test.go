@@ -214,7 +214,8 @@ func (f *reuseFixture) buildCharge(t *testing.T, registration stockjit.Observati
 		t.Fatal(err)
 	}
 	f.stock = stock
-	volumes := []reuse.VolumeCharge{{Name: f.creation.Observation.Identity.Subject.Name, BindingDigest: evidenceDigest([]byte("volume\x00" + f.creation.Observation.Identity.Subject.Name))}}
+	subject := f.creation.Observation.Identity.Subject
+	volumes := []reuse.VolumeCharge{{Name: subject.Name, BindingDigest: reuse.VolumeBindingDigest(subject.ScopeFingerprint, subject.Name)}}
 	charge, err := ChargeFromCreation(f.request, f.creation, stock, volumes)
 	if err != nil {
 		t.Fatal(err)

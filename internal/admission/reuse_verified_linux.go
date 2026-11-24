@@ -124,8 +124,11 @@ func anchoredCharge(req Request, creation CreateEvidence, stock reuse.StockBindi
 // ChargeFromCreation validates the original-charge anchor: the exact
 // reservation, the authenticated original-create incarnation and the stock
 // registration must all bind. Volumes are the applicable exact charged
-// allocation supplied by the trusted assembler; they are validated, never
-// discovered here.
+// allocation: today the ledger independently records exactly the instance
+// root identity, so each volume must be that recorded root volume and its
+// binding digest must recompute from the enrolled scope and exact name.
+// Allocation beyond the recorded root identity is a documented follow-up and
+// never validates by convenience.
 func ChargeFromCreation(req Request, creation CreateEvidence, stock reuse.StockBinding, volumes []reuse.VolumeCharge) (reuse.ChargeIdentity, error) {
 	subject := creation.Observation.Identity.Subject
 	if creation.Request != req || subject.ReservationKey != req.Key || !validCreateEvidence(creation) {
@@ -134,11 +137,53 @@ func ChargeFromCreation(req Request, creation CreateEvidence, stock reuse.StockB
 	if stock.ControllerID != subject.ControllerID || stock.PoolID != subject.PoolID || stock.RunnerName != subject.Name {
 		return reuse.ChargeIdentity{}, ErrReuseEvidence
 	}
+	for _, volume := range volumes {
+		if volume.Name != subject.Name || volume.BindingDigest != reuse.VolumeBindingDigest(subject.ScopeFingerprint, subject.Name) {
+			return reuse.ChargeIdentity{}, ErrReuseEvidence
+		}
+	}
 	charge := anchoredCharge(req, creation, stock, volumes)
 	if !charge.Valid() {
 		return reuse.ChargeIdentity{}, ErrReuseEvidence
 	}
 	return charge, nil
+}
+
+// validateRecordedAllocations binds delivered evidence to the independently
+// recorded identities before any dimension is credited: the runner identity
+// recorded at dispatch, the exact volume identity derived from the enrolled
+// scope, and the immutable incarnation fingerprint pinned by the durable
+// retirement intent. Every mismatch keeps the full charge.
+func validateRecordedAllocations(tx *sql.Tx, req Request, creation CreateEvidence, intent RetirementIntent, charge reuse.ChargeIdentity, evidence reuse.TerminalEvidence) error {
+	subject := creation.Observation.Identity.Subject
+	if intent.Creation.Observation.Identity.SubjectFingerprint != creation.Observation.Identity.SubjectFingerprint {
+		return ErrReuseEvidence
+	}
+	dispatch, _, err := dispatchRecord(tx, req.Key)
+	if err != nil {
+		return err
+	}
+	if dispatch.ResourceID == "" || dispatch.ResourceID != subject.Name || dispatch.ResourceID != charge.Incarnation.Name || dispatch.ResourceID != evidence.Charge.Incarnation.Name {
+		return ErrReuseEvidence
+	}
+	if charge.Incarnation.Name != subject.Name || charge.Incarnation.UUID != subject.UUID ||
+		charge.Incarnation.Generation != subject.Generation || !charge.Incarnation.CreatedAt.Equal(subject.CreatedAt) ||
+		intent.Creation.Observation.Identity.Subject != subject {
+		return ErrReuseEvidence
+	}
+	if evidence.Charge.Ref.Key != req.Key || evidence.Charge.Ref.Pool != req.Pool || evidence.Charge.Ref.Host != req.Host {
+		return ErrReuseEvidence
+	}
+	if evidence.Teardown != nil && evidence.Teardown.Valid() &&
+		evidence.Teardown.Identity.SubjectFingerprint != intent.Creation.Observation.Identity.SubjectFingerprint {
+		return ErrReuseEvidence
+	}
+	for _, volume := range charge.Volumes {
+		if volume.Name != dispatch.ResourceID || volume.BindingDigest != reuse.VolumeBindingDigest(subject.ScopeFingerprint, volume.Name) {
+			return ErrReuseEvidence
+		}
+	}
+	return nil
 }
 
 // remainingCharge subtracts qualified dimensions from a charge. An
@@ -239,6 +284,9 @@ func (s *SQLiteStore) ReleaseVerified(ctx context.Context, req Request, evidence
 			return err
 		}
 		charge := anchoredCharge(req, creation, evidence.Charge.Stock, evidence.Charge.Volumes)
+		if err := validateRecordedAllocations(tx, req, creation, intent, charge, evidence); err != nil {
+			return err
+		}
 		verdict := reuse.Assess(charge, []reuse.TerminalEvidence{evidence})
 		if !verdict.Releasable.Any() {
 			// Every missing, conflicting, distinct-charge or unverified

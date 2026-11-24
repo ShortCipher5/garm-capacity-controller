@@ -65,7 +65,7 @@ func reuseTestCharge() ChargeIdentity {
 			Generation: subject.Generation,
 			CreatedAt:  subject.CreatedAt,
 		},
-		Volumes: []VolumeCharge{{Name: "runner-1", BindingDigest: reuseTestDigest('f')}},
+		Volumes: []VolumeCharge{{Name: "runner-1", BindingDigest: VolumeBindingDigest(reuseTestDigest('c'), "runner-1")}},
 	}
 }
 
