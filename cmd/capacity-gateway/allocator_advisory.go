@@ -15,7 +15,11 @@ type allocatorAdvisoryConfiguration struct {
 	RepositoryIDs       []string `json:"repository_ids"`
 	StockIdlePreview    bool     `json:"stock_idle_preview,omitempty"`
 	StockMaximumPreview bool     `json:"stock_maximum_preview,omitempty"`
-	IntervalSeconds     int      `json:"interval_seconds"`
+	// AllocatorProposal attaches the observe-only cross-repository allocation
+	// proposal to each cached read. It stays read-only: it never enables the
+	// allocator_loop writer path or any GARM write.
+	AllocatorProposal bool `json:"allocator_proposal,omitempty"`
+	IntervalSeconds   int  `json:"interval_seconds"`
 }
 
 func configuredAllocatorAdvisory(ctx context.Context, c configuration, store *admission.SQLiteStore) (*brokerinput.AdvisoryLoop, func(), error) {
@@ -27,7 +31,12 @@ func configuredAllocatorAdvisory(ctx context.Context, c configuration, store *ad
 	if err != nil {
 		return nil, noop, err
 	}
-	reader, err := brokerinput.NewAdvisoryReaderWithStockPreviews(store, source, c.AllocatorAdvisory.StockMaximumPreview, c.AllocatorAdvisory.StockIdlePreview)
+	var reader *brokerinput.AdvisoryReader
+	if c.AllocatorAdvisory.AllocatorProposal {
+		reader, err = brokerinput.NewAdvisoryReaderWithAllocatorProposal(store, source, c.AllocatorAdvisory.StockMaximumPreview, c.AllocatorAdvisory.StockIdlePreview)
+	} else {
+		reader, err = brokerinput.NewAdvisoryReaderWithStockPreviews(store, source, c.AllocatorAdvisory.StockMaximumPreview, c.AllocatorAdvisory.StockIdlePreview)
+	}
 	if err != nil {
 		source.Close()
 		return nil, noop, err

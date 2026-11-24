@@ -52,10 +52,10 @@ func TestRoutedStockSixOrdinaryPoolsShareProviderAndRetainedBudget(t *testing.T)
 		} // Off-route occupancy still consumes global capacity.
 		snapshot.Charges = append(snapshot.Charges, capacitybroker.Charge{ID: fingerprint, Pool: p, Host: host, Resources: unit})
 	}
-	routes := []verifiedStockProviderRoute{{source: source, provider: provider, host: "a", hostBindingSequence: 3, observedAt: opt.Now.Add(-time.Second)}}
+	routes := []VerifiedStockProviderRoute{{Source: source, Provider: provider, Host: "a", HostBindingSequence: 3, ObservedAt: opt.Now.Add(-time.Second)}}
 	original := append([]capacitybroker.Charge(nil), snapshot.Charges...)
 	full, expiry, err := planRoutedStockPreview(state, snapshot, observation, source, opt, routes)
-	if err != nil || !expiry.Equal(routes[0].observedAt.Add(opt.MaxAge)) || len(full.Assignments) != 0 || len(full.RemainingJobs) != 6 {
+	if err != nil || !expiry.Equal(routes[0].ObservedAt.Add(opt.MaxAge)) || len(full.Assignments) != 0 || len(full.RemainingJobs) != 6 {
 		t.Fatalf("one shared route must not multiply or erase retained global capacity: %+v %v %v", full, expiry, err)
 	}
 
