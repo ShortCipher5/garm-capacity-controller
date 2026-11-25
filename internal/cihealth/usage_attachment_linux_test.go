@@ -44,7 +44,7 @@ func (f *attachmentFixture) membership(t *testing.T, member bool) {
 	a := snapAttempt(scope, f.claim.Job.Attempt.RunID, f.claim.Job.Attempt.Attempt, at)
 	a.Jobs = nil
 	if member {
-		a.Jobs = []JobFacts{{Key: f.claim.Job, Clock: Clock{Phase: Completed, StartedAt: f.set.Scope.StartedAt, CompletedAt: f.set.Scope.EndAt, ObservedAt: at}}}
+		a.Jobs = []JobFacts{{Key: f.claim.Job, Clock: Clock{Phase: Completed, StartedAt: f.set.Scope.StartedAt, CompletedAt: at, ObservedAt: at}}}
 	}
 	if err := h.Apply(t.Context(), scope, cursor, HistoryCursor{Revision: cursor.Revision + 1}, []AttemptFacts{a}, at); err != nil {
 		t.Fatal(err)
@@ -333,5 +333,107 @@ func TestUsageAttachmentUninitializedAndUnrepresentableWireFailClosed(t *testing
 	}
 	if _, found, err := f.store.Read(t.Context(), f.claim.Job); err != nil || found {
 		t.Fatal(found, err)
+	}
+}
+
+func TestUsageAttachmentRejectsNewerEvidenceForDifferentWindowOrRunner(t *testing.T) {
+	for _, change := range []string{"window", "runner", "same window and runner"} {
+		t.Run(change, func(t *testing.T) {
+			f := newAttachmentFixture(t)
+			previous := f.attach(t)
+			f.offset.Store(int64(time.Second))
+			claim := f.claim
+			claim.Row.ObservedAt = f.clock()
+			claim.Origin.Row = claim.Row
+			claim.Execution.ObservedAt = f.clock()
+			if change == "runner" {
+				claim.Incarnation.Generation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+				claim.Origin.Incarnation = claim.Incarnation
+			}
+			fresh := usageFixtureSet(claim, f.clock(), MaxJobResourceGap)
+			if change == "window" {
+				fresh.Scope.EndAt = fresh.Scope.EndAt.Add(time.Second)
+				fresh.Closing.ObservedAt = fresh.Scope.EndAt
+			}
+			r := BuildVerifiedJobUsage(fixtureFullMatrix(), claim, fresh, f.clock())
+			if r.Measured == nil || !r.AsOf.After(previous.EvidenceAsOf) {
+				t.Fatal("fixture must supply a coherent newer observation")
+			}
+			err := f.store.Attach(t.Context(), claim, fresh)
+			stored, found, readErr := f.store.Read(t.Context(), claim.Job)
+			if !found || readErr != nil {
+				t.Fatal("lost original observation", readErr)
+			}
+			if change == "same window and runner" {
+				if err != nil || !stored.EvidenceAsOf.Equal(r.AsOf) {
+					t.Fatal("same-window update lost", err)
+				}
+			} else if !errors.Is(err, ErrUsageAttachmentConflict) || stored.Integrity != previous.Integrity {
+				t.Fatal("newer clock displaced a different window or runner", err)
+			}
+		})
+	}
+}
+
+func TestUsageAttachmentCancellationAndTimingHistoryCompatibility(t *testing.T) {
+	f := newAttachmentFixture(t)
+	readTiming := func() []byte {
+		raw, err := f.in.History.root.ReadFile(historyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	before := readTiming()
+	a := f.attach(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := f.store.Attach(ctx, f.claim, f.set); !errors.Is(err, ErrUsageAttachment) {
+		t.Fatal("canceled replay", err)
+	}
+	if _, found, err := f.store.Read(ctx, f.claim.Job); found || !errors.Is(err, ErrUsageAttachment) {
+		t.Fatal("canceled read", err)
+	}
+	if err := f.store.SetEnrolled(ctx, usageScopeOf(f.claim.Job), false); !errors.Is(err, ErrUsageAttachment) {
+		t.Fatal("canceled revocation", err)
+	}
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.open(t, false)
+	stored, found, err := f.store.Read(t.Context(), f.claim.Job)
+	if !found || err != nil || a.Integrity != stored.Integrity {
+		t.Fatal("canceled operation changed attachment", err)
+	}
+	if !bytes.Equal(before, readTiming()) {
+		t.Fatal("sidecar rewrote independently owned timing history")
+	}
+	if s, err := OpenUsageAttachments(t.Context(), UsageAttachmentInput{}); err != nil || s != nil {
+		t.Fatal("ordinary startup opened the sidecar", err)
+	}
+}
+
+func TestUsageAttachmentChecksLatestTimingEndpointsOnReadAndReplay(t *testing.T) {
+	f := newAttachmentFixture(t)
+	f.attach(t)
+	f.offset.Store(int64(time.Second))
+	history := f.in.History
+	scope := historyScope(f.claim.Job.Attempt)
+	row := snapAttempt(scope, f.claim.Job.Attempt.RunID, f.claim.Job.Attempt.Attempt, f.clock())
+	row.Jobs = []JobFacts{{Key: f.claim.Job, Clock: Clock{
+		Phase: Completed, StartedAt: f.set.Scope.StartedAt, CompletedAt: f.set.Scope.EndAt.Add(-time.Second), ObservedAt: f.clock(),
+	}}}
+	cursor, err := history.Cursor(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := history.Apply(t.Context(), scope, cursor, HistoryCursor{Revision: cursor.Revision + 1}, []AttemptFacts{row}, f.clock()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := f.store.Read(t.Context(), f.claim.Job); !errors.Is(err, ErrUsageAttachmentConflict) || found {
+		t.Fatal("latest completion contradicts retained usage", err)
+	}
+	if err := f.store.Attach(t.Context(), f.claim, f.set); !errors.Is(err, ErrUsageAttachmentConflict) {
+		t.Fatal("replay masked terminal cutoff", err)
 	}
 }

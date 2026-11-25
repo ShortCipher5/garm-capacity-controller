@@ -504,25 +504,31 @@ func (s *UsageAttachmentStore) SetEnrolled(ctx context.Context, scope UsageAttac
 // Callers hold the sidecar mutex followed by the timing history mutex. The
 // latest version alone defines row membership. A future version after a clock
 // regression also blocks reads, even if an older matching row exists.
-func (s *UsageAttachmentStore) authorized(ctx context.Context, job JobKey, now time.Time) bool {
+func (s *UsageAttachmentStore) currentJobClock(ctx context.Context, job JobKey, now time.Time) (Clock, bool) {
 	if !s.enrolled(usageScopeOf(job)) || !s.history.available(ctx) || !s.available(ctx) {
-		return false
+		return Clock{}, false
 	}
 	for _, attempt := range s.history.state.Attempts {
 		if attempt.Key != job.Attempt {
 			continue
 		}
 		if attempt.AsOf.After(now) || !attempt.AsOf.After(now.Add(-historyRetention)) {
-			return false
+			return Clock{}, false
 		}
 		for _, row := range attempt.Jobs {
 			if row.Key == job {
-				return true
+				return row.Clock, true
 			}
 		}
-		return false
+		return Clock{}, false
 	}
-	return false
+	return Clock{}, false
+}
+
+// A sparse latest row can establish membership without measuring execution.
+// Positive endpoints on that row must agree with the historical usage window.
+func timingAllowsUsageWindow(row Clock, start, end time.Time) bool {
+	return (row.StartedAt.IsZero() || row.StartedAt.Equal(start)) && (row.CompletedAt.IsZero() || !row.CompletedAt.Before(end))
 }
 
 func (s *UsageAttachmentStore) position(job JobKey) (int, bool) {
@@ -534,7 +540,8 @@ func (s *UsageAttachmentStore) position(job JobKey) (int, bool) {
 // Attach builds the display evidence internally from the exact verified
 // attribution and bounded sample window. No caller-supplied wire is accepted.
 // Replaying identical validated input retains its original evidence and
-// attachment times, including after a later read or restart.
+// attachment times, including after a later read or restart. A later
+// observation may update only the same runner and measured window.
 func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet) error {
 	if s == nil || len(set.Samples) > MaxJobResourceSamples {
 		return ErrUsageAttachment
@@ -547,8 +554,12 @@ func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionC
 	s.history.mu.Lock()
 	defer s.history.mu.Unlock()
 	now := s.now().UTC()
-	if !validTime(now) || !s.authorized(ctx, claim.Job, now) {
+	row, member := s.currentJobClock(ctx, claim.Job, now)
+	if !validTime(now) || !member {
 		return ErrUsageAttachment
+	}
+	if !timingAllowsUsageWindow(row, set.Scope.StartedAt, set.Scope.EndAt) {
+		return ErrUsageAttachmentConflict
 	}
 	if err := s.prune(ctx, now); err != nil {
 		return err
@@ -595,7 +606,9 @@ func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionC
 	}
 	rows := append([]UsageAttachment{}, s.state.Attachments...)
 	if exists {
-		if rows[pos].RunnerDigest != runner || !rows[pos].EvidenceAsOf.Before(next.EvidenceAsOf) {
+		old := rows[pos]
+		if old.RunnerDigest != runner || !old.WindowStart.Equal(next.WindowStart) ||
+			!old.WindowEnd.Equal(next.WindowEnd) || !old.EvidenceAsOf.Before(next.EvidenceAsOf) {
 			return ErrUsageAttachmentConflict
 		}
 		rows[pos] = next
@@ -631,7 +644,8 @@ func (s *UsageAttachmentStore) Read(ctx context.Context, job JobKey) (UsageAttac
 	s.history.mu.Lock()
 	defer s.history.mu.Unlock()
 	now := s.now().UTC()
-	if !validTime(now) || !s.authorized(ctx, job, now) {
+	row, member := s.currentJobClock(ctx, job, now)
+	if !validTime(now) || !member {
 		return UsageAttachment{}, false, ErrUsageAttachment
 	}
 	pos, exists := s.position(job)
@@ -639,6 +653,9 @@ func (s *UsageAttachmentStore) Read(ctx context.Context, job JobKey) (UsageAttac
 		return UsageAttachment{}, false, nil
 	}
 	a := s.state.Attachments[pos]
+	if !timingAllowsUsageWindow(row, a.WindowStart, a.WindowEnd) {
+		return UsageAttachment{}, false, ErrUsageAttachmentConflict
+	}
 	if a.AttachedAt.After(now) {
 		return UsageAttachment{}, false, ErrUsageAttachment
 	}
