@@ -246,7 +246,7 @@ type SlotReuseDecision struct {
 
 // ReleaseRetiredSlot is the guarded accounting transition for the exact
 // retired runner. One BEGIN IMMEDIATE transaction rechecks readiness,
-// observation freshness, the reconciliation epoch, the exact hold in state
+// observation freshness, the reconciliation epoch and its barrier time, the exact hold in state
 // 'deleting', the linked charged inventory row and any prior tombstone, then
 // removes the charge and writes the immutable release tombstone plus audit.
 // Identical evidence replay returns the prior decision with zero additional
@@ -343,6 +343,21 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		}
 		if !sqliteObservationsFresh(config, at) {
 			return ErrReconciliation
+		}
+		var timestamp string
+		if err := tx.QueryRowContext(ctx, "SELECT began_at FROM metadata WHERE id=1").Scan(&timestamp); err != nil {
+			return err
+		}
+		beganAt, err := time.Parse(time.RFC3339Nano, timestamp)
+		if err != nil || beganAt.IsZero() || beganAt.After(at) {
+			return ErrReconciliation
+		}
+		// Historical facts can predate reconciliation. The observation that
+		// the independent fence still holds must follow this durable barrier.
+		// A newer epoch number alone cannot refresh a prior fence observation.
+		if !evidence.Fence.ObservedAt.After(beganAt) {
+			holdDecision.Status = SlotReuseFenceUnproven
+			return ErrSlotReuseEvidence
 		}
 		removed, err := tx.Exec("DELETE FROM inventory WHERE reservation_key=?", hold.Key)
 		if err != nil {
