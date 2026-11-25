@@ -151,6 +151,14 @@ func (m AttributionCapabilityMatrix) Supports(fact AttributionFact) bool {
 	return false
 }
 
+// supportsExactJobAttribution requires every source capability used to bind
+// a job to its original runner allocation and immutable process incarnation.
+func (m AttributionCapabilityMatrix) supportsExactJobAttribution() bool {
+	return m.Supports(FactExactJobIdentity) && m.Supports(FactPositiveRunnerRegistration) &&
+		m.Supports(FactExactStockRow) && m.Supports(FactPositiveStockRowAgent) &&
+		m.Supports(FactIncusIncarnation) && m.Supports(FactProcessEpoch) && m.Supports(FactProviderOriginJoin)
+}
+
 // ClassProves reports whether the identified source positively proves the
 // fact within this matrix.
 func (m AttributionCapabilityMatrix) ClassProves(class AttributionEvidenceClass, fact AttributionFact) bool {
