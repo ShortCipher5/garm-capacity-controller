@@ -5,7 +5,7 @@ import {observedActiveJobs} from "./ci-health-active-jobs.js";
 import {longestObservedSteps} from "./ci-health-longest-steps.js";
 import {focusCIJob, focusCIStep} from "./ci-health-step-navigation.js";
 import {CIHealthHistory} from "./ci-health-history.jsx";
-import {ciByteText, ciUsageCoverage, ciUsageReasonText, ciUsageStateLabel} from "./ci-health-usage.js";
+import {ciByteText, ciUsageCoverage, ciUsageDiskView, ciUsageReasonText, ciUsageStateLabel} from "./ci-health-usage.js";
 
 const statuses = {queued: "Queued", running: "Running", completed: "Completed", skipped: "Skipped", unknown: "Unknown"};
 const results = {success: "Success", failure: "Failure", cancelled: "Cancelled", timed_out: "Timed out", other_terminal: "Other terminal result"};
@@ -73,9 +73,33 @@ function StepRows({attempt, job, stepId}) {
     </div>
   );
 }
+function DiskCounter({label, counter, windowNs}) {
+  return <div><dt>{label}</dt><dd>
+    {ciByteText(counter.bytes)}
+    {counter.covered !== null
+      ? <> over {ciUsageCoverage(counter.covered, windowNs) ?? "unknown"} of the job window{counter.complete === false ? " (partial coverage)" : ""}</>
+      : <> (coverage not recorded for this counter)</>}
+  </dd></div>;
+}
+function DiskUsage({disk, windowNs}) {
+  const view = ciUsageDiskView(disk);
+  if (view.state !== "verified") {
+    return <div><dt>Disk</dt><dd>{ciUsageReasonText(view.reason)}</dd></div>;
+  }
+  return <>
+    {view.read && <DiskCounter label="Disk read" counter={view.read} windowNs={windowNs} />}
+    {view.write && <DiskCounter label="Disk written" counter={view.write} windowNs={windowNs} />}
+    {view.used && <div><dt>Disk used</dt><dd>
+      sampled peak {ciByteText(view.used.peak)}
+      {view.used.samples !== null && <> across {view.used.samples} gauge sample{view.used.samples === 1 ? "" : "s"}</>}
+      {view.used.peakAt && <>, peak reached {view.used.peakAt}</>}
+      {view.used.latestAt && <>, last gauge sample {view.used.latestAt}</>}
+      {" "}(point-in-time gauge, not interval coverage)
+    </dd></div>}
+  </>;
+}
 function ResourceUsage({usage}) {
   const measured = usage.measured;
-  const covered = measured ? (measured.cpu ? measured.cpu.covered_ns : measured.ram && measured.ram.covered_ns ? measured.ram.covered_ns : "0") : "0";
   return <div>
     <dt>Resource usage</dt>
     <dd>
@@ -87,12 +111,10 @@ function ResourceUsage({usage}) {
           : ciUsageReasonText(usage.reason)}
       </span>
       {measured && <dl className="ci-health-facts">
-        <div><dt>Samples</dt><dd>{measured.samples} over {ciUsageCoverage(covered, measured.window_ns) ?? "unknown"} of the job window</dd></div>
-        {measured.cpu && <div><dt>CPU</dt><dd>average {measured.cpu.average_millicpu} mCPU, interval peak {measured.cpu.peak_interval_millicpu} mCPU{measured.cpu.complete ? "" : " (partial coverage)"}</dd></div>}
-        {measured.ram && <div><dt>RAM</dt><dd>time-weighted mean {measured.ram.mean_bytes !== undefined ? ciByteText(measured.ram.mean_bytes) : "unknown"}, sampled peak {measured.ram.sample_peak_bytes !== undefined ? ciByteText(measured.ram.sample_peak_bytes) : "unknown"}</dd></div>}
-        <div><dt>Disk</dt><dd>{measured.disk.state === "verified"
-          ? <>attributable usage: {["read_bytes", "write_bytes"].filter((key) => measured.disk[key]).map((key) => measured.disk[key] && `${key === "read_bytes" ? "read" : "written"} ${ciByteText(measured.disk[key])}`).filter(Boolean).join(", ") || "measured"}</>
-          : ciUsageReasonText(measured.disk.reason)}</dd></div>
+        <div><dt>Samples</dt><dd>{measured.samples}</dd></div>
+        {measured.cpu && <div><dt>CPU</dt><dd>average {measured.cpu.average_millicpu} mCPU, interval peak {measured.cpu.peak_interval_millicpu} mCPU over {ciUsageCoverage(measured.cpu.covered_ns, measured.window_ns)} of the job window{measured.cpu.complete ? "" : " (partial coverage)"}</dd></div>}
+        {measured.ram && <div><dt>RAM</dt><dd>time-weighted mean {measured.ram.mean_bytes !== undefined ? <>{ciByteText(measured.ram.mean_bytes)} over {ciUsageCoverage(measured.ram.covered_ns, measured.window_ns)} of the job window</> : "unknown"}, sampled peak {measured.ram.sample_peak_bytes !== undefined ? ciByteText(measured.ram.sample_peak_bytes) : "unknown"}</dd></div>}
+        <DiskUsage disk={measured.disk} windowNs={measured.window_ns} />
       </dl>}
     </dd>
   </div>;
