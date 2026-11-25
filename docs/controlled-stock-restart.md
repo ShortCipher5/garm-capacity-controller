@@ -59,3 +59,17 @@ The lifecycle action hook is not proof: final independently authenticated source
 process and mounted-file observations are still mandatory. No restart HTTP route
 or automatic trigger is exposed. Real namespace restart qualification remains
 outstanding; do not claim a production-qualified automated deployment lifecycle.
+
+### Inspect historical records
+
+The installation operator can run
+`capacity-managed-garm inspect-restart-history <supervisor-spec.json>` locally
+as root using the existing protected supervisor specification. It reads only
+the protected restart journal and non-secret bootstrap outcome records. It
+does not contact GARM, Docker, a runner, or the restart participant.
+
+The output distinguishes a recorded intent, a returned resume hook with no
+completion receipt observed, and an internally consistent historical
+revalidation receipt. A torn or inconsistent journal is unavailable. A
+receipt is not proof of current readiness or of storage durability; it is
+never permission to replay, resume, or enable writes.
