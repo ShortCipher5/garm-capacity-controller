@@ -418,12 +418,15 @@ func (a UsageAttachment) valid(now time.Time, matrix AttributionCapabilityMatrix
 		if !ok || r.GaugeSamples < 1 || r.GaugeSamples > m.Samples {
 			return false
 		}
-		// MetricWire always emits coverage and completeness. A standalone
-		// RAM gauge currently projects an empty covered_ns that the dashboard
-		// rejects. Keep that projection out of durable display history.
-		mean, ok := usageQuantity(r.MeanBytes, 63)
-		if !ok || mean > peak || !usageCoverage(r.CoveredNanoseconds, r.Complete, window, r.GaugeSamples) {
-			return false
+		if r.MeanBytes == "" {
+			if r.CoveredNanoseconds != "" || r.Complete {
+				return false
+			}
+		} else {
+			mean, ok := usageQuantity(r.MeanBytes, 63)
+			if !ok || mean > peak || !usageCoverage(r.CoveredNanoseconds, r.Complete, window, r.GaugeSamples) {
+				return false
+			}
 		}
 	}
 	full := m.CPU != nil && m.CPU.Complete && m.RAM != nil && m.RAM.Complete

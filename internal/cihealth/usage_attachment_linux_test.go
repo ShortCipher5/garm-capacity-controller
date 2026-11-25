@@ -314,7 +314,7 @@ func TestUsageAttachmentDisabledAndExclusive(t *testing.T) {
 	}
 }
 
-func TestUsageAttachmentUninitializedAndUnrepresentableWireFailClosed(t *testing.T) {
+func TestUsageAttachmentUninitializedStoreFailsClosed(t *testing.T) {
 	f := newAttachmentFixture(t)
 	var zero UsageAttachmentStore
 	if err := zero.Attach(t.Context(), f.claim, f.set); !errors.Is(err, ErrUsageAttachment) {
@@ -323,16 +323,28 @@ func TestUsageAttachmentUninitializedAndUnrepresentableWireFailClosed(t *testing
 	if _, found, err := zero.Read(t.Context(), f.claim.Job); found || !errors.Is(err, ErrUsageAttachment) {
 		t.Fatal(found, err)
 	}
-	if err := f.store.SetEnrolled(t.Context(), usageScopeOf(f.claim.Job), true); err != nil {
+}
+
+func TestUsageAttachmentReopensWithStandaloneRAMGauge(t *testing.T) {
+	f := newAttachmentFixture(t)
+	f.set.Samples[0].RAMBytes = ResourceValue{}
+	f.set.Samples[1].RAMBytes = knownResource(0)
+	f.set.Samples[2].RAMBytes = ResourceValue{}
+	original := f.attach(t)
+	if original.Evidence.State != VerifiedUsagePartial {
+		t.Fatalf("standalone gauge cannot establish full coverage: %s", original.Evidence.State)
+	}
+	wire, err := json.Marshal(original.Evidence)
+	if err != nil || !bytes.Contains(wire, []byte(`"ram":{"sample_peak_bytes":"0","gauge_samples":1}`)) {
+		t.Fatalf("standalone gauge lost its measured zero or acquired coverage: %s %v", wire, err)
+	}
+	if err := f.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	f.set.Samples[0].RAMBytes = ResourceValue{}
-	f.set.Samples[2].RAMBytes = ResourceValue{}
-	if err := f.store.Attach(t.Context(), f.claim, f.set); !errors.Is(err, ErrUsageAttachment) {
-		t.Fatal("stored an empty covered_ns for a standalone RAM gauge", err)
-	}
-	if _, found, err := f.store.Read(t.Context(), f.claim.Job); err != nil || found {
-		t.Fatal(found, err)
+	f.open(t, false)
+	retained, found, err := f.store.Read(t.Context(), f.claim.Job)
+	if !found || err != nil || retained.Integrity != original.Integrity {
+		t.Fatalf("gauged record changed after reopen: %v %v", found, err)
 	}
 }
 
