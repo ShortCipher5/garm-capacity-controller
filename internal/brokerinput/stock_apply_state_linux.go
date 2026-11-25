@@ -885,6 +885,13 @@ type StockApplyResumeView struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+// StockApplyReadbackView reports a setting from the evaluation's read-only
+// capture. Its freshness belongs to that capture, and it carries no receipt.
+type StockApplyReadbackView struct {
+	Maximum int64 `json:"maximum"`
+	Fresh   bool  `json:"fresh"`
+}
+
 // StockApplyView is the conservative operator contract: the controller state,
 // why each action is disabled, and what capacity remains charged.
 type StockApplyView struct {
@@ -898,6 +905,7 @@ type StockApplyView struct {
 	Charged    StockApplyChargedView       `json:"charged"`
 	Resume     StockApplyResumeView        `json:"resume"`
 	Capability StockApplyCapabilityVerdict `json:"capability"`
+	Readback   *StockApplyReadbackView     `json:"readback,omitempty"`
 }
 
 // View derives the operator view from durable state and fresh evidence.
@@ -926,6 +934,9 @@ func (c *StockApplyController) View(ctx context.Context, scope [sha256.Size]byte
 		Paused:     mode.paused,
 		Capability: verdict,
 		Actions:    []StockApplyActionView{},
+	}
+	if eval.Readback != nil {
+		view.Readback = &StockApplyReadbackView{Maximum: *eval.Readback, Fresh: eval.Fresh}
 	}
 	switch {
 	case mode.paused:
