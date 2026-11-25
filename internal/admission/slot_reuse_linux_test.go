@@ -50,7 +50,7 @@ func slotReuseFixtureEvidence(req Request, epoch int64, now time.Time) SlotReuse
 		Fence: SlotReuseFence{
 			Source: slotReuseFixtureSource, RequestKey: req.Key,
 			IdentityDigest: slotReuseIdentityDigest(identity), Epoch: epoch, WriterFenced: true,
-			ObservedAt: now.Add(-30 * time.Second),
+			ObservedAt: now,
 		},
 	}
 }
@@ -520,6 +520,44 @@ func TestReleaseRetiredSlotEvidenceExpiresWhileWaitingForFinalization(t *testing
 	assertNoSlotReuseCredit(t, out.d)
 	if got := slotReuseCharged(t, store); got != req.Resources {
 		t.Fatalf("expired evidence changed charge: %v", got)
+	}
+}
+
+func TestReleaseRetiredSlotRejectsFenceObservedBeforeCurrentBarrier(t *testing.T) {
+	registerSlotReuseFixtureSource(t)
+	ctx := t.Context()
+	store, req, epoch := slotReuseHold(t)
+	var value string
+	if err := store.db.QueryRowContext(ctx, "SELECT began_at FROM metadata WHERE id=1").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	began, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := store.now()
+	evidence := slotReuseFixtureEvidence(req, epoch, now)
+	for _, observed := range []time.Time{began.Add(-time.Nanosecond), began} {
+		before := evidence
+		before.Fence.ObservedAt = observed
+		if verdict := ClassifySlotReuse(req, before, now); verdict.Status != SlotReuseCandidateComplete {
+			t.Fatalf("fixture must have otherwise complete current-epoch evidence: %+v", verdict)
+		}
+		decision, err := store.ReleaseRetiredSlot(ctx, req, before)
+		if !errors.Is(err, ErrSlotReuseEvidence) || decision.Status != SlotReuseFenceUnproven {
+			t.Fatalf("pre-barrier fence was not rejected: %+v %v", decision, err)
+		}
+		assertNoSlotReuseCredit(t, decision)
+		if charged := slotReuseCharged(t, store); charged != req.Resources {
+			t.Fatalf("pre-barrier fence changed the charge: %v", charged)
+		}
+		if _, err := store.LookupRelease(ctx, req.Key); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("pre-barrier fence created a release tombstone: %v", err)
+		}
+	}
+	release, err := store.ReleaseRetiredSlot(ctx, req, evidence)
+	if err != nil || release.Replay || release.Status != SlotReuseCandidateComplete || slotReuseCharged(t, store) != (Resources{}) {
+		t.Fatalf("post-barrier fence failed to release the exact charge: %+v %v", release, err)
 	}
 }
 
