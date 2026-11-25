@@ -115,6 +115,11 @@ func TestVerifyJobAttributionRejectsMismatchedAndMalformedClaims(t *testing.T) {
 		"executing with reported end": func(c *JobAttributionClaim) {
 			c.Execution.EndedAt = c.Execution.ObservedAt
 		},
+		"unrecognized execution state": func(c *JobAttributionClaim) { c.Execution.State = StockJobExecutionState(255) },
+		"runtime starts after job": func(c *JobAttributionClaim) {
+			c.Incarnation.StartedAt = c.Execution.StartedAt.Add(time.Nanosecond)
+			c.Origin.Incarnation = c.Incarnation
+		},
 		"unknown execution state": func(c *JobAttributionClaim) { c.Execution.State = StockJobExecutionUnknown },
 		"bad peer fingerprint":    func(c *JobAttributionClaim) { c.Incarnation.PeerFingerprint = "xyz" },
 		"incarnation never started": func(c *JobAttributionClaim) {
@@ -147,5 +152,70 @@ func TestVerifyJobAttributionRequiresDocumentedIdentitySources(t *testing.T) {
 	joinOnly := AttributionCapabilityMatrix{Sources: []AttributionCapability{{Class: "fixture_verified_origin", Proves: []AttributionFact{FactProviderOriginJoin}}}}
 	if _, err := VerifyJobAttribution(joinOnly, claim, now); err != ErrAttributionUnsupported {
 		t.Fatalf("join evidence alone cannot replace identity facts: %v", err)
+	}
+}
+
+// Even an otherwise verified original allocation does not establish the boot
+// identity of the process whose counters cover the job window.
+func TestJobMetricsNeedIndependentProcessEpoch(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	matrix := DocumentedMatrix()
+	matrix.Sources = append(matrix.Sources, AttributionCapability{
+		Class: "fixture_allocation_only", Proves: []AttributionFact{FactProviderOriginJoin},
+	})
+	if _, err := VerifyJobAttribution(matrix, claim, now); err != ErrAttributionUnsupported {
+		t.Fatalf("allocation plus matching PID/start must leave the process epoch unproven: %v", err)
+	}
+	record := BuildVerifiedJobUsage(matrix, claim, set, now)
+	if record.State != VerifiedUsageUnavailable || record.Measured != nil || record.Wire(matrix).Measured != nil {
+		t.Fatalf("unproven process epoch yielded measurements: %+v", record)
+	}
+	decision := DecideCollection(matrix, claim, set, CollectionHooks{
+		Producer: fixtureProducer{class: "fixture_allocation_only"}, History: fixtureHistory{revision: 1},
+	}, now)
+	if decision.Collect {
+		t.Fatal("unproven process epoch authorized collection")
+	}
+}
+
+func TestJobMetricsRespectBothExecutionReceipts(t *testing.T) {
+	for _, tc := range []struct {
+		name                                               string
+		claimEnd, sampleEnd, claimObserved, sampleObserved time.Duration
+		want                                               UsageOmissionReason
+	}{
+		{"cutoff before later independent completion", 8 * time.Second, 0, 20 * time.Second, 6 * time.Second, UsageOmissionNone},
+		{"later sample confirms completion", 0, 8 * time.Second, 7 * time.Second, 20 * time.Second, UsageOmissionNone},
+		{"matching terminal receipts", 8 * time.Second, 8 * time.Second, 12 * time.Second, 13 * time.Second, UsageOmissionNone},
+		{"claim ended before sampled cutoff", 5 * time.Second, 0, 10 * time.Second, 6 * time.Second, UsageOmissionUnbracketed},
+		{"terminal receipts disagree", 8 * time.Second, 9 * time.Second, 20 * time.Second, 20 * time.Second, UsageOmissionEvidenceMismatch},
+		{"sample still executing after claim completion", 8 * time.Second, 0, 20 * time.Second, 9 * time.Second, UsageOmissionEvidenceMismatch},
+		{"claim still executing after sample completion", 0, 8 * time.Second, 9 * time.Second, 20 * time.Second, UsageOmissionEvidenceMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim, now := attributionFixtureClaim()
+			set := usageFixtureSet(claim, now, MaxJobResourceGap)
+			start := set.Scope.StartedAt
+			claim.Execution.ObservedAt = start.Add(tc.claimObserved)
+			set.Execution.ObservedAt = start.Add(tc.sampleObserved)
+			if tc.claimEnd > 0 {
+				claim.Execution.State = StockJobObservedEnded
+				claim.Execution.EndedAt = start.Add(tc.claimEnd)
+			}
+			if tc.sampleEnd > 0 {
+				set.Execution.State = StockJobObservedEnded
+				set.Execution.EndedAt = start.Add(tc.sampleEnd)
+			}
+			record := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, now)
+			decision := DecideCollection(fixtureJoinMatrix(), claim, set, fixtureHooks(), now)
+			if tc.want == UsageOmissionNone {
+				if record.Measured == nil || record.State != VerifiedUsageVerified || !decision.Collect {
+					t.Fatalf("consistent receipts withheld: %+v %+v", record, decision)
+				}
+			} else if record.Reason != tc.want || record.Measured != nil || decision.Collect || decision.Reason != tc.want {
+				t.Fatalf("contradictory receipts yielded %+v, %+v", record, decision)
+			}
+		})
 	}
 }

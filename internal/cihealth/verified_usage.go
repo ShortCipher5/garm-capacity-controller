@@ -239,6 +239,12 @@ func classifySampleSet(a VerifiedAttribution, set VerifiedUsageSampleSet, now ti
 	if reason := ValidateCollectionWindow(set, now); reason != UsageOmissionNone {
 		return omission{VerifiedUsageUnavailable, reason}
 	}
+	if a.ExecutionEnds && a.EndedAt.Before(scope.EndAt) {
+		return omission{VerifiedUsageUnavailable, UsageOmissionUnbracketed}
+	}
+	if a.conflictsWithExecution(*set.Execution) {
+		return omission{VerifiedUsageUnavailable, UsageOmissionEvidenceMismatch}
+	}
 	return omission{VerifiedUsageVerified, UsageOmissionNone}
 }
 
