@@ -132,6 +132,7 @@ test("resource usage wire keeps the legacy mixed disk shape readable without len
   assert.ok(usage({state: "verified", read_bytes: "18446744073709551615", covered_ns: "2000000000"}));
   assert.ok(usage({state: "verified", read_bytes: "50", covered_ns: "2000000000"}));
   assert.equal(usage({state: "verified", read_bytes: "50", covered_ns: "0"}), null);
+  assert.equal(usage({state: "verified", read_bytes: "50"}), null);
   // Orphaned legacy coverage without the read counter it was measured on is
   // malformed, not a write measurement.
   assert.equal(usage({state: "verified", write_bytes: "3", covered_ns: "6000000000", complete: true}), null);

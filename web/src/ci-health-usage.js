@@ -99,9 +99,10 @@ function validDisk(value, windowNs, samples, asOf) {
   if (["read", "write", "used"].some((key) => Object.hasOwn(value, key))) return false;
   const quantities = ["read_bytes", "write_bytes", "used_sample_peak_bytes"].filter((key) => Object.hasOwn(value, key));
   if (quantities.length === 0 || !quantities.every((key) => decimal(value[key], true, maxUint64))) return false;
-  if (samples < 2 && (Object.hasOwn(value, "read_bytes") || Object.hasOwn(value, "write_bytes"))) return false;
-  if (!Object.hasOwn(value, "covered_ns")) return !Object.hasOwn(value, "complete");
-  if (!Object.hasOwn(value, "read_bytes") || !decimal(value.covered_ns, false)) return false;
+  const hasRead = Object.hasOwn(value, "read_bytes");
+  if (samples < 2 && (hasRead || Object.hasOwn(value, "write_bytes"))) return false;
+  if (!hasRead) return !Object.hasOwn(value, "covered_ns") && !Object.hasOwn(value, "complete");
+  if (!decimal(value.covered_ns, false)) return false;
   const covered = BigInt(value.covered_ns);
   if (covered > windowNs) return false;
   // The legacy producer omitted the false completeness flag.
@@ -185,7 +186,7 @@ export function ciUsageDiskView(disk) {
   return {
     state: "verified",
     read: Object.hasOwn(disk, "read_bytes")
-      ? {bytes: disk.read_bytes, covered: Object.hasOwn(disk, "covered_ns") ? disk.covered_ns : null, complete: Object.hasOwn(disk, "covered_ns") ? disk.complete ?? false : null}
+      ? {bytes: disk.read_bytes, covered: disk.covered_ns, complete: disk.complete ?? false}
       : null,
     write: Object.hasOwn(disk, "write_bytes") ? {bytes: disk.write_bytes, covered: null, complete: null} : null,
     used: Object.hasOwn(disk, "used_sample_peak_bytes") ? {peak: disk.used_sample_peak_bytes, samples: null, peakAt: null, latestAt: null} : null,
