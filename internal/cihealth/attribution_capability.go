@@ -42,7 +42,8 @@ const (
 	// generation and creation time) of the read's chosen subject.
 	FactIncusIncarnation AttributionFact = "incus_incarnation"
 	// FactProcessEpoch is the chosen subject's process boot/start epoch
-	// (start time and boot identity) identified independently of any name.
+	// (boot ID and process start ticks). Named Incus state supplies PID and
+	// wall-clock start time, which cannot establish this fact.
 	FactProcessEpoch AttributionFact = "process_epoch"
 	// FactCPUCounters is the chosen subject's cumulative container CPU time.
 	FactCPUCounters AttributionFact = "cpu_counters"
@@ -78,7 +79,7 @@ type AttributionCapabilityMatrix struct {
 }
 
 // DocumentedMatrix returns the repository's published source capabilities.
-// It intentionally records that no source proves FactProviderOriginJoin or
+// No documented source proves FactProviderOriginJoin, FactProcessEpoch or
 // FactDiskCounters; callers must fail closed on those facts.
 func DocumentedMatrix() AttributionCapabilityMatrix {
 	return AttributionCapabilityMatrix{Sources: []AttributionCapability{
@@ -122,11 +123,11 @@ func DocumentedMatrix() AttributionCapabilityMatrix {
 			Class: EvidenceIncusRuntimeHealth,
 			Proves: []AttributionFact{
 				FactIncusIncarnation,
-				FactProcessEpoch,
 				FactCPUCounters,
 				FactRAMCounters,
 			},
 			NeverProves: []AttributionFact{
+				FactProcessEpoch,
 				FactExactJobIdentity,
 				FactPositiveRunnerRegistration,
 				FactExactStockRow,
@@ -148,6 +149,14 @@ func (m AttributionCapabilityMatrix) Supports(fact AttributionFact) bool {
 		}
 	}
 	return false
+}
+
+// supportsExactJobAttribution requires every source capability used to bind
+// a job to its original runner allocation and immutable process incarnation.
+func (m AttributionCapabilityMatrix) supportsExactJobAttribution() bool {
+	return m.Supports(FactExactJobIdentity) && m.Supports(FactPositiveRunnerRegistration) &&
+		m.Supports(FactExactStockRow) && m.Supports(FactPositiveStockRowAgent) &&
+		m.Supports(FactIncusIncarnation) && m.Supports(FactProcessEpoch) && m.Supports(FactProviderOriginJoin)
 }
 
 // ClassProves reports whether the identified source positively proves the
