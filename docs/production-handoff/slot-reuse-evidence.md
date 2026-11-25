@@ -1,0 +1,16 @@
+# Stock runner-slot reuse evidence
+
+This follow-up to [#392](https://github.com/ShortCipher5/garm-capacity-controller/pull/392) uses the classifier and atomic release transition from [#396](https://github.com/ShortCipher5/garm-capacity-controller/pull/396). The stock source registry remains empty.
+
+## Source findings
+
+| Required fact | Pinned source or existing read | Remaining gap |
+| --- | --- | --- |
+| Exact original allocation and teardown | GARM v0.2.1 selects the provider from the runner row and calls it by recorded provider ID, falling back to the runner name. The v0.1.1 external wrapper accepts both a successful command and the provider's not-found exit. [Pool deletion](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/pool/pool.go#L1543-L1575), [provider deletion](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/providers/v0.1.1/external.go#L134-L168) | The return carries no independently verifiable original-allocation identity or immutable backend teardown result. Cleanup acknowledgment and disappearance both leave this proof missing. |
+| Accepted work and assignment closure | The pinned runner listener's shutdown uses a cancel-running-job path. [Runner v2.323.0 job dispatcher](https://github.com/actions/runner/blob/d8b82f44a9ec0258904d5869ae683c31d5aac299/src/Runner.Listener/JobDispatcher.cs#L201-L214) | Natural one-job exhaustion still needs positive evidence for the exact job, its post-job activity, and closure of late assignment, start, retry and reconnect. |
+| Original instance, processes and charged storage | Incus v6.0.4 deletes by project and instance name. Recursive operation reads filter by project and permission. [Instance delete](https://github.com/lxc/incus/blob/a99413afd0c742da3bba10eb4f75d639f9dbbd32/cmd/incusd/instance_delete.go#L46-L101), [operation visibility](https://github.com/lxc/incus/blob/a99413afd0c742da3bba10eb4f75d639f9dbbd32/cmd/incusd/operations.go#L543-L569) | Name-addressed deletion and project reads do not bind teardown to the original incarnation or establish disposition of its backing storage and processes. Each supported backend needs its own affirmative records. |
+| Continuing fence | The local reconciliation barrier durably closes admission before inventory collection. [Physical proof boundary](../physical-retirement-proof-boundary.md) | An independently enforced fence must cover already-accepted backend work and late writers. The local epoch and even complete local inventory cannot provide that fence. |
+
+The finalization transaction requires the independent fence observation to follow the durable start of the current reconciliation epoch. An observed terminal job or teardown can remain historical. Re-labeling a pre-barrier fence with the current epoch cannot fund release. The regression fixture proves refusal with the full charge and no tombstone, followed by release once with a fresh fence observation. It exercises the local transition with an offline source and provides no installed-stack qualification.
+
+See the [isolated qualification and rollback runbook](https://github.com/ShortCipher5/garm-capacity-controller/pull/392) for the underlying acceptance plan.
