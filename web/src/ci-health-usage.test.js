@@ -78,8 +78,9 @@ test("resource usage wire admits the versioned split disk shape", () => {
   assert.ok(usage({state: "verified", version: "disk-measured/v2",
     read: counter(), write: counter({bytes: "3", covered_ns: "4000000000", complete: false})}));
   assert.ok(usage({state: "verified", version: "disk-measured/v2",
-    used: {sample_peak_bytes: "100", gauge_samples: 3, peak_at: "2026-01-02T03:04:30Z", latest_sample_at: "2026-01-02T03:04:36Z"}}));
-  assert.ok(usage({state: "verified", version: "disk-measured/v2", used: {sample_peak_bytes: "0", gauge_samples: 1}}));
+    used: {sample_peak_bytes: "100", gauge_samples: 3, peak_at: "2026-01-02T03:04:30Z", latest_sample_at: at}}));
+  assert.ok(usage({state: "verified", version: "disk-measured/v2", used: {sample_peak_bytes: "0", gauge_samples: 1, peak_at: at, latest_sample_at: at}}));
+  assert.ok(usage({state: "verified", version: "disk-measured/v2", write: counter({bytes: "18446744073709551615"})}));
 });
 
 test("resource usage wire rejects corrupt versioned disk shapes", () => {
@@ -89,14 +90,29 @@ test("resource usage wire rejects corrupt versioned disk shapes", () => {
   reject({state: "verified", version: "disk-measured/v2"}); // no measured part
   reject({state: "verified", version: "disk-measured/v3", read: counter()}); // unknown version
   reject({state: "verified", version: "disk-measured/v2", read: counter(), read_bytes: "50"}); // mixed shapes
+  reject({state: "verified", read_bytes: "50", read: counter()}); // unversioned mixed shape
+  reject({state: "verified", version: "disk-measured/v2", read: counter({covered_ns: "0", complete: false})});
+  reject({state: "verified", version: "disk-measured/v2", read: counter({bytes: "18446744073709551616"})});
   reject({state: "verified", version: "disk-measured/v2", read: counter({covered_ns: "6000000001"})}); // coverage beyond window
   reject({state: "verified", version: "disk-measured/v2", read: counter({complete: false})}); // full but not complete
   reject({state: "verified", version: "disk-measured/v2", write: counter({covered_ns: "2000000000", complete: true})}); // complete but not full
   reject({state: "verified", version: "disk-measured/v2", read: {bytes: "50", covered_ns: "6000000000"}}); // missing completeness
-  reject({state: "verified", version: "disk-measured/v2", used: {sample_peak_bytes: "100", gauge_samples: 4}}); // gauge beyond series
-  reject({state: "verified", version: "disk-measured/v2", used: {sample_peak_bytes: "100", gauge_samples: 0}});
-  reject({state: "verified", version: "disk-measured/v2", used: {sample_peak_bytes: "100", gauge_samples: 3, peak_at: "not-a-time"}});
-  reject({state: "verified", version: "disk-measured/v2", used: {sample_peak_bytes: "100", gauge_samples: 3, covered_ns: "6000000000"}}); // gauge never has coverage
+  const gauge = (over = {}) => ({state: "verified", version: "disk-measured/v2", used: {
+    sample_peak_bytes: "100", gauge_samples: 3,
+    peak_at: "2026-01-02T03:04:30.000000001Z", latest_sample_at: "2026-01-02T03:04:30.000000002Z", ...over,
+  }});
+  assert.ok(validateCIJobResourceUsage({state: "verified", as_of: at, measured: {...measured, disk: gauge()}}));
+  reject(gauge({gauge_samples: 4}));
+  reject(gauge({gauge_samples: 0}));
+  reject(gauge({gauge_samples: 1}));
+  reject(gauge({peak_at: "not-a-time"}));
+  reject(gauge({peak_at: "2025-02-29T03:04:30Z"}));
+  reject(gauge({peak_at: "2026-01-02T03:04:30.000000003Z"}));
+  reject(gauge({latest_sample_at: "2026-01-02T03:04:35.000000001Z"}));
+  reject(gauge({covered_ns: "6000000000"}));
+  const missingTime = gauge();
+  delete missingTime.used.latest_sample_at;
+  reject(missingTime);
   reject({state: "verified", version: "disk-measured/v2", read: counter(), reason: "disk_not_independently_measured"}); // measured carries no reason
 });
 
@@ -107,6 +123,8 @@ test("resource usage wire keeps the legacy mixed disk shape readable without len
   assert.ok(usage({state: "verified", read_bytes: "50", covered_ns: "6000000000", complete: true}));
   assert.ok(usage({state: "verified", read_bytes: "50", write_bytes: "3", covered_ns: "6000000000", complete: true}));
   assert.ok(usage({state: "verified", write_bytes: "3", used_sample_peak_bytes: "100"}));
+  assert.ok(usage({state: "verified", read_bytes: "50", covered_ns: "2000000000"}));
+  assert.equal(usage({state: "verified", read_bytes: "50", covered_ns: "0"}), null);
   // Orphaned legacy coverage without the read counter it was measured on is
   // malformed, not a write measurement.
   assert.equal(usage({state: "verified", write_bytes: "3", covered_ns: "6000000000", complete: true}), null);
@@ -116,10 +134,10 @@ test("resource usage wire keeps the legacy mixed disk shape readable without len
   assert.deepEqual(legacy.write, {bytes: "3", covered: null, complete: null});
   const versioned = ciUsageDiskView({state: "verified", version: "disk-measured/v2",
     read: {bytes: "50", covered_ns: "6000000000", complete: true},
-    used: {sample_peak_bytes: "100", gauge_samples: 3, peak_at: "2026-01-02T03:04:30Z"}});
+    used: {sample_peak_bytes: "100", gauge_samples: 3, peak_at: "2026-01-02T03:04:30Z", latest_sample_at: at}});
   assert.deepEqual(versioned.read, {bytes: "50", covered: "6000000000", complete: true});
   assert.equal(versioned.write, null);
-  assert.deepEqual(versioned.used, {peak: "100", samples: 3, peakAt: "2026-01-02T03:04:30Z", latestAt: null});
+  assert.deepEqual(versioned.used, {peak: "100", samples: 3, peakAt: "2026-01-02T03:04:30Z", latestAt: at});
   assert.equal(ciUsageDiskView({state: "unavailable", reason: "disk_unsupported_by_sources"}).state, "unavailable");
 });
 
@@ -190,15 +208,14 @@ test("ci-health timing renders per-job usage states without inventing zeros", as
     const verified = render(usageSnapshot({state: "verified", as_of: "2026-01-02T03:04:35Z", measured}));
     assert.match(verified, /<dt>Resource usage<\/dt><dd><span class="pill">Verified<\/span>/);
     assert.match(verified, /average 1000 mCPU, interval peak 1250 mCPU/);
-    assert.match(verified, /time-weighted mean 33 B, sampled peak 50 B/);
+    assert.match(verified, /time-weighted mean 33 B over 100% of the job window, sampled peak 50 B/);
     assert.match(verified, /host free disk is not job usage/);
-    assert.match(verified, /3 over 100% of the job window/);
+    assert.match(verified, /<dt>Samples<\/dt><dd>3<\/dd>/);
     assert.doesNotMatch(verified, /no documented source proves the runner.{0,8}s original provider allocation/);
 
     const partial = render(usageSnapshot({state: "partial", as_of: "2026-01-02T03:04:35Z", measured: {...measured, cpu: {covered_ns: "2000000000", complete: false, average_millicpu: "500", peak_interval_millicpu: "500"}}}));
     assert.match(partial, /<span class="pill">Partial<\/span>/);
-    assert.match(partial, /average 500 mCPU, interval peak 500 mCPU \(partial coverage\)/);
-    assert.match(partial, /3 over 33% of the job window/);
+    assert.match(partial, /average 500 mCPU, interval peak 500 mCPU over 33% of the job window \(partial coverage\)/);
 
     const stale = render(usageSnapshot({state: "stale", as_of: "2026-01-02T03:04:35Z", reason: "stale_evidence"}));
     assert.match(stale, /<span class="pill">Stale<\/span>/);

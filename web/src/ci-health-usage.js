@@ -17,24 +17,26 @@ const usageReasons = [
   "collection_unavailable",
 ];
 const maxInt64 = "9223372036854775807";
+const maxUint64 = "18446744073709551615";
 const maxUsageSamples = 4096;
 
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const exactKeys = (value, required, optional = []) => object(value) &&
   required.every((key) => Object.hasOwn(value, key)) &&
   Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
-function decimal(value, allowZero = true) {
+function decimal(value, allowZero = true, limit = maxInt64) {
   return typeof value === "string" &&
     value.trim() === value &&
-    ((allowZero && value === "0") || /^[1-9][0-9]{0,18}$/.test(value)) &&
-    (value.length < 19 || value <= maxInt64);
+    ((allowZero && value === "0") || /^[1-9][0-9]{0,19}$/.test(value)) &&
+    (value.length < limit.length || (value.length === limit.length && value <= limit));
 }
 function timestamp(value) {
   if (typeof value !== "string") return null;
   const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/.exec(value);
   if (!m || m[1].startsWith("0000") || m[0] !== value) return null;
   const seconds = Date.parse(m[1] + "Z");
-  return Number.isFinite(seconds) ? value : null;
+  if (!Number.isFinite(seconds) || new Date(seconds).toISOString().slice(0, 19) !== m[1]) return null;
+  return BigInt(seconds) * 1_000_000n + BigInt((m[2] ?? "").padEnd(9, "0"));
 }
 
 function validMetric(value, kinds, windowNs) {
@@ -53,21 +55,24 @@ function validMetric(value, kinds, windowNs) {
 
 function validDiskCounter(value, windowNs) {
   if (!exactKeys(value, ["bytes", "covered_ns", "complete"])) return false;
-  if (!decimal(value.bytes) || !decimal(value.covered_ns) || typeof value.complete !== "boolean") return false;
+  if (!decimal(value.bytes, true, maxUint64) || !decimal(value.covered_ns, false) || typeof value.complete !== "boolean") return false;
   const covered = BigInt(value.covered_ns);
   return covered <= windowNs && value.complete === (covered === windowNs);
 }
 
-function validDiskGauge(value, samples) {
-  if (!exactKeys(value, ["sample_peak_bytes", "gauge_samples"], ["peak_at", "latest_sample_at"])) return false;
-  if (!decimal(value.sample_peak_bytes)) return false;
+function validDiskGauge(value, samples, asOf) {
+  if (!exactKeys(value, ["sample_peak_bytes", "gauge_samples", "peak_at", "latest_sample_at"])) return false;
+  if (!decimal(value.sample_peak_bytes, true, maxUint64)) return false;
   if (!Number.isInteger(value.gauge_samples) || value.gauge_samples < 1 || value.gauge_samples > samples) return false;
-  return ["peak_at", "latest_sample_at"].every((key) => !Object.hasOwn(value, key) || timestamp(value[key]) !== null);
+  const peak = timestamp(value.peak_at);
+  const latest = timestamp(value.latest_sample_at);
+  return peak !== null && latest !== null && peak <= latest && latest <= asOf &&
+    (value.gauge_samples !== 1 || peak === latest);
 }
 
 const legacyDiskKeys = ["read_bytes", "write_bytes", "used_sample_peak_bytes", "covered_ns", "complete"];
 
-function validDisk(value, windowNs, samples) {
+function validDisk(value, windowNs, samples, asOf) {
   if (!exactKeys(value, ["state"], ["reason", "version", "read", "write", "used", ...legacyDiskKeys])) return false;
   if (value.state !== "unavailable" && value.state !== "verified") return false;
   if (Object.hasOwn(value, "reason") && !usageReasons.includes(value.reason)) return false;
@@ -84,28 +89,29 @@ function validDisk(value, windowNs, samples) {
     if (!["read", "write", "used"].some((key) => Object.hasOwn(value, key))) return false;
     if (Object.hasOwn(value, "read") && !validDiskCounter(value.read, windowNs)) return false;
     if (Object.hasOwn(value, "write") && !validDiskCounter(value.write, windowNs)) return false;
-    return !Object.hasOwn(value, "used") || validDiskGauge(value.used, samples);
+    return !Object.hasOwn(value, "used") || validDiskGauge(value.used, samples, asOf);
   }
   // Legacy unversioned mixed shape (migration branch). Its shared coverage
   // pair was measured on the read counter only; it is meaningless without
   // read_bytes and is never assigned to writes.
+  if (["read", "write", "used"].some((key) => Object.hasOwn(value, key))) return false;
   const quantities = ["read_bytes", "write_bytes", "used_sample_peak_bytes"].filter((key) => Object.hasOwn(value, key));
   if (quantities.length === 0 || !quantities.every((key) => decimal(value[key]))) return false;
-  if (!Object.hasOwn(value, "read_bytes") && (Object.hasOwn(value, "covered_ns") || Object.hasOwn(value, "complete"))) return false;
-  if (Object.hasOwn(value, "covered_ns")) {
-    if (!decimal(value.covered_ns)) return false;
-    const covered = BigInt(value.covered_ns);
-    if (covered > windowNs) return false;
-    if (Object.hasOwn(value, "complete") && typeof value.complete === "boolean" && value.complete !== (covered === windowNs)) return false;
-  }
-  return !Object.hasOwn(value, "complete") || typeof value.complete === "boolean";
+  if (!Object.hasOwn(value, "covered_ns")) return !Object.hasOwn(value, "complete");
+  if (!Object.hasOwn(value, "read_bytes") || !decimal(value.covered_ns, false)) return false;
+  const covered = BigInt(value.covered_ns);
+  if (covered > windowNs) return false;
+  // The legacy producer omitted the false completeness flag.
+  return (value.complete ?? false) === (covered === windowNs) &&
+    (!Object.hasOwn(value, "complete") || typeof value.complete === "boolean");
 }
 
 export function validateCIJobResourceUsage(value) {
   if (!exactKeys(value, ["state", "as_of"], ["reason", "measured"])) return null;
   if (!usageStates.includes(value.state)) return null;
   const withNoObservation = value.as_of === null && (value.state === "unavailable" || value.state === "stale");
-  if (!withNoObservation && timestamp(value.as_of) === null) return null;
+  const asOf = timestamp(value.as_of);
+  if (!withNoObservation && asOf === null) return null;
   if (Object.hasOwn(value, "reason")) {
     if ((value.state !== "unavailable" && value.state !== "stale") || !usageReasons.includes(value.reason)) return null;
   } else if (value.state === "unavailable" || value.state === "stale") {
@@ -133,7 +139,7 @@ export function validateCIJobResourceUsage(value) {
     if (Object.hasOwn(ram, "sample_peak_bytes") &&
         (!Number.isInteger(ram.gauge_samples) || ram.gauge_samples < 1 || ram.gauge_samples > measured.samples)) return null;
   }
-  if (!validDisk(measured.disk, windowNs, measured.samples)) return null;
+  if (!validDisk(measured.disk, windowNs, measured.samples, asOf)) return null;
   return value;
 }
 
@@ -169,15 +175,14 @@ export function ciUsageDiskView(disk) {
       write: object(disk.write) ? {bytes: disk.write.bytes, covered: disk.write.covered_ns, complete: disk.write.complete} : null,
       used: object(disk.used) ? {
         peak: disk.used.sample_peak_bytes, samples: disk.used.gauge_samples,
-        peakAt: typeof disk.used.peak_at === "string" ? disk.used.peak_at : null,
-        latestAt: typeof disk.used.latest_sample_at === "string" ? disk.used.latest_sample_at : null,
+        peakAt: disk.used.peak_at, latestAt: disk.used.latest_sample_at,
       } : null,
     };
   }
   return {
     state: "verified",
     read: Object.hasOwn(disk, "read_bytes")
-      ? {bytes: disk.read_bytes, covered: Object.hasOwn(disk, "covered_ns") ? disk.covered_ns : null, complete: Object.hasOwn(disk, "complete") ? disk.complete : null}
+      ? {bytes: disk.read_bytes, covered: Object.hasOwn(disk, "covered_ns") ? disk.covered_ns : null, complete: Object.hasOwn(disk, "covered_ns") ? disk.complete ?? false : null}
       : null,
     write: Object.hasOwn(disk, "write_bytes") ? {bytes: disk.write_bytes, covered: null, complete: null} : null,
     used: Object.hasOwn(disk, "used_sample_peak_bytes") ? {peak: disk.used_sample_peak_bytes, samples: null, peakAt: null, latestAt: null} : null,

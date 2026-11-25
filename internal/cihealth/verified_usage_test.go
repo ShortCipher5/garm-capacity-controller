@@ -329,8 +329,8 @@ func TestVerifiedUsageWireProjectsDiskCountersAndGaugeSeparately(t *testing.T) {
 		}
 	}).Measured.Disk
 	if gaugeOnly.Used == nil || gaugeOnly.Used.SamplePeakBytes != "100" || gaugeOnly.Used.GaugeSamples != 3 ||
-		gaugeOnly.Used.PeakAt == nil || !gaugeOnly.Used.PeakAt.Equal(start) ||
-		gaugeOnly.Used.LatestSampleAt == nil || !gaugeOnly.Used.LatestSampleAt.Equal(end) ||
+		!gaugeOnly.Used.PeakAt.Equal(start) ||
+		!gaugeOnly.Used.LatestSampleAt.Equal(end) ||
 		gaugeOnly.Read != nil || gaugeOnly.Write != nil {
 		t.Fatalf("gauge-only disk projection wrong: %+v", gaugeOnly)
 	}
@@ -367,6 +367,26 @@ func TestVerifiedUsageWireProjectsDiskCountersAndGaugeSeparately(t *testing.T) {
 }
 
 type fixtureProducer struct{ class AttributionEvidenceClass }
+
+func TestVerifiedUsageWireOmitsInvalidDiskMeasurements(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	matrix := fixtureFullMatrix()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	for i := range set.Samples {
+		set.Samples[i].DiskReadBytes = knownResource(uint64(i))
+		set.Samples[i].DiskUsedBytes = knownResource(uint64(100 - i))
+	}
+	record := BuildVerifiedJobUsage(matrix, claim, set, now)
+	if record.Measured == nil || record.Measured.DiskRead == nil || record.Measured.DiskUsed == nil {
+		t.Fatal("positive fixture did not yield disk measurements")
+	}
+	record.Measured.DiskRead.Coverage = ResourceCoverage{}
+	record.Measured.DiskUsed.PeakAt = record.Measured.DiskUsed.LatestAt.Add(time.Nanosecond)
+	wire := record.Wire(matrix)
+	if disk := wire.Measured.Disk; disk.State != VerifiedUsageUnavailable || disk.Read != nil || disk.Used != nil {
+		t.Fatalf("invalid counter and gauge were projected: %+v", disk)
+	}
+}
 
 func (p fixtureProducer) EvidenceClass() AttributionEvidenceClass { return p.class }
 

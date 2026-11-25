@@ -303,3 +303,66 @@ test("resolves the exact job only on click, and discards a late destination afte
   expect(requests).toBe(2);
   expect(external).toBe(1);
 });
+
+test("measured disk and legacy snapshots display independently through producer changes", async ({page}) => {
+  const asOf = new Date();
+  const at = asOf.toISOString();
+  const peak = new Date(asOf.getTime() - 6000).toISOString();
+  const version = "disk-measured/v2";
+  const gauge = {sample_peak_bytes: "1048576", gauge_samples: 3, peak_at: peak, latest_sample_at: at};
+  const split = {
+    state: "verified", version,
+    read: {bytes: "0", covered_ns: "6000000000", complete: true},
+    write: {bytes: "2048", covered_ns: "4000000000", complete: false},
+    used: gauge,
+  };
+  const legacy = {state: "verified", read_bytes: "50", write_bytes: "3", covered_ns: "2000000000"};
+  let disk = legacy;
+  await page.route(overviewRoute, (route) =>
+    route.fulfill({json: {...overview, ci_health_available: true}}));
+  await page.route(timingRoute, (route) => {
+    const snapshot = timing(at);
+    snapshot.timing.attempts[0].jobs[1].resource_usage = {
+      state: "partial", as_of: at, measured: {samples: 3, window_ns: "6000000000", disk},
+    };
+    return route.fulfill({json: snapshot});
+  });
+  await page.goto("/");
+  await login(page);
+  const panel = page.getByRole("region", {name: "CI Health", exact: true});
+  const openJob = () => panel.getByRole("button", {name: /^View step 7, job 9007199254740998,/}).click();
+  const refresh = async (nextDisk) => {
+    disk = nextDisk;
+    const response = page.waitForResponse((res) => res.url().endsWith("/admin/api/v1/ci-health"));
+    await panel.getByRole("button", {name: "Refresh timing snapshot"}).click();
+    await response;
+  };
+
+  await panel.getByRole("button", {name: "Load timing snapshot"}).click();
+  await openJob();
+  await expect(panel.getByText("50 B over 33% of the job window (partial coverage)", {exact: true})).toBeVisible();
+  await expect(panel.getByText("3 B (coverage not recorded for this counter)", {exact: true})).toBeVisible();
+
+  await refresh(split);
+  await openJob();
+  await expect(panel.getByText("0 B over 100% of the job window", {exact: true})).toBeVisible();
+  await expect(panel.getByText("2 KiB over 66% of the job window (partial coverage)", {exact: true})).toBeVisible();
+  await expect(panel.getByText(`sampled peak 1 MiB across 3 gauge samples, peak reached ${peak}, last gauge sample ${at}`, {exact: false})).toBeVisible();
+  await expect(panel).not.toContainText(/(?:^|\s)0% of the job window/);
+
+  await refresh({state: "verified", version, used: gauge});
+  await openJob();
+  await expect(panel.getByText("Disk used", {exact: true})).toBeVisible();
+  await expect(panel.getByText("Disk read", {exact: true})).toHaveCount(0);
+  await expect(panel.getByText("Disk written", {exact: true})).toHaveCount(0);
+  await expect(panel).not.toContainText("% of the job window");
+
+  await refresh(legacy);
+  await openJob();
+  await expect(panel.getByText("3 B (coverage not recorded for this counter)", {exact: true})).toBeVisible();
+  await expect(panel.getByText("Disk used", {exact: true})).toHaveCount(0);
+
+  await refresh({...split, read_bytes: "50"});
+  await expect(panel).toContainText("CI Health timing is unavailable");
+  await expect(panel.getByText("Disk written", {exact: true})).toHaveCount(0);
+});

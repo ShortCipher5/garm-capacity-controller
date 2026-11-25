@@ -100,7 +100,6 @@ function DiskUsage({disk, windowNs}) {
 }
 function ResourceUsage({usage}) {
   const measured = usage.measured;
-  const covered = measured ? (measured.cpu ? measured.cpu.covered_ns : measured.ram && measured.ram.covered_ns ? measured.ram.covered_ns : "0") : "0";
   return <div>
     <dt>Resource usage</dt>
     <dd>
@@ -112,9 +111,9 @@ function ResourceUsage({usage}) {
           : ciUsageReasonText(usage.reason)}
       </span>
       {measured && <dl className="ci-health-facts">
-        <div><dt>Samples</dt><dd>{measured.samples} over {ciUsageCoverage(covered, measured.window_ns) ?? "unknown"} of the job window</dd></div>
-        {measured.cpu && <div><dt>CPU</dt><dd>average {measured.cpu.average_millicpu} mCPU, interval peak {measured.cpu.peak_interval_millicpu} mCPU{measured.cpu.complete ? "" : " (partial coverage)"}</dd></div>}
-        {measured.ram && <div><dt>RAM</dt><dd>time-weighted mean {measured.ram.mean_bytes !== undefined ? ciByteText(measured.ram.mean_bytes) : "unknown"}, sampled peak {measured.ram.sample_peak_bytes !== undefined ? ciByteText(measured.ram.sample_peak_bytes) : "unknown"}</dd></div>}
+        <div><dt>Samples</dt><dd>{measured.samples}</dd></div>
+        {measured.cpu && <div><dt>CPU</dt><dd>average {measured.cpu.average_millicpu} mCPU, interval peak {measured.cpu.peak_interval_millicpu} mCPU over {ciUsageCoverage(measured.cpu.covered_ns, measured.window_ns)} of the job window{measured.cpu.complete ? "" : " (partial coverage)"}</dd></div>}
+        {measured.ram && <div><dt>RAM</dt><dd>time-weighted mean {measured.ram.mean_bytes !== undefined ? <>{ciByteText(measured.ram.mean_bytes)} over {ciUsageCoverage(measured.ram.covered_ns, measured.window_ns)} of the job window</> : "unknown"}, sampled peak {measured.ram.sample_peak_bytes !== undefined ? ciByteText(measured.ram.sample_peak_bytes) : "unknown"}</dd></div>}
         <DiskUsage disk={measured.disk} windowNs={measured.window_ns} />
       </dl>}
     </dd>

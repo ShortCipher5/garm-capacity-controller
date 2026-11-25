@@ -416,10 +416,10 @@ type DiskCounterWire struct {
 // of gauge samples, the explicitly tracked time the peak was first reached,
 // and the last sample time. It never carries interval coverage.
 type DiskGaugeWire struct {
-	SamplePeakBytes string     `json:"sample_peak_bytes"`
-	GaugeSamples    int        `json:"gauge_samples"`
-	PeakAt          *time.Time `json:"peak_at,omitempty"`
-	LatestSampleAt  *time.Time `json:"latest_sample_at,omitempty"`
+	SamplePeakBytes string    `json:"sample_peak_bytes"`
+	GaugeSamples    int       `json:"gauge_samples"`
+	PeakAt          time.Time `json:"peak_at"`
+	LatestSampleAt  time.Time `json:"latest_sample_at"`
 }
 
 type DiskWire struct {
@@ -483,38 +483,45 @@ func (r VerifiedJobUsageRecord) Wire(matrix AttributionCapabilityMatrix) Wire {
 			// counter's window never stands in for the write counter's, and a
 			// missing counter stays absent instead of becoming a zero. The
 			// used-space gauge is a separate sampled peak, not an interval.
-			measured.Disk = DiskWire{State: VerifiedUsageVerified, Version: DiskWireVersion}
-			if summary.DiskRead != nil {
-				measured.Disk.Read = &DiskCounterWire{
-					Bytes:              strconv.FormatUint(summary.DiskRead.Bytes, 10),
-					CoveredNanoseconds: strconv.FormatUint(uint64(summary.DiskRead.Coverage.Duration), 10),
-					Complete:           summary.DiskRead.Coverage.Complete,
+			disk := DiskWire{
+				State:   VerifiedUsageVerified,
+				Version: DiskWireVersion,
+				Read:    diskCounterWire(summary.DiskRead, summary.Window),
+				Write:   diskCounterWire(summary.DiskWrite, summary.Window),
+			}
+			if used := summary.DiskUsed; used != nil {
+				peak, latest := used.PeakAt.UTC(), used.LatestAt.UTC()
+				if used.Samples > 0 && used.Samples <= summary.Samples && validTime(peak) && validTime(latest) &&
+					!peak.Before(summary.Scope.StartedAt) && !peak.After(latest) && !latest.After(summary.Scope.EndAt) &&
+					!latest.After(r.AsOf) && (used.Samples != 1 || peak.Equal(latest)) {
+					disk.Used = &DiskGaugeWire{
+						SamplePeakBytes: strconv.FormatUint(used.SampleMax, 10),
+						GaugeSamples:    used.Samples,
+						PeakAt:          peak,
+						LatestSampleAt:  latest,
+					}
 				}
 			}
-			if summary.DiskWrite != nil {
-				measured.Disk.Write = &DiskCounterWire{
-					Bytes:              strconv.FormatUint(summary.DiskWrite.Bytes, 10),
-					CoveredNanoseconds: strconv.FormatUint(uint64(summary.DiskWrite.Coverage.Duration), 10),
-					Complete:           summary.DiskWrite.Coverage.Complete,
-				}
-			}
-			if summary.DiskUsed != nil {
-				gauge := &DiskGaugeWire{
-					SamplePeakBytes: strconv.FormatUint(summary.DiskUsed.SampleMax, 10),
-					GaugeSamples:    summary.DiskUsed.Samples,
-				}
-				if validTime(summary.DiskUsed.PeakAt) {
-					at := summary.DiskUsed.PeakAt.UTC()
-					gauge.PeakAt = &at
-				}
-				if validTime(summary.DiskUsed.LatestAt) {
-					at := summary.DiskUsed.LatestAt.UTC()
-					gauge.LatestSampleAt = &at
-				}
-				measured.Disk.Used = gauge
+			if disk.Read != nil || disk.Write != nil || disk.Used != nil {
+				measured.Disk = disk
 			}
 		}
 	}
 	out.Measured = measured
 	return out
+}
+
+func diskCounterWire(counter *JobResourceCounterDelta, window time.Duration) *DiskCounterWire {
+	if counter == nil {
+		return nil
+	}
+	covered := counter.Coverage.Duration
+	if covered <= 0 || covered > window || counter.Coverage.Complete != (covered == window) {
+		return nil
+	}
+	return &DiskCounterWire{
+		Bytes:              strconv.FormatUint(counter.Bytes, 10),
+		CoveredNanoseconds: strconv.FormatUint(uint64(covered), 10),
+		Complete:           counter.Coverage.Complete,
+	}
 }
