@@ -1,6 +1,7 @@
 package cihealth
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,59 @@ func TestJobMetricsRespectBothExecutionReceipts(t *testing.T) {
 				}
 			} else if record.Reason != tc.want || record.Measured != nil || decision.Collect || decision.Reason != tc.want {
 				t.Fatalf("contradictory receipts yielded %+v, %+v", record, decision)
+			}
+		})
+	}
+}
+
+func TestJobUsageGatesEachMetricOnItsSourceCapability(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	for i := range set.Samples {
+		set.Samples[i].DiskReadBytes = knownResource(uint64(i))
+	}
+	unrestricted := BuildVerifiedJobUsage(fixtureFullMatrix(), claim, set, now)
+	for _, tc := range []struct {
+		name     string
+		cpu, ram bool
+	}{
+		{"CPU only", true, false}, {"RAM only", false, true}, {"no qualified metrics", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			matrix := fixtureJoinMatrix()
+			for i := range matrix.Sources {
+				source := &matrix.Sources[i]
+				source.Proves = slices.DeleteFunc(source.Proves, func(f AttributionFact) bool {
+					return (!tc.cpu && f == FactCPUCounters) || (!tc.ram && f == FactRAMCounters)
+				})
+			}
+			record := BuildVerifiedJobUsage(matrix, claim, set, now)
+			for _, wire := range []Wire{record.Wire(matrix), unrestricted.Wire(matrix)} {
+				if !tc.cpu && !tc.ram {
+					if record.Measured != nil || wire.Measured != nil || wire.State != VerifiedUsageUnavailable || wire.Reason != UsageOmissionDiskUnsupported {
+						t.Fatalf("unsupported inputs produced measurements: %+v", wire)
+					}
+					continue
+				}
+				if record.Measured == nil || (record.Measured.CPU != nil) != tc.cpu || (record.Measured.RAM != nil) != tc.ram ||
+					(record.Measured.RAMMean != nil) != tc.ram || record.Measured.DiskRead != nil ||
+					wire.State != VerifiedUsagePartial || wire.Measured == nil || (wire.Measured.CPU != nil) != tc.cpu || (wire.Measured.RAM != nil) != tc.ram ||
+					wire.Measured.Disk.State != VerifiedUsageUnavailable || wire.Measured.Disk.Reason != UsageOmissionDiskUnsupported {
+					t.Fatalf("metric projection mismatch: %+v", wire)
+				}
+			}
+			if !set.Samples[1].RAMBytes.Known || !set.Samples[1].CPUTimeNanos.Known || !set.Samples[1].DiskReadBytes.Known {
+				t.Fatal("capability filtering modified caller samples")
+			}
+			if !tc.cpu && !tc.ram {
+				noDisk := usageFixtureSet(claim, now, MaxJobResourceGap)
+				got := BuildVerifiedJobUsage(matrix, claim, noDisk, now)
+				if got.State != VerifiedUsageUnavailable || got.Reason != UsageOmissionCollectionUnavailable || got.Measured != nil {
+					t.Fatalf("unqualified CPU and RAM were retained: %+v", got)
+				}
+				if DecideCollection(matrix, claim, noDisk, fixtureHooks(), now).Collect {
+					t.Fatal("empty capability set allowed collection")
+				}
 			}
 		})
 	}
