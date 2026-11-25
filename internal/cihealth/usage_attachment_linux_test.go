@@ -276,6 +276,30 @@ func TestUsageAttachmentReopenRejectsCorruptCanonicalRecords(t *testing.T) {
 	}
 }
 
+func TestUsageAttachmentReopenRefusesWithdrawnMetricCapability(t *testing.T) {
+	f := newAttachmentFixture(t)
+	f.attach(t)
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.in.Initialize = false
+	matrix := fixtureFullMatrix()
+	for i := range matrix.Sources {
+		source := &matrix.Sources[i]
+		proven := source.Proves[:0]
+		for _, fact := range source.Proves {
+			if fact != FactRAMCounters {
+				proven = append(proven, fact)
+			}
+		}
+		source.Proves = proven
+	}
+	store, err := openUsageAttachments(t.Context(), f.in, matrix, f.clock, time.Minute)
+	if store != nil || !errors.Is(err, ErrUsageAttachment) {
+		t.Fatalf("reopen accepted retained measurements without their source capability: %v", err)
+	}
+}
+
 func TestUsageAttachmentOmissionAndStaleNeverBecomeNumbers(t *testing.T) {
 	for _, state := range []VerifiedUsageState{VerifiedUsageUnavailable, VerifiedUsageStale} {
 		t.Run(string(state), func(t *testing.T) {

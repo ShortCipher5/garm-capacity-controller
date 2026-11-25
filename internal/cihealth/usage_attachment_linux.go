@@ -405,13 +405,13 @@ func (a UsageAttachment) valid(now time.Time, matrix AttributionCapabilityMatrix
 	if c := m.CPU; c != nil {
 		mean, ok := usageQuantity(c.AverageMilliCPU, 63)
 		peak, okPeak := usageQuantity(c.PeakMilliCPU, 63)
-		if !ok || !okPeak || mean > peak || !usageCoverage(c.CoveredNanoseconds, c.Complete, window, m.Samples) ||
+		if !matrix.Supports(FactCPUCounters) || !ok || !okPeak || mean > peak || !usageCoverage(c.CoveredNanoseconds, c.Complete, window, m.Samples) ||
 			c.MeanBytes != "" || c.SamplePeakBytes != "" || c.GaugeSamples != 0 {
 			return false
 		}
 	}
 	if r := m.RAM; r != nil {
-		if r.AverageMilliCPU != "" || r.PeakMilliCPU != "" || r.SamplePeakBytes == "" {
+		if !matrix.Supports(FactRAMCounters) || r.AverageMilliCPU != "" || r.PeakMilliCPU != "" || r.SamplePeakBytes == "" {
 			return false
 		}
 		peak, ok := usageQuantity(r.SamplePeakBytes, 63)
