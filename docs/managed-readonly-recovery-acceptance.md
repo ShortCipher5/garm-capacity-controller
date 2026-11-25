@@ -12,7 +12,12 @@ Run `go test -race ./internal/managedwriter ./internal/managedgarm
 - `TestWriterSuspendWaitsForActualHandlersAndDoesNotTerminateOwner`: real
   loopback HTTP drain; failed suspension does not report a stopped service.
 - `TestReadOnlyOverAuthenticatedTLS`: actual disposable TLS and the fixed GET
-  settings handler, fake stock backend, non-GET denial and role authentication.
+  settings handler and the Service listener lifecycle, with a synthetic stock
+  backend. The test holds a second authenticated GET inside the handler,
+  witnesses a timed-out suspension, releases the read, and confirms successful
+  drain and closure of the old listener. A canceled Resume leaves the service
+  stopped with its original journal lineage and pending intent set. Mutation
+  requests and an unauthenticated client remain denied.
 - `TestFailedExplicitResumeRetainsReadOnlyAndJournal`: failed explicit Resume
   retains the read-only option and same durable journal, exposes no replacement
   listener/session, and does not fabricate termination or mutation intents.
