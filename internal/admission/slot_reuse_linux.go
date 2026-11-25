@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -143,6 +144,17 @@ func slotReuseIdentityDigest(identity SlotReuseIdentity) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// The charged inventory ID must identify the allocation independently of the
+// presented fence. Scope the immutable instance and generation to the original
+// enrolled route. Reconciliation can retain older opaque IDs, but those rows
+// cannot establish an incarnation match for slot reuse.
+func slotReuseResourceID(v SlotReuseIdentity) string {
+	return evidenceDigest([]byte(strings.Join([]string{
+		"slot-reuse-incarnation/v1", v.Controller, v.SourceID, v.Route, v.Daemon,
+		v.Project, v.Instance, v.Generation,
+	}, "\x00")))
+}
+
 func validSlotReuseTime(at, now time.Time) bool {
 	return !at.IsZero() && !at.After(now) && now.Sub(at) <= SlotReuseMaxEvidenceAge
 }
@@ -152,7 +164,7 @@ func validSlotReuseIdentity(v SlotReuseIdentity, hold Request) bool {
 		v.CPU == hold.Resources.CPU && v.RAM == hold.Resources.RAM && v.Disk == hold.Resources.Disk &&
 		bindingName(v.Controller) && bindingName(v.SourceID) && bindingFingerprint(v.Route) &&
 		bindingFingerprint(v.Daemon) && bindingFingerprint(v.Project) &&
-		validOperationID(v.Instance) && validOperationID(v.Generation) && bindingName(v.ResourceID) &&
+		validOperationID(v.Instance) && validOperationID(v.Generation) && v.ResourceID == slotReuseResourceID(v) &&
 		v.Epoch >= 0 && !v.ObservedAt.IsZero()
 }
 
@@ -238,12 +250,7 @@ type SlotReuseDecision struct {
 // or any missing or contradictory evidence preserves the charge. The
 // all-or-nothing scope releases exactly the resources the hold charged.
 func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evidence SlotReuseEvidence) (SlotReuseDecision, error) {
-	decision := SlotReuseDecision{Request: hold}
-	verdict := ClassifySlotReuse(hold, evidence, s.now())
-	if verdict.Status != SlotReuseCandidateComplete {
-		decision.Status = verdict.Status
-		return decision, ErrSlotReuseEvidence
-	}
+	holdDecision := SlotReuseDecision{Request: hold, Status: SlotReuseStaleOrConflictingEvidence}
 	record := evidence
 	record.Identity.ObservedAt = record.Identity.ObservedAt.UTC()
 	record.Settlement.ObservedAt = record.Settlement.ObservedAt.UTC()
@@ -251,46 +258,36 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 	record.Fence.ObservedAt = record.Fence.ObservedAt.UTC()
 	encoded, err := json.Marshal(record)
 	if err != nil || len(encoded) == 0 || len(encoded) > 16384 {
-		decision.Status = SlotReuseStaleOrConflictingEvidence
-		return decision, ErrSlotReuseEvidence
+		return holdDecision, ErrSlotReuseEvidence
 	}
 	digest := evidenceDigest(encoded)
+	preflight := ClassifySlotReuse(hold, evidence, s.now())
+	var result SlotReuseDecision
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
-		config, ready, epoch, _, err := sqliteMetadata(tx)
-		if err != nil {
-			return err
-		}
-		if !ready || epoch == int64(1<<63-1) {
-			return ErrReconciliation
-		}
-		if !sqliteObservationsFresh(config, s.now()) {
-			if _, err := tx.Exec("UPDATE metadata SET ready=0,nonce='' WHERE id=1"); err != nil {
-				return err
-			}
-			return ErrReconciliation
-		}
-		// The durable tombstone answers replay first: an identical replay
-		// returns the prior decision with zero additional credit even after a
-		// later reconciliation advanced the epoch. A mismatched replay is
-		// contradictory: the tombstone stands and the conflict is reported,
-		// never merged.
+		// An immutable tombstone answers historical replay even if the store
+		// is now reconciling or the recorded evidence has expired.
 		if prior, err := releaseRecord(tx, hold.Key); err == nil {
-			if prior.AbsenceDigest != digest {
-				decision.Status = SlotReuseStaleOrConflictingEvidence
+			if prior.Request != hold || prior.AbsenceDigest != digest {
 				return ErrConflict
 			}
-			decision.Status = SlotReuseCandidateComplete
-			decision.EvidenceDigest = prior.AbsenceDigest
-			decision.ReleasedAt = prior.ReleasedAt
-			decision.Replay = true
+			result = SlotReuseDecision{Request: prior.Request, Status: SlotReuseCandidateComplete,
+				EvidenceDigest: prior.AbsenceDigest, ReleasedAt: prior.ReleasedAt, Replay: true}
 			return nil
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		// Recheck the evidence scope and reconciliation epoch at commit: a
-		// prevalidated recommendation is not authority.
+		if preflight.Status != SlotReuseCandidateComplete {
+			holdDecision.Status = preflight.Status
+			return ErrSlotReuseEvidence
+		}
+		config, ready, epoch, nonce, err := sqliteMetadata(tx)
+		if err != nil {
+			return err
+		}
+		if !ready || nonce != "" || epoch <= 0 || epoch == int64(1<<63-1) {
+			return ErrReconciliation
+		}
 		if evidence.Identity.Epoch != epoch || evidence.Fence.Epoch != epoch {
-			decision.Status = SlotReuseStaleOrConflictingEvidence
 			return ErrSlotReuseEvidence
 		}
 		reservations, err := sqliteReservations(tx)
@@ -299,15 +296,13 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		}
 		reservation, exists := reservations[hold.Key]
 		if !exists {
-			decision.Status = SlotReuseStaleOrConflictingEvidence
 			return ErrSlotReuseEvidence
 		}
 		if reservation.Request != hold {
-			decision.Status = SlotReuseStaleOrConflictingEvidence
 			return ErrConflict
 		}
 		if reservation.State != "deleting" {
-			decision.Status = SlotReuseAwaitingTeardownEvidence
+			holdDecision.Status = SlotReuseAwaitingTeardownEvidence
 			return ErrSlotReuseEvidence
 		}
 		// The charged inventory row must still be the exact original
@@ -318,31 +313,38 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		if err != nil {
 			return err
 		}
+		want := InventoryResource{ID: evidence.Identity.ResourceID, Host: hold.Host, Pool: hold.Pool,
+			ReservationKey: hold.Key, Resources: hold.Resources, State: "deleting"}
 		linked := 0
 		for _, item := range rows {
 			if item.ReservationKey == hold.Key {
-				linked++
-				if item.ID != evidence.Identity.ResourceID || item.Host != hold.Host || item.Pool != hold.Pool ||
-					item.Resources.CPU != hold.Resources.CPU || item.Resources.RAM != hold.Resources.RAM {
-					decision.Status = SlotReuseStaleOrConflictingEvidence
+				if item != want {
 					return ErrConflict
 				}
+				linked++
 			}
 		}
 		if linked != 1 {
-			decision.Status = SlotReuseAwaitingStorageEvidence
+			holdDecision.Status = SlotReuseAwaitingStorageEvidence
 			return ErrSlotReuseEvidence
+		}
+
+		// Use one clock sample after acquiring the writer lock and checking
+		// the durable charge. A pre-lock classification may have expired.
+		at := s.now().UTC()
+		verdict := ClassifySlotReuse(hold, evidence, at)
+		if verdict.Status != SlotReuseCandidateComplete {
+			holdDecision.Status = verdict.Status
+			return ErrSlotReuseEvidence
+		}
+		if !sqliteObservationsFresh(config, at) {
+			return ErrReconciliation
 		}
 		removed, err := tx.Exec("DELETE FROM inventory WHERE reservation_key=?", hold.Key)
 		if err != nil {
 			return err
 		}
 		if count, err := removed.RowsAffected(); err != nil || count != 1 {
-			decision.Status = SlotReuseStaleOrConflictingEvidence
-			return ErrConflict
-		}
-		at := s.now().UTC()
-		if at.IsZero() {
 			return ErrConflict
 		}
 		if _, err := tx.Exec("INSERT INTO releases(request_key,pool,host,cpu,ram,disk,runners,absence_digest,record,released_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -352,13 +354,12 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		if err := sqliteAudit(tx, "slot_reuse_released", hold.Key, at); err != nil {
 			return err
 		}
-		decision.Status = SlotReuseCandidateComplete
-		decision.EvidenceDigest = digest
-		decision.ReleasedAt = at
+		result = SlotReuseDecision{Request: hold, Status: SlotReuseCandidateComplete, EvidenceDigest: digest, ReleasedAt: at}
 		return nil
 	})
 	if err != nil {
-		return decision, err
+		// The callback can finish before SQLite reports an uncertain commit.
+		return holdDecision, err
 	}
-	return decision, nil
+	return result, nil
 }
