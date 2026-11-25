@@ -107,12 +107,18 @@ test("resource usage wire rejects corrupt versioned disk shapes", () => {
   reject(gauge({gauge_samples: 1}));
   reject(gauge({peak_at: "not-a-time"}));
   reject(gauge({peak_at: "2025-02-29T03:04:30Z"}));
+  reject(gauge({peak_at: "0001-01-01T00:00:00Z"}));
+  reject(gauge({peak_at: "2026-01-02T03:04:20Z"}));
   reject(gauge({peak_at: "2026-01-02T03:04:30.000000003Z"}));
   reject(gauge({latest_sample_at: "2026-01-02T03:04:35.000000001Z"}));
   reject(gauge({covered_ns: "6000000000"}));
   const missingTime = gauge();
   delete missingTime.used.latest_sample_at;
   reject(missingTime);
+  assert.equal(validateCIJobResourceUsage({state: "partial", as_of: at, measured: {
+    samples: 1, window_ns: "6000000000",
+    disk: {state: "verified", version: "disk-measured/v2", read: counter()},
+  }}), null);
   reject({state: "verified", version: "disk-measured/v2", read: counter(), reason: "disk_not_independently_measured"}); // measured carries no reason
 });
 
@@ -123,6 +129,7 @@ test("resource usage wire keeps the legacy mixed disk shape readable without len
   assert.ok(usage({state: "verified", read_bytes: "50", covered_ns: "6000000000", complete: true}));
   assert.ok(usage({state: "verified", read_bytes: "50", write_bytes: "3", covered_ns: "6000000000", complete: true}));
   assert.ok(usage({state: "verified", write_bytes: "3", used_sample_peak_bytes: "100"}));
+  assert.ok(usage({state: "verified", read_bytes: "18446744073709551615", covered_ns: "2000000000"}));
   assert.ok(usage({state: "verified", read_bytes: "50", covered_ns: "2000000000"}));
   assert.equal(usage({state: "verified", read_bytes: "50", covered_ns: "0"}), null);
   // Orphaned legacy coverage without the read counter it was measured on is

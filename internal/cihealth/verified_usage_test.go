@@ -380,7 +380,7 @@ func TestVerifiedUsageWireOmitsInvalidDiskMeasurements(t *testing.T) {
 	if record.Measured == nil || record.Measured.DiskRead == nil || record.Measured.DiskUsed == nil {
 		t.Fatal("positive fixture did not yield disk measurements")
 	}
-	record.Measured.DiskRead.Coverage = ResourceCoverage{}
+	record.Measured.DiskRead.Coverage.Intervals = 0
 	record.Measured.DiskUsed.PeakAt = record.Measured.DiskUsed.LatestAt.Add(time.Nanosecond)
 	wire := record.Wire(matrix)
 	if disk := wire.Measured.Disk; disk.State != VerifiedUsageUnavailable || disk.Read != nil || disk.Used != nil {

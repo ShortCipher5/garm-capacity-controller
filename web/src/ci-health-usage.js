@@ -36,7 +36,9 @@ function timestamp(value) {
   if (!m || m[1].startsWith("0000") || m[0] !== value) return null;
   const seconds = Date.parse(m[1] + "Z");
   if (!Number.isFinite(seconds) || new Date(seconds).toISOString().slice(0, 19) !== m[1]) return null;
-  return BigInt(seconds) * 1_000_000n + BigInt((m[2] ?? "").padEnd(9, "0"));
+  const fraction = BigInt((m[2] ?? "").padEnd(9, "0"));
+  if (m[1] === "0001-01-01T00:00:00" && fraction === 0n) return null;
+  return BigInt(seconds) * 1_000_000n + fraction;
 }
 
 function validMetric(value, kinds, windowNs) {
@@ -53,20 +55,20 @@ function validMetric(value, kinds, windowNs) {
   return true;
 }
 
-function validDiskCounter(value, windowNs) {
-  if (!exactKeys(value, ["bytes", "covered_ns", "complete"])) return false;
+function validDiskCounter(value, windowNs, samples) {
+  if (samples < 2 || !exactKeys(value, ["bytes", "covered_ns", "complete"])) return false;
   if (!decimal(value.bytes, true, maxUint64) || !decimal(value.covered_ns, false) || typeof value.complete !== "boolean") return false;
   const covered = BigInt(value.covered_ns);
   return covered <= windowNs && value.complete === (covered === windowNs);
 }
 
-function validDiskGauge(value, samples, asOf) {
+function validDiskGauge(value, windowNs, samples, asOf) {
   if (!exactKeys(value, ["sample_peak_bytes", "gauge_samples", "peak_at", "latest_sample_at"])) return false;
   if (!decimal(value.sample_peak_bytes, true, maxUint64)) return false;
   if (!Number.isInteger(value.gauge_samples) || value.gauge_samples < 1 || value.gauge_samples > samples) return false;
   const peak = timestamp(value.peak_at);
   const latest = timestamp(value.latest_sample_at);
-  return peak !== null && latest !== null && peak <= latest && latest <= asOf &&
+  return peak !== null && latest !== null && peak <= latest && latest <= asOf && latest - peak <= windowNs &&
     (value.gauge_samples !== 1 || peak === latest);
 }
 
@@ -87,16 +89,17 @@ function validDisk(value, windowNs, samples, asOf) {
     // fields must never be blended into the versioned shape.
     if (value.version !== "disk-measured/v2" || legacyDiskKeys.some((key) => Object.hasOwn(value, key))) return false;
     if (!["read", "write", "used"].some((key) => Object.hasOwn(value, key))) return false;
-    if (Object.hasOwn(value, "read") && !validDiskCounter(value.read, windowNs)) return false;
-    if (Object.hasOwn(value, "write") && !validDiskCounter(value.write, windowNs)) return false;
-    return !Object.hasOwn(value, "used") || validDiskGauge(value.used, samples, asOf);
+    if (Object.hasOwn(value, "read") && !validDiskCounter(value.read, windowNs, samples)) return false;
+    if (Object.hasOwn(value, "write") && !validDiskCounter(value.write, windowNs, samples)) return false;
+    return !Object.hasOwn(value, "used") || validDiskGauge(value.used, windowNs, samples, asOf);
   }
   // Legacy unversioned mixed shape (migration branch). Its shared coverage
   // pair was measured on the read counter only; it is meaningless without
   // read_bytes and is never assigned to writes.
   if (["read", "write", "used"].some((key) => Object.hasOwn(value, key))) return false;
   const quantities = ["read_bytes", "write_bytes", "used_sample_peak_bytes"].filter((key) => Object.hasOwn(value, key));
-  if (quantities.length === 0 || !quantities.every((key) => decimal(value[key]))) return false;
+  if (quantities.length === 0 || !quantities.every((key) => decimal(value[key], true, maxUint64))) return false;
+  if (samples < 2 && (Object.hasOwn(value, "read_bytes") || Object.hasOwn(value, "write_bytes"))) return false;
   if (!Object.hasOwn(value, "covered_ns")) return !Object.hasOwn(value, "complete");
   if (!Object.hasOwn(value, "read_bytes") || !decimal(value.covered_ns, false)) return false;
   const covered = BigInt(value.covered_ns);

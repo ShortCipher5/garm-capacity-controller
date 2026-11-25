@@ -486,8 +486,8 @@ func (r VerifiedJobUsageRecord) Wire(matrix AttributionCapabilityMatrix) Wire {
 			disk := DiskWire{
 				State:   VerifiedUsageVerified,
 				Version: DiskWireVersion,
-				Read:    diskCounterWire(summary.DiskRead, summary.Window),
-				Write:   diskCounterWire(summary.DiskWrite, summary.Window),
+				Read:    diskCounterWire(summary.DiskRead, summary.Window, summary.Samples),
+				Write:   diskCounterWire(summary.DiskWrite, summary.Window, summary.Samples),
 			}
 			if used := summary.DiskUsed; used != nil {
 				peak, latest := used.PeakAt.UTC(), used.LatestAt.UTC()
@@ -511,8 +511,8 @@ func (r VerifiedJobUsageRecord) Wire(matrix AttributionCapabilityMatrix) Wire {
 	return out
 }
 
-func diskCounterWire(counter *JobResourceCounterDelta, window time.Duration) *DiskCounterWire {
-	if counter == nil {
+func diskCounterWire(counter *JobResourceCounterDelta, window time.Duration, samples int) *DiskCounterWire {
+	if counter == nil || counter.Coverage.Intervals < 1 || counter.Coverage.Intervals >= samples {
 		return nil
 	}
 	covered := counter.Coverage.Duration
