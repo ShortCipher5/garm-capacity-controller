@@ -13,4 +13,4 @@ This follow-up to [#392](https://github.com/ShortCipher5/garm-capacity-controlle
 
 The finalization transaction requires the independent fence observation to follow the durable start of the current reconciliation epoch. An observed terminal job or teardown can remain historical. Re-labeling a pre-barrier fence with the current epoch cannot fund release. The regression fixture proves refusal with the full charge and no tombstone, followed by release once with a fresh fence observation. It exercises the local transition with an offline source and provides no installed-stack qualification.
 
-See the [isolated qualification and rollback runbook](https://github.com/ShortCipher5/garm-capacity-controller/pull/392) for the underlying acceptance plan.
+The [slot-reuse handoff](https://github.com/ShortCipher5/garm-capacity-controller/pull/392) defines the installed-stack acceptance criteria.
