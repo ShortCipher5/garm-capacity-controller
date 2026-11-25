@@ -33,6 +33,13 @@ test('malformed and untrusted payloads collapse to a conservative unavailable vi
   {...stockView,state:'outcome_unknown',operation:undefined},
   {...stockView,operation:{...operation,operation_id:'nope'}},
   {...stockView,operation:{...operation,state:'applied'}},
+  {...stockView,operation:{...operation,scope:'cd'.repeat(32)}},
+  {...stockView,operation:{...operation,charged:1}},
+  {...stockView,operation:{...operation,state:'applied_when_proven'}},
+  {...stockView,readback:{maximum:1,fresh:'yes'}},
+  {...stockView,readback:{maximum:-1,fresh:true}},
+  {...stockView,readback:{maximum:3,fresh:true,settled:true}},
+  {...stockView,scope:'0'.repeat(64)},
   {...stockView,reason:'Upper Case'},
   {...stockView,resume:undefined},
   {...stockView,resume:{lift_pause:'yes',ready:false}},
@@ -82,6 +89,8 @@ test('pause lift and fresh-check readiness are reported as different states',()=
  assert.match(messages.resumeReady,/pause must be lifted first/);
  const ready={...stockView,capability:{supported:true,refusals:[]},resume:resume(false,'not_paused',true,'')};
  assert.match(stockApplyMessages(stockApplyView(ready)).resumeReady,/every fresh drift check passes/);
+ assert.equal(stockApplyView({...ready,readback:{maximum:operation.observed,fresh:false}}).reason,'view_unavailable');
+ assert.equal(stockApplyView({...ready,readback:{maximum:operation.suggested,fresh:true}}).reason,'view_unavailable');
  assert.match(stockApplyMessages(stockApplyView({...stockView,resume:resume(false,'not_paused',false,'stale_evidence')})).resumeReady,/stale evidence/);
 });
 
@@ -100,4 +109,25 @@ test('missing charge stays unavailable and a recorded zero is explicit',()=>{
  assert.match(stockApplyMessages(unavailable).charged,/unavailable here. This is not a zero count/);
  const zero=stockApplyView({...stockView,operation:{...operation,charged:0},charged:{...stockView.charged,runners:0}});
  assert.match(stockApplyMessages(zero).charged,/Last recorded runner charge: 0 slot/);
+});
+
+test('recovery separates a local pause and settings observations from an upstream result',()=>{
+ const paused={...stockView,state:'paused_maintenance',paused:true,resume:resume(true,'',false,'pause_must_be_lifted_first')};
+ for(const state of ['dispatched','outcome_unknown']){
+  const operationHere={...operation,state};
+  for(const maximum of [0,operationHere.observed,operationHere.suggested,1000000]){
+   for(const fresh of [false,true]){
+    const messages=stockApplyMessages(stockApplyView({...paused,operation:operationHere,readback:{maximum,fresh}}));
+    assert.match(messages.localPause,/^Applied/);
+    assert.match(messages.upstream,/^Unresolved/);
+    assert.equal(messages.settings,`Maximum ${maximum} (${fresh?'fresh':'stale'} observation).`);
+   }
+  }
+ }
+ assert.match(stockApplyMessages(stockApplyView({...paused,operation:{...operation,state:'proposed'}})).upstream,/No submission/);
+ assert.match(stockApplyMessages(stockApplyView({...paused,operation:{...operation,state:'applied_when_proven'}})).upstream,/independently proven/);
+ const unavailable=stockApplyMessages(stockApplyDiagnosticsUnavailable());
+ assert.equal(unavailable.upstream,'Not observed.');
+ assert.equal(unavailable.localPause,'Not observed.');
+ assert.equal(unavailable.settings,'Not observed.');
 });

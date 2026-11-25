@@ -1,0 +1,98 @@
+//go:build testing
+
+package pool
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	commonParams "github.com/cloudbase/garm-provider-common/params"
+	"github.com/cloudbase/garm/locking"
+	"github.com/cloudbase/garm/params"
+	"github.com/cloudbase/garm/runner/common"
+	"github.com/cloudbase/garm/runner/common/mocks"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+)
+
+type sharedAdmissionTestTokens struct{}
+
+func (sharedAdmissionTestTokens) NewInstanceJWTToken(params.Instance, params.ForgeEntity, uint) (string, error) {
+	return "fixture", nil
+}
+
+func (sharedAdmissionTestTokens) NewAgentJWTToken(params.Instance, params.ForgeEntity) (string, error) {
+	return "", errors.New("unexpected agent token request")
+}
+
+// The stock worker uses the process-wide name locker for pending rows.
+var sharedAdmissionLocker = sync.OnceValue(func() error {
+	locker, err := locking.NewLocalLocker(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	return locking.RegisterLocker(locker)
+})
+
+// Exercise the unpatched normal-pool pending worker against its real SQLite
+// store. Only the forge, token issuer, and provider effects are fixtures.
+func (s *PoolStressTestSuite) TestSharedAdmissionIsLocalToConfiguredProvider() {
+	s.Require().NoError(sharedAdmissionLocker())
+	s.mgr.instanceTokenGetter = sharedAdmissionTestTokens{}
+	s.ghcliMock.EXPECT().GetEntityJITConfig(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(map[string]string{"fixture": "opaque"}, nil, nil).Twice()
+	type route struct {
+		provider *mocks.Provider
+		name     string
+		want     commonParams.InstanceStatus
+	}
+	routes := []route{{s.providerMock, "test-provider", commonParams.InstanceError}, {mocks.NewProvider(s.T()), "alternate-provider", commonParams.InstanceRunning}}
+	rows := make([]params.Instance, 0, len(routes))
+	for _, r := range routes {
+		s.mgr.providers[r.name] = r.provider
+		p, err := s.store.CreateEntityPool(s.adminCtx, s.entity, params.CreatePoolParams{
+			ProviderName: r.name, MaxRunners: 1, Enabled: true, OSType: "linux", OSArch: "amd64",
+			Image: "fixture-image", Flavor: "fixture-size", Tags: []string{r.name},
+			ExtraSpecs: []byte(`{"runner_install_template":"Zml4dHVyZQ=="}`),
+		})
+		s.Require().NoError(err)
+		r.provider.EXPECT().DisableJITConfig().Return(false).Once()
+		s.Require().NoError(s.mgr.addRunnerToPool(p, nil))
+		pending, err := s.store.ListPoolInstances(s.adminCtx, p.ID, false)
+		s.Require().NoError(err)
+		s.Require().Len(pending, 1)
+		row := pending[0]
+		s.Require().Equal(commonParams.InstancePendingCreate, row.Status)
+		rows = append(rows, row)
+		// Both normal-pool rows were accepted before the cap change. Leave the
+		// pools enabled and persist a zero maximum before running the worker.
+		zero := uint(0)
+		updated, err := s.store.UpdateEntityPool(s.adminCtx, s.entity, p.ID, params.UpdatePoolParams{MaxRunners: &zero})
+		s.Require().NoError(err)
+		s.Require().Zero(updated.MaxRunners)
+		args := mock.MatchedBy(func(b commonParams.BootstrapInstance) bool {
+			return b.Name == row.Name && b.PoolID == p.ID && b.JitConfigEnabled
+		})
+		scope := mock.MatchedBy(func(c common.CreateInstanceParams) bool {
+			pool := c.CreateInstanceV011.PoolInfo
+			return pool.ID == p.ID && pool.ProviderName == r.name && pool.MaxRunners == 0
+		})
+		create := r.provider.EXPECT().CreateInstance(mock.Anything, args, scope)
+		if r.want == commonParams.InstanceError {
+			create.Return(commonParams.ProviderInstance{}, errors.New("fixture provider capacity refused")).Once()
+			r.provider.EXPECT().DeleteInstance(mock.Anything, row.Name, mock.Anything).Return(nil).Once()
+		} else {
+			create.Return(commonParams.ProviderInstance{ProviderID: row.Name, Name: row.Name, Status: commonParams.InstanceRunning}, nil).Once()
+		}
+	}
+	s.Require().NoError(s.mgr.addPendingInstances())
+	s.Require().EventuallyWithT(func(t *assert.CollectT) {
+		for i, row := range rows {
+			got, err := s.store.GetInstance(s.adminCtx, row.Name)
+			assert.NoError(t, err)
+			assert.Equal(t, routes[i].want, got.Status)
+		}
+	}, 10*time.Second, 10*time.Millisecond)
+}
