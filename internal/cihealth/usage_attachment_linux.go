@@ -120,7 +120,7 @@ func openUsageAttachments(ctx context.Context, in UsageAttachmentInput, matrix A
 	if !in.Enabled {
 		return nil, nil
 	}
-	if !historyActive(ctx) || in.Root == nil || in.History == nil || !matrix.Supports(FactProviderOriginJoin) || maxWait <= 0 || maxWait > time.Minute || clock == nil || !validTime(clock()) {
+	if !historyActive(ctx) || in.Root == nil || in.History == nil || !matrix.supportsExactJobAttribution() || maxWait <= 0 || maxWait > time.Minute || clock == nil || !validTime(clock()) {
 		return nil, ErrUsageAttachment
 	}
 	root, err := in.Root.OpenRoot(".")
