@@ -1,0 +1,41 @@
+# Isolated qualification and rollback for stock GARM
+
+Production trackers [#53](https://github.com/ShortCipher5/garm-capacity-controller/issues/53) and [#268](https://github.com/ShortCipher5/garm-capacity-controller/issues/268) own the work. Use this checklist on a separately authorized isolated installed stack. Release review requires affirmative evidence for each capability on the exact installed artifact and bounded scope. Keep controller writes, automatic release, and attributed collection disabled wherever evidence is missing or contradictory.
+
+## Candidate and scope
+
+- Record main, reviewed head and merge SHA, checkout SHA from each job, and the model CI, disposable packaging, read-only admin UI and pinned GARM compatibility results. Repeat affected review and all four workflows on a new integrated candidate when the base or tested tree changes.
+- Record the installed controller, unmodified GARM, provider, runner and backend artifacts with digests and source revisions. Identify the permitted repository pools, provider routes, backend projects and qualified resource profiles. Document the other create, restart and settings paths and how each is independently excluded or held to the same boundary. Keep synthetic fixtures, public source findings and installed-stack evidence labeled in the report.
+- Capture the initial held CPU, RAM, runner and applicable storage commitments, with pending and unknown operations separately counted. Use only sanitized references and resource totals in the report. Keep runner and job records private, and keep GitHub assignment and GARM lifecycle in place.
+
+## Shared admission under competing demand
+
+- Stage two or more isolated ordinary repository pools with a common enforced resource budget and one remaining slot. Exercise simultaneous demand plus an already accepted create. Repeat at exact CPU and RAM boundaries where a runner slot alone would otherwise fit. Capture the durable decision and effective footprint before backend effects, and reconcile provider operations to those decisions.
+- **Pass evidence.** At most one eligible allocation commits the final slot. Current scope, profile, readiness and actual vector are validated at admission. Other create paths either hit the same authority and budget or are independently blocked. Failed, pending, or ambiguous allocations remain charged after restart. Stale, incomplete or wrong-scope observations refuse new growth.
+- **Stop condition.** A native provider, alternate route, queued request or privileged writer can exceed the tested limit, or a changed pool setting is the only apparent enforcement. Leave enforcement disabled. A whole-host claim requires independent accounting or exclusion of all other consumers. [Plan #394](https://github.com/ShortCipher5/garm-capacity-controller/pull/394)
+
+## Operator pause and interrupted settings updates
+
+- In the approved isolated scenario, observe local pause with work attempted before and after its durable acknowledgment. Observe drain through the protected read-only service separately. Exercise response loss after acceptance, delayed completion, process restart and a competing writer with the supported upstream contract.
+- **Pass evidence.** Subsequent local work is denied after pause commits. A drain result describes the protected session and carries its own evidence. The exact interrupted operation has an independently verifiable outcome under a continuing exclusive writer and accepted-work fence. Lifting a local pause leaves unresolved work blocked and charged. Apply and rollback require fresh scope and intended-field readback under that fence.
+- **Stop condition.** Exact outcome, continuing exclusion, or scope changes are unclear. Keep the writer disabled and preserve the unresolved work. Report matching settings, listener changes and historical restart receipts as diagnostics only. [Plan #393](https://github.com/ShortCipher5/garm-capacity-controller/pull/393)
+
+## Natural retirement and slot reuse
+
+- Capture the exact original completed one-job runner, its registration and immutable backend allocation, and the full charged resource vector. Obtain independent positive job settlement, post-job completion, assignment and reconnect closure, original-incarnation teardown, and disposition of processes and charged storage. Keep an independent late-work fence held across a new durable reconciliation barrier and the ensuing bounded inventory.
+- **Pass evidence.** The current reconciliation proves the relevant scope, and the continuing fence has fresh post-barrier evidence. The guarded transaction credits exactly the original vector once. Retry and restart show the same tombstone and zero additional credit. Wrong generation, retained storage, stale fence, disputed outcome and reappearing inventory preserve or restore the applicable charge or hold without implying reusable capacity.
+- **Stop condition.** Any witness relies on a name, a successful provider acknowledgment, a missing row, or incomplete visibility. Preserve the charge. [Plan #392](https://github.com/ShortCipher5/garm-capacity-controller/pull/392)
+
+## Per-job usage and retention
+
+- Join the exact enrolled source, repository, workflow, run, attempt and job to the assigned numeric runner registration. Prove the original GARM row and provider allocation lead to the immutable runtime incarnation, including process epoch. Bracket the independently observed job window and compare each supported measure with the installed source's documented units and sampling behavior.
+- **Pass evidence.** CPU is derived from valid cumulative intervals, memory mean and sampled peak retain distinct semantics, and each supported disk counter has independent coverage. Gauge timestamps are in the observed window. Missing metrics stay unavailable. Foreign scope, wrong generation, overlapping jobs, reset and teardown prevent attribution across those boundaries. Verify bounded runtime/API impact and isolation from admission. Test retention revocation, reopen, duplicate/conflicting observations and physical expiry with no new writes, including restart.
+- **Stop condition.** A link has only a name, mutable provider ID, apparent timing match, or an unproven original allocation. Keep live usage and retention disabled and verify GitHub timing and navigation still work. Roll out the [#399](https://github.com/ShortCipher5/garm-capacity-controller/pull/399) dashboard before any measured-v2 producer. [Plan #395](https://github.com/ShortCipher5/garm-capacity-controller/pull/395)
+
+## Rollback and evidence handoff
+
+1. Close new controller admission and any settings writer, and record whether local pause, session drain and settlement each have evidence. Keep unresolved operations and their full charges. Preserve the original provider routes for work that already exists.
+2. Disable live metric production and projection before reverting the dashboard. Check that timing remains usable and existing private retention remains governed by its expiry contract. Verify that no retained data supplies scaling or runner-control authority.
+3. Preserve the durable ledger, reconciliation history, release tombstones and private recovery state. For SQLite use a consistent backup or a closed checkpointed database. Check schema and read compatibility before selecting a rollback build. Keep write paths disabled if state compatibility is uncertain.
+4. Treat any inverse settings change as a separately reviewed operation under the current scope and fence. An interrupted or uncertain rollback stays blocked and charged. Verify final held vectors and absence of new controller commits during the pause.
+5. Hand off the signed-off artifact and scope manifest, per-case PASS or BLOCKED with sanitized evidence, custody and rollback observations, and the exact four CI links. Record any unsupported capability as blocked. Obtain separate authorization for activation and for each expanded scope or fault scenario.
