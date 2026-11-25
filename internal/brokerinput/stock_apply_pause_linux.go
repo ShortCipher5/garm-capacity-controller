@@ -1,11 +1,3 @@
-// Durable operator stop and interrupted-update recovery seam. A stop
-// acknowledgment means no new controller work under the paused scope; it
-// never means upstream work completed, a runner stopped, or capacity became
-// available. Local pause applied, local session drained and upstream outcome
-// settled are three distinct facts: this seam can only ever establish the
-// first. A possibly accepted update stays unresolved across restart until an
-// independently authoritative outcome is proven; a matching GET or a resumed
-// listener is not proof.
 package brokerinput
 
 import (
@@ -13,16 +5,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"errors"
 	"time"
 )
 
-// StockApplyPauseAck is the durable stop acknowledgment for one scope. It
-// reports the local pause and the exact unresolved work that stays held and
-// charged. SessionDrained and UpstreamSettled are always false here: a local
-// pause never drains an upstream session and never settles an accepted
-// change, and rendering them as anything but distinct unproven facts would
-// be a false completion claim.
+// StockApplyPauseAck confirms that local admission is paused for this scope.
+// Unresolved describes work still held and charged at the pause transaction.
+// SessionDrained and UpstreamSettled remain false because each requires
+// independent evidence. Existing idle runners can still accept jobs.
 type StockApplyPauseAck struct {
 	Scope             string               `json:"scope"`
 	Paused            bool                 `json:"paused"`
@@ -34,15 +23,15 @@ type StockApplyPauseAck struct {
 	Reason            string               `json:"reason"`
 }
 
-// AcknowledgePause durably pauses the scope and, in the same serialized
-// transaction, reads back the exact work that remains unresolved. The
-// acknowledgment is serialized against new admission: after it returns, no
-// new proposal or dispatch can start under the scope. Earlier accepted or
-// uncertain work is held, never replayed or discarded. A repeated
-// acknowledgment after a lost response is idempotent: it changes nothing and
-// reports the same durable state.
+// AcknowledgePause sets the local pause and captures unresolved work in one
+// transaction. Proposal admission and local dispatch check the durable pause
+// in their own write transactions. Work committed earlier stays recorded.
+// AcknowledgedAt is this call's supplied time in UTC. A retry while paused
+// observes current work without changing the pause or adding an audit event.
+// After Resume the same request sets a new pause. Use RecoverScope to inspect
+// a lost acknowledgment without requesting another stop.
 func (c *StockApplyController) AcknowledgePause(ctx context.Context, scope [sha256.Size]byte, reason string, now time.Time) (StockApplyPauseAck, error) {
-	if now.IsZero() || !stockApplyReasonText(reason, 256) {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() || !stockApplyReasonText(reason, 256) {
 		return StockApplyPauseAck{}, ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -52,13 +41,11 @@ func (c *StockApplyController) AcknowledgePause(ctx context.Context, scope [sha2
 	key := hex.EncodeToString(scope[:])
 	ack := StockApplyPauseAck{Scope: key, AcknowledgedAt: now.UTC()}
 	err := c.journal.transaction(ctx, func(tx *sql.Tx) error {
-		var paused int
-		err := tx.QueryRow("SELECT paused FROM stock_apply_mode WHERE scope=?", key).Scan(&paused)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ErrStockApplyJournal
+		state, err := loadStockApplyScope(tx, key, false)
+		if err != nil {
+			return err
 		}
-		already := err == nil && paused == 1
-		if !already {
+		if !state.paused {
 			if _, err := tx.Exec("INSERT INTO stock_apply_mode(scope,paused,reason,updated_at) VALUES(?,1,?,?) ON CONFLICT(scope) DO UPDATE SET paused=1,reason=excluded.reason,updated_at=excluded.updated_at", key, reason, now.UTC().Format(time.RFC3339Nano)); err != nil {
 				return ErrStockApplyJournal
 			}
@@ -66,19 +53,10 @@ func (c *StockApplyController) AcknowledgePause(ctx context.Context, scope [sha2
 				return err
 			}
 		}
-		var op StockApplyOperation
-		row := tx.QueryRow("SELECT "+stockApplyOperationColumns+" FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown') ORDER BY sequence DESC LIMIT 1", key)
-		op, err = scanStockApplyOperation(row)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ErrStockApplyJournal
-		}
-		if err == nil {
-			held := op
-			ack.Unresolved = &held
-		}
+		ack.Unresolved = state.operation
 		ack.Paused = true
 		ack.LocalPauseApplied = true
-		if already {
+		if state.paused {
 			ack.Reason = stockApplyReasonAlreadyPaused
 		} else {
 			ack.Reason = stockApplyReasonPauseActive
@@ -91,14 +69,12 @@ func (c *StockApplyController) AcknowledgePause(ctx context.Context, scope [sha2
 	return ack, nil
 }
 
-// AdmitScopeWork is the scheduler/control seam every controller loop must
-// pass before starting new work under a scope. It fails closed: a paused
-// scope admits nothing new, an unresolved operation blocks new work even
-// after the pause is lifted, and journal failures never silently become a
-// writable scope. Admission here is permission to plan local work only; it
-// grants no upstream write authority.
+// AdmitScopeWork is a point-in-time preflight for planning. A favorable
+// result expires as soon as another transaction changes the scope. It grants
+// no reservation or write authority. RecordProposal repeats the checks in
+// the transaction that actually admits the local proposal.
 func (c *StockApplyController) AdmitScopeWork(ctx context.Context, scope [sha256.Size]byte, now time.Time) error {
-	if now.IsZero() {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -106,22 +82,11 @@ func (c *StockApplyController) AdmitScopeWork(ctx context.Context, scope [sha256
 	}
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
-	var paused int
-	err := c.journal.db.QueryRowContext(ctx, "SELECT paused FROM stock_apply_mode WHERE scope=?", key).Scan(&paused)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return ErrStockApplyJournal
+	state, err := c.journal.scopeSnapshot(ctx, key, false)
+	if err != nil {
+		return err
 	}
-	if err == nil && paused == 1 {
-		return ErrStockApplyPaused
-	}
-	var unresolved int
-	if err := c.journal.db.QueryRowContext(ctx, "SELECT count(*) FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown')", key).Scan(&unresolved); err != nil {
-		return ErrStockApplyJournal
-	}
-	if unresolved != 0 {
-		return ErrStockApplyBlocked
-	}
-	return nil
+	return state.admitProposal()
 }
 
 // StockApplyRecovery is the restart inspection for one scope. It separates
@@ -150,7 +115,7 @@ const (
 // proven operation is not in flight. Missing or foreign lineage already
 // failed at journal open, so an available journal here is the genuine one.
 func (c *StockApplyController) RecoverScope(ctx context.Context, scope [sha256.Size]byte, now time.Time) (StockApplyRecovery, error) {
-	if now.IsZero() {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() {
 		return StockApplyRecovery{}, ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -159,28 +124,23 @@ func (c *StockApplyController) RecoverScope(ctx context.Context, scope [sha256.S
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
 	recovery := StockApplyRecovery{Scope: key, Inflight: StockApplyInflightNone, Reason: stockApplyReasonNoOpenOperation}
-	var paused int
-	err := c.journal.db.QueryRowContext(ctx, "SELECT paused FROM stock_apply_mode WHERE scope=?", key).Scan(&paused)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return StockApplyRecovery{}, ErrStockApplyJournal
+	state, err := c.journal.scopeSnapshot(ctx, key, false)
+	if err != nil {
+		return StockApplyRecovery{}, err
 	}
-	recovery.Paused = err == nil && paused == 1
-	var op StockApplyOperation
-	row := c.journal.db.QueryRowContext(ctx, "SELECT "+stockApplyOperationColumns+" FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown') ORDER BY sequence DESC LIMIT 1", key)
-	op, err = scanStockApplyOperation(row)
-	if errors.Is(err, sql.ErrNoRows) {
+	recovery.Paused = state.paused
+	recovery.Operation = state.operation
+	if state.operation == nil {
 		return recovery, nil
 	}
-	if err != nil {
-		return StockApplyRecovery{}, ErrStockApplyJournal
-	}
-	held := op
-	recovery.Operation = &held
-	switch op.State {
+	switch state.operation.State {
 	case "proposed":
 		recovery.Inflight = StockApplyInflightProposalOpen
-		recovery.Withdrawable = true
+		recovery.Withdrawable = !state.paused
 		recovery.Reason = "proposal_open_withdrawal_available"
+		if state.paused {
+			recovery.Reason = stockApplyReasonPauseLiftFirst
+		}
 	case "dispatched":
 		recovery.Inflight = StockApplyInflightOutcomeUnresolved
 		recovery.Reason = stockApplyReasonAwaitingReceipt

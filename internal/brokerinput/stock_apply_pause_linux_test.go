@@ -2,17 +2,22 @@ package brokerinput
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 )
 
 func TestStockApplyPauseAckSerializesAgainstNewWork(t *testing.T) {
-	controller, scope, _, _ := stockApplyTestController(t)
+	controller, scope, path, lineage := stockApplyTestController(t)
+	operator := reopenStockApplyController(t, path, lineage)
 	now := time.Unix(1700000200, 0)
 	ctx := context.Background()
-	ack, err := controller.AcknowledgePause(ctx, scope, "operator stop", now)
+	if err := controller.AdmitScopeWork(ctx, scope, now); err != nil {
+		t.Fatalf("preflight before pause: %v", err)
+	}
+	ack, err := operator.AcknowledgePause(ctx, scope, "operator stop", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,9 +35,36 @@ func TestStockApplyPauseAckSerializesAgainstNewWork(t *testing.T) {
 	}
 	// A repeated acknowledgment after a lost response is idempotent: same
 	// durable state, no new unresolved work invented, no error.
-	again, err := controller.AcknowledgePause(ctx, scope, "operator stop", now.Add(2*time.Second))
-	if err != nil || !again.Paused || !again.LocalPauseApplied || again.Reason != stockApplyReasonAlreadyPaused {
-		t.Fatalf("lost-response retry must be idempotent: %+v %v", again, err)
+	retryTime := now.Add(2 * time.Second)
+	again, err := controller.AcknowledgePause(ctx, scope, "retry after lost response", retryTime)
+	if err != nil || !again.Paused || !again.LocalPauseApplied || again.Reason != stockApplyReasonAlreadyPaused ||
+		!again.AcknowledgedAt.Equal(retryTime) || again.Unresolved != nil || again.UpstreamSettled || again.SessionDrained {
+		t.Fatalf("lost-response retry: %+v %v", again, err)
+	}
+	var reason, stamp string
+	var events int
+	key := hex.EncodeToString(scope[:])
+	if err := operator.journal.db.QueryRow("SELECT reason,updated_at FROM stock_apply_mode WHERE scope=?", key).Scan(&reason, &stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := operator.journal.db.QueryRow("SELECT count(*) FROM stock_apply_audit WHERE scope=?", key).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "operator stop" || stamp != now.UTC().Format(time.RFC3339Nano) || events != 1 {
+		t.Fatalf("retry modified durable pause: reason=%q at=%q audit rows=%d", reason, stamp, events)
+	}
+	if err := operator.Resume(ctx, scope, "maintenance complete", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.AdmitScopeWork(ctx, scope, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("clean scope after resume: %v", err)
+	}
+	again, err = controller.AcknowledgePause(ctx, scope, "operator stop", now.Add(5*time.Second))
+	if err != nil || again.Reason != stockApplyReasonPauseActive || again.UpstreamSettled || again.SessionDrained {
+		t.Fatalf("reissued stop after resume: %+v %v", again, err)
+	}
+	if err := operator.RecordProposal(ctx, plan, 0, planNow); !errors.Is(err, ErrStockApplyPaused) {
+		t.Fatalf("reissued stop allowed actual admission: %v", err)
 	}
 	// An unrelated scope neither inherits the pause nor loses its own state.
 	other := scope
@@ -43,60 +75,123 @@ func TestStockApplyPauseAckSerializesAgainstNewWork(t *testing.T) {
 }
 
 func TestStockApplyConcurrentPauseAndAdmission(t *testing.T) {
-	controller, scope, _, _ := stockApplyTestController(t)
+	controller, scope, path, lineage := stockApplyTestController(t)
+	operator := reopenStockApplyController(t, path, lineage)
 	now := time.Unix(1700000200, 0)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	plan, planNow := validatedStockApplyPlan(t, 1)
 	const workers = 8
-	var wg sync.WaitGroup
-	admitted := make([]error, workers)
+	start := make(chan struct{})
+	admitted := make(chan error, workers)
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			if err := controller.AdmitScopeWork(ctx, scope, now); err != nil {
-				admitted[i] = err
-				return
+		go func() {
+			<-start
+			err := controller.AdmitScopeWork(ctx, scope, now)
+			if err == nil {
+				err = controller.RecordProposal(ctx, plan, 2, planNow)
 			}
-			admitted[i] = controller.RecordProposal(ctx, plan, 0, planNow)
-		}(i)
+			admitted <- err
+		}()
 	}
-	ackDone := make(chan StockApplyPauseAck, 1)
+	type pauseResult struct {
+		ack StockApplyPauseAck
+		err error
+	}
+	paused := make(chan pauseResult, 1)
 	go func() {
-		ack, err := controller.AcknowledgePause(ctx, scope, "operator stop", now)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		ackDone <- ack
+		<-start
+		ack, err := operator.AcknowledgePause(ctx, scope, "operator stop", now)
+		paused <- pauseResult{ack, err}
 	}()
-	wg.Wait()
-	<-ackDone
-	// However the race resolved, after the acknowledged pause no new work
-	// starts, and earlier admitted work is held rather than discarded.
-	if err := controller.AdmitScopeWork(ctx, scope, now.Add(time.Second)); !errors.Is(err, ErrStockApplyPaused) {
-		t.Fatal("work admitted after acknowledged pause", err)
-	}
-	recovery, err := controller.RecoverScope(ctx, scope, now.Add(time.Second))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !recovery.Paused {
-		t.Fatal("recovery lost the acknowledged pause")
+	close(start)
+	var ack StockApplyPauseAck
+	select {
+	case result := <-paused:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		ack = result.ack
+	case <-ctx.Done():
+		t.Fatal("pause acknowledgment timed out")
 	}
 	succeeded := 0
-	for _, err := range admitted {
-		if err == nil {
-			succeeded++
-		} else if !errors.Is(err, ErrStockApplyPaused) && !errors.Is(err, ErrStockApplyBlocked) {
-			t.Fatalf("unexpected admission failure: %v", err)
+	for i := 0; i < workers; i++ {
+		select {
+		case err := <-admitted:
+			if err == nil {
+				succeeded++
+			} else if !errors.Is(err, ErrStockApplyPaused) && !errors.Is(err, ErrStockApplyBlocked) {
+				t.Fatalf("unexpected admission failure: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("proposal admission timed out")
 		}
 	}
-	if succeeded > 1 {
-		t.Fatalf("more than one proposal admitted: %d", succeeded)
+	recovery, err := controller.RecoverScope(ctx, scope, now.Add(time.Second))
+	if err != nil || !recovery.Paused || !ack.LocalPauseApplied || ack.UpstreamSettled || ack.SessionDrained {
+		t.Fatalf("pause and recovery: %+v %+v %v", ack, recovery, err)
 	}
-	if recovery.Inflight == StockApplyInflightProposalOpen && succeeded != 1 {
-		t.Fatalf("held proposal and admission count disagree: %+v %d", recovery, succeeded)
+	if succeeded > 1 || (succeeded == 1) != (ack.Unresolved != nil) || (succeeded == 1) != (recovery.Operation != nil) {
+		t.Fatalf("commits=%d, pause=%+v, recovery=%+v", succeeded, ack, recovery)
+	}
+	if succeeded == 1 && (*recovery.Operation != *ack.Unresolved || ack.Unresolved.Charged != 2 ||
+		recovery.Inflight != StockApplyInflightProposalOpen || recovery.Withdrawable) {
+		t.Fatalf("paused proposal: pause=%+v recovery=%+v", ack.Unresolved, recovery)
+	}
+}
+
+// During each transition the scope always has a dispatched operation, a
+// committed pause, or both. Reading the pre-pause mode with the post-proof
+// operation would incorrectly report a clear scope.
+func TestStockApplySnapshotAcrossHandlesDuringSettlement(t *testing.T) {
+	enableStockApplyFixtureInterface(t)
+	reader, scope, path, lineage := stockApplyTestController(t)
+	writer := reopenStockApplyController(t, path, lineage)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	plan, now := validatedStockApplyPlan(t, 1)
+	claim := stockApplyFixtureClaim()
+	for round := 0; round < 16; round++ {
+		if err := writer.Resume(ctx, scope, "prepare fixture", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.RecordProposal(ctx, plan, 2, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.MarkDispatched(ctx, scope, claim, now); err != nil {
+			t.Fatal(err)
+		}
+		proof := StockApplyOutcomeProof{OperationID: viewOperationID(t, writer, scope), ReceiptDigest: [32]byte{1}, ChallengeDigest: [32]byte{2}}
+		done := make(chan error, 1)
+		go func() {
+			_, err := writer.AcknowledgePause(ctx, scope, "operator stop", now)
+			if err == nil {
+				err = writer.RecordProvenOutcome(ctx, scope, claim, proof, now)
+			}
+			done <- err
+		}()
+		for i := 0; i < 8; i++ {
+			recovery, err := reader.RecoverScope(ctx, scope, now)
+			if err != nil || (!recovery.Paused && recovery.Operation == nil) {
+				t.Fatalf("incoherent recovery: %+v %v", recovery, err)
+			}
+			if recovery.Operation != nil && (recovery.Operation.OperationID != proof.OperationID || recovery.Operation.Charged != 2) {
+				t.Fatalf("recovery lost held work: %+v", recovery.Operation)
+			}
+			err = reader.AdmitScopeWork(ctx, scope, now)
+			if !errors.Is(err, ErrStockApplyBlocked) && !errors.Is(err, ErrStockApplyPaused) {
+				t.Fatalf("preflight missed both the operation and pause: %v", err)
+			}
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal("pause and settlement timed out")
+		}
 	}
 }
 
@@ -125,6 +220,11 @@ func TestStockApplyPauseAckHoldsUnresolvedAndResumeStaysBlocked(t *testing.T) {
 	if ack.Unresolved == nil || ack.Unresolved.OperationID != operationID || ack.Unresolved.State != "outcome_unknown" ||
 		ack.Unresolved.Charged != 2 || ack.UpstreamSettled || ack.SessionDrained {
 		t.Fatalf("pause ack lost or settled unresolved work: %+v", ack)
+	}
+	retry, err := controller.AcknowledgePause(ctx, plan.Scope, "retry after lost response", now.Add(4*time.Second))
+	if err != nil || retry.Unresolved == nil || *retry.Unresolved != *ack.Unresolved ||
+		retry.Reason != stockApplyReasonAlreadyPaused || retry.SessionDrained || retry.UpstreamSettled {
+		t.Fatalf("lost-ack retry changed held work or claimed settlement: %+v %v", retry, err)
 	}
 	// Lifting the pause changes only the local pause state: new work stays
 	// blocked and no retry, resolution or premature resume is permitted.
@@ -265,5 +365,35 @@ func TestStockApplyPauseAckNeverFabricatesSettlement(t *testing.T) {
 	}
 	if err := controller.AdmitScopeWork(context.Background(), scope, time.Time{}); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("zero clock admitted", err)
+	}
+}
+
+func TestStockApplyZeroScopeRejected(t *testing.T) {
+	controller, _, _, _ := stockApplyTestController(t)
+	ctx := context.Background()
+	plan, now := validatedStockApplyPlan(t, 1)
+	var scope [sha256.Size]byte
+	plan.Scope = scope
+	claim := StockApplyCapabilityClaim{Interface: StockApplyStockInterface}
+	_, ackErr := controller.AcknowledgePause(ctx, scope, "operator stop", now)
+	_, recoverErr := controller.RecoverScope(ctx, scope, now)
+	_, viewErr := controller.View(ctx, scope, stockApplyEval(now, claim, 0, nil, true))
+	for name, err := range map[string]error{
+		"acknowledge": ackErr,
+		"recover":     recoverErr,
+		"view":        viewErr,
+		"preflight":   controller.AdmitScopeWork(ctx, scope, now),
+		"propose":     controller.RecordProposal(ctx, plan, 0, now),
+		"pause":       controller.Pause(ctx, scope, "operator stop", now),
+		"resume":      controller.Resume(ctx, scope, "resume", now),
+		"withdraw":    controller.WithdrawProposal(ctx, scope, "withdraw", now),
+		"dispatch":    controller.MarkDispatched(ctx, scope, claim, now),
+		"uncertain":   controller.MarkOutcomeUncertain(ctx, scope, now),
+		"prove":       controller.RecordProvenOutcome(ctx, scope, claim, StockApplyOutcomeProof{}, now),
+		"observe":     controller.RecordObservation(ctx, scope, 1, 1, now),
+	} {
+		if !errors.Is(err, ErrStockApplyConflict) {
+			t.Errorf("%s accepted zero scope or reported a different error: %v", name, err)
+		}
 	}
 }
