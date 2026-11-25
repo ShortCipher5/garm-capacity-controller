@@ -96,16 +96,16 @@ type JobAttributionClaim struct {
 // incarnation all proven consistent, with positive original-allocation
 // evidence.
 type VerifiedAttribution struct {
-	Job           JobKey
-	Enrolled      EnrolledRowScope
-	AgentID       int64
-	SourceID      string
-	PoolID        string
-	RowID         string
-	Incarnation   StockRunnerIncarnation
-	Origin        VerifiedProviderOrigin
-	StartedAt     time.Time
-	ExecutionEnds bool
+	Job                                     JobKey
+	Enrolled                                EnrolledRowScope
+	AgentID                                 int64
+	SourceID                                string
+	PoolID                                  string
+	RowID                                   string
+	Incarnation                             StockRunnerIncarnation
+	Origin                                  VerifiedProviderOrigin
+	StartedAt, EndedAt, ExecutionObservedAt time.Time
+	ExecutionEnds                           bool
 }
 
 func validRunnerIncarnationFacts(r StockRunnerIncarnation) bool {
@@ -149,14 +149,14 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 	var none VerifiedAttribution
 	if !matrix.Supports(FactExactJobIdentity) || !matrix.Supports(FactPositiveRunnerRegistration) ||
 		!matrix.Supports(FactExactStockRow) || !matrix.Supports(FactPositiveStockRowAgent) ||
-		!matrix.Supports(FactIncusIncarnation) || !matrix.Supports(FactProviderOriginJoin) || now.IsZero() {
+		!matrix.Supports(FactIncusIncarnation) || !matrix.Supports(FactProcessEpoch) || !matrix.Supports(FactProviderOriginJoin) || now.IsZero() {
 		return none, ErrAttributionUnsupported
 	}
 	job := claim.Job
 	execution, row, incarnation := claim.Execution, claim.Row, claim.Incarnation
 	started, observed := execution.StartedAt.UTC(), execution.ObservedAt.UTC()
 	if !validKey(job.Attempt) || job.JobID <= 0 || execution.Job != job || execution.RunnerAgentID <= 0 ||
-		execution.State == StockJobExecutionUnknown || !validTime(started) || !validTime(observed) ||
+		(execution.State != StockJobObservedExecuting && execution.State != StockJobObservedEnded) || !validTime(started) || !validTime(observed) ||
 		observed.Before(started) || observed.UTC().After(now.UTC()) {
 		return none, ErrAttributionUnsupported
 	}
@@ -177,7 +177,7 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 	if !validStockRowEvidence(row, now) || row.AgentID != execution.RunnerAgentID {
 		return none, ErrAttributionUnsupported
 	}
-	if !validRunnerIncarnationFacts(incarnation) {
+	if !validRunnerIncarnationFacts(incarnation) || incarnation.StartedAt.After(started) {
 		return none, ErrAttributionUnsupported
 	}
 	// Cross-runner, cross-attempt and cross-repository claims die here: only
@@ -190,6 +190,18 @@ func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributi
 	return VerifiedAttribution{
 		Job: job, Enrolled: claim.Enrolled, AgentID: row.AgentID, SourceID: row.SourceIdentity,
 		PoolID: row.PoolID, RowID: row.RowID, Incarnation: incarnation, Origin: origin,
-		StartedAt: started, ExecutionEnds: execution.State == StockJobObservedEnded,
+		StartedAt: started, EndedAt: ended, ExecutionObservedAt: observed, ExecutionEnds: execution.State == StockJobObservedEnded,
 	}, nil
+}
+
+// The earlier execution receipt and the independent sampling receipt may
+// legitimately straddle completion. Both must describe one possible timeline.
+func (a VerifiedAttribution) conflictsWithExecution(other StockJobExecutionObservation) bool {
+	if a.ExecutionEnds {
+		if other.State == StockJobObservedEnded {
+			return !a.EndedAt.Equal(other.EndedAt)
+		}
+		return !other.ObservedAt.Before(a.EndedAt)
+	}
+	return other.State == StockJobObservedEnded && !a.ExecutionObservedAt.Before(other.EndedAt)
 }

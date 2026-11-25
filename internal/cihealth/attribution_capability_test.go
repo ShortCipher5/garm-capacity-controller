@@ -10,7 +10,7 @@ func TestDocumentedMatrixProvesOnlyPublishedSourceFacts(t *testing.T) {
 		FactExactStockRow:              true,
 		FactPositiveStockRowAgent:      true,
 		FactIncusIncarnation:           true,
-		FactProcessEpoch:               true,
+		FactProcessEpoch:               false,
 		FactCPUCounters:                true,
 		FactRAMCounters:                true,
 		// The whole point of the matrix: no documented read proves the
@@ -51,10 +51,10 @@ func TestDocumentedMatrixPerSourceCapabilities(t *testing.T) {
 		},
 		{
 			class:  EvidenceIncusRuntimeHealth,
-			proves: []AttributionFact{FactIncusIncarnation, FactProcessEpoch, FactCPUCounters, FactRAMCounters},
+			proves: []AttributionFact{FactIncusIncarnation, FactCPUCounters, FactRAMCounters},
 			never: []AttributionFact{
 				FactExactJobIdentity, FactPositiveRunnerRegistration, FactExactStockRow, FactPositiveStockRowAgent,
-				FactStockProviderName, FactProviderOriginJoin, FactDiskCounters,
+				FactStockProviderName, FactProcessEpoch, FactProviderOriginJoin, FactDiskCounters,
 			},
 		},
 	}
@@ -95,13 +95,13 @@ func TestDocumentedMatrixPerSourceCapabilities(t *testing.T) {
 
 // fixtureJoinMatrix is a fixture-only matrix standing in for a future
 // qualified producer of original provider allocation evidence. It exists so
-// the verified paths can be exercised offline; DocumentedMatrix remains the
+// the verified paths can be exercised offline with independent boot/start proof; DocumentedMatrix remains the
 // production contract and keeps the join unsupported.
 func fixtureJoinMatrix() AttributionCapabilityMatrix {
 	m := DocumentedMatrix()
 	m.Sources = append(m.Sources, AttributionCapability{
 		Class:  "fixture_verified_origin",
-		Proves: []AttributionFact{FactProviderOriginJoin},
+		Proves: []AttributionFact{FactProviderOriginJoin, FactProcessEpoch},
 	})
 	return m
 }
