@@ -296,7 +296,7 @@ func TestStockApplyRestartPresentsDispatchedAsOutcomeUnknownAndHoldsCharges(t *t
 
 func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 	enableStockApplyFixtureInterface(t)
-	controller, _, _, _ := stockApplyTestController(t)
+	controller, _, path, lineage := stockApplyTestController(t)
 	plan, now := validatedStockApplyPlan(t, 1)
 	claim := stockApplyFixtureClaim()
 	if err := controller.RecordProposal(context.Background(), plan, 2, now); err != nil {
@@ -308,6 +308,7 @@ func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 	if err := controller.MarkOutcomeUncertain(context.Background(), plan.Scope, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	operationID := viewOperationID(t, controller, plan.Scope)
 	for i, readback := range []int64{plan.Suggested, plan.Observed, plan.Suggested} {
 		// The ledger baseline moves while the operation is open; the held
 		// capacity display must follow it without touching the outcome.
@@ -318,12 +319,37 @@ func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if view.Readback == nil || !view.Readback.Fresh || view.Readback.Maximum != readback || view.Operation == nil || view.Operation.OperationID != operationID || view.Resume.Ready {
+			t.Fatal("current settings and unresolved operation must remain separate", view)
+		}
 		if view.State != StockApplyStateOutcomeUnknown || view.Drift {
 			t.Fatal("readback changed the durable outcome", readback, view.State, view.Drift)
 		}
 		if view.Charged.Runners != int64(5+i) || view.Charged.Reason != stockApplyChargedUncertain {
 			t.Fatal("current charged baseline not reflected", view.Charged)
 		}
+	}
+	if _, err := controller.AcknowledgePause(t.Context(), plan.Scope, "operator stop", now.Add(6*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	controller = reopenStockApplyController(t, path, lineage)
+	stale := plan.Suggested
+	paused, err := controller.View(t.Context(), plan.Scope, stockApplyEval(now.Add(7*time.Second), claim, 7, &stale, false))
+	if err != nil || !paused.Paused || paused.Readback == nil || paused.Readback.Maximum != stale || paused.Readback.Fresh ||
+		paused.Operation == nil || paused.Operation.OperationID != operationID || paused.Operation.State != "outcome_unknown" ||
+		paused.Charged.Runners != 7 || paused.Resume.Ready {
+		t.Fatalf("restart with a stale matching setting: %+v %v", paused, err)
+	}
+	if err := controller.Resume(t.Context(), plan.Scope, "lift local pause", now.Add(8*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	unpaused, err := controller.View(t.Context(), plan.Scope, stockApplyEval(now.Add(9*time.Second), claim, 7, nil, false))
+	if err != nil || unpaused.Paused || unpaused.Readback != nil || unpaused.State != StockApplyStateOutcomeUnknown ||
+		unpaused.Operation == nil || unpaused.Operation.OperationID != operationID || unpaused.Charged.Runners != 7 || unpaused.Resume.Ready {
+		t.Fatalf("pause lift with missing settings: %+v %v", unpaused, err)
 	}
 	proof := StockApplyOutcomeProof{OperationID: viewOperationID(t, controller, plan.Scope), ReceiptDigest: sha256.Sum256([]byte("authoritative receipt")), ChallengeDigest: sha256.Sum256([]byte("fence challenge"))}
 	if err := controller.RecordProvenOutcome(context.Background(), plan.Scope, claim, proof, now.Add(10*time.Second)); err != nil {

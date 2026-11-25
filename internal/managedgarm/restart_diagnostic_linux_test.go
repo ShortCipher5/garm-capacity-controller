@@ -18,6 +18,8 @@ func TestHistoricalRestartInspection(t *testing.T) {
 		corrupt    func(*testing.T, *bootstrapFiles, restartHistoryReceipt)
 	}{
 		{name: "intent", want: "restart intent observed"},
+		{name: "suspend-pending", want: "suspension requested; no returned suspend hook observed"},
+		{name: "suspend-returned", want: "suspend-hook-returned; no completed resume observed"},
 		{name: "resume-only", want: "resume-hook-returned"},
 		{name: "receipt", want: "historical revalidation receipt observed"},
 		{name: "receipt-clock-step", want: "historical revalidation receipt observed"},
@@ -97,9 +99,12 @@ func TestHistoricalRestartInspection(t *testing.T) {
 			putHistory(t, f, "controlled-restart-intent.json", record)
 			intentHash := hashBytes(intent)
 			if tt.name != "intent" {
-				for _, phase := range []string{"suspend-pending", "suspend-confirmed"} {
-					putHistory(t, f, "controlled-restart-writer-"+phase+".json", intentHash)
-				}
+				putHistory(t, f, "controlled-restart-writer-suspend-pending.json", intentHash)
+			}
+			if tt.name != "intent" && tt.name != "suspend-pending" {
+				putHistory(t, f, "controlled-restart-writer-suspend-confirmed.json", intentHash)
+			}
+			if tt.name != "intent" && tt.name != "suspend-pending" && tt.name != "suspend-returned" {
 				for i, step := range order {
 					for _, phase := range []string{"pending", "confirmed"} {
 						putHistory(t, f, fmt.Sprintf("controlled-restart-%d-%s.json", i, phase), restartJournalEvent{Intent: intentHash, Index: i, Step: step, Pending: phase == "pending"})
