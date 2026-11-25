@@ -438,11 +438,6 @@ type StockApplyOperation struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-type stockApplyModeRow struct {
-	paused bool
-	reason string
-}
-
 func scanStockApplyOperation(row interface{ Scan(...any) error }) (StockApplyOperation, error) {
 	var op StockApplyOperation
 	var scope, expires, created, updated string
@@ -459,24 +454,53 @@ func scanStockApplyOperation(row interface{ Scan(...any) error }) (StockApplyOpe
 
 const stockApplyOperationColumns = "operation_id,scope,pool_id,repository_id,source,fingerprint,observed,suggested,charged,direction,plan_expires_at,state,drift,created_at,updated_at"
 
-func (c *StockApplyController) load(ctx context.Context, scope string) (stockApplyModeRow, *StockApplyOperation, error) {
-	mode := stockApplyModeRow{}
-	var paused int
-	err := c.journal.db.QueryRowContext(ctx, "SELECT paused,reason FROM stock_apply_mode WHERE scope=?", scope).Scan(&paused, &mode.reason)
+type stockApplyScopeState struct {
+	paused    bool
+	operation *StockApplyOperation
+}
+
+// loadStockApplyScope reads both rows inside the caller's SQLite transaction.
+// The operator view also shows the last proven change after it leaves recovery.
+func loadStockApplyScope(tx *sql.Tx, scope string, includeProven bool) (stockApplyScopeState, error) {
+	var state stockApplyScopeState
+	err := tx.QueryRow("SELECT paused FROM stock_apply_mode WHERE scope=?", scope).Scan(&state.paused)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return mode, nil, ErrStockApplyJournal
+		return stockApplyScopeState{}, ErrStockApplyJournal
 	}
-	mode.paused = paused == 1
-	row := c.journal.db.QueryRowContext(ctx, "SELECT "+stockApplyOperationColumns+" FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown','applied_when_proven') ORDER BY sequence DESC LIMIT 1", scope)
-	var op StockApplyOperation
-	op, err = scanStockApplyOperation(row)
+	states := "('proposed','dispatched','outcome_unknown')"
+	if includeProven {
+		states = "('proposed','dispatched','outcome_unknown','applied_when_proven')"
+	}
+	row := tx.QueryRow("SELECT "+stockApplyOperationColumns+" FROM stock_apply_operation WHERE scope=? AND state IN "+states+" ORDER BY sequence DESC LIMIT 1", scope)
+	op, err := scanStockApplyOperation(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return mode, nil, nil
+		return state, nil
 	}
 	if err != nil {
-		return mode, nil, ErrStockApplyJournal
+		return stockApplyScopeState{}, ErrStockApplyJournal
 	}
-	return mode, &op, nil
+	state.operation = &op
+	return state, nil
+}
+
+func (j *stockApplyJournal) scopeSnapshot(ctx context.Context, key string, includeProven bool) (stockApplyScopeState, error) {
+	var state stockApplyScopeState
+	err := j.transaction(ctx, func(tx *sql.Tx) error {
+		var err error
+		state, err = loadStockApplyScope(tx, key, includeProven)
+		return err
+	})
+	return state, err
+}
+
+func (s stockApplyScopeState) admitProposal() error {
+	if s.paused {
+		return ErrStockApplyPaused
+	}
+	if s.operation != nil {
+		return ErrStockApplyBlocked
+	}
+	return nil
 }
 
 // RecordProposal durably records an operator-reviewed, already-validated
@@ -503,20 +527,12 @@ func (c *StockApplyController) RecordProposal(ctx context.Context, plan StockCha
 	defer c.leave()
 	return c.journal.transaction(ctx, func(tx *sql.Tx) error {
 		key := hex.EncodeToString(plan.Scope[:])
-		var paused int
-		err := tx.QueryRow("SELECT paused FROM stock_apply_mode WHERE scope=?", key).Scan(&paused)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ErrStockApplyJournal
+		state, err := loadStockApplyScope(tx, key, false)
+		if err != nil {
+			return err
 		}
-		if err == nil && paused == 1 {
-			return ErrStockApplyPaused
-		}
-		var unresolved int
-		if tx.QueryRow("SELECT count(*) FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown')", hex.EncodeToString(plan.Scope[:])).Scan(&unresolved) != nil {
-			return ErrStockApplyJournal
-		}
-		if unresolved != 0 {
-			return ErrStockApplyBlocked
+		if err := state.admitProposal(); err != nil {
+			return err
 		}
 		var entropy [16]byte
 		if _, err := rand.Read(entropy[:]); err != nil {
@@ -525,11 +541,11 @@ func (c *StockApplyController) RecordProposal(ctx context.Context, plan StockCha
 		operationID := hex.EncodeToString(entropy[:])
 		stamp := now.UTC().Format(time.RFC3339Nano)
 		if _, err := tx.Exec("INSERT INTO stock_apply_operation(operation_id,scope,pool_id,repository_id,source,fingerprint,observed,suggested,charged,direction,plan_expires_at,state,drift,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'proposed',0,?,?)",
-			operationID, hex.EncodeToString(plan.Scope[:]), plan.PoolID, plan.RepositoryID, plan.Source, plan.Fingerprint,
+			operationID, key, plan.PoolID, plan.RepositoryID, plan.Source, plan.Fingerprint,
 			plan.Observed, plan.Suggested, charged, plan.Direction, plan.ExpiresAt.UTC().Format(time.RFC3339Nano), stamp, stamp); err != nil {
 			return ErrStockApplyJournal
 		}
-		return stockApplyAudit(tx, hex.EncodeToString(plan.Scope[:]), operationID, "proposal_recorded", plan.PoolID)
+		return stockApplyAudit(tx, key, operationID, "proposal_recorded", plan.PoolID)
 	})
 }
 
@@ -537,7 +553,7 @@ func (c *StockApplyController) RecordProposal(ctx context.Context, plan StockCha
 // operator review. It refuses to touch a dispatched or unknown operation:
 // withdrawal is not recovery.
 func (c *StockApplyController) WithdrawProposal(ctx context.Context, scope [sha256.Size]byte, reason string, now time.Time) error {
-	if now.IsZero() || !stockApplyReasonText(reason, 256) {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() || !stockApplyReasonText(reason, 256) {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -576,7 +592,7 @@ func (c *StockApplyController) WithdrawProposal(ctx context.Context, scope [sha2
 // new work only and never modifies an existing operation: pending and unknown
 // states are preserved exactly.
 func (c *StockApplyController) Pause(ctx context.Context, scope [sha256.Size]byte, reason string, now time.Time) error {
-	if now.IsZero() || !stockApplyReasonText(reason, 256) {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() || !stockApplyReasonText(reason, 256) {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -596,7 +612,7 @@ func (c *StockApplyController) Pause(ctx context.Context, scope [sha256.Size]byt
 // new proposals; it never resolves, clears or reclassifies a pending or
 // unknown operation.
 func (c *StockApplyController) Resume(ctx context.Context, scope [sha256.Size]byte, reason string, now time.Time) error {
-	if now.IsZero() || !stockApplyReasonText(reason, 256) {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() || !stockApplyReasonText(reason, 256) {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -617,6 +633,9 @@ func (c *StockApplyController) Resume(ctx context.Context, scope [sha256.Size]by
 // drifted or paused; without a qualified adapter this transition is
 // unreachable and proposals stay inert metadata.
 func (c *StockApplyController) MarkDispatched(ctx context.Context, scope [sha256.Size]byte, claim StockApplyCapabilityClaim, now time.Time) error {
+	if scope == ([sha256.Size]byte{}) {
+		return ErrStockApplyConflict
+	}
 	verdict := assessStockApplyCapability(claim)
 	if !verdict.Supported {
 		return ErrStockApplyUnavailable
@@ -668,6 +687,9 @@ func (c *StockApplyController) MarkDispatched(ctx context.Context, scope [sha256
 // operation stays charged and blocked until an independently authoritative
 // outcome is proven.
 func (c *StockApplyController) MarkOutcomeUncertain(ctx context.Context, scope [sha256.Size]byte, now time.Time) error {
+	if scope == ([sha256.Size]byte{}) {
+		return ErrStockApplyConflict
+	}
 	if now.IsZero() {
 		return ErrStockApplyJournal
 	}
@@ -712,6 +734,9 @@ type StockApplyOutcomeProof struct {
 // requires a supported capability and a complete proof bound to the exact
 // operation. A readback matching the old or new value can never satisfy it.
 func (c *StockApplyController) RecordProvenOutcome(ctx context.Context, scope [sha256.Size]byte, claim StockApplyCapabilityClaim, proof StockApplyOutcomeProof, now time.Time) error {
+	if scope == ([sha256.Size]byte{}) {
+		return ErrStockApplyConflict
+	}
 	verdict := assessStockApplyCapability(claim)
 	if !verdict.Supported {
 		return ErrStockApplyUnavailable
@@ -772,7 +797,7 @@ func stockApplyReadbackConsistent(op StockApplyOperation, readback int64) bool {
 // readback inconsistent with the journaled operation raises a sticky drift
 // flag that blocks dispatch until the operator reviews.
 func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, readback, charged int64, now time.Time) error {
-	if now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
+	if scope == ([sha256.Size]byte{}) || now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -879,7 +904,7 @@ type StockApplyView struct {
 // Stale evidence, drift, pause, unknown outcomes and unavailable capability
 // all keep every mutating action disabled with a visible reason.
 func (c *StockApplyController) View(ctx context.Context, scope [sha256.Size]byte, eval StockApplyEvaluation) (StockApplyView, error) {
-	if eval.Now.IsZero() || eval.BaselineCharged < 0 || eval.BaselineCharged > 100000 {
+	if scope == ([sha256.Size]byte{}) || eval.Now.IsZero() || eval.BaselineCharged < 0 || eval.BaselineCharged > 100000 {
 		return StockApplyView{}, ErrStockApplyConflict
 	}
 	if eval.Readback != nil && (*eval.Readback < 0 || *eval.Readback > 1000000) {
@@ -890,10 +915,11 @@ func (c *StockApplyController) View(ctx context.Context, scope [sha256.Size]byte
 	}
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
-	mode, op, err := c.load(ctx, key)
+	mode, err := c.journal.scopeSnapshot(ctx, key, true)
 	if err != nil {
 		return StockApplyView{}, err
 	}
+	op := mode.operation
 	verdict := assessStockApplyCapability(eval.Claim)
 	view := StockApplyView{
 		Scope:      key,
