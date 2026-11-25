@@ -53,6 +53,16 @@ func run(args []string) error {
 		defer session.Close()
 		_, err = managedgarm.NewProviderPathObserver(context.Background(), session, p.Profiles, p.Executables)
 		return err
+	case "inspect-restart-history":
+		var p managedgarm.Specification
+		if d.Decode(&p) != nil || d.Decode(new(any)) != io.EOF {
+			return managedgarm.ErrBoundary
+		}
+		state, err := managedgarm.InspectRestartHistory(p)
+		if err == nil {
+			fmt.Println(state)
+		}
+		return err
 	case "inspect":
 		var p managedgarm.Specification
 		if d.Decode(&p) != nil || d.Decode(new(any)) != io.EOF {
