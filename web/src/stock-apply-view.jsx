@@ -13,6 +13,12 @@ export function StockApplyControllerView({ view = stockApplyDiagnosticsUnavailab
     {messages.drift && <p className="drain-warning" role="alert">{messages.drift}</p>}
     {view.operation && <p>Recorded operation <code>{view.operation.operation_id}</code>: {view.operation.direction} pool <code>{view.operation.pool_id}</code> maximum from {view.operation.observed} to {view.operation.suggested} (durable state: <code>{view.operation.state}</code>).</p>}
     {messages.refusals.length > 0 && <ul>{messages.refusals.map((line, index) => <li key={index}>{line}</li>)}</ul>}
+    <dl>
+      <dt>Local admission pause</dt><dd>{messages.localPause}</dd>
+      <dt>Managed listener drain</dt><dd>Not observed by this view. Existing idle runners can still accept jobs.</dd>
+      <dt>Exact upstream operation outcome</dt><dd>{messages.upstream}</dd>
+      <dt>Observed pool settings</dt><dd>{messages.settings}</dd>
+    </dl>
     <h4>Pause and resume</h4>
     <p>{messages.resumeLift}</p>
     <p>{messages.resumeReady}</p>

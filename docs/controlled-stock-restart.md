@@ -68,8 +68,11 @@ as root using the existing protected supervisor specification. It reads only
 the protected restart journal and non-secret bootstrap outcome records. It
 does not contact GARM, Docker, a runner, or the restart participant.
 
-The output distinguishes a recorded intent, a returned resume hook with no
-completion receipt observed, and an internally consistent historical
-revalidation receipt. A torn or inconsistent journal is unavailable. A
-receipt is not proof of current readiness or of storage durability; it is
-never permission to replay, resume, or enable writes.
+The output distinguishes a recorded intent, a pending suspend request,
+a returned suspend hook, a returned resume hook without a final receipt,
+and a historical revalidation receipt. A torn or inconsistent journal is
+unavailable. A missing suspend confirmation leaves the hook outcome unknown.
+A returned hook records its return within that restart attempt. Current
+listener drain, stock settings settlement and present topology each require
+separate observations. The historical receipt grants no recovery authority.
+Storage durability also requires independent verification.

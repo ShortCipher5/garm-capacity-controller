@@ -3,7 +3,8 @@
 // permission grant: malformed, untrusted or unsupported payloads collapse to
 // a conservative unavailable view.
 const count=v=>Number.isSafeInteger(v)&&v>=0&&v<=100000;
-const scope=v=>typeof v==='string'&&/^[0-9a-f]{64}$/.test(v);
+const scope=v=>typeof v==='string'&&v.length===64&&/^[0-9a-f]{64}$/.test(v)&&v!=='0'.repeat(64);
+const maximum=v=>Number.isSafeInteger(v)&&v>=0&&v<=1000000;
 const reason=v=>typeof v==='string'&&/^[a-z0-9_]{0,96}$/.test(v);
 const text=v=>typeof v==='string'&&v.length>0&&v.length<=512;
 const exact=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===keys.length&&keys.every(k=>Object.hasOwn(v,k));
@@ -17,7 +18,7 @@ const timestamp=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:
 
 function unavailableView(code='view_unavailable'){
  return {state:'unavailable',reason:code,paused:null,drift:null,operation:null,
-  charged:null,
+  charged:null,readback:null,
   capability:{supported:false,refusals:[{code}]},
   actions:['apply','withdraw_proposal','pause','resume','resolve_outcome','rollback'].map(action=>({action,enabled:false,reason:code})),
   resume:{lift_pause:false,ready:false,reason:code}};
@@ -31,10 +32,10 @@ export function stockApplyDiagnosticsUnavailable(){
 }
 
 function validOperation(raw){
- if(!exact(raw,operationKeys)||!/^[0-9a-f]{32}$/.test(raw.operation_id))return false;
+ if(!exact(raw,operationKeys)||typeof raw.operation_id!=='string'||raw.operation_id.length!==32||!/^[0-9a-f]{32}$/.test(raw.operation_id))return false;
  if(!scope(raw.scope)||typeof raw.pool_id!=='string'||raw.pool_id.length>256||typeof raw.repository_id!=='string'||raw.repository_id.length>256||
     typeof raw.source!=='string'||raw.source.length>256||typeof raw.fingerprint!=='string'||raw.fingerprint.length>256||
-    !count(raw.observed)||raw.observed===0||!count(raw.suggested)||raw.suggested===0||!count(raw.charged)||
+    !maximum(raw.observed)||raw.observed===0||!maximum(raw.suggested)||raw.suggested===0||!count(raw.charged)||
     !['increase','decrease'].includes(raw.direction)||!operationStates.has(raw.state)||typeof raw.drift!=='boolean'||
     ![raw.plan_expires_at,raw.created_at,raw.updated_at].every(timestamp))return false;
  return true;
@@ -44,7 +45,9 @@ export function stockApplyView(raw){
  if(!raw||typeof raw!=='object'||Array.isArray(raw))return unavailableView();
  const baseKeys=['scope','state','reason','paused','drift','actions','charged','capability','resume'];
  const keys=Object.keys(raw);
- if(keys.length!==baseKeys.length+(Object.hasOwn(raw,'operation')?1:0)||!baseKeys.every(k=>Object.hasOwn(raw,k)))return unavailableView();
+ if(!baseKeys.every(k=>Object.hasOwn(raw,k))||!keys.every(k=>baseKeys.includes(k)||k==='operation'||k==='readback'))return unavailableView();
+ const readback=Object.hasOwn(raw,'readback')?raw.readback:null;
+ if(Object.hasOwn(raw,'readback')&&(!exact(readback,['maximum','fresh'])||!maximum(readback.maximum)||typeof readback.fresh!=='boolean'))return unavailableView();
  if(!scope(raw.scope)||!states.has(raw.state)||!reason(raw.reason)||typeof raw.paused!=='boolean'||typeof raw.drift!=='boolean'||raw.drift===true&&!raw.operation)return unavailableView();
  const chargedKeys=['runners','reason'];
  if(!exact(raw.charged,chargedKeys)||!count(raw.charged.runners)||!text(raw.charged.reason))return unavailableView();
@@ -72,10 +75,13 @@ export function stockApplyView(raw){
     raw.resume.lift_reason!==undefined&&!reason(raw.resume.lift_reason)||raw.resume.reason!==undefined&&!reason(raw.resume.reason))return unavailableView();
  const operation=raw.operation===undefined?null:validOperation(raw.operation)?raw.operation:null;
  if(raw.operation!==undefined&&operation===null)return unavailableView();
- if(['proposed','applied_when_proven','outcome_unknown'].includes(raw.state)&&!operation)return unavailableView();
+ if(operation&&(operation.scope!==raw.scope||operation.charged!==raw.charged.runners||operation.drift!==raw.drift))return unavailableView();
+ const underlying=operation?.state==='dispatched'?'outcome_unknown':operation?.state??'unavailable';
+ if(underlying==='withdrawn'||raw.state!==(raw.paused?'paused_maintenance':underlying))return unavailableView();
  if(raw.resume.lift_pause!==raw.paused||raw.resume.ready&&
-    (!raw.capability.supported||raw.paused||raw.drift||raw.state!=='proposed'||operation?.state!=='proposed'||operation.drift))return unavailableView();
- return {state:raw.state,reason:raw.reason,paused:raw.paused,drift:raw.drift,operation,
+    (!raw.capability.supported||raw.paused||raw.drift||raw.state!=='proposed'||operation?.state!=='proposed'||operation.drift||
+     (readback&&(!readback.fresh||readback.maximum!==operation.observed))))return unavailableView();
+ return {state:raw.state,reason:raw.reason,paused:raw.paused,drift:raw.drift,operation,readback,
   charged:raw.charged,capability:{supported:raw.capability.supported,refusals},actions:raw.actions,resume:raw.resume};
 }
 
@@ -103,7 +109,17 @@ export function stockApplyMessages(view){
  const refusals=view.capability.refusals.map(refusal=>refusalMessages[refusal.code]??`Capability refused: ${refusal.code}.`);
  const detail=view.capability.refusals.find(refusal=>refusal.code==='requirement_unestablished');
  if(detail)refusals[view.capability.refusals.indexOf(detail)]=`A required adapter property is not established: ${detail.detail}.`;
- return {state,reason:view.reason,charged,refusals,
+ const localPause=view.paused===null?'Not observed.':view.paused?'Applied. New local proposals are blocked.':'Lifted or never applied.';
+ const upstream=view.paused===null?'Not observed.':({
+  proposed:'No submission recorded for this proposal.',
+  dispatched:'Unresolved. The submitted request is awaiting an authoritative result.',
+  outcome_unknown:'Unresolved. The exact operation may still settle upstream.',
+  applied_when_proven:'The exact recorded operation has an independently proven outcome.'
+ })[view.operation?.state]??'No accepted operation recorded for this scope.';
+ const settings=view.readback
+  ?`Maximum ${view.readback.maximum} (${view.readback.fresh?'fresh':'stale'} observation).`
+  :'Not observed.';
+ return {state,reason:view.reason,charged,refusals,localPause,upstream,settings,
   drift:view.drift?'Observed settings drifted from the journaled operation; apply stays blocked pending explicit operator review.':'',
   resumeLift:view.resume.lift_pause
    ?'The recorded state allows lifting the local maintenance pause, but this panel cannot do it. Lifting it never clears, resolves or reclassifies a pending or unknown operation.'

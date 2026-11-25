@@ -44,6 +44,28 @@ dashboard endpoint. A missing operation charge is explicitly unknown, not
 zero; if an offline view has a recorded charge, it labels that value as
 last recorded, not current capacity. The dashboard offers no write controls.
 
+### Reading a scoped recovery view
+
+The bound controller's read-only `View` takes the reviewed scope and its
+settings evaluation. The optional `readback` contains the measured maximum
+and the caller's freshness assessment for that capture. A missing capture
+omits the field. Earlier projections without the field remain readable.
+The proposed old and desired maxima remain labeled as proposal history.
+
+| Operator field | Evidence and interpretation |
+| --- | --- |
+| Local admission pause | The mode row for the reviewed scope records whether admission is paused. Lifting the pause keeps the existing operation and charge. |
+| Managed listener drain | The stock-apply journal has no witness for listener drain. Only the protected Service owner observes successful suspension after the listener closes, entered handlers finish and the old session is revoked. Existing idle runners can still accept jobs. |
+| Exact upstream operation outcome | A dispatched or uncertain operation remains unresolved under either pause state. An unsubmitted proposal has no recorded submission. A historical proven outcome applies only to its specific operation. |
+| Observed pool settings | The read-only capture can report a fresh or stale value, including a match with the old or desired maximum. The operation still needs its own authoritative result. |
+
+After a lost pause acknowledgment, inspect with `RecoverScope` before
+deciding whether to request a stop again. Reissuing the request after a
+resume starts a new local pause. A pending upstream operation continues to
+block new admission, apply and rollback. For stock v0.2.1, exact completion
+after interruption, continued exclusion of late writers, and exclusive
+ownership of the controlled fields remain unproved.
+
 ## What the durable SQLite and lineage checks establish — and what they do not
 
 The stock-apply journal reuses the management journal's local durability
