@@ -111,15 +111,19 @@ func EvaluateSharedCapacity(state admission.BrokerGrantState, charges []admissio
 	}
 	for id, p := range snapshot.Pools {
 		out.Remaining.Pools[id] = budgetLeft("pool", id, *p.Budget, held.pools[id])
-		out.Remaining.PoolRunners[id] = max(0, p.MaxRunners-held.pools[id][3])
-		if held.pools[id][3] > p.MaxRunners {
-			out.Refusals = append(out.Refusals, SharedCapacityRefusal{"pool_runner_cap", id, SharedCapacityOverage})
-		}
 	}
-	for id, r := range snapshot.Repositories {
-		out.Remaining.RepositoryRunners[id] = max(0, r.MaxRunners-held.repos[id][3])
-		if held.repos[id][3] > r.MaxRunners {
-			out.Refusals = append(out.Refusals, SharedCapacityRefusal{"repository", id, SharedCapacityOverage})
+	// Historical pools and repositories outside policy keep their charges.
+	// Only an explicit policy entry defines a runner-count ceiling.
+	for _, r := range state.Policy.Repositories {
+		out.Remaining.RepositoryRunners[r.ID] = max(0, r.MaxRunners-held.repos[r.ID][3])
+		if held.repos[r.ID][3] > r.MaxRunners {
+			out.Refusals = append(out.Refusals, SharedCapacityRefusal{"repository", r.ID, SharedCapacityOverage})
+		}
+		for _, p := range r.Pools {
+			out.Remaining.PoolRunners[p.ID] = max(0, p.MaxRunners-held.pools[p.ID][3])
+			if held.pools[p.ID][3] > p.MaxRunners {
+				out.Refusals = append(out.Refusals, SharedCapacityRefusal{"pool_runner_cap", p.ID, SharedCapacityOverage})
+			}
 		}
 	}
 

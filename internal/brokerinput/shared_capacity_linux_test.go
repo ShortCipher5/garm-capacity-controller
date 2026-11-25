@@ -569,3 +569,15 @@ func TestSharedCapacityUnknownAndLoweredCapRetainCharge(t *testing.T) {
 		t.Fatalf("missing stock row and lower cap %+v", d)
 	}
 }
+
+func TestSharedCapacityRetainsHistoricalPoolWithoutInventingPolicyCap(t *testing.T) {
+	f := scInputFixture(t, []scPool{{scPoolA, scRepoA, false}, {scPoolD, scRepoA, false}}, []string{scPoolA}, nil)
+	f.state.Policy.Repositories[0].Pools = []admission.BrokerPoolPolicy{{ID: scPoolA, MaxRunners: 4}}
+	f.charge("retained-outside-policy", scPoolD, scSize)
+	d := f.evaluate(t)
+	_, hasCap := d.Remaining.PoolRunners[scPoolD]
+	if hasCap || len(d.Refusals) != 0 || len(d.Plan.Assignments) != 1 || d.Plan.Assignments[0].Pool != scPoolA ||
+		d.Remaining.Global[3] != 5 || d.Remaining.Pools[scPoolD][3] != 5 || d.Remaining.RepositoryRunners[scRepoA] != 3 {
+		t.Fatalf("historical pool accounting %+v", d)
+	}
+}
