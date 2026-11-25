@@ -37,11 +37,13 @@ func slotReuseFixtureEvidence(req Request, epoch int64, now time.Time) SlotReuse
 		Identity: identity,
 		Settlement: SlotReuseSettlement{
 			Source: slotReuseFixtureSource, RequestKey: req.Key,
-			JobTerminal: true, PostJobFinished: true, AssignmentClosed: true, StartRetryClosed: true, OneJobEphemeral: true,
+			IdentityDigest: slotReuseIdentityDigest(identity),
+			JobTerminal:    true, PostJobFinished: true, AssignmentClosed: true, StartRetryClosed: true, OneJobEphemeral: true,
 			ObservedAt: now.Add(-2 * time.Minute),
 		},
 		Teardown: SlotReuseTeardown{
 			Source: slotReuseFixtureSource, RequestKey: req.Key,
+			IdentityDigest: slotReuseIdentityDigest(identity),
 			InstanceAbsent: true, StorageReleased: true, ProcessesSettled: true,
 			ObservedAt: now.Add(-time.Minute),
 		},
@@ -371,6 +373,8 @@ func TestReleaseRetiredSlotConflictingInventoryStaysCharged(t *testing.T) {
 	other.Identity.Generation = "33333333-3333-4333-8333-333333333333"
 	other.Identity.ResourceID = slotReuseResourceID(other.Identity)
 	other.Fence.IdentityDigest = slotReuseIdentityDigest(other.Identity)
+	other.Settlement.IdentityDigest = other.Fence.IdentityDigest
+	other.Teardown.IdentityDigest = other.Fence.IdentityDigest
 	if verdict := ClassifySlotReuse(req, other, now); verdict.Status != SlotReuseCandidateComplete {
 		t.Fatalf("expected complete candidate for other incarnation: %+v", verdict)
 	}
@@ -379,6 +383,86 @@ func TestReleaseRetiredSlotConflictingInventoryStaysCharged(t *testing.T) {
 		t.Fatalf("different incarnation must stay charged: %+v %v", decision, err)
 	}
 	assertNoSlotReuseCredit(t, decision)
+}
+
+func TestReleaseRetiredSlotRejectsUnboundFactGroupsAndNilIncarnations(t *testing.T) {
+	registerSlotReuseFixtureSource(t)
+	store, req, epoch := slotReuseHold(t)
+	evidence := slotReuseFixtureEvidence(req, epoch, store.now())
+	other := evidence.Identity
+	other.Generation = "33333333-3333-4333-8333-333333333333"
+	other.ResourceID = slotReuseResourceID(other)
+	otherDigest := slotReuseIdentityDigest(other)
+	for _, group := range []string{"settlement", "teardown", "nil instance", "nil generation"} {
+		t.Run(group, func(t *testing.T) {
+			candidate := evidence
+			switch group {
+			case "settlement":
+				candidate.Settlement.IdentityDigest = otherDigest
+			case "teardown":
+				candidate.Teardown.IdentityDigest = otherDigest
+			default:
+				if group == "nil instance" {
+					candidate.Identity.Instance = "00000000-0000-0000-0000-000000000000"
+				} else {
+					candidate.Identity.Generation = "00000000-0000-0000-0000-000000000000"
+				}
+				candidate.Identity.ResourceID = slotReuseResourceID(candidate.Identity)
+				digest := slotReuseIdentityDigest(candidate.Identity)
+				candidate.Settlement.IdentityDigest = digest
+				candidate.Teardown.IdentityDigest = digest
+				candidate.Fence.IdentityDigest = digest
+			}
+			if verdict := ClassifySlotReuse(req, candidate, store.now()); verdict.Status != SlotReuseStaleOrConflictingEvidence {
+				t.Fatalf("invalid incarnation classified as %+v", verdict)
+			}
+			got, err := store.ReleaseRetiredSlot(context.Background(), req, candidate)
+			if !errors.Is(err, ErrSlotReuseEvidence) || slotReuseCharged(t, store) != req.Resources {
+				t.Fatalf("incarnation mismatch changed accounting: %+v %v", got, err)
+			}
+			assertNoSlotReuseCredit(t, got)
+		})
+	}
+}
+
+func TestReleaseRetiredSlotSerializesWithReconciliationOnAnotherHandle(t *testing.T) {
+	registerSlotReuseFixtureSource(t)
+	ctx := context.Background()
+	store, req, epoch := slotReuseHold(t)
+	other, err := OpenSQLite(store.path, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	evidence := slotReuseFixtureEvidence(req, epoch, store.now())
+	start := make(chan struct{})
+	fenced := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := other.BeginReconciliation(ctx)
+		fenced <- err
+	}()
+	close(start)
+	d, releaseErr := store.ReleaseRetiredSlot(ctx, req, evidence)
+	if err := <-fenced; err != nil {
+		t.Fatal(err)
+	}
+	snapshot := sqliteSnapshot(t, other)
+	if snapshot.Ready || snapshot.Epoch != epoch+1 {
+		t.Fatalf("reconciliation barrier lost (ready=%v, epoch=%d)", snapshot.Ready, snapshot.Epoch)
+	}
+	if releaseErr == nil {
+		replay, err := other.ReleaseRetiredSlot(ctx, req, evidence)
+		if d.Replay || err != nil || !replay.Replay || replay.EvidenceDigest != d.EvidenceDigest ||
+			slotReuseCharged(t, other) != (Resources{}) {
+			t.Fatalf("committed release did not serialize before barrier: %+v %+v %v", d, replay, err)
+		}
+	} else {
+		if !errors.Is(releaseErr, ErrReconciliation) || slotReuseCharged(t, other) != req.Resources {
+			t.Fatalf("release changed charge after barrier: %+v %v", d, releaseErr)
+		}
+		assertNoSlotReuseCredit(t, d)
+	}
 }
 
 func assertNoSlotReuseCredit(t *testing.T, d SlotReuseDecision) {

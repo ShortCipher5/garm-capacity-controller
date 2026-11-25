@@ -18,7 +18,7 @@ import (
 // or old writer can recreate it. Missing or contradictory evidence keeps the
 // charge. Nothing here authorizes a STOP/DELETE/deregister call, forks the
 // runner lifecycle, or treats a matching readback as proof.
-const SlotReuseEvidenceVersion = "slot-reuse-evidence/v1"
+const SlotReuseEvidenceVersion = "slot-reuse-evidence/v2"
 
 // SlotReuseMaxEvidenceAge bounds the age of every fact group at commit. Old
 // evidence is not refreshed by replay, restart or re-presentation.
@@ -83,6 +83,7 @@ type SlotReuseIdentity struct {
 type SlotReuseSettlement struct {
 	Source           SlotReuseSourceClass `json:"source"`
 	RequestKey       string               `json:"request_key"`
+	IdentityDigest   string               `json:"identity_digest,omitempty"`
 	JobTerminal      bool                 `json:"job_terminal"`
 	PostJobFinished  bool                 `json:"post_job_finished"`
 	AssignmentClosed bool                 `json:"assignment_closed"`
@@ -97,6 +98,7 @@ type SlotReuseSettlement struct {
 type SlotReuseTeardown struct {
 	Source           SlotReuseSourceClass `json:"source"`
 	RequestKey       string               `json:"request_key"`
+	IdentityDigest   string               `json:"identity_digest,omitempty"`
 	InstanceAbsent   bool                 `json:"instance_absent"`
 	StorageReleased  bool                 `json:"storage_released"`
 	ProcessesSettled bool                 `json:"processes_settled"`
@@ -164,7 +166,7 @@ func validSlotReuseIdentity(v SlotReuseIdentity, hold Request) bool {
 		v.CPU == hold.Resources.CPU && v.RAM == hold.Resources.RAM && v.Disk == hold.Resources.Disk &&
 		bindingName(v.Controller) && bindingName(v.SourceID) && bindingFingerprint(v.Route) &&
 		bindingFingerprint(v.Daemon) && bindingFingerprint(v.Project) &&
-		validOperationID(v.Instance) && validOperationID(v.Generation) && v.ResourceID == slotReuseResourceID(v) &&
+		routeUUID(v.Instance) && routeUUID(v.Generation) && v.ResourceID == slotReuseResourceID(v) &&
 		v.Epoch >= 0 && !v.ObservedAt.IsZero()
 }
 
@@ -191,7 +193,9 @@ func ClassifySlotReuse(hold Request, evidence SlotReuseEvidence, now time.Time) 
 		return verdict(SlotReuseStaleOrConflictingEvidence, "original_identity_mismatch")
 	}
 	settlement, teardown, fence := evidence.Settlement, evidence.Teardown, evidence.Fence
-	if settlement.RequestKey != hold.Key || teardown.RequestKey != hold.Key || fence.RequestKey != hold.Key {
+	identityDigest := slotReuseIdentityDigest(identity)
+	if settlement.RequestKey != hold.Key || teardown.RequestKey != hold.Key || fence.RequestKey != hold.Key ||
+		settlement.IdentityDigest != identityDigest || teardown.IdentityDigest != identityDigest {
 		return verdict(SlotReuseStaleOrConflictingEvidence, "fact_group_scope_mismatch")
 	}
 	if !validSlotReuseTime(identity.ObservedAt, now) || !validSlotReuseTime(settlement.ObservedAt, now) ||
@@ -223,7 +227,7 @@ func ClassifySlotReuse(hold Request, evidence SlotReuseEvidence, now time.Time) 
 	}
 	// A fence bound to a different identity or epoch contradicts the evidence
 	// instead of merely missing it.
-	if fence.IdentityDigest != slotReuseIdentityDigest(identity) || fence.Epoch != identity.Epoch {
+	if fence.IdentityDigest != identityDigest || fence.Epoch != identity.Epoch {
 		return verdict(SlotReuseStaleOrConflictingEvidence, "fence_binding_mismatch")
 	}
 	return verdict(SlotReuseCandidateComplete, "")
