@@ -65,3 +65,23 @@ prove archive provenance or prove that it covers all upstream tests.
   runner control or allocation authority follows from CI Health. The advisory
   route stays unavailable until a verified producer publishes a reviewed
   snapshot, and nothing in the view applies a recommendation.
+
+## Disk display compatibility
+
+A measured `disk-measured/v2` payload gives read and write counters separate
+byte totals and positive covered durations. A sampled used-space peak has
+its own sample count and ordered peak and last-sample timestamps. A measured
+zero stays visible. Missing measurements have no numeric value.
+
+| Producer | Dashboard | Result |
+|---|---|---|
+| Legacy | Legacy | Displays the historical disk projection. |
+| Legacy | Updated | Displays legacy totals and assigns the historical coverage to reads. Writes show that coverage was unrecorded. |
+| Updated | Updated | Displays each v2 counter's own coverage and the separately sampled gauge. |
+| Updated | Legacy | The legacy dashboard rejects measured v2 and reports the timing snapshot unavailable. |
+
+An unavailable disk state uses the same shape in both versions. When a
+qualified measured producer exists, roll out the updated dashboard first.
+Roll back the producer before restoring the legacy dashboard. The updated
+dashboard rejects a disk object that mixes both measured shapes. Collection
+and usage retention remain disabled.
