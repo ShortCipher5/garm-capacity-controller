@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -91,13 +92,20 @@ func (s *Service) Resume(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.serve(listener, session, handler)
+	valid = true
+	return nil
+}
+
+// serve publishes the listener and starts serving after Resume authenticates
+// the session. The caller holds mu until the new service is fully installed.
+func (s *Service) serve(listener net.Listener, session *managedgarm.Session, handler *Handler) {
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second, MaxHeaderBytes: 16384}
 	done := make(chan error, 1)
 	s.session = session
 	s.server = server
 	s.done = done
 	s.stopped = false
-	valid = true
 	go func() {
 		err := server.Serve(tls.NewListener(listener, s.trust))
 		listener.Close()
@@ -110,7 +118,6 @@ func (s *Service) Resume(ctx context.Context) error {
 			}
 		}
 	}()
-	return nil
 }
 func (s *Service) Suspend(ctx context.Context) error {
 	if s == nil || ctx == nil {

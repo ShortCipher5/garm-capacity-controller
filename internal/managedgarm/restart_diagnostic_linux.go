@@ -125,7 +125,6 @@ func inspectRestartHistory(files *bootstrapFiles, spec Specification) (string, e
 	}
 	h := hashBytes(raw)
 	gap := false
-	participantReturned := false
 	check := func(name string, out, expected any) (bool, error) {
 		_, err := readRestartHistoryRecord(files, name, 16384, out)
 		if errors.Is(err, os.ErrNotExist) {
@@ -141,10 +140,13 @@ func inspectRestartHistory(files *bootstrapFiles, spec Specification) (string, e
 		var got string
 		return check("controlled-restart-writer-"+phase+".json", &got, &h)
 	}
-	for _, p := range []string{"suspend-pending", "suspend-confirmed"} {
-		if _, err := writer(p); err != nil {
-			return "", err
-		}
+	suspendPending, err := writer("suspend-pending")
+	if err != nil {
+		return "", err
+	}
+	suspendReturned, err := writer("suspend-confirmed")
+	if err != nil {
+		return "", err
 	}
 	for i, step := range order {
 		for _, phase := range []string{"pending", "confirmed"} {
@@ -158,15 +160,21 @@ func inspectRestartHistory(files *bootstrapFiles, spec Specification) (string, e
 	if _, err := writer("resume-pending"); err != nil {
 		return "", err
 	}
-	participantReturned, err = writer("resume-confirmed")
+	resumeReturned, err := writer("resume-confirmed")
 	if err != nil {
 		return "", err
 	}
 	var receipt restartHistoryReceipt
 	_, err = readRestartHistoryRecord(files, "controlled-restart-complete.json", maxIntent+4096, &receipt)
 	if errors.Is(err, os.ErrNotExist) {
-		if participantReturned {
+		if resumeReturned {
 			return "resume-hook-returned; no completion receipt observed", nil
+		}
+		if suspendReturned {
+			return "suspend-hook-returned; no completed resume observed", nil
+		}
+		if suspendPending {
+			return "suspension requested; no returned suspend hook observed", nil
 		}
 		return "restart intent observed; completion not established", nil
 	}

@@ -49,6 +49,12 @@ test('controller state renders fully disabled with charges, reasons and no permi
   assert.match(pausedHtml,/never clears, resolves or reclassifies a pending or unknown operation/);
   assert.match(pausedHtml,/Ready to resume apply work: no — pause must be lifted first/);
   assert.match(pausedHtml,/Lifting a pause does not imply readiness/);
+  const held=render({...paused,operation:{...operation,state:'outcome_unknown'},readback:{maximum:4,fresh:true}});
+  assert.match(held,/<dt>Local admission pause<\/dt><dd>Applied/);
+  assert.match(held,/<dt>Managed listener drain<\/dt><dd>Not observed by this view/);
+  assert.match(held,/<dt>Exact upstream operation outcome<\/dt><dd>Unresolved/);
+  assert.match(held,/<dt>Observed pool settings<\/dt><dd>Maximum 4 \(fresh observation\)/);
+  assert.doesNotMatch(held,/<button(?![^>]*\bdisabled\b)/);
   // Drift warns and blocks.
   assert.match(render({drift:true,operation:{...operation,drift:true}}),/drifted from the journaled operation/);
   // Proven outcome stays humble about capacity.
