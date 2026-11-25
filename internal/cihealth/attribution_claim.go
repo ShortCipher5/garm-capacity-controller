@@ -147,9 +147,7 @@ func validVerifiedProviderOrigin(o VerifiedProviderOrigin, now time.Time) bool {
 // Enrolled scope cannot be replaced by fields that happen to match.
 func VerifyJobAttribution(matrix AttributionCapabilityMatrix, claim JobAttributionClaim, now time.Time) (VerifiedAttribution, error) {
 	var none VerifiedAttribution
-	if !matrix.Supports(FactExactJobIdentity) || !matrix.Supports(FactPositiveRunnerRegistration) ||
-		!matrix.Supports(FactExactStockRow) || !matrix.Supports(FactPositiveStockRowAgent) ||
-		!matrix.Supports(FactIncusIncarnation) || !matrix.Supports(FactProcessEpoch) || !matrix.Supports(FactProviderOriginJoin) || now.IsZero() {
+	if !matrix.supportsExactJobAttribution() || now.IsZero() {
 		return none, ErrAttributionUnsupported
 	}
 	job := claim.Job
