@@ -53,7 +53,7 @@ func TestBuildVerifiedJobUsageProducesExpectedNumbersForProvenWindow(t *testing.
 	if got.Window != 6*time.Second || got.Samples != 3 || got.Sampling != (ResourceSamplingCoverage{}) ||
 		got.CPU == nil || *got.CPU != (JobCPURates{1000, 1250, full}) ||
 		got.RAMMean == nil || *got.RAMMean != (JobRAMAverage{33, full}) ||
-		got.RAM == nil || *got.RAM != (ResourceGaugeSummary{3, 50, 50, set.Scope.EndAt}) {
+		got.RAM == nil || *got.RAM != (ResourceGaugeSummary{3, 50, 50, set.Scope.EndAt, set.Scope.EndAt}) {
 		t.Fatalf("unexpected measured summary: %+v", got)
 	}
 	// Disk was not independently bound: it stays separate and unmeasured,
@@ -247,7 +247,10 @@ func TestBuildVerifiedJobUsageSeparatesIndependentlyBoundDisk(t *testing.T) {
 		t.Fatalf("independently bound disk usage must be preserved: %+v", record.Measured)
 	}
 	wire := record.Wire(fixtureFullMatrix())
-	if wire.Measured == nil || wire.Measured.Disk.State != VerifiedUsageVerified || wire.Measured.Disk.ReadBytes != "50" {
+	if wire.Measured == nil || wire.Measured.Disk.State != VerifiedUsageVerified || wire.Measured.Disk.Version != DiskWireVersion ||
+		wire.Measured.Disk.Read == nil || wire.Measured.Disk.Read.Bytes != "50" ||
+		wire.Measured.Disk.Read.CoveredNanoseconds != "6000000000" || !wire.Measured.Disk.Read.Complete ||
+		wire.Measured.Disk.Write != nil || wire.Measured.Disk.Used != nil {
 		t.Fatalf("disk wire projection must stay separate and positive: %+v", wire.Measured.Disk)
 	}
 	// No documented source supports per-instance disk counters: the same
@@ -255,12 +258,135 @@ func TestBuildVerifiedJobUsageSeparatesIndependentlyBoundDisk(t *testing.T) {
 	// instead of showing unsupported numbers.
 	stockWire := record.Wire(DocumentedMatrix())
 	if stockWire.Measured == nil || stockWire.Measured.Disk.State != VerifiedUsageUnavailable ||
-		stockWire.Measured.Disk.Reason != UsageOmissionDiskUnsupported || stockWire.Measured.Disk.ReadBytes != "" {
+		stockWire.Measured.Disk.Reason != UsageOmissionDiskUnsupported || stockWire.Measured.Disk.Read != nil {
 		t.Fatalf("disk must hide without a documented source, not show zeros: %+v", stockWire.Measured.Disk)
 	}
 }
 
+// TestVerifiedUsageWireProjectsDiskCountersAndGaugeSeparately covers the
+// versioned disk wire shape: read and write carry independent totals and
+// coverage, a measured zero stays a measured zero, and the used-space gauge
+// is a sampled peak with its own sample count and explicit peak time, never
+// an interval coverage.
+func TestVerifiedUsageWireProjectsDiskCountersAndGaugeSeparately(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	matrix := fixtureFullMatrix()
+	build := func(bind func(samples []JobResourceSample)) Wire {
+		set := usageFixtureSet(claim, now, MaxJobResourceGap)
+		bind(set.Samples)
+		record := BuildVerifiedJobUsage(matrix, claim, set, now)
+		if record.State != VerifiedUsageVerified || record.Measured == nil {
+			t.Fatalf("coherent disk evidence must verify: %+v", record)
+		}
+		wire := record.Wire(matrix)
+		if wire.Measured == nil || wire.Measured.Disk.State != VerifiedUsageVerified || wire.Measured.Disk.Version != DiskWireVersion {
+			t.Fatalf("measured disk must carry the versioned shape: %+v", wire.Measured)
+		}
+		return wire
+	}
+	start, end := claim.Execution.StartedAt.UTC(), claim.Execution.StartedAt.UTC().Add(6*time.Second)
+
+	// Read only: the read counter carries its own full coverage; write and
+	// the gauge stay absent rather than inheriting anything.
+	readOnly := build(func(samples []JobResourceSample) {
+		for i := range samples {
+			samples[i].DiskReadBytes = knownResource([]uint64{5, 15, 55}[i])
+		}
+	}).Measured.Disk
+	if readOnly.Read == nil || readOnly.Read.Bytes != "50" || readOnly.Read.CoveredNanoseconds != "6000000000" || !readOnly.Read.Complete ||
+		readOnly.Write != nil || readOnly.Used != nil {
+		t.Fatalf("read-only disk projection wrong: %+v", readOnly)
+	}
+
+	// Write only with a shorter covered window: coverage belongs to the
+	// write counter alone and is honestly incomplete.
+	writeOnly := build(func(samples []JobResourceSample) {
+		samples[1].DiskWriteBytes = knownResource(6)
+		samples[2].DiskWriteBytes = knownResource(9)
+	}).Measured.Disk
+	if writeOnly.Write == nil || writeOnly.Write.Bytes != "3" || writeOnly.Write.CoveredNanoseconds != "4000000000" ||
+		writeOnly.Write.Complete || writeOnly.Read != nil || writeOnly.Used != nil {
+		t.Fatalf("write-only disk projection wrong: %+v", writeOnly)
+	}
+
+	// A counter that was measured and did not move is a measured zero with
+	// full coverage, not a missing metric.
+	zeroWrite := build(func(samples []JobResourceSample) {
+		for i := range samples {
+			samples[i].DiskWriteBytes = knownResource(7)
+		}
+	}).Measured.Disk
+	if zeroWrite.Write == nil || zeroWrite.Write.Bytes != "0" || !zeroWrite.Write.Complete || zeroWrite.Read != nil {
+		t.Fatalf("measured zero write must be preserved: %+v", zeroWrite)
+	}
+
+	// Gauge only: a sampled peak with its own sample count, the explicitly
+	// tracked time the peak was reached and the last sample time. It never
+	// implies interval coverage and never borrows counter semantics.
+	gaugeOnly := build(func(samples []JobResourceSample) {
+		for i := range samples {
+			samples[i].DiskUsedBytes = knownResource([]uint64{100, 9, 20}[i])
+		}
+	}).Measured.Disk
+	if gaugeOnly.Used == nil || gaugeOnly.Used.SamplePeakBytes != "100" || gaugeOnly.Used.GaugeSamples != 3 ||
+		!gaugeOnly.Used.PeakAt.Equal(start) ||
+		!gaugeOnly.Used.LatestSampleAt.Equal(end) ||
+		gaugeOnly.Read != nil || gaugeOnly.Write != nil {
+		t.Fatalf("gauge-only disk projection wrong: %+v", gaugeOnly)
+	}
+
+	// Differing windows: read covers the whole job while write covers only
+	// the tail; neither counter borrows the other's coverage.
+	differing := build(func(samples []JobResourceSample) {
+		for i := range samples {
+			samples[i].DiskReadBytes = knownResource([]uint64{5, 15, 55}[i])
+		}
+		samples[1].DiskWriteBytes = knownResource(6)
+		samples[2].DiskWriteBytes = knownResource(9)
+	}).Measured.Disk
+	if differing.Read == nil || differing.Read.CoveredNanoseconds != "6000000000" || !differing.Read.Complete ||
+		differing.Write == nil || differing.Write.CoveredNanoseconds != "4000000000" || differing.Write.Complete {
+		t.Fatalf("differing read/write windows must stay independent: %+v", differing)
+	}
+
+	// The wire JSON uses the versioned field names and omits absent metrics.
+	raw, err := json.Marshal(gaugeOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{`"version":"disk-measured/v2"`, `"used":{"sample_peak_bytes":"100","gauge_samples":3,"peak_at":"`} {
+		if !strings.Contains(string(raw), fragment) {
+			t.Fatalf("disk wire JSON missing %s: %s", fragment, raw)
+		}
+	}
+	for _, fragment := range []string{`"read"`, `"write"`, "covered_ns"} {
+		if strings.Contains(string(raw), fragment) {
+			t.Fatalf("gauge-only disk wire must omit %s: %s", fragment, raw)
+		}
+	}
+}
+
 type fixtureProducer struct{ class AttributionEvidenceClass }
+
+func TestVerifiedUsageWireOmitsInvalidDiskMeasurements(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	matrix := fixtureFullMatrix()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	for i := range set.Samples {
+		set.Samples[i].DiskReadBytes = knownResource(uint64(i))
+		set.Samples[i].DiskUsedBytes = knownResource(uint64(100 - i))
+	}
+	record := BuildVerifiedJobUsage(matrix, claim, set, now)
+	if record.Measured == nil || record.Measured.DiskRead == nil || record.Measured.DiskUsed == nil {
+		t.Fatal("positive fixture did not yield disk measurements")
+	}
+	record.Measured.DiskRead.Coverage.Intervals = 0
+	record.Measured.DiskUsed.PeakAt = record.Measured.DiskUsed.LatestAt.Add(time.Nanosecond)
+	wire := record.Wire(matrix)
+	if disk := wire.Measured.Disk; disk.State != VerifiedUsageUnavailable || disk.Read != nil || disk.Used != nil {
+		t.Fatalf("invalid counter and gauge were projected: %+v", disk)
+	}
+}
 
 func (p fixtureProducer) EvidenceClass() AttributionEvidenceClass { return p.class }
 

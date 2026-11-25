@@ -57,7 +57,10 @@ type JobCPURates struct {
 type ResourceGaugeSummary struct {
 	Samples           int
 	SampleMax, Latest uint64
-	LatestAt          time.Time
+	// PeakAt is when SampleMax was first reached; LatestAt is when the last
+	// gauge sample arrived. They are distinct facts: the last sample time is
+	// never relabeled as the peak time.
+	PeakAt, LatestAt time.Time
 }
 
 type JobRAMAverage struct {
@@ -189,7 +192,9 @@ func appendResourceGauge(out *ResourceGaugeSummary, v ResourceValue, at time.Tim
 			out = new(ResourceGaugeSummary)
 		}
 		out.Samples++
-		out.SampleMax = max(out.SampleMax, v.Value)
+		if out.Samples == 1 || v.Value > out.SampleMax {
+			out.SampleMax, out.PeakAt = v.Value, at
+		}
 		out.Latest, out.LatestAt = v.Value, at
 	}
 	return out
