@@ -22,7 +22,7 @@ Production trackers [#53](https://github.com/ShortCipher5/garm-capacity-controll
 
 ## Natural retirement and slot reuse
 
-- Capture the exact original completed one-job runner, its registration and immutable backend allocation, and the full charged resource vector. Obtain independent positive job settlement, post-job completion, assignment and reconnect closure, original-incarnation teardown, and disposition of processes and charged storage. Keep an independent late-work fence held across a new durable reconciliation barrier and the ensuing bounded inventory.
+- Capture the exact original completed one-job runner, its registration and immutable backend allocation, and the full charged resource vector. Obtain independent positive job settlement, post-job completion, assignment and reconnect closure, original-incarnation teardown, and disposition of processes and charged storage. Hold the independent late-work fence. Wait for the new durable reconciliation barrier to return before collecting bounded inventory or observing the continuing fence. Collect new evidence for each barrier.
 - **Pass evidence.** The current reconciliation proves the relevant scope, and the continuing fence has fresh post-barrier evidence. The guarded transaction credits exactly the original vector once. Retry and restart show the same tombstone and zero additional credit. Wrong generation, retained storage, stale fence, disputed outcome and reappearing inventory preserve or restore the applicable charge or hold without implying reusable capacity.
 - **Stop condition.** Any witness relies on a name, a successful provider acknowledgment, a missing row, or incomplete visibility. Preserve the charge. [Plan #392](https://github.com/ShortCipher5/garm-capacity-controller/pull/392)
 
