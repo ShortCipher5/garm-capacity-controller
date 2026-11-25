@@ -1,6 +1,7 @@
 package cihealth
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -271,5 +272,35 @@ func TestJobUsageGatesEachMetricOnItsSourceCapability(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJobMetricsRAMGaugeOnlyHasNoIntervalWireFields(t *testing.T) {
+	claim, now := attributionFixtureClaim()
+	set := usageFixtureSet(claim, now, MaxJobResourceGap)
+	set.Samples[0].RAMBytes = ResourceValue{}
+	set.Samples[2].RAMBytes = ResourceValue{}
+	matrix := fixtureJoinMatrix()
+	wireRAM := func() map[string]json.RawMessage {
+		t.Helper()
+		r := BuildVerifiedJobUsage(matrix, claim, set, now).Wire(matrix)
+		if r.Measured == nil || r.Measured.RAM == nil {
+			t.Fatal("RAM sample missing")
+		}
+		raw, err := json.Marshal(r.Measured.RAM)
+		var fields map[string]json.RawMessage
+		if err != nil || json.Unmarshal(raw, &fields) != nil {
+			t.Fatal("invalid RAM wire", err)
+		}
+		return fields
+	}
+	fields := wireRAM()
+	if len(fields) != 2 || string(fields["sample_peak_bytes"]) != `"30"` || string(fields["gauge_samples"]) != "1" {
+		t.Fatalf("gauge advertised unsupported fields: %s", fields)
+	}
+	set.Samples[2].RAMBytes = knownResource(40)
+	fields = wireRAM()
+	if string(fields["covered_ns"]) != `"4000000000"` || string(fields["complete"]) != "false" || string(fields["mean_bytes"]) != `"35"` {
+		t.Fatalf("partial mean lost its interval fields: %s", fields)
 	}
 }

@@ -1,6 +1,7 @@
 package cihealth
 
 import (
+	"encoding/json"
 	"strconv"
 	"time"
 )
@@ -67,44 +68,24 @@ type VerifiedUsageSampleSet struct {
 	Samples   []JobResourceSample
 }
 
-// Keep metric capabilities independent. Unsupported inputs cannot create
-// measurements or introduce a counter reset into another metric's window.
-// Preserve caller ownership of samples and the distinction between an
-// unmeasured disk and a supplied measurement from an unsupported source.
-func supportedUsageSamples(matrix AttributionCapabilityMatrix, set VerifiedUsageSampleSet) (VerifiedUsageSampleSet, UsageOmissionReason) {
-	cpu, ram, disk := matrix.Supports(FactCPUCounters), matrix.Supports(FactRAMCounters), matrix.Supports(FactDiskCounters)
-	if len(set.Samples) > MaxJobResourceSamples || (cpu && ram && disk) {
-		return set, UsageOmissionNone
-	}
-	var filtered []JobResourceSample
+// The reducer checks the original inputs for contradictory observations first.
+// Only independently supported results can leave that boundary, even if the
+// supplied counters were internally consistent and measured a complete window.
+func restrictUsageMetrics(summary *JobResourceSummary, matrix AttributionCapabilityMatrix) UsageOmissionReason {
 	reason := UsageOmissionNone
-	for i, original := range set.Samples {
-		sample := original
-		if !cpu {
-			sample.CPUTimeNanos = ResourceValue{}
-		}
-		if !ram {
-			sample.RAMBytes = ResourceValue{}
-		}
-		if !disk && (sample.DiskReadBytes != (ResourceValue{}) || sample.DiskWriteBytes != (ResourceValue{}) || sample.DiskUsedBytes != (ResourceValue{})) {
-			sample.DiskReadBytes, sample.DiskWriteBytes, sample.DiskUsedBytes = ResourceValue{}, ResourceValue{}, ResourceValue{}
-			reason = UsageOmissionDiskUnsupported
-		}
-		if sample == original {
-			continue
-		}
-		if reason == UsageOmissionNone {
-			reason = UsageOmissionCollectionUnavailable
-		}
-		if filtered == nil {
-			filtered = append([]JobResourceSample(nil), set.Samples...)
-		}
-		filtered[i] = sample
+	if !matrix.Supports(FactCPUCounters) && summary.CPU != nil {
+		summary.CPU = nil
+		reason = UsageOmissionCollectionUnavailable
 	}
-	if filtered != nil {
-		set.Samples = filtered
+	if !matrix.Supports(FactRAMCounters) && (summary.RAM != nil || summary.RAMMean != nil) {
+		summary.RAM, summary.RAMMean = nil, nil
+		reason = UsageOmissionCollectionUnavailable
 	}
-	return set, reason
+	if !matrix.Supports(FactDiskCounters) && (summary.DiskRead != nil || summary.DiskWrite != nil || summary.DiskUsed != nil) {
+		summary.DiskRead, summary.DiskWrite, summary.DiskUsed = nil, nil, nil
+		reason = UsageOmissionDiskUnsupported
+	}
+	return reason
 }
 
 // BuildVerifiedJobUsage validates the assembled attribution claim and the
@@ -137,8 +118,6 @@ func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttribut
 		record.Reason = classifyAttributionFailure(claim, now)
 		return record
 	}
-	set, unsupported := supportedUsageSamples(matrix, set)
-	record.diskUnsupported = unsupported == UsageOmissionDiskUnsupported
 	if verdict := classifySampleSet(attribution, set, now); verdict.reason != UsageOmissionNone {
 		record.State, record.Reason = verdict.state, verdict.reason
 		return record
@@ -159,6 +138,8 @@ func BuildVerifiedJobUsage(matrix AttributionCapabilityMatrix, claim JobAttribut
 		record.Reason = UsageOmissionUnbracketed
 		return record
 	}
+	unsupported := restrictUsageMetrics(&summary, matrix)
+	record.diskUnsupported = unsupported == UsageOmissionDiskUnsupported
 	if summary.Samples == 0 || (summary.CPU == nil && summary.RAM == nil && summary.RAMMean == nil &&
 		summary.DiskRead == nil && summary.DiskWrite == nil && summary.DiskUsed == nil) {
 		// Attribution is proven, but no counter covered the job window. A
@@ -413,7 +394,6 @@ func DecideCollection(matrix AttributionCapabilityMatrix, claim JobAttributionCl
 	if !matrix.Supports(FactCPUCounters) && !matrix.Supports(FactRAMCounters) && !matrix.Supports(FactDiskCounters) {
 		return CollectionDecision{false, UsageOmissionCollectionUnavailable}
 	}
-	set, _ = supportedUsageSamples(matrix, set)
 	if verdict := classifySampleSet(attribution, set, now); verdict != (omission{VerifiedUsageVerified, UsageOmissionNone}) {
 		return CollectionDecision{false, verdict.reason}
 	}
@@ -449,6 +429,20 @@ type MetricWire struct {
 	MeanBytes          string `json:"mean_bytes,omitempty"`
 	SamplePeakBytes    string `json:"sample_peak_bytes,omitempty"`
 	GaugeSamples       int    `json:"gauge_samples,omitempty"`
+}
+
+// A sampled RAM gauge alone has no covered interval. Mean and CPU metrics
+// always retain their explicit completeness flag, including false.
+func (m MetricWire) MarshalJSON() ([]byte, error) {
+	if m.SamplePeakBytes != "" && m.MeanBytes == "" && m.CoveredNanoseconds == "" && !m.Complete &&
+		m.AverageMilliCPU == "" && m.PeakMilliCPU == "" {
+		return json.Marshal(struct {
+			SamplePeakBytes string `json:"sample_peak_bytes"`
+			GaugeSamples    int    `json:"gauge_samples"`
+		}{m.SamplePeakBytes, m.GaugeSamples})
+	}
+	type plain MetricWire
+	return json.Marshal(plain(m))
 }
 
 type DiskWire struct {
