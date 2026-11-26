@@ -81,7 +81,7 @@ func (f *Facade) CreateStockProvider(ctx context.Context, b common.BootstrapInst
 	empty := common.ProviderInstance{}
 	// Runtime lineage is not sole-writer native authority. No qualified capability
 	// exists yet, so the new stock path is currently disposable/offline only.
-	if f.RuntimeOriginalPreparationRequired() {
+	if f.RuntimeOriginalPreparationRequired() || f.store.CheckOfflineBroker(ctx) != nil {
 		return empty, ErrUnavailable
 	}
 	if authority.Controller != f.controller || authority.PoolID != b.PoolID {

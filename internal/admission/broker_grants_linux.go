@@ -360,10 +360,13 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 	return v, e
 }
 
-// CheckOfflineBroker rejects unqualified grant cycles before they read stock
-// demand. The mutation and redemption transactions repeat the persisted check.
+// CheckOfflineBroker checks persisted authority on the same connection that
+// will perform local admission. The mutation transactions repeat the check.
 func (s *SQLiteStore) CheckOfflineBroker(ctx context.Context) error {
-	return s.readTransaction(ctx, requireOfflineBroker)
+	if s == nil || ctx == nil {
+		return ErrBrokerGrant
+	}
+	return s.transaction(ctx, requireOfflineBroker)
 }
 
 func requireOfflineBroker(tx *sql.Tx) error {

@@ -42,7 +42,7 @@ type NativeStock struct {
 }
 
 func NewNativeStock(ctx context.Context, store *admission.SQLiteStore, controller string, pools map[string]NativeStockPool) (*NativeStock, error) {
-	if store == nil || controller == "" || len(pools) == 0 || store.RuntimeLineageBound() {
+	if store == nil || controller == "" || len(pools) == 0 || store.RuntimeLineageBound() || store.CheckOfflineBroker(ctx) != nil {
 		return nil, ErrPolicy
 	}
 	profiles, e := store.CurrentBrokerPoolProfiles(ctx)
@@ -108,7 +108,7 @@ func (f *NativeStock) RuntimeOriginalPreparationRequired() bool {
 }
 func (f *NativeStock) CreateStockProvider(ctx context.Context, b common.BootstrapInstance, authority admission.StockProviderAuthority) (common.ProviderInstance, error) {
 	empty := common.ProviderInstance{}
-	if f.RuntimeOriginalPreparationRequired() {
+	if f.RuntimeOriginalPreparationRequired() || f.store.CheckOfflineBroker(ctx) != nil {
 		return empty, ErrUnavailable
 	}
 	route, ok := f.pools[b.PoolID]
