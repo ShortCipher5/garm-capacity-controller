@@ -320,7 +320,7 @@ export class ReadSession {
     try {
       const response = await this.fetcher(ciHealthEndpoint, {
         method: "GET",
-        headers: {Authorization: `Bearer ${this.#token}`, Accept: "application/json"},
+        headers: {Authorization: `Bearer ${this.#token}`, Accept: "application/json", "X-GARM-CI-Usage": "leased-v1"},
         credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal,
       });
       active();

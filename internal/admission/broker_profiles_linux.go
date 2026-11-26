@@ -90,6 +90,10 @@ func validBrokerProfile(v BrokerPoolProfile) bool {
 // Read and validate the append-only revision chains in sequence order. A record
 // cannot be hidden by deleting its head: audit-to-record counts are checked too.
 func sqliteBrokerPoolProfiles(tx *sql.Tx) (map[string]BrokerPoolProfile, error) {
+	return readBrokerPoolProfiles(tx, nil)
+}
+
+func readBrokerPoolProfiles(tx *sql.Tx, ambiguousOwners map[string]bool) (map[string]BrokerPoolProfile, error) {
 	out := map[string]BrokerPoolProfile{}
 	rows, err := tx.Query("SELECT record_sequence,pool,previous_sequence,payload,payload_hash FROM broker_pool_profiles ORDER BY record_sequence")
 	if err != nil {
@@ -118,6 +122,9 @@ func sqliteBrokerPoolProfiles(tx *sql.Tx) (map[string]BrokerPoolProfile, error) 
 			if err != nil || b.Spec.Controller != v.Authority.Controller || b.Spec.Host != d.Host || b.Spec.DomainID != d.DomainID || b.Spec.PolicyDigest != d.PolicyDigest || b.Spec.HostBindingSequence != d.HostBindingSequence {
 				return nil, ErrBrokerProfile
 			}
+		}
+		if old := out[pool]; ambiguousOwners != nil && old.Sequence != 0 && (old.Repository != v.Repository || old.SourceIdentity != v.SourceIdentity || old.Authority.Controller != v.Authority.Controller) {
+			ambiguousOwners[pool] = true
 		}
 		out[pool] = v
 		if len(out) > 1000 {

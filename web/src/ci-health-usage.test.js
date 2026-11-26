@@ -188,7 +188,7 @@ test("usage display helpers format coverage without narrowing", () => {
 
 function usageSnapshot(jobUsage) {
   return {
-    state: "observed", observed_at: "2026-01-02T03:04:35Z",
+    state: "observed", observed_at: "2026-01-02T03:04:35Z", ...(jobUsage ? {usage_expires_at: "2026-01-02T03:05:00Z"} : {}),
     timing: {attempts: [{source: "fixture_source", repository_id: "9007199254740993", workflow_id: "17", run_id: "9223372036854775807", attempt: "2", observed_at: "2026-01-02T03:04:35Z", status: "completed", jobs: [{id: "9007199254741001", status: "completed", steps: [], ...(jobUsage ? {resource_usage: jobUsage} : {})}]}]},
   };
 }
@@ -207,7 +207,7 @@ test("ci-health timing renders per-job usage states without inventing zeros", as
   try {
     server = await createServer({cacheDir, server: {middlewareMode: true, hmr: false}, appType: "custom"});
     const {CIHealthTiming} = await server.ssrLoadModule("/src/ci-health.jsx");
-    const render = (snapshot) => renderToStaticMarkup(React.createElement(CIHealthTiming, {snapshot, now: Date.parse("2026-01-02T03:04:36Z")}));
+    const render = (snapshot) => renderToStaticMarkup(React.createElement(CIHealthTiming, {snapshot, showUsage: true, now: Date.parse("2026-01-02T03:04:36Z")}));
 
     const none = render(usageSnapshot(null));
     assert.match(none, /Per-job CPU, memory, and disk usage are unavailable: no documented source proves the runner.{0,8}s original provider allocation/);

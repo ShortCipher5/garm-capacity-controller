@@ -2,9 +2,16 @@ import {validateGarm} from "./garm-client.js";
 import {entityOnboardingView} from "./entity-onboarding.js";
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function inventory(snapshot){
- const pools=validateGarm(snapshot).pool_inventory?.pools;
+ const observed=validateGarm(snapshot);
+ const pools=observed.pool_inventory?.pools;
  if(!Array.isArray(pools)||pools.length>1000)throw new Error("Existing Garm scope observation unavailable.");
  const counts=new Map();
+ if(observed.settings_available){
+  for(const repo of observed.settings.repositories){
+   if(!uuid.test(repo.id)||repo.id==="00000000-0000-0000-0000-000000000000")throw new Error("Existing Garm scope observation unavailable.");
+   counts.set("repository/"+repo.id,{type:"repository",id:repo.id,pool_count:0,configured:true});
+  }
+ }
  for(const p of pools){
   if(!uuid.test(p.id)||p.id==="00000000-0000-0000-0000-000000000000"||!["organization","repository","enterprise"].includes(p.owner_kind)||typeof p.owner_id!=="string")throw new Error("Existing Garm scope observation unavailable.");
   const key=p.owner_kind+"/"+p.owner_id;const row=counts.get(key)||{type:p.owner_kind,id:p.owner_id,pool_count:0};row.pool_count++;counts.set(key,row);

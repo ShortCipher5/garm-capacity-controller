@@ -53,13 +53,13 @@ func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garma
 	if _, _, err = enrolledCycle(state, charges, observation, sourceIdentity, opt, ttl); err != nil {
 		return GrantCycleResult{}, err
 	}
-	// Only the canonical UNUSED→EXPIRED transition can release these charges.
+	// Only an audited expiry or revocation of a superseded unused grant releases its charge.
 	// A raced consumption aborts this cycle; no reservation is ever retired.
-	if err = retireExpiredCycleGrants(ctx, store, state.Grants, opt.Now); err != nil {
+	if err = retireCycleGrants(ctx, store, state.Grants, opt.Now); err != nil {
 		return GrantCycleResult{}, err
 	}
 	// Maintenance may append audit entries and change capacity. Never issue using
-	// the pre-maintenance revision, even if another worker performed the expiry.
+	// the pre-maintenance revision, even if another worker performed the retirement.
 	state, charges, err = store.ReadBrokerPlanningState(ctx)
 	if err != nil {
 		return GrantCycleResult{}, err
@@ -207,26 +207,32 @@ func RunGrantCycles(ctx context.Context, store *admission.SQLiteStore, source *g
 
 // Fixed work budget per cycle. Larger backlogs remain charged and are processed
 // across later cycles; no scan/incomplete pass makes an unretired grant free.
-const cycleExpiryLimit = 64
+const cycleRetirementLimit = 64
 
-func cycleExpiryCandidates(grants []admission.BrokerGrant, now time.Time) []string {
-	ids := make([]string, 0, cycleExpiryLimit)
+func cycleRetirementCandidates(grants []admission.BrokerGrant, now time.Time) []admission.BrokerGrant {
+	candidates := make([]admission.BrokerGrant, 0, cycleRetirementLimit)
 	for _, g := range grants {
-		if g.State == "unused" && !g.Spec.ExpiresAt.IsZero() && !g.Spec.ExpiresAt.After(now) {
-			ids = append(ids, g.ID)
-			if len(ids) == cycleExpiryLimit {
+		if g.State == "unused" && !g.Spec.ExpiresAt.IsZero() && (g.Superseded() || !g.Spec.ExpiresAt.After(now)) {
+			candidates = append(candidates, g)
+			if len(candidates) == cycleRetirementLimit {
 				break
 			}
 		}
 	}
-	return ids
+	return candidates
 }
-func retireExpiredCycleGrants(ctx context.Context, store *admission.SQLiteStore, grants []admission.BrokerGrant, now time.Time) error {
-	for _, id := range cycleExpiryCandidates(grants, now) {
+func retireCycleGrants(ctx context.Context, store *admission.SQLiteStore, grants []admission.BrokerGrant, now time.Time) error {
+	for _, g := range cycleRetirementCandidates(grants, now) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := store.RetireUnusedBrokerGrant(ctx, id, true); err != nil {
+		var err error
+		if !g.Spec.ExpiresAt.After(now) {
+			err = store.RetireUnusedBrokerGrant(ctx, g.ID, true)
+		} else {
+			err = store.RetireSupersededBrokerGrant(ctx, g.ID)
+		}
+		if err != nil {
 			return err
 		}
 	}

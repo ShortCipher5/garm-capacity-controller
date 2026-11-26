@@ -10,11 +10,10 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/garmapi"
 )
 
-const DisabledPoolProtocol = "native-disabled-repository-pool-v1"
+const DisabledPoolProtocol = garmapi.NativeDisabledPoolProtocol
 
 // StagedPool is durable creation evidence only. A confirmed disabled readback is
-// not route enrollment, admission readiness or an enable permit. Stock v0.2.1
-// rejects native template-zero creation; the separate source8 patch is required.
+// not route enrollment, admission readiness or an enable permit.
 type StagedPool struct {
 	ProviderName       string `json:"provider_name"`
 	Generation         uint64 `json:"generation"`
@@ -45,7 +44,7 @@ type disabledPoolIntent struct {
 // capturePoolReceipt preserves a UUID before a subsequent GET or client timeout.
 // It is not completion: the global pending slot remains occupied and audited.
 func (j *Journal) capturePoolReceipt(ctx context.Context, id string, result StagedPool) error {
-	if !validUUID(result.PoolID) || !validUUID(result.RepositoryID) || result.RequestID != id || result.Protocol != DisabledPoolProtocol || result.JournalLineage != j.Lineage() || !validJournalLineage(result.ManagementIdentity) || result.DisabledReadback || result.PoolFingerprint != "" || !result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
+	if !validUUID(result.PoolID) || !validUUID(result.RepositoryID) || result.RequestID != id || (result.Protocol != DisabledPoolProtocol && result.Protocol != garmapi.StockDisabledPoolProtocol) || result.JournalLineage != j.Lineage() || !validJournalLineage(result.ManagementIdentity) || result.DisabledReadback || result.PoolFingerprint != "" || !result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
 		return ErrJournal
 	}
 	return j.transaction(ctx, func(tx *sql.Tx) error {
@@ -81,7 +80,8 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 	if err != nil {
 		return StagedPool{}, err
 	}
-	desired := disabledPoolIntent{"create_disabled_pool", DisabledPoolProtocol, owned}
+	protocol := garmapi.DisabledPoolProtocol(owned)
+	desired := disabledPoolIntent{"create_disabled_pool", protocol, owned}
 	hash, err := requestHash(requestID, repositoryID, expected, "repository", reason, desired)
 	if err != nil {
 		return StagedPool{}, err
@@ -116,7 +116,7 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 	if replayed != nil {
 		return decodeRecorded(replayed)
 	}
-	result := StagedPool{Protocol: DisabledPoolProtocol, ProviderName: owned.ProviderName, ManagementIdentity: m.remote.ManagementIdentity(), JournalLineage: m.journal.Lineage(), RequestID: requestID, RepositoryID: repositoryID, SpecFingerprint: garmapi.DisabledPoolSpecFingerprint(owned), RouteRequired: true}
+	result := StagedPool{Protocol: protocol, ProviderName: owned.ProviderName, ManagementIdentity: m.remote.ManagementIdentity(), JournalLineage: m.journal.Lineage(), RequestID: requestID, RepositoryID: repositoryID, SpecFingerprint: garmapi.DisabledPoolSpecFingerprint(owned), RouteRequired: true}
 	receipt, remoteErr := remote.PostDisabledRepoPool(ctx, repositoryID, expected, owned)
 	if receipt.PoolID() != "" {
 		result.PoolID = receipt.PoolID()
@@ -146,7 +146,7 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 	state := "confirmed"
 	if remoteErr != nil {
 		state = "unknown"
-		if result.PoolID == "" && (errors.Is(remoteErr, garmapi.ErrManagementDisabled) || errors.Is(remoteErr, garmapi.ErrManagementConflict) || errors.Is(remoteErr, garmapi.ErrManagementUnsafe)) {
+		if result.PoolID == "" && (errors.Is(remoteErr, garmapi.ErrManagementDisabled) || errors.Is(remoteErr, garmapi.ErrManagementConflict) || errors.Is(remoteErr, garmapi.ErrManagementUnsafe) || errors.Is(remoteErr, garmapi.ErrManagementNotDispatched)) {
 			state = "rejected"
 		}
 	}
@@ -166,7 +166,7 @@ func (m *Manager) CreateDisabledPool(ctx context.Context, requestID, repositoryI
 
 func (m *Manager) decodeRecordedStage(raw json.RawMessage, requestID, repositoryID string, owned garmapi.DisabledPoolSpec) (StagedPool, error) {
 	var result StagedPool
-	if json.Unmarshal(raw, &result) != nil || result.Protocol != DisabledPoolProtocol || result.ManagementIdentity != m.remote.ManagementIdentity() || result.JournalLineage != m.journal.Lineage() || result.RequestID != requestID || result.RepositoryID != repositoryID || !validUUID(result.PoolID) || result.SpecFingerprint != garmapi.DisabledPoolSpecFingerprint(owned) || result.ProviderName != owned.ProviderName || !validJournalLineage(result.PoolFingerprint) || !result.DisabledReadback || !result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
+	if json.Unmarshal(raw, &result) != nil || result.Protocol != garmapi.DisabledPoolProtocol(owned) || result.ManagementIdentity != m.remote.ManagementIdentity() || result.JournalLineage != m.journal.Lineage() || result.RequestID != requestID || result.RepositoryID != repositoryID || !validUUID(result.PoolID) || result.SpecFingerprint != garmapi.DisabledPoolSpecFingerprint(owned) || result.ProviderName != owned.ProviderName || !validJournalLineage(result.PoolFingerprint) || !result.DisabledReadback || !result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
 		return StagedPool{}, ErrJournal
 	}
 	return result, nil

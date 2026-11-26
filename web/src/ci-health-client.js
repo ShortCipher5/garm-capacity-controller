@@ -154,11 +154,11 @@ function validRetainedHistory(history, observed, scopes) {
 
 export function validateCIHealthSnapshot(value) {
   const fail = () => { throw new Error("CI Health response unavailable."); };
-  if (!exactKeys(value, ["state", "timing"], ["observed_at", "coverage", "history"]) ||
+  if (!exactKeys(value, ["state", "timing"], ["observed_at", "coverage", "history", "usage_expires_at"]) ||
       !exactKeys(value.timing, ["attempts"]) || !Array.isArray(value.timing.attempts) ||
       value.timing.attempts.length > 25) fail();
   if (value.state === "unavailable") {
-    if (Object.hasOwn(value, "observed_at") || Object.hasOwn(value, "coverage") || Object.hasOwn(value, "history") || value.timing.attempts.length !== 0) fail();
+    if (Object.hasOwn(value, "observed_at") || Object.hasOwn(value, "coverage") || Object.hasOwn(value, "history") || Object.hasOwn(value, "usage_expires_at") || value.timing.attempts.length !== 0) fail();
     return value;
   }
   const observed = timestamp(value.observed_at);
@@ -213,6 +213,13 @@ export function validateCIHealthSnapshot(value) {
   }
   if (Object.hasOwn(value, "history") &&
       (value.coverage !== "observed_subset" || !validRetainedHistory(value.history, observed, scopes))) fail();
+  // Older producers can supply resource_usage without a display deadline.
+  // Keep timing, history and navigation available when usage cannot be shown.
+  if (ciUsageExpiry(value) === null && (Object.hasOwn(value, "usage_expires_at") ||
+      value.timing.attempts.some(a => a.jobs.some(j => Object.hasOwn(j, "resource_usage"))))) {
+    const {usage_expires_at, ...plain} = value;
+    return {...plain, timing: {attempts: value.timing.attempts.map(a => ({...a, jobs: a.jobs.map(({resource_usage, ...job}) => job)}))}};
+  }
   return value;
 }
 
@@ -253,12 +260,31 @@ export function ciHealthLeaseRemaining(value, lease, wall = Date.now(), monotoni
   return Math.max(0, Math.min(lease.wallDeadline - wall, lease.monotonicDeadline - monotonic));
 }
 
+// Round submillisecond expiry down. Compare its remaining fractional digits
+// as well, so even a one-nanosecond extension beyond the timing limit fails.
+export function ciUsageExpiry(value) {
+  const at = timestamp(value?.observed_at);
+  const expires = timestamp(value?.usage_expires_at);
+  if (!at || !expires || expires.exact <= at.exact) return null;
+  const limit = at.milliseconds + lifetime;
+  if (expires.milliseconds > limit ||
+      (expires.milliseconds === limit && expires.exact.slice(-6) > at.exact.slice(-6))) return null;
+  return expires.milliseconds;
+}
+
+function boundedCILease(value, wallDeadline, wall, monotonic) {
+  const timing = ciHealthLease(value, wall, monotonic);
+  if (!timing || wallDeadline == null || wallDeadline <= wall || wallDeadline > timing.wallDeadline) return null;
+  return Object.freeze({wallDeadline, accepted: monotonic, monotonicDeadline: monotonic + (wallDeadline - wall)});
+}
+
+export function ciUsageLease(value, wall = Date.now(), monotonic = performance.now()) {
+  return boundedCILease(value, ciUsageExpiry(value), wall, monotonic);
+}
+
 export function ciHistoryLease(value, wall = Date.now(), monotonic = performance.now()) {
   const expires = timestamp(value?.history?.expires_at);
-  const timing = ciHealthLease(value, wall, monotonic);
-  if (!expires || !timing || expires.milliseconds <= wall || expires.milliseconds > timing.wallDeadline) return null;
-  const wallDeadline = expires.milliseconds;
-  return Object.freeze({wallDeadline, accepted: monotonic, monotonicDeadline: monotonic + (wallDeadline - wall)});
+  return boundedCILease(value, expires?.milliseconds, wall, monotonic);
 }
 
 export async function readCIHealthBody(response, signal) {

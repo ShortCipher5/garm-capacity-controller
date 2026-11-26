@@ -507,25 +507,25 @@ func (s *UsageAttachmentStore) SetEnrolled(ctx context.Context, scope UsageAttac
 // Callers hold the sidecar mutex followed by the timing history mutex. The
 // latest version alone defines row membership. A future version after a clock
 // regression also blocks reads, even if an older matching row exists.
-func (s *UsageAttachmentStore) currentJobClock(ctx context.Context, job JobKey, now time.Time) (Clock, bool) {
+func (s *UsageAttachmentStore) currentJobClock(ctx context.Context, job JobKey, now time.Time) (Clock, time.Time, bool) {
 	if !s.enrolled(usageScopeOf(job)) || !s.history.available(ctx) || !s.available(ctx) {
-		return Clock{}, false
+		return Clock{}, time.Time{}, false
 	}
 	for _, attempt := range s.history.state.Attempts {
 		if attempt.Key != job.Attempt {
 			continue
 		}
 		if attempt.AsOf.After(now) || !attempt.AsOf.After(now.Add(-historyRetention)) {
-			return Clock{}, false
+			return Clock{}, time.Time{}, false
 		}
 		for _, row := range attempt.Jobs {
 			if row.Key == job {
-				return row.Clock, true
+				return row.Clock, attempt.AsOf, true
 			}
 		}
-		return Clock{}, false
+		return Clock{}, time.Time{}, false
 	}
-	return Clock{}, false
+	return Clock{}, time.Time{}, false
 }
 
 // A sparse latest row can establish membership without measuring execution.
@@ -557,7 +557,7 @@ func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionC
 	s.history.mu.Lock()
 	defer s.history.mu.Unlock()
 	now := s.now().UTC()
-	row, member := s.currentJobClock(ctx, claim.Job, now)
+	row, _, member := s.currentJobClock(ctx, claim.Job, now)
 	if !validTime(now) || !member {
 		return ErrUsageAttachment
 	}
@@ -647,23 +647,9 @@ func (s *UsageAttachmentStore) Read(ctx context.Context, job JobKey) (UsageAttac
 	s.history.mu.Lock()
 	defer s.history.mu.Unlock()
 	now := s.now().UTC()
-	row, member := s.currentJobClock(ctx, job, now)
-	if !validTime(now) || !member {
-		return UsageAttachment{}, false, ErrUsageAttachment
-	}
-	pos, exists := s.position(job)
-	if !exists {
-		return UsageAttachment{}, false, nil
-	}
-	a := s.state.Attachments[pos]
-	if !timingAllowsUsageWindow(row, a.WindowStart, a.WindowEnd) {
-		return UsageAttachment{}, false, ErrUsageAttachmentConflict
-	}
-	if a.AttachedAt.After(now) {
-		return UsageAttachment{}, false, ErrUsageAttachment
-	}
-	if !a.EvidenceAsOf.After(now.Add(-usageAttachmentRetention)) {
-		return UsageAttachment{}, false, nil
+	a, _, _, err := s.readCurrent(ctx, job, now)
+	if err != nil || a.Job != job {
+		return UsageAttachment{}, false, err
 	}
 	raw, err := json.Marshal(a)
 	var out UsageAttachment
@@ -671,6 +657,30 @@ func (s *UsageAttachmentStore) Read(ctx context.Context, job JobKey) (UsageAttac
 		return UsageAttachment{}, false, ErrUsageAttachment
 	}
 	return out, true, nil
+}
+
+// Callers hold both the sidecar and timing locks. The returned attachment
+// is owned by the store and must be copied before crossing that boundary.
+func (s *UsageAttachmentStore) readCurrent(ctx context.Context, job JobKey, now time.Time) (UsageAttachment, Clock, time.Time, error) {
+	row, membershipAt, member := s.currentJobClock(ctx, job, now)
+	if !validTime(now) || !member {
+		return UsageAttachment{}, Clock{}, time.Time{}, ErrUsageAttachment
+	}
+	pos, exists := s.position(job)
+	if !exists {
+		return UsageAttachment{}, Clock{}, time.Time{}, nil
+	}
+	a := s.state.Attachments[pos]
+	if !timingAllowsUsageWindow(row, a.WindowStart, a.WindowEnd) {
+		return UsageAttachment{}, Clock{}, time.Time{}, ErrUsageAttachmentConflict
+	}
+	if a.AttachedAt.After(now) {
+		return UsageAttachment{}, Clock{}, time.Time{}, ErrUsageAttachment
+	}
+	if !a.EvidenceAsOf.After(now.Add(-usageAttachmentRetention)) {
+		return UsageAttachment{}, Clock{}, time.Time{}, nil
+	}
+	return a, row, membershipAt.Add(historyRetention), nil
 }
 
 func (s *UsageAttachmentStore) prune(ctx context.Context, now time.Time) error {

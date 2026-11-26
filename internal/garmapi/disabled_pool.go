@@ -5,16 +5,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 )
 
+const (
+	NativeDisabledPoolProtocol = "native-disabled-repository-pool-v1"
+	StockDisabledPoolProtocol  = "stock-disabled-repository-pool-v1"
+)
+
 // DisabledPoolSpec is trusted server configuration, never arbitrary browser/job
-// JSON. This experimental transport requires the separately qualified source8 native
-// template-zero protocol. An opt-in is intent, not proof of installed support.
-// It cannot activate a pool or assert a durable admission route exists.
+// JSON. Stock GARM requires a positive preconfigured template ID. Zero selects
+// the separate source8 native protocol. Neither protocol can activate a pool.
 type DisabledPoolSpec struct {
 	ProviderName string   `json:"provider_name"`
 	MaxRunners   uint64   `json:"max_runners"`
@@ -22,10 +27,11 @@ type DisabledPoolSpec struct {
 	Flavor       string   `json:"flavor"`
 	Arch         string   `json:"os_arch"`
 	Tags         []string `json:"tags"`
+	TemplateID   uint64   `json:"template_id,omitempty"`
 }
 
 func CanonicalDisabledPoolSpec(spec DisabledPoolSpec) (DisabledPoolSpec, error) {
-	if !boundedSettingText(spec.ProviderName, 256) || !boundedSettingText(spec.Image, 256) || !boundedSettingText(spec.Flavor, 256) || spec.MaxRunners < 1 || spec.MaxRunners > 1000000 || (spec.Arch != "amd64" && spec.Arch != "arm64") || len(spec.Tags) < 1 || len(spec.Tags) > 100 {
+	if !boundedSettingText(spec.ProviderName, 256) || !boundedSettingText(spec.Image, 256) || !boundedSettingText(spec.Flavor, 256) || spec.MaxRunners < 1 || spec.MaxRunners > 1000000 || spec.TemplateID > (1<<53)-1 || (spec.Arch != "amd64" && spec.Arch != "arm64") || len(spec.Tags) < 1 || len(spec.Tags) > 100 {
 		return DisabledPoolSpec{}, ErrManagementUnsafe
 	}
 	spec.Tags = append([]string(nil), spec.Tags...)
@@ -37,6 +43,13 @@ func CanonicalDisabledPoolSpec(spec DisabledPoolSpec) (DisabledPoolSpec, error) 
 	}
 	return spec, nil
 }
+func DisabledPoolProtocol(spec DisabledPoolSpec) string {
+	if spec.TemplateID > 0 {
+		return StockDisabledPoolProtocol
+	}
+	return NativeDisabledPoolProtocol
+}
+
 func DisabledPoolSpecFingerprint(spec DisabledPoolSpec) string {
 	canonical, err := CanonicalDisabledPoolSpec(spec)
 	if err != nil {
@@ -45,7 +58,7 @@ func DisabledPoolSpecFingerprint(spec DisabledPoolSpec) string {
 	raw, _ := json.Marshal(struct {
 		Protocol string           `json:"protocol"`
 		Spec     DisabledPoolSpec `json:"spec"`
-	}{"native-disabled-repository-pool-v1", canonical})
+	}{DisabledPoolProtocol(canonical), canonical})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -65,15 +78,18 @@ func (r DisabledPoolReceipt) RepositoryID() string    { return r.repo }
 func (r DisabledPoolReceipt) SpecFingerprint() string { return r.fingerprint }
 
 func (m *ManagementClient) DisabledPoolCreationEnabled() bool {
-	return m.writes && m.disabledPoolCreation
+	return m.writes && (m.disabledPoolCreation || m.stockDisabledPoolCreation)
 }
 
 // PostDisabledRepoPool is deliberately separate from readback so the caller can
 // durably capture a returned UUID first. It does not add it to writable scopes.
 func (m *ManagementClient) PostDisabledRepoPool(ctx context.Context, repo, expected string, spec DisabledPoolSpec) (DisabledPoolReceipt, error) {
-	m.mu.Lock()
+	if !m.mu.lockContext(ctx) {
+		return DisabledPoolReceipt{}, ErrManagementNotDispatched
+	}
 	defer m.mu.Unlock()
-	if !m.writes || !m.disabledPoolCreation {
+	if !m.writes || (spec.TemplateID == 0 && !m.disabledPoolCreation) ||
+		(spec.TemplateID > 0 && !m.stockDisabledPoolCreation) {
 		return DisabledPoolReceipt{}, ErrManagementDisabled
 	}
 	canonical, err := CanonicalDisabledPoolSpec(spec)
@@ -82,7 +98,7 @@ func (m *ManagementClient) PostDisabledRepoPool(ctx context.Context, repo, expec
 	}
 	before, err := m.repository(ctx, repo)
 	if err != nil {
-		return DisabledPoolReceipt{}, err
+		return DisabledPoolReceipt{}, fmt.Errorf("%w: %w", ErrManagementNotDispatched, err)
 	}
 	if before.Fingerprint != expected {
 		return DisabledPoolReceipt{}, ErrManagementConflict
@@ -95,7 +111,7 @@ func (m *ManagementClient) PostDisabledRepoPool(ctx context.Context, repo, expec
 		ExtraSpecs     json.RawMessage `json:"extra_specs"`
 		EnableShell    bool            `json:"enable_shell"`
 		TemplateID     uint64          `json:"template_id"`
-	}{canonical, 0, false, "linux", json.RawMessage(`{}`), false, 0}
+	}{canonical, 0, false, "linux", json.RawMessage(`{}`), false, canonical.TemplateID}
 	fields, err := m.exchange(ctx, http.MethodPost, "/repositories/"+url.PathEscape(repo)+"/pools", body)
 	if err != nil {
 		return DisabledPoolReceipt{}, ErrManagementOutcomeUnknown
@@ -113,7 +129,7 @@ func (m *ManagementClient) PostDisabledRepoPool(ctx context.Context, repo, expec
 }
 func (m *ManagementClient) verifyDisabledPool(fields map[string]json.RawMessage, poolID, repositoryID string, spec DisabledPoolSpec) (ManagedPool, error) {
 	for name := range fields {
-		for _, exact := range []string{"id", "provider_name", "repo_id", "org_id", "enterprise_id", "max_runners", "min_idle_runners", "enabled", "generation", "tags", "image", "flavor", "os_type", "os_arch", "template_id", "enable_shell", "extra_specs", "instances"} {
+		for _, exact := range []string{"id", "provider_name", "repo_id", "org_id", "enterprise_id", "github-runner-group", "max_runners", "min_idle_runners", "enabled", "generation", "tags", "image", "flavor", "os_type", "os_arch", "template_id", "enable_shell", "extra_specs", "instances"} {
 			if strings.EqualFold(name, exact) && name != exact {
 				return ManagedPool{}, ErrManagementOutcomeUnknown
 			}
@@ -140,8 +156,8 @@ func (m *ManagementClient) verifyDisabledPool(fields map[string]json.RawMessage,
 			return ManagedPool{}, ErrManagementOutcomeUnknown
 		}
 	}
-	template, e := number(fields, "template_id", false)
-	if e != nil || template != 0 {
+	template, e := number(fields, "template_id", spec.TemplateID > 0)
+	if e != nil || template != spec.TemplateID {
 		return ManagedPool{}, ErrManagementOutcomeUnknown
 	}
 	var shell bool

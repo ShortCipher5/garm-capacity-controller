@@ -47,6 +47,16 @@ func (c Cycle) ObservedJobLink(source *demandobserver.CIHealthSource, key ciheal
 	if !ok {
 		return none, false
 	}
+	if _, ok := c.observedJobClock(key); !ok {
+		return none, false
+	}
+	return ObservedJobLink{run: runLink, jobID: key.JobID}, true
+}
+
+// An exact job must appear once in this run with a coherent job observation.
+// The retained-usage and navigation projections share this membership check.
+func (c Cycle) observedJobClock(key cihealth.JobKey) (cihealth.Clock, bool) {
+	var observed cihealth.Clock
 	found := false
 	for _, a := range c.facts {
 		if a.Key.Source != key.Attempt.Source || a.Key.RepositoryID != key.Attempt.RepositoryID || a.Key.RunID != key.Attempt.RunID {
@@ -60,13 +70,14 @@ func (c Cycle) ObservedJobLink(source *demandobserver.CIHealthSource, key ciheal
 			// same run. Conflicting evidence cannot mint either destination.
 			if found || a.Key != key.Attempt || job.Key != key || job.Clock.ObservedAt.IsZero() ||
 				job.Clock.ObservedAt.Before(a.Clock.ObservedAt) || job.Clock.ObservedAt.After(a.AsOf) {
-				return none, false
+				return cihealth.Clock{}, false
 			}
 			found = true
+			observed = job.Clock
 		}
 	}
 	if !found {
-		return none, false
+		return cihealth.Clock{}, false
 	}
-	return ObservedJobLink{run: runLink, jobID: key.JobID}, true
+	return observed, true
 }

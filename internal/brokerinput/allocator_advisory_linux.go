@@ -373,6 +373,14 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 	coveredIdle := allocatorPoolCounts(plan.CoveredByIdle)
 	coveredGrant := allocatorPoolCounts(plan.CoveredByGrant)
 	deferred := allocatorPoolCounts(plan.DeferredByInflight)
+	// A runner already matched to a job cannot also cover the spare idle floor.
+	// Count only verified idle/pending supply and warm (not queued) awards.
+	warmSpare := map[string]int64{}
+	for _, s := range in.Observation.Supply {
+		id := s.PoolID
+		warmSpare[id] = s.Idle + in.Snapshot.Pools[id].PendingWarm -
+			coveredIdle[id] - coveredGrant[id] - deferred[id]
+	}
 	remaining := map[string]int64{}
 	for _, job := range plan.RemainingJobs {
 		seen := map[string]bool{}
@@ -442,7 +450,8 @@ func ExplainAllocatorPlan(in AllocatorInput, plan capacitybroker.JobPlan, expiry
 				// accounting of charges on other hosts in the same pool.
 				pool.Hosts = []string{host}
 			}
-			decision.Reason = allocatorDecisionReason(in.Snapshot, planned, pool, remote, in.Blocked, decision)
+			unmetWarm := pool.WarmIdle > 0 && warmSpare[poolID]+decision.AdditionalWarm < pool.WarmIdle
+			decision.Reason = allocatorDecisionReason(in.Snapshot, planned, pool, remote, in.Blocked, decision, unmetWarm)
 			out.Decisions = append(out.Decisions, decision)
 		}
 	}
@@ -601,20 +610,20 @@ func allocatorPlanned(s capacitybroker.Snapshot, plan capacitybroker.JobPlan, he
 
 // allocatorDecisionReason picks one deterministic explanation for a pool. The
 // checks run in a fixed order; the first that applies wins.
-func allocatorDecisionReason(s capacitybroker.Snapshot, planned allocatorHeldView, pool capacitybroker.Pool, remote garmapi.DiscoveredPool, blocked map[string]bool, d AllocatorPoolDecision) string {
+func allocatorDecisionReason(s capacitybroker.Snapshot, planned allocatorHeldView, pool capacitybroker.Pool, remote garmapi.DiscoveredPool, blocked map[string]bool, d AllocatorPoolDecision, unmetWarm bool) string {
 	if !remote.Enabled {
 		return allocatorDecisionPoolDisabled
 	}
-	if d.Additional > 0 && d.RemainingQueued == 0 {
+	if d.Additional > 0 && d.RemainingQueued == 0 && !unmetWarm {
 		return allocatorDecisionProposed
 	}
 	if d.Additional > 0 {
 		return allocatorDecisionPartial
 	}
-	if d.DeferredByInflight > 0 {
+	if d.DeferredByInflight > 0 && (!unmetWarm || d.RemainingQueued > 0) {
 		return allocatorDecisionDeferredInflight
 	}
-	if d.RemainingQueued == 0 {
+	if d.RemainingQueued == 0 && !unmetWarm {
 		if d.CoveredByIdle > 0 || d.CoveredByGrant > 0 {
 			return allocatorDecisionCovered
 		}

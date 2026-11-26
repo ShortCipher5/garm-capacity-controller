@@ -14,6 +14,20 @@ const (
 	maxCIResponseBytes = 1 << 20
 )
 
+type ciUsageResponse struct {
+	expires time.Time
+	body    []byte
+	current func() bool
+}
+
+type ciTimingResponse struct {
+	UsageExpiresAt *time.Time   `json:"usage_expires_at,omitempty"`
+	State          string       `json:"state"`
+	At             time.Time    `json:"observed_at"`
+	Coverage       string       `json:"coverage"`
+	View           ciTimingView `json:"timing"`
+}
+
 // CIHealthRepository is an exact identity from already-authorized startup
 // configuration. Authenticated dashboard readers have the existing owner-wide
 // read role, not individual per-repository permissions.
@@ -34,6 +48,7 @@ type CIHealthSnapshot struct {
 	generation *ciHealthGeneration
 	body       []byte
 	history    ciHistoryResponse
+	usage      ciUsageResponse
 	jobLinks   map[string]ciJobLinkTarget
 	runLinks   map[string]ciRunLinkTarget
 	stopped    bool
@@ -123,12 +138,7 @@ func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.
 	if boundedPartial {
 		coverage = "bounded_partial"
 	}
-	wire, err := json.Marshal(struct {
-		State    string       `json:"state"`
-		At       time.Time    `json:"observed_at"`
-		Coverage string       `json:"coverage"`
-		View     ciTimingView `json:"timing"`
-	}{State: "observed", At: at, Coverage: coverage, View: view})
+	wire, err := json.Marshal(ciTimingResponse{State: "observed", At: at, Coverage: coverage, View: view})
 	if err != nil || len(wire) > maxCIResponseBytes {
 		return errCIProjection
 	}
@@ -157,6 +167,7 @@ func (s *CIHealthSnapshot) commitTiming(at time.Time, lease *ciHealthGeneration,
 	}
 	s.latest, s.body, s.generation = at, wire, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
+	s.usage = ciUsageResponse{}
 	s.workflows, s.jobLinks, s.runLinks = workflows, jobLinks, runLinks
 	return nil
 }
@@ -205,26 +216,40 @@ func (s *CIHealthSnapshot) Stop() {
 func (s *CIHealthSnapshot) fenceLocked() {
 	s.body, s.generation = nil, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
+	s.usage = ciUsageResponse{}
 	s.workflows, s.jobLinks = nil, nil
 	if s.checked.After(s.latest) {
 		s.latest = s.checked
 	}
 }
 
-func (s *CIHealthSnapshot) read() []byte {
+func (s *CIHealthSnapshot) read() []byte { return s.timingResponse(false) }
+
+func (s *CIHealthSnapshot) timingResponse(leasedUsage bool) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now, stable := s.wallLocked()
 	if !stable || now.Before(s.latest) || !now.Before(s.latest.Add(ciDisplayLifetime)) {
 		s.body = nil
 		s.history = ciHistoryResponse{}
+		s.usage = ciUsageResponse{}
 		s.workflows, s.jobLinks = nil, nil
+	}
+	if leasedUsage && s.usage.current != nil && (!now.Before(s.usage.expires) || !s.usage.current()) {
+		s.usage = ciUsageResponse{}
+		s.history.withUsage = nil
 	}
 	if s.history.body != nil {
 		if now.Before(s.history.expires) && s.history.source.Current() {
+			if leasedUsage && s.usage.body != nil && s.history.withUsage != nil {
+				return s.history.withUsage
+			}
 			return s.history.body
 		}
 		s.history = ciHistoryResponse{}
+	}
+	if leasedUsage && s.usage.body != nil {
+		return s.usage.body
 	}
 	return s.body
 }
@@ -257,7 +282,11 @@ func (h *Handler) serveCIHealth(w http.ResponseWriter, r *http.Request, source *
 		serveCIRunLink(w, r, source, handles)
 		return
 	}
-	body := source.read()
+	// Older clients reject new top-level keys. Opt-in changes only the
+	// representation for the already authenticated owner GET.
+	versions := r.Header.Values("X-GARM-CI-Usage")
+	leasedUsage := len(versions) == 1 && versions[0] == "leased-v1" && sameOrigin(r)
+	body := source.timingResponse(leasedUsage)
 	if body == nil {
 		_, _ = w.Write([]byte("{\"state\":\"unavailable\",\"timing\":{\"attempts\":[]}}\n"))
 		return

@@ -397,3 +397,153 @@ func TestStockApplyZeroScopeRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestStockApplyGuardedModeAcrossHandles(t *testing.T) {
+	c, scope, path, lineage := stockApplyTestController(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	other := reopenStockApplyController(t, path, lineage)
+	plan, now := validatedStockApplyPlan(t, 1)
+	initial, err := c.RecoverScope(ctx, scope, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two requests based on the same review can commit exactly one decision.
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, handle := range []*StockApplyController{c, other} {
+		go func() {
+			<-start
+			_, err := handle.ChangeScopePause(ctx, scope, initial.ModeRevision, true, "reviewed stop", now)
+			results <- err
+		}()
+	}
+	close(start)
+	var commits, conflicts int
+	for range 2 {
+		select {
+		case err := <-results:
+			switch {
+			case err == nil:
+				commits++
+			case errors.Is(err, ErrStockApplyConflict):
+				conflicts++
+			default:
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal("guarded mode change timed out")
+		}
+	}
+	if commits != 1 || conflicts != 1 {
+		t.Fatalf("commits=%d conflicts=%d", commits, conflicts)
+	}
+	paused, err := c.RecoverScope(ctx, scope, now)
+	if err != nil || !paused.Paused || paused.ModeRevision == initial.ModeRevision {
+		t.Fatalf("after stop: %+v %v", paused, err)
+	}
+	if err := other.RecordProposal(ctx, plan, 3, now); !errors.Is(err, ErrStockApplyPaused) {
+		t.Fatalf("paused scope admitted proposal: %v", err)
+	}
+	// Older controller methods use the same journal. Even with the same
+	// timestamp and identical final mode, an old resume must fail.
+	if err := other.Resume(ctx, scope, "previous work complete", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.AcknowledgePause(ctx, scope, "separate operator hold", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ChangeScopePause(ctx, scope, paused.ModeRevision, false, "delayed resume", now); !errors.Is(err, ErrStockApplyConflict) {
+		t.Fatalf("stale resume: %v", err)
+	}
+	fresh, err := c.RecoverScope(ctx, scope, now)
+	if err != nil || !fresh.Paused || fresh.ModeRevision == paused.ModeRevision {
+		t.Fatalf("lost newer pause: %+v %v", fresh, err)
+	}
+	if _, err := c.ChangeScopePause(ctx, scope, fresh.ModeRevision, false, "new review", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.ChangeScopePause(ctx, scope, initial.ModeRevision, true, "delayed original stop", now); !errors.Is(err, ErrStockApplyConflict) {
+		t.Fatalf("stale stop: %v", err)
+	}
+	if err := other.RecordProposal(ctx, plan, 3, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStockApplyModeRevisionBindingsAndRollback(t *testing.T) {
+	c, scope, _, _ := stockApplyTestController(t)
+	foreign, _, _, _ := stockApplyTestController(t)
+	ctx := context.Background()
+	now := time.Unix(1700000200, 0)
+	review, err := c.RecoverScope(ctx, scope, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := sha256.Sum256([]byte("another scope"))
+	if _, err := c.ChangeScopePause(ctx, other, review.ModeRevision, true, "wrong scope", now); !errors.Is(err, ErrStockApplyConflict) {
+		t.Fatalf("cross-scope review: %v", err)
+	}
+	if _, err := foreign.ChangeScopePause(ctx, scope, review.ModeRevision, true, "wrong journal", now); !errors.Is(err, ErrStockApplyConflict) {
+		t.Fatalf("cross-lineage review: %v", err)
+	}
+	if err := c.Pause(ctx, other, "independent stop", now); err != nil {
+		t.Fatal(err)
+	}
+	// Failure while appending the audit must roll back the mode write.
+	_, err = c.journal.db.Exec("CREATE TRIGGER reject_mode_audit BEFORE INSERT ON stock_apply_audit BEGIN SELECT RAISE(ABORT,'fixture audit failure'); END")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := c.ChangeScopePause(ctx, scope, review.ModeRevision, true, "reviewed stop", now); err == nil || result.ModeRevision != "" {
+		t.Fatalf("returned an acknowledgment after audit failure: %+v %v", result, err)
+	}
+	got, err := c.RecoverScope(ctx, scope, now)
+	if err != nil || got != review {
+		t.Fatalf("audit failure changed scope: %+v %v", got, err)
+	}
+	if _, err = c.journal.db.Exec("DROP TRIGGER reject_mode_audit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ChangeScopePause(ctx, scope, review.ModeRevision, true, "after audit repair", now); err != nil {
+		t.Fatal("unrelated scope or failed audit invalidated original review", err)
+	}
+}
+
+func TestStockApplyGuardedResumeKeepsUnknownHeld(t *testing.T) {
+	enableStockApplyFixtureInterface(t)
+	c, scope, path, lineage := stockApplyTestController(t)
+	plan, now := validatedStockApplyPlan(t, 1)
+	ctx := context.Background()
+	if err := c.RecordProposal(ctx, plan, 4, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.MarkDispatched(ctx, scope, stockApplyFixtureClaim(), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.MarkOutcomeUncertain(ctx, scope, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RecordObservation(ctx, scope, plan.Suggested, 4, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Pause(ctx, scope, "local stop", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := reopenStockApplyController(t, path, lineage)
+	review, err := reopened.RecoverScope(ctx, scope, now)
+	if err != nil || review.Operation == nil || review.Inflight != StockApplyInflightOutcomeUnresolved {
+		t.Fatalf("restart: %+v %v", review, err)
+	}
+	after, err := reopened.ChangeScopePause(ctx, scope, review.ModeRevision, false, "lift local hold", now)
+	if err != nil || after.Paused || after.Withdrawable || after.Operation == nil || *after.Operation != *review.Operation || after.Inflight != review.Inflight || after.Operation.Charged != 4 {
+		t.Fatalf("resume changed the uncertain operation: %+v %v", after, err)
+	}
+	if err := reopened.RecordProposal(ctx, plan, 4, now); !errors.Is(err, ErrStockApplyBlocked) {
+		t.Fatalf("resume admitted another proposal: %v", err)
+	}
+}
