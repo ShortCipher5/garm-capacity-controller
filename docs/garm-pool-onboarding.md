@@ -18,7 +18,7 @@ A disabled pool with minimum idle zero still needs `max_runners >= 1`; zero is
 rejected by upstream validation. Stock/unopted Garm rejects an explicit
 `template_id: 0`. The separate source8 native bootstrap protocol permits explicit
 zero only for its correctly opted-in provider and stores SQL NULL, avoiding a
-legacy bootstrap template. This foundation exclusively requests that native
+legacy bootstrap template. The native staging path exclusively requests that
 zero mode. It does not create a positive-template pool and silently change its
 generation later. A client opt-in expresses intent, not proof that the installed
 Garm is patched, compatible or qualified.
