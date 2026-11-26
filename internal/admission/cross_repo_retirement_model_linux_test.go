@@ -12,9 +12,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/demandrepair"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/testsupport"
 )
 
 // This test couples durable accounting to the separately observed job
@@ -33,28 +36,26 @@ func TestCrossRepoRetirementAndExactJobRecoveryModel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			// The fixed timeline is old enough for ObserveExactJob's no-future
-			// check but independent of wall-clock timing and scheduler speed.
-			at := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-			config := fixture(at)
+			config := fixture(time.Now())
 			config.Global = tc.cap
-			for id, host := range config.Hosts {
-				host.Budget.Disk = 32768
-				config.Hosts[id] = host
-			}
+			delete(config.Hosts, "b")
+			host := config.Hosts["a"]
+			host.Budget.Disk = 32768
+			config.Hosts["a"] = host
 			for id, pool := range config.Pools {
 				pool.Budget.Disk = 32768
+				pool.Hosts = []string{"a"}
 				config.Pools[id] = pool
 			}
 			store := sqliteFixtureStore(t, config, false)
-			store.now = func() time.Time { return at }
-			reconcileSQLite(t, store, nil)
+			fake := testsupport.NewFakeIncus(t, "cross-repo-model")
+			t.Cleanup(fake.Client.Close)
+			reconcileModelRunner(t, store, config, fake.Client, nil, "")
 			other, err := OpenSQLite(store.path, Config{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { other.Close() })
-			other.now = store.now
 			a := modelWaitingJob{demandrepair.Repository{GarmID: "app", Host: "github.example", Owner: "sample", Name: "app"}, 318, 2, 9007199254741001}
 			b := modelWaitingJob{demandrepair.Repository{GarmID: "api", Host: "github.example", Owner: "sample", Name: "api"}, 319, 3, 9007199254741002}
 			jobs := []modelWaitingJob{a, b}
@@ -66,7 +67,7 @@ func TestCrossRepoRetirementAndExactJobRecoveryModel(t *testing.T) {
 			for i, handle := range []*SQLiteStore{store, other} {
 				j := jobs[i]
 				requests[i] = Request{
-					Key:  evidenceDigest([]byte(fmt.Sprintf("%s/%s/%d/%d/%d", j.repo.Owner, j.repo.Name, j.run, j.attempt, j.id))),
+					Key:  executionKey(ExecutionImage{Controller: modelController, Name: j.runnerName()}, j.repo.GarmID),
 					Pool: j.repo.GarmID, Host: "a", Resources: size,
 				}
 				wg.Go(func() {
@@ -99,19 +100,29 @@ func TestCrossRepoRetirementAndExactJobRecoveryModel(t *testing.T) {
 			}
 			assertWaiting(other)
 
-			identity := slotReuseFixtureEvidence(held, 0, at).Identity
-			row := InventoryResource{
-				ID: identity.ResourceID, Host: held.Host, Pool: held.Pool,
-				ReservationKey: held.Key, Resources: held.Resources, State: "idle",
+			spec := incusapi.InstanceSpec{
+				Name: jobs[winner].runnerName(), Type: "container", Profiles: []string{"runner-base"},
+				ImageFingerprint: strings.Repeat("a", 64), UserData: "#cloud-config\nfixture",
+				CPUMillis: size.CPU, RAMMiB: size.RAM, DiskMiB: size.Disk,
+				ControllerID: modelController, PoolID: held.Pool, ReservationKey: held.Key,
 			}
-			reconcileSQLite(t, store, []InventoryResource{row})
+			if _, err := fake.Client.Create(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			reconcileModelRunner(t, store, config, fake.Client, &held, "idle")
 			if _, err := store.MarkDeleting(ctx, held); err != nil {
 				t.Fatal(err)
 			}
-			row.State = "deleting"
-			fence := reconcileSQLite(t, store, []InventoryResource{row})
-			at = at.Add(time.Second) // fence observation follows the durable barrier.
-			evidence := slotReuseFixtureEvidence(held, fence.Epoch, at)
+			identity := reconcileModelRunner(t, store, config, fake.Client, &held, "deleting")
+			fake.SetGuestVisible(false)
+			at := time.Now().UTC()
+			store.now = func() time.Time { return at }
+			other.now = store.now
+			evidence := slotReuseFixtureEvidence(held, identity.Epoch, at)
+			evidence.Identity = identity
+			digest := slotReuseIdentityDigest(identity)
+			evidence.Settlement.ObservedAt = at
+			evidence.Settlement.IdentityDigest, evidence.Teardown.IdentityDigest, evidence.Fence.IdentityDigest = digest, digest, digest
 			if got, err := other.ReleaseRetiredSlot(ctx, held, evidence); !errors.Is(err, ErrSlotReuseEvidence) || got.Status != SlotReuseUnsupportedSource {
 				t.Fatalf("stock production registry accepted fixture facts: %+v %v", got, err)
 			}
@@ -147,9 +158,80 @@ func TestCrossRepoRetirementAndExactJobRecoveryModel(t *testing.T) {
 	}
 }
 
+const modelController = "controller-1"
+
+// Preserve the original enrollment and collect a new complete observation on
+// every pass, including the empty pre-admission inventory.
+func reconcileModelRunner(t *testing.T, store *SQLiteStore, config Config, client *incusapi.Client, held *Request, state string) SlotReuseIdentity {
+	t.Helper()
+	ctx := t.Context()
+	fence, err := store.BeginReconciliation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physical, err := client.PhysicalIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := HostBinding{
+		Host: "a", ServerKeyFingerprint: physical.ServerKeyFingerprint(),
+		OriginFingerprint: physical.OriginFingerprint(), ScopeFingerprint: physical.ScopeFingerprint(),
+		ServerName: physical.ServerName(), ServerVersion: physical.ServerVersion(), ObservedAt: store.now(),
+	}
+	if err := store.BindHostIdentities(ctx, fence, []HostBinding{binding}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.PinPhysicalIdentity(physical); err != nil {
+		t.Fatal(err)
+	}
+	observed := store.now()
+	list, err := client.Instances(incusapi.WithInventoryFence(ctx, fence.Nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operations, err := client.Operations(ctx); err != nil || len(operations) != 0 {
+		t.Fatalf("fixture operations: %v %v", operations, err)
+	}
+	snap := InventorySnapshot{Hosts: observations(config, observed)}
+	var identity SlotReuseIdentity
+	if held == nil {
+		if len(list) != 0 {
+			t.Fatal("unexpected pre-admission allocation")
+		}
+	} else {
+		if len(list) != 1 {
+			t.Fatal("incomplete fixture inventory", len(list))
+		}
+		listed := list[0].ListedIdentity
+		observation := listed.Observation()
+		subject := observation.Subject
+		if observation.CompletedAt.IsZero() || subject.ReservationKey != held.Key || subject.PoolID != held.Pool {
+			t.Fatal("missing exact fixture incarnation")
+		}
+		identity = SlotReuseIdentity{
+			Source: slotReuseFixtureSource, SourceID: "model-source", Route: evidenceDigest([]byte("model-provider-route")),
+			RequestKey: subject.ReservationKey, Pool: subject.PoolID, Host: held.Host,
+			CPU: subject.CPUMillis, RAM: subject.RAMMiB, Disk: held.Resources.Disk,
+			Controller: subject.ControllerID, Daemon: subject.BackendKeyFingerprint, Project: subject.ScopeFingerprint,
+			Instance: subject.UUID, Generation: subject.Generation, Epoch: fence.Epoch, ObservedAt: observation.CompletedAt,
+		}
+		identity.ResourceID = slotReuseResourceID(identity)
+		row := InventoryResource{ID: identity.ResourceID, Host: held.Host, Pool: held.Pool, ReservationKey: held.Key, Resources: held.Resources, State: state}
+		snap.Resources = []InventoryResource{row.WithListedIdentity(listed)}
+	}
+	if err := store.CompleteReconciliation(ctx, fence, snap); err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
 type modelWaitingJob struct {
 	repo             demandrepair.Repository
 	run, attempt, id int64
+}
+
+func (j modelWaitingJob) runnerName() string {
+	return fmt.Sprintf("%s-%s-%d-%d-%d", j.repo.Owner, j.repo.Name, j.run, j.attempt, j.id)
 }
 
 func assertExactRecoveryModel(t *testing.T, job modelWaitingJob, released time.Time) {
@@ -220,21 +302,30 @@ func assertExactRecoveryModel(t *testing.T, job modelWaitingJob, released time.T
 			defer server.Close()
 			roots := x509.NewCertPool()
 			roots.AddCert(server.Certificate())
-			client, err := demandrepair.NewGitHub(server.URL, job.repo.Host, "fixture-ref",
-				func(context.Context, string) (string, error) { return "fixture-only", nil },
-				&tls.Config{RootCAs: roots}, []demandrepair.Repository{job.repo})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer client.Close()
-			observation, err := client.ObserveExactJob(t.Context(), job.repo, job.id)
-			r := observation.Record()
-			got := err == nil && observation.Valid() && r.Repository == job.repo && r.RunID == job.run &&
-				r.RunAttempt == job.attempt && r.JobID == job.id && r.RunnerID == expectedRunner && r.RunnerName == runnerName &&
-				r.Status == "in_progress" && !r.StartedAt.Before(released) && !r.StartedAt.After(released.Add(window))
-			if got != tc.want {
-				t.Fatalf("recovery=%v, want %v; observation=%+v err=%v", got, tc.want, r, err)
-			}
+			// Observe after every modeled start, including the late-start negative.
+			// Only the test reader's clock advances; the actual durable release
+			// timestamp anchors every response and the acceptance window.
+			synctest.Test(t, func(t *testing.T) {
+				time.Sleep(time.Until(released.Add(window + time.Minute)))
+				client, err := demandrepair.NewGitHub(server.URL, job.repo.Host, "fixture-ref",
+					func(context.Context, string) (string, error) { return "fixture-only", nil },
+					&tls.Config{RootCAs: roots}, []demandrepair.Repository{job.repo})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer client.Close()
+				observation, err := client.ObserveExactJob(t.Context(), job.repo, job.id)
+				r := observation.Record()
+				if tc.start != 0 && (err != nil || !observation.Valid() || !r.StartedAt.Equal(released.Add(start))) {
+					t.Fatalf("timing boundary needs a valid exact-job observation: %+v %v", r, err)
+				}
+				got := err == nil && observation.Valid() && r.Repository == job.repo && r.RunID == job.run &&
+					r.RunAttempt == job.attempt && r.JobID == job.id && r.RunnerID == expectedRunner && r.RunnerName == runnerName &&
+					r.Status == "in_progress" && !r.StartedAt.Before(released) && !r.StartedAt.After(released.Add(window))
+				if got != tc.want {
+					t.Fatalf("recovery=%v, want %v; observation=%+v err=%v", got, tc.want, r, err)
+				}
+			})
 		})
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -34,7 +35,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 30
+const sqliteCurrentVersion = 31
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -477,6 +478,14 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 31 {
+			if err := migrateSlotIncarnations(tx); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v31", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -677,6 +686,7 @@ func sqliteReservations(tx *sql.Tx) (map[string]Reservation, error) {
 // ID must be a stable, project-qualified identity supplied by a trusted adapter.
 // No such live adapter exists in this slice.
 type InventoryResource struct {
+	listed         incusapi.ListedInstanceObservation
 	ID             string    `json:"id"`
 	Host           string    `json:"host"`
 	Pool           string    `json:"pool"`
@@ -963,7 +973,8 @@ func validInventory(r InventoryResource) bool {
 // Identity/binding changes and duplicate links fail closed, requiring a future
 // explicit identity-resolution workflow rather than freeing capacity implicitly.
 func (s *SQLiteStore) CompleteReconciliation(ctx context.Context, fence Fence, snapshot InventorySnapshot) error {
-	return s.transaction(ctx, func(tx *sql.Tx) error {
+	var conflict bool
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
 		config, ready, epoch, nonce, err := sqliteMetadata(tx)
 		if err != nil {
 			return err
@@ -1037,6 +1048,12 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 			if err != nil {
 				return err
 			}
+			if !resource.listed.StartedAt.IsZero() {
+				_, existed := existing[identity]
+				if err := recordListedIncarnation(tx, resource, existed, fence, began, now, config.MaxObservationAge); err != nil {
+					return err
+				}
+			}
 		}
 		inventory, err := sqliteInventory(tx)
 		if err != nil {
@@ -1053,11 +1070,24 @@ ON CONFLICT(host,resource_id) DO UPDATE SET cpu=MAX(inventory.cpu,excluded.cpu),
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec("UPDATE metadata SET config=?,ready=1,nonce='' WHERE id=1", encoded); err != nil {
+		// Two positively identified incarnations under one accounting key may
+		// represent two physical charges. Retain the observations and keep the
+		// barrier closed across retries and restarts until lineage is resolved.
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM inventory WHERE incarnation_conflict=1)").Scan(&conflict); err != nil {
 			return err
+		}
+		if _, err := tx.Exec("UPDATE metadata SET config=?,ready=?,nonce='' WHERE id=1", encoded, !conflict); err != nil {
+			return err
+		}
+		if conflict {
+			return sqliteAudit(tx, "reconciliation_incarnation_conflict", "", now)
 		}
 		return sqliteAudit(tx, "reconciliation_completed", "", now)
 	})
+	if err == nil && conflict {
+		return ErrReconciliation
+	}
+	return err
 }
 
 type AuditEvent struct {

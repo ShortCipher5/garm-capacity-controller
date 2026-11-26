@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 )
 
 // GarmInstance is the non-secret subset of an authoritative Garm inventory.
@@ -107,7 +108,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 	snapshot := admission.InventorySnapshot{}
 	physicalNames := map[string]bool{}
 	for host, backend := range f.hosts {
-		instances, err := backend.Instances(ctx)
+		instances, err := backend.Instances(incusapi.WithInventoryFence(ctx, fence.Nonce))
 		if err != nil {
 			return ErrUnavailable
 		}
@@ -152,7 +153,7 @@ func (f *Facade) Reconcile(ctx context.Context, garm GarmSource) error {
 			if instance.Status != 103 && resource.State != "deleting" {
 				resource.State = "unknown"
 			}
-			inventory[identity] = resource
+			inventory[identity] = resource.WithListedIdentity(instance.ListedIdentity)
 		}
 		operations, err := backend.Operations(ctx)
 		if err != nil {
