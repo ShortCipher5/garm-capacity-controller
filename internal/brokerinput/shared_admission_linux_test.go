@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/capacitybroker"
 )
 
 func sharedGrantBatch(t *testing.T, store *admission.SQLiteStore, id, pool string) admission.BrokerGrantBatch {
@@ -206,5 +207,105 @@ func TestSharedAdmissionHostDiskLeavesOtherDimensionsFree(t *testing.T) {
 	state, err := store.ReadBrokerGrantState(ctx)
 	if err != nil || state.Allocated.Hosts["host"] != scSize || state.Allocated.Global != scSize || len(state.Grants) != 1 {
 		t.Fatalf("expected precisely one exact-fit commitment: %+v %v", state.Allocated, err)
+	}
+}
+
+func TestGrantCycleReplacesSupersededLastSlotBeforeExpiry(t *testing.T) {
+	ctx := t.Context()
+	pools := []scPool{{scPoolA, scRepoA, false}}
+	stock, trust, source := scStock(t, pools, []string{scPoolA}, nil)
+	store, path := enrolledSharedCapacityStore(t, stock, trust, pools, nil)
+	state, err := store.ReadBrokerGrantState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := scSize
+	if err := store.ApplyPolicyChange(ctx, admission.PolicyChange{Action: "global_budget", Budget: &limit, Reason: "fixture last slot", Revision: admission.PolicyRevision(state.Config)}); err != nil {
+		t.Fatal(err)
+	}
+	reconcile := func() {
+		t.Helper()
+		fence, err := store.BeginReconciliation(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CompleteReconciliation(ctx, fence, admission.InventorySnapshot{Hosts: []admission.HostObservation{{Host: "host", ObservedAt: time.Now().UTC(), Healthy: true, Bounded: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cycle := func() GrantCycleResult {
+		t.Helper()
+		result, err := GrantCycle(ctx, store, source, capacitybroker.Options{MaxAge: time.Minute, MaxAssignments: 10}, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	reconcile()
+	first := cycle()
+	if len(first.Grants) != 1 {
+		t.Fatal("first cycle failed to fund the waiting job", first.Plan)
+	}
+	old := first.Grants[0]
+	if err := store.RetireSupersededBrokerGrant(ctx, old.ID); !errors.Is(err, admission.ErrBrokerGrant) {
+		t.Fatal("unfenced grant was revoked", err)
+	}
+	reconcile()
+	state, err = store.ReadBrokerGrantState(ctx)
+	if err != nil || len(state.Grants) != 1 || !state.Grants[0].Superseded() || state.Allocated.Global != limit || !old.Spec.ExpiresAt.After(time.Now().Add(50*time.Minute)) {
+		t.Fatalf("expected a superseded grant still holding the last slot: %+v %v", state.Grants, err)
+	}
+	second := cycle()
+	if len(second.Grants) != 1 || old.ID == second.Grants[0].ID || first.BatchID == second.BatchID {
+		t.Fatalf("eligible demand did not promptly regain a fresh grant: %+v", second)
+	}
+	state, err = store.ReadBrokerGrantState(ctx)
+	if err != nil || len(state.Grants) != 2 || state.Allocated.Global != limit || state.Allocated.Pools[scPoolA] != limit || state.Allocated.Hosts["host"] != limit {
+		t.Fatal("fresh issue changed exact commitment", state.Allocated, err)
+	}
+	fresh := second.Grants[0]
+	for _, g := range state.Grants {
+		if g.ID == old.ID && (g.State != "revoked" || g.RequestKey != "") || g.ID == fresh.ID && (g.State != "unused" || g.Superseded()) {
+			t.Fatal("wrong disposition", g)
+		}
+	}
+	if result := cycle(); len(result.Grants) != 0 || len(result.Plan.CoveredByGrant) != 1 {
+		t.Fatal("repeated cycle duplicated funding", result)
+	}
+	// A caller carrying a stale maintenance selection races a stock claim
+	// on a separate SQLite handle. Neither lock order may retire fresh or
+	// already accepted work.
+	other, err := admission.OpenSQLite(path, admission.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	place := sharedPlacement(scPoolA, "accepted-runner")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var retireErr, claimErr error
+	wg.Go(func() { <-start; retireErr = store.RetireSupersededBrokerGrant(ctx, fresh.ID) })
+	wg.Go(func() {
+		<-start
+		_, claimErr = other.AdmitStockProviderPlacement(ctx, place, scAuthority(scPoolA), strings.Repeat("b", 64))
+	})
+	close(start)
+	wg.Wait()
+	if claimErr != nil || !errors.Is(retireErr, admission.ErrBrokerGrant) {
+		t.Fatalf("redemption vs maintenance: %v / %v", claimErr, retireErr)
+	}
+	reconcile()
+	if err := store.RetireSupersededBrokerGrant(ctx, fresh.ID); !errors.Is(err, admission.ErrBrokerGrant) {
+		t.Fatalf("accepted grant retired after another fence: %v", err)
+	}
+	if _, err := store.CompactBrokerGrantBatch(ctx, first.BatchID); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RetireSupersededBrokerGrant(ctx, old.ID); err != nil {
+		t.Fatal("archived revoked replay", err)
+	}
+	state, err = other.ReadBrokerGrantState(ctx)
+	if err != nil || len(state.Grants) != 1 || state.Grants[0].State != "consumed" || state.Grants[0].RequestKey != place.Key || state.Reservations[place.Key].State != "creating" || state.Allocated.Global != limit {
+		t.Fatalf("accepted commitment lost after maintenance: %+v %+v %v", state.Grants, state.Allocated, err)
 	}
 }

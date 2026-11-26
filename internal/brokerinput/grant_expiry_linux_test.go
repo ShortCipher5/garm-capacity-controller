@@ -19,11 +19,11 @@ func TestCycleExpiryBoundedAndNeverSelectsConsumed(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		grants = append(grants, admission.BrokerGrant{ID: fmt.Sprintf("eligible-%d", i), State: "unused", Spec: admission.BrokerGrantSpec{ExpiresAt: now}})
 	}
-	ids := cycleExpiryCandidates(grants, now)
-	if len(ids) != cycleExpiryLimit || ids[0] != "eligible-0" || ids[len(ids)-1] != "eligible-63" {
-		t.Fatalf("unsafe or unbounded expiry %+v", ids)
+	selected := cycleRetirementCandidates(grants, now)
+	if len(selected) != cycleRetirementLimit || selected[0].ID != "eligible-0" || selected[len(selected)-1].ID != "eligible-63" {
+		t.Fatalf("unsafe or unbounded expiry %+v", selected)
 	}
-	if len(cycleExpiryCandidates(grants, now.Add(-time.Second))) != 0 {
+	if len(cycleRetirementCandidates(grants, now.Add(-time.Second))) != 0 {
 		t.Fatal("future expiry selected")
 	}
 }
