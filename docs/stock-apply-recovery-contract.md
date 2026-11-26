@@ -66,6 +66,38 @@ block new admission, apply and rollback. For stock v0.2.1, exact completion
 after interruption, continued exclusion of late writers, and exclusive
 ownership of the controlled fields remain unproved.
 
+### Operating the existing private journal on Linux
+
+The journal owner can inspect, pause, and lift the local admission pause
+with `capacity-stock-recovery`. Supply the active journal, its independently
+configured lineage and bound controller identity, and the digest of the
+reviewed scope. The command opens an existing bound journal. It runs
+locally and has no network endpoint or GARM settings client.
+
+```sh
+go build -o capacity-stock-recovery ./cmd/capacity-stock-recovery
+./capacity-stock-recovery inspect --journal "$journal" --lineage "$lineage" --identity "$identity" --scope "$scope"
+./capacity-stock-recovery pause --journal "$journal" --lineage "$lineage" --identity "$identity" --scope "$scope" --expect "$reviewed_revision" --reason 'maintenance'
+```
+
+Copy the returned `mode_revision` from the inspection into
+`reviewed_revision` for the intended change. For a later lift, inspect again
+and use `resume` with that revision and a new reason. A committed decision
+changes the scope's revision even when timestamps repeat. The guarded
+command refuses an old decision even if an intervening stop and resume
+return the mode to its original value. Lost output calls for a fresh
+inspection and operator review. Reading current mode does not establish
+which caller committed it. The revision covers local mode decisions in this
+active journal; it cannot detect restoration of an older same-lineage copy.
+
+The JSON result reports the local pause and open work from one SQLite
+transaction. An open operation carries its ID and last recorded runner
+charge. An absent charge means the journal has no open operation to report.
+`listener_drain` is `not_observed`. An accepted or uncertain operation
+reports `upstream_outcome: unresolved`; the other cases report
+`not_observed`. Lifting the local pause preserves the open operation,
+including its charge. The stock adapter remains observe-only.
+
 ## What the durable SQLite and lineage checks establish — and what they do not
 
 The stock-apply journal reuses the management journal's local durability

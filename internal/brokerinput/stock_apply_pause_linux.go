@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
+	"strconv"
 	"time"
 )
 
@@ -46,10 +48,7 @@ func (c *StockApplyController) AcknowledgePause(ctx context.Context, scope [sha2
 			return err
 		}
 		if !state.paused {
-			if _, err := tx.Exec("INSERT INTO stock_apply_mode(scope,paused,reason,updated_at) VALUES(?,1,?,?) ON CONFLICT(scope) DO UPDATE SET paused=1,reason=excluded.reason,updated_at=excluded.updated_at", key, reason, now.UTC().Format(time.RFC3339Nano)); err != nil {
-				return ErrStockApplyJournal
-			}
-			if err := stockApplyAudit(tx, key, "", "pause_acknowledged", reason); err != nil {
+			if err := writeStockApplyMode(tx, key, true, "pause_acknowledged", reason, now); err != nil {
 				return err
 			}
 		}
@@ -95,6 +94,7 @@ func (c *StockApplyController) AdmitScopeWork(ctx context.Context, scope [sha256
 // possibly accepted update that stays unresolved with the same operation
 // identity and charges even on a healthy new process.
 type StockApplyRecovery struct {
+	ModeRevision string               `json:"mode_revision"`
 	Scope        string               `json:"scope"`
 	Paused       bool                 `json:"paused"`
 	Inflight     string               `json:"inflight"`
@@ -123,11 +123,82 @@ func (c *StockApplyController) RecoverScope(ctx context.Context, scope [sha256.S
 	}
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
-	recovery := StockApplyRecovery{Scope: key, Inflight: StockApplyInflightNone, Reason: stockApplyReasonNoOpenOperation}
-	state, err := c.journal.scopeSnapshot(ctx, key, false)
+	var recovery StockApplyRecovery
+	err := c.journal.transaction(ctx, func(tx *sql.Tx) error {
+		var err error
+		recovery, err = c.scopeRecovery(tx, key)
+		return err
+	})
 	if err != nil {
 		return StockApplyRecovery{}, err
 	}
+	return recovery, nil
+}
+
+// ChangeScopePause changes local mode only if the reviewed mode revision
+// is still current. A response can be lost after commit. Inspect again with
+// RecoverScope; a retry carrying the same revision cannot change mode twice.
+func (c *StockApplyController) ChangeScopePause(ctx context.Context, scope [sha256.Size]byte, expectedRevision string, paused bool, reason string, now time.Time) (StockApplyRecovery, error) {
+	if scope == ([sha256.Size]byte{}) || !validStockApplyLineage(expectedRevision) || !stockApplyReasonText(reason, 256) || now.IsZero() {
+		return StockApplyRecovery{}, ErrStockApplyConflict
+	}
+	if err := c.enter(ctx); err != nil {
+		return StockApplyRecovery{}, err
+	}
+	defer c.leave()
+	key := hex.EncodeToString(scope[:])
+	var after StockApplyRecovery
+	err := c.journal.transaction(ctx, func(tx *sql.Tx) error {
+		before, err := c.scopeRecovery(tx, key)
+		if err != nil {
+			return err
+		}
+		if before.ModeRevision != expectedRevision || before.Paused == paused {
+			return ErrStockApplyConflict
+		}
+		event := "pause_exited"
+		if paused {
+			event = "pause_entered"
+		}
+		if err := writeStockApplyMode(tx, key, paused, event, reason, now); err != nil {
+			return err
+		}
+		after, err = c.scopeRecovery(tx, key)
+		return err
+	})
+	if err != nil {
+		return StockApplyRecovery{}, err
+	}
+	return after, nil
+}
+
+func writeStockApplyMode(tx *sql.Tx, key string, paused bool, event, reason string, now time.Time) error {
+	if _, err := tx.Exec("INSERT INTO stock_apply_mode(scope,paused,reason,updated_at) VALUES(?,?,?,?) ON CONFLICT(scope) DO UPDATE SET paused=excluded.paused,reason=excluded.reason,updated_at=excluded.updated_at", key, paused, reason, now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return ErrStockApplyJournal
+	}
+	return stockApplyAudit(tx, key, "", event, reason)
+}
+
+func (c *StockApplyController) scopeRecovery(tx *sql.Tx, key string) (StockApplyRecovery, error) {
+	recovery := StockApplyRecovery{Scope: key, Inflight: StockApplyInflightNone, Reason: stockApplyReasonNoOpenOperation}
+	state, err := loadStockApplyScope(tx, key, false)
+	if err != nil {
+		return StockApplyRecovery{}, err
+	}
+	// The audit sequence covers legacy Pause, Resume and AcknowledgePause
+	// as well as guarded changes. Wall clocks can repeat or move backwards.
+	var seq int64
+	var kind string
+	err = tx.QueryRow("SELECT sequence,kind FROM stock_apply_audit WHERE scope=? AND kind IN ('pause_entered','pause_acknowledged','pause_exited') ORDER BY sequence DESC LIMIT 1", key).Scan(&seq, &kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		if state.modeRecorded {
+			return StockApplyRecovery{}, ErrStockApplyJournal
+		}
+	} else if err != nil || !state.modeRecorded || seq < 1 || state.paused != (kind != "pause_exited") {
+		return StockApplyRecovery{}, ErrStockApplyJournal
+	}
+	digest := sha256.Sum256([]byte(c.journal.lineage + "/" + key + "/" + strconv.FormatInt(seq, 10)))
+	recovery.ModeRevision = hex.EncodeToString(digest[:])
 	recovery.Paused = state.paused
 	recovery.Operation = state.operation
 	if state.operation == nil {
