@@ -101,6 +101,16 @@ type StockApplyRecovery struct {
 	Operation    *StockApplyOperation `json:"operation,omitempty"`
 	Withdrawable bool                 `json:"withdrawable"`
 	Reason       string               `json:"reason"`
+	// RecoverScope includes the most recently journaled comparison for the open operation.
+	RecordedReadback *StockApplyRecordedReadback `json:"last_recorded_readback,omitempty"`
+}
+
+// StockApplyRecordedReadback describes historical evidence at local audit time.
+// The journal does not attest to capture freshness or upstream causality.
+type StockApplyRecordedReadback struct {
+	Status     string     `json:"status"`
+	Comparison string     `json:"comparison,omitempty"`
+	RecordedAt *time.Time `json:"recorded_at,omitempty"`
 }
 
 const (
@@ -127,12 +137,63 @@ func (c *StockApplyController) RecoverScope(ctx context.Context, scope [sha256.S
 	err := c.journal.transaction(ctx, func(tx *sql.Tx) error {
 		var err error
 		recovery, err = c.scopeRecovery(tx, key)
+		if err != nil || recovery.Operation == nil {
+			return err
+		}
+		recovery.RecordedReadback, err = lastStockApplyReadback(tx, recovery.Operation)
 		return err
 	})
 	if err != nil {
 		return StockApplyRecovery{}, err
 	}
 	return recovery, nil
+}
+
+// Bound the scan on the v1 audit table's integer primary key. A journal with
+// many unrelated events can still report the unresolved operation and charge.
+const stockApplyReadbackWindow = 256
+
+func lastStockApplyReadback(tx *sql.Tx, op *StockApplyOperation) (*StockApplyRecordedReadback, error) {
+	var kind, stamp, detail string
+	var latest int64
+	if err := tx.QueryRow("SELECT COALESCE(max(sequence),0) FROM stock_apply_audit").Scan(&latest); err != nil {
+		return nil, ErrStockApplyJournal
+	}
+	floor := latest - stockApplyReadbackWindow
+	err := tx.QueryRow(`SELECT kind, recorded_at, detail FROM stock_apply_audit
+		WHERE sequence>? AND scope=? AND operation_id=? AND kind IN ('operation_observation','observation','proposal_recorded')
+		ORDER BY sequence DESC LIMIT 1`, floor, op.Scope, op.OperationID).Scan(&kind, &stamp, &detail)
+	if errors.Is(err, sql.ErrNoRows) && floor > 0 {
+		return &StockApplyRecordedReadback{Status: "history_outside_inspection_window"}, nil
+	}
+	if err != nil {
+		return nil, ErrStockApplyJournal
+	}
+	if kind == "proposal_recorded" {
+		return nil, nil
+	}
+	maximum, err := strconv.ParseInt(detail, 10, 64)
+	if err != nil || maximum < 0 || maximum > 1000000 || detail != strconv.FormatInt(maximum, 10) {
+		return nil, ErrStockApplyJournal
+	}
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil || at.IsZero() {
+		return nil, ErrStockApplyJournal
+	}
+	at = at.UTC()
+	if kind == "observation" {
+		// Earlier versions attached captures to whichever operation was current
+		// at record time, without checking the operation at collection.
+		return &StockApplyRecordedReadback{Status: "legacy_scope_only", RecordedAt: &at}, nil
+	}
+	comparison := "differs_from_both"
+	switch maximum {
+	case op.Observed:
+		comparison = "matches_proposal_baseline"
+	case op.Suggested:
+		comparison = "matches_proposal_target"
+	}
+	return &StockApplyRecordedReadback{Status: "operation_matched", Comparison: comparison, RecordedAt: &at}, nil
 }
 
 // ChangeScopePause changes local mode only if the reviewed mode revision

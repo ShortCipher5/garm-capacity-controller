@@ -444,12 +444,18 @@ func scanStockApplyOperation(row interface{ Scan(...any) error }) (StockApplyOpe
 	var drift int
 	err := row.Scan(&op.OperationID, &scope, &op.PoolID, &op.RepositoryID, &op.Source, &op.Fingerprint,
 		&op.Observed, &op.Suggested, &op.Charged, &op.Direction, &expires, &op.State, &drift, &created, &updated)
+	if err != nil {
+		return StockApplyOperation{}, err
+	}
 	op.Scope = scope
 	op.Drift = drift == 1
 	op.PlanExpires, _ = time.Parse(time.RFC3339Nano, expires)
 	op.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	op.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	return op, err
+	op.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+	if err != nil || op.UpdatedAt.IsZero() || op.CreatedAt.IsZero() || op.PlanExpires.IsZero() {
+		return StockApplyOperation{}, ErrStockApplyJournal
+	}
+	return op, nil
 }
 
 const stockApplyOperationColumns = "operation_id,scope,pool_id,repository_id,source,fingerprint,observed,suggested,charged,direction,plan_expires_at,state,drift,created_at,updated_at"
@@ -665,7 +671,7 @@ func (c *StockApplyController) MarkDispatched(ctx context.Context, scope [sha256
 		if op.State != "proposed" {
 			return ErrStockApplyBlocked
 		}
-		if !op.PlanExpires.After(now) {
+		if now.Before(op.UpdatedAt) || !op.PlanExpires.After(now) {
 			return ErrStockApplyStale
 		}
 		if op.Drift {
@@ -695,25 +701,34 @@ func (c *StockApplyController) MarkOutcomeUncertain(ctx context.Context, scope [
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
 	return c.journal.transaction(ctx, func(tx *sql.Tx) error {
-		var state, operationID string
-		err := tx.QueryRow("SELECT state,operation_id FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown') ORDER BY sequence DESC LIMIT 1", key).Scan(&state, &operationID)
+		row := tx.QueryRow("SELECT "+stockApplyOperationColumns+" FROM stock_apply_operation WHERE scope=? AND state IN ('proposed','dispatched','outcome_unknown') ORDER BY sequence DESC LIMIT 1", key)
+		op, err := scanStockApplyOperation(row)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrStockApplyConflict
 		}
 		if err != nil {
 			return ErrStockApplyJournal
 		}
-		if state == "outcome_unknown" {
+		if op.State == "outcome_unknown" {
 			return nil
 		}
-		if state != "dispatched" {
+		if op.State != "dispatched" {
 			return ErrStockApplyConflict
 		}
-		if _, err := tx.Exec("UPDATE stock_apply_operation SET state='outcome_unknown',updated_at=? WHERE operation_id=?", now.UTC().Format(time.RFC3339Nano), operationID); err != nil {
+		if _, err := tx.Exec("UPDATE stock_apply_operation SET state='outcome_unknown',updated_at=? WHERE operation_id=?", op.transitionStamp(now), op.OperationID); err != nil {
 			return ErrStockApplyJournal
 		}
-		return stockApplyAudit(tx, key, operationID, "outcome_uncertain", "interrupted_without_authoritative_receipt")
+		return stockApplyAudit(tx, key, op.OperationID, "outcome_uncertain", "interrupted_without_authoritative_receipt")
 	})
+}
+
+// Recording an outcome must work even if the clock moved backward on restart.
+// Preserve the lower bound used to reject older charge and settings captures.
+func (op StockApplyOperation) transitionStamp(now time.Time) string {
+	if now.Before(op.UpdatedAt) {
+		now = op.UpdatedAt
+	}
+	return now.UTC().Format(time.RFC3339Nano)
 }
 
 // StockApplyOutcomeProof binds an independently authoritative outcome to the
@@ -763,7 +778,7 @@ func (c *StockApplyController) RecordProvenOutcome(ctx context.Context, scope [s
 		if op.State != "dispatched" && op.State != "outcome_unknown" {
 			return ErrStockApplyBlocked
 		}
-		if _, err := tx.Exec("UPDATE stock_apply_operation SET state='applied_when_proven',updated_at=? WHERE operation_id=?", now.UTC().Format(time.RFC3339Nano), op.OperationID); err != nil {
+		if _, err := tx.Exec("UPDATE stock_apply_operation SET state='applied_when_proven',updated_at=? WHERE operation_id=?", op.transitionStamp(now), op.OperationID); err != nil {
 			return ErrStockApplyJournal
 		}
 		return stockApplyAudit(tx, key, op.OperationID, "outcome_proven", hex.EncodeToString(proof.ReceiptDigest[:]))
@@ -784,16 +799,13 @@ func stockApplyReadbackConsistent(op StockApplyOperation, readback int64) bool {
 	}
 }
 
-// RecordObservation records one read-only settings observation for the scope's
-// open or proven operation. Matching the old or the new value is retained as
-// an audit observation only; it never changes the operation state and never
-// releases a charge. Charged is the CURRENT ledger-charged runner baseline:
-// it is stored durably so the held-capacity display keeps reflecting live
-// charging, including baseline movements while an operation is open. A
-// readback inconsistent with the journaled operation raises a sticky drift
-// flag that blocks dispatch until the operator reviews.
-func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, readback, charged int64, now time.Time) error {
-	if scope == ([sha256.Size]byte{}) || now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
+// RecordObservation requires the operation ID read before collecting the settings
+// and ledger baseline. It compares that ID with the current operation in the
+// recording transaction, so delayed work cannot be attached to a replacement.
+// A matching setting updates only the audit and the caller's recorded charge.
+// An inconsistent setting raises sticky drift and blocks dispatch.
+func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, expectedOperationID string, readback, charged int64, now time.Time) error {
+	if scope == ([sha256.Size]byte{}) || len(expectedOperationID) != 32 || now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -814,12 +826,12 @@ func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha
 		}
 		// Do not let an earlier or same-time observation replace the last
 		// recorded charge. This orders local records, not their authority.
-		if !now.After(op.UpdatedAt) {
+		if op.OperationID != expectedOperationID || !now.After(op.UpdatedAt) {
 			return ErrStockApplyConflict
 		}
 		consistent := stockApplyReadbackConsistent(op, readback)
 		detail := strconv.FormatInt(readback, 10)
-		if err := stockApplyAudit(tx, key, op.OperationID, "observation", detail); err != nil {
+		if err := stockApplyAudit(tx, key, op.OperationID, "operation_observation", detail); err != nil {
 			return err
 		}
 		// Advance ordering even when the reported count is unchanged.
