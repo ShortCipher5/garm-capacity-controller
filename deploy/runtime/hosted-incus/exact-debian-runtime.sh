@@ -232,7 +232,17 @@ inner init "$f" "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH
   -c user.runner-controller-id=11111111-1111-4111-8111-111111111111 \
   -c user.runner-pool-id=22222222-2222-4222-8222-222222222222 >/dev/null
 echo 'Starting the nested fixture container'
-inner start "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH_PROJECT"
+if inner start "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH_PROJECT"; then
+  echo 'Nested fixture container started'
+else
+  launch_rc=$?
+  printf 'Nested fixture container failed to start (exit %d)\n' "$launch_rc" >&2
+  inner info --show-log "$GCC_HOSTED_INCUS_AUTH_GUEST" \
+    --project "$GCC_HOSTED_INCUS_AUTH_PROJECT" 2>&1 | tail -n 120 >&2 || true
+  timeout 8 journalctl --boot --no-pager -n 60 -o short-monotonic \
+    -u incus.service 2>&1 >&2 || true
+  exit "$launch_rc"
+fi
 inner config trust add-certificate "$GCC_HOSTED_INCUS_AUTH_DIR/allowed.pem" --restricted --projects "$GCC_HOSTED_INCUS_AUTH_PROJECT"
 inner config set core.https_address 127.0.0.1:8443
 timeout 10 openssl s_client -verify_return_error -verify_ip 127.0.0.1 \
