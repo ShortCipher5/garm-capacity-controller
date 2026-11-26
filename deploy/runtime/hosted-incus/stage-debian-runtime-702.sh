@@ -96,17 +96,31 @@ export APT_CONFIG="$work/apt.conf"
 apt-get -q -o APT::Update::Error-Mode=any update
 request=(install --yes --no-install-recommends --no-remove --download-only
   "incus-base=$version" "incus-client=$version" openssl ca-certificates)
-# The same solver and options first give us the expected complete filename set
-# and archive sizes, so a short download, duplicate, or over-budget plan fails.
-apt-get --print-uris "${request[@]}" >"$work/plan"
-awk -v max_files="$limit_packages" -v max_bytes="$limit_bytes" '
+# Force the URI plan's checksum type explicitly: the default MD5 checksum may
+# be absent in signed Debian indexes. The actual fetch still uses normal APT.
+apt-get -o Acquire::ForceHash=SHA256 --print-uris "${request[@]}" >"$work/plan" ||
+  { printf 'APT could not resolve the dependency plan\n' >&2; exit 1; }
+if ! awk -v max_files="$limit_packages" -v max_bytes="$limit_bytes" '
   substr($1,1,1) == sprintf("%c",39) {
     if (NF != 4 || $2 !~ /^[a-zA-Z0-9][a-zA-Z0-9.+_~%:-]*[.]deb$/ ||
-        $3 !~ /^[0-9]+$/ || $3 == 0 || seen[$2]++) exit 1
+        $3 !~ /^[0-9]+$/ || $3 == 0 || $4 !~ /^SHA256:[[:xdigit:]]+$/ ||
+        length($4) != 71 || seen[$2]++) {
+      printf "Invalid APT plan record at line %d (%d fields)\n", NR, NF > "/dev/stderr"
+      invalid = 1; exit 1
+    }
     ++count; bytes += $3; print $2
   }
-  END { if (!count || count > max_files || bytes > max_bytes) exit 1 }
-' "$work/plan" | sort >"$work/expected"
+  END {
+    if (invalid) exit 1
+    if (!count || count > max_files || bytes > max_bytes) {
+      printf "APT plan empty or over limit (%d packages, %.0f bytes)\n", count, bytes > "/dev/stderr"
+      exit 1
+    }
+  }
+' "$work/plan" | sort >"$work/expected"; then
+  exit 1
+fi
+printf 'Resolved %s package archives from signed Debian indexes\n' "$(wc -l <"$work/expected")"
 apt-get -q "${request[@]}" >"$work/download.log" ||
   { printf 'APT could not download the authenticated dependency plan\n' >&2; exit 1; }
 cd "$work/archives"
