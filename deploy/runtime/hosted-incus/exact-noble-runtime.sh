@@ -98,6 +98,10 @@ if (d.get("type"), d.get("path"), d.get("pool")) != ("disk", "/", sys.argv[1]) o
     raise SystemExit("unexpected fixture root device")
 if x["expanded_config"].get("security.privileged") != "false":
     raise SystemExit("fixture is not explicitly unprivileged")' "$pool"
+# Incus 7.0.2 reconstructs process startup from whole-second boot time
+# and scheduler ticks. Leave a gap after creation so truncation cannot make
+# a healthy fixture look like its process predates the container.
+sleep 2
 if inc start "$guest" --project "$project"; then
   echo 'Native fixture container started'
 else
@@ -120,5 +124,17 @@ done
 [[ $tls_ready == true ]] || { echo 'Pinned fixture loopback TLS not reachable' >&2; exit 1; }
 inc query "/1.0/instances/$guest?project=$project" > "$GCC_HOSTED_INCUS_RUNTIME_METADATA"
 [[ $(stat -c '%a' "$GCC_HOSTED_INCUS_RUNTIME_METADATA") == 600 ]]
-timeout 90 "$test_binary" -test.run '^TestHostedIncusRuntimeHealth702$' -test.v | tee "$work/reader.log"
+if timeout 90 "$test_binary" -test.run '^TestHostedIncusRuntimeHealth702$' -test.v | tee "$work/reader.log"; then
+  :
+else
+  test_rc=$?
+  # Capture only disposable, loopback fixture timing and counter summaries.
+  if inc query "/1.0/instances/$guest/state?project=$project" > "$work/state-at-failure.json"; then
+    jq -cr '{status, status_code, pid, started_at, cpu_usage: .cpu.usage,
+      memory_current: .memory.usage, memory_peak: .memory.usage_peak}' \
+      "$work/state-at-failure.json" >&2 || true
+    jq -cr '{created_at}' "$GCC_HOSTED_INCUS_RUNTIME_METADATA" >&2 || true
+  fi
+  exit "$test_rc"
+fi
 grep -Eq '^--- PASS: TestHostedIncusRuntimeHealth702 \(' "$work/reader.log"
