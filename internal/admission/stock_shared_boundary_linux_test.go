@@ -87,3 +87,40 @@ func TestStockGrantAndPlacementCompeteForLastHostSlot(t *testing.T) {
 		t.Fatalf("restart created headroom: %v", err)
 	}
 }
+
+func TestSharedAdmissionMigrationPreservesGrantAndRequiresNewEpoch(t *testing.T) {
+	ctx := t.Context()
+	s := placementFixture(t)
+	grant := issueStockTestGrant(t, s, "before-upgrade")
+	// Schema 30 only adds an index and a writer-version fence. Reconstruct
+	// the v29 data layout with a ready ledger and outstanding stock grant.
+	if _, err := s.db.Exec(`DROP INDEX shared_admission_barriers;
+ DELETE FROM audit WHERE kind='schema_migrated_v30'; PRAGMA user_version=29;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := OpenSQLite(s.path, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	check := func() {
+		t.Helper()
+		state, err := upgraded.ReadBrokerGrantState(ctx)
+		if err != nil || len(state.Grants) != 1 || state.Grants[0].ID != grant.ID || state.Grants[0].State != "unused" || state.Allocated.Global != grant.Spec.Resources {
+			t.Fatalf("upgrade lost outstanding grant: %+v %v", state.Allocated, err)
+		}
+	}
+	check()
+	req := placementRequest("after-upgrade")
+	if _, err := upgraded.AdmitStockProviderPlacement(ctx, req, stockAuthority(), stockDigest()); !errors.Is(err, ErrReconciliation) {
+		t.Fatalf("upgrade left admission open: %v", err)
+	}
+	reconcileSQLite(t, upgraded, nil)
+	if _, err := upgraded.AdmitStockProviderPlacement(ctx, req, stockAuthority(), stockDigest()); !errors.Is(err, ErrBrokerGrant) {
+		t.Fatalf("reconciliation revived stale pre-upgrade grant: %v", err)
+	}
+	check()
+}

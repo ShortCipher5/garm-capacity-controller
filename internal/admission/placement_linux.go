@@ -190,9 +190,17 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 			return err
 		}
 
+		policy, err := sqliteBrokerPolicy(tx)
+		if err != nil {
+			return err
+		}
+		shared, err := readSharedAdmission(tx, policy, allocated)
+		if err != nil {
+			return err
+		}
 		var stockGrant *BrokerGrant
 		if stock != nil {
-			selectedGrant, err := selectStockGrant(tx, request, stock.Authority, now, config, allocated)
+			selectedGrant, err := selectStockGrant(tx, request, stock.Authority, now, config, allocated, shared)
 			if err != nil {
 				return deny("placement_denied_broker_grant", err)
 			}
@@ -203,6 +211,10 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 			allocated.Hosts[stockGrant.Spec.Host] = subtractGrant(allocated.Hosts[stockGrant.Spec.Host], stockGrant.Spec.Resources)
 			allocated.Pools[request.Pool] = subtractGrant(allocated.Pools[request.Pool], stockGrant.Spec.Resources)
 			request.Hosts = []string{stockGrant.Spec.Host}
+		}
+		if stock == nil && (!shared.permitsCharge(request.Pool, request.Resources, request.Resources.Runners, allocated.Pools[request.Pool].Runners) ||
+			!shared.permitsExecution(request.Pool, request.Execution, nil)) {
+			return deny("placement_denied_shared_policy", ErrDenied)
 		}
 		if !fits(allocated.Global, request.Resources, config.Global) || !fits(allocated.Pools[request.Pool], request.Resources, pool.Budget) {
 			return deny("placement_denied_capacity", ErrDenied)
@@ -225,7 +237,7 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 			if !contains(pool.Hosts, id) || host.Mode != "enabled" || !host.Healthy || !fits(allocated.Hosts[id], request.Resources, host.Budget) {
 				continue
 			}
-			if binding, ok := bindings[id]; !ok || binding.Sequence <= 0 {
+			if binding, ok := bindings[id]; !ok || binding.Sequence <= 0 || !shared.permitsHost(request.Pool, id, binding.Sequence, config) {
 				continue
 			}
 			if selected == "" || (request.Strategy == "least_runners" && allocated.Hosts[id].Runners < allocated.Hosts[selected].Runners) {
