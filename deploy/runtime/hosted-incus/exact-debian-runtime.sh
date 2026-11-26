@@ -66,8 +66,24 @@ export DEBIAN_FRONTEND=noninteractive
 [[ -r /usr/share/keyrings/debian-archive-keyring.gpg ]]
 [[ ! -e /var/lib/incus && ! -L /var/lib/incus ]]
 v=7.0.2-3~bpo13+1
-timeout 150 apt-get update -qq
-timeout 100 apt-get --no-remove --no-install-recommends install -y openssl ca-certificates
+# The disposable bridge is IPv4-only. Fail if updates cannot obtain fresh,
+# signature-checked indexes rather than falling back to the image's cache.
+if ip -4 route show default | grep -q '^default '; then
+  echo 'Disposable guest IPv4 default route: present'
+else
+  echo 'Disposable guest IPv4 default route: absent'
+fi
+for host in deb.debian.org snapshot.debian.org; do
+  if timeout 5 getent ahostsv4 "$host" >/dev/null; then
+    echo "IPv4 resolution for $host: present"
+  else
+    echo "IPv4 resolution for $host: absent"
+  fi
+done
+apt_v4=(apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=1
+  -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12)
+timeout 150 "${apt_v4[@]}" --error-on=any update -qq
+timeout 100 "${apt_v4[@]}" --no-remove --no-install-recommends install -y openssl ca-certificates
 cat >/etc/apt/sources.list.d/gcc-exact-incus.sources <<'SOURCES'
 Types: deb
 URIs: https://snapshot.debian.org/archive/debian/20261104T143429Z/
@@ -77,13 +93,13 @@ Components: main
 Check-Valid-Until: no
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 SOURCES
-timeout 150 apt-get update -qq
+timeout 150 "${apt_v4[@]}" --error-on=any update -qq
 # Incus may auto-start on package install. Deposit a deliberate one-job TLS
 # identity before that first start; standard peer verification must accept IP SAN.
 install -d -m 0700 /var/lib/incus
 openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj /CN=localhost \
   -addext subjectAltName=IP:127.0.0.1 -keyout /var/lib/incus/server.key -out /var/lib/incus/server.crt
-timeout 270 apt-get --no-remove --no-install-recommends install -y "incus-base=$v" "incus-client=$v"
+timeout 270 "${apt_v4[@]}" --no-remove --no-install-recommends install -y "incus-base=$v" "incus-client=$v"
 [[ $(dpkg-query -W -f='${Version}' incus-base) == "$v" ]]
 [[ $(dpkg-query -W -f='${Version}' incus-client) == "$v" ]]
 timeout 30 systemctl start incus.socket
