@@ -1,17 +1,6 @@
 name: hosted-incus-stock-garm-smoke
 on:
   pull_request:
-    paths:
-      - .github/workflows/hosted-incus-smoke.yml
-      - Dockerfile
-      - .dockerignore
-      - deploy/**
-      - cmd/**
-      - internal/**
-      - go.mod
-      - go.sum
-      - integration/garm-v0.2.1/**
-      - web/**
   workflow_dispatch:
 permissions:
   contents: read
