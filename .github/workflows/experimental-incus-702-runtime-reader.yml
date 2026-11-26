@@ -1,0 +1,38 @@
+name: experimental-incus-702-runtime-reader
+on:
+  pull_request:
+    paths:
+      - .github/workflows/experimental-incus-702-runtime-reader.yml
+      - deploy/runtime/hosted-incus/exact-debian-runtime.sh
+      - deploy/runtime/hosted-incus/runtime_health_702_test.go
+      - internal/incusapi/**
+      - go.mod
+      - go.sum
+permissions:
+  contents: read
+concurrency:
+  group: experimental-incus-702-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  incus-702-runtime-reader:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Compile the runtime reader fixture
+        shell: bash
+        run: CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/gcc-incus-runtime.test" ./deploy/runtime/hosted-incus
+      - name: Exercise the exact Debian daemon in a disposable nested fixture
+        shell: bash
+        run: bash deploy/runtime/hosted-incus/exact-debian-runtime.sh "$RUNNER_TEMP/gcc-incus-runtime.test"
+      - name: State the experiment boundary
+        if: always()
+        shell: bash
+        run: |
+          echo 'Experimental only; not a required check. This can test authenticated Incus runtime reads, not a deployed GARM integration or actual GitHub job attribution.' >> "$GITHUB_STEP_SUMMARY"
