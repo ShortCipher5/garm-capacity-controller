@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -128,45 +127,23 @@ func TestEnrolledCycleReusesDurableGrantAfterRestart(t *testing.T) {
 	}
 }
 
-// This crosses the planner-to-real-SQLite issuance boundary. Profile enrollment
-// itself is covered by schema20 tests; this fixture supplies the validated plan
-// input explicitly so concurrent durable batch behavior is isolated.
+// Exercise the planner's batch using the same persisted, observed ownership
+// mapping that issuance revalidates under the writer lock.
 func TestCycleBatchRealLedgerConcurrentReplayAndRestart(t *testing.T) {
-	state, obs, source, opt := enrolledCycleFixture(t)
-	path := filepath.Join(t.TempDir(), "ledger.db")
-	store, err := admission.OpenSQLite(path, state.Config)
+	ctx := t.Context()
+	pools := []scPool{{scPoolA, scRepoA, false}}
+	stock, trust, source := scStock(t, pools, []string{scPoolA}, nil)
+	store, path := enrolledSharedCapacityStore(t, stock, trust, pools, nil)
+	obs, err := source.Observe(ctx)
 	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-	policy := state.Policy
-	policy.Revision = 0
-	if err = store.ReplaceBrokerPolicy(ctx, policy); err != nil {
-		t.Fatal(err)
-	}
-	fence, err := store.BeginReconciliation(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := admission.HostBinding{Host: "host", ServerKeyFingerprint: strings.Repeat("a", 64), OriginFingerprint: strings.Repeat("b", 64), ScopeFingerprint: strings.Repeat("c", 64), ServerName: "host", ServerVersion: "6.0.4", ObservedAt: time.Now().UTC()}
-	if err = store.BindHostIdentities(ctx, fence, []admission.HostBinding{binding}); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.CompleteReconciliation(ctx, fence, admission.InventorySnapshot{Hosts: []admission.HostObservation{{Host: "host", ObservedAt: time.Now().UTC(), Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true}}}); err != nil {
 		t.Fatal(err)
 	}
 	actual, charges, err := store.ReadBrokerPlanningState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile := state.PoolProfiles[pool]
-	profile.Authority.ClientFingerprint = strings.Repeat("f", 64)
-	profile.Execution = admission.ExecutionImage{Controller: "controller", Flavor: "small", Image: "image", Fingerprint: strings.Repeat("a", 64), Type: "container", Profiles: []string{"runner"}, Arch: "amd64"}
-	profile.Domains[0].HostBindingSequence = actual.HostBindings["host"].Sequence
-	actual.PoolProfiles = map[string]admission.BrokerPoolProfile{pool: profile}
-	opt.Now = time.Now().UTC()
-	_, batch, err := enrolledCycle(actual, charges, obs, source, opt, time.Minute)
+	opt := capacitybroker.Options{Now: time.Now().UTC(), MaxAge: time.Minute, MaxAssignments: 100}
+	_, batch, err := enrolledCycle(actual, charges, obs, source.SourceIdentity(), opt, time.Minute)
 	if err != nil || len(batch.Grants) != 1 {
 		t.Fatalf("plan %v", err)
 	}
@@ -222,7 +199,7 @@ func TestCycleBatchRealLedgerConcurrentReplayAndRestart(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			expiryErrors <- retireExpiredCycleGrants(ctx, reopened, after.Grants, time.Now())
+			expiryErrors <- retireCycleGrants(ctx, reopened, after.Grants, time.Now())
 		}()
 	}
 	wg.Wait()

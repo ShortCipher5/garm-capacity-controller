@@ -100,7 +100,7 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 	// once as provisional planned supply and suppress extra warm issuance.
 	// IDs and states remain durable in the ledger; no job-to-runner claim.
 	for _, g := range state.Grants {
-		if g.State == "unused" {
+		if g.State == "unused" && !g.Superseded() {
 			profile, exists := profiles[g.Spec.Authority.PoolID]
 			binding, bound := state.HostBindings[g.Spec.Host]
 			host, hostKnown := s.Hosts[g.Spec.Host]

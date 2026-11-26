@@ -26,11 +26,18 @@ type BrokerGrantSpec struct {
 	ExpiresAt           time.Time              `json:"expires_at"`
 }
 type BrokerGrant struct {
-	ID         string          `json:"id"`
-	Spec       BrokerGrantSpec `json:"spec"`
-	State      string          `json:"state"`
-	RequestKey string          `json:"request_key,omitempty"`
+	ID             string          `json:"id"`
+	Spec           BrokerGrantSpec `json:"spec"`
+	State          string          `json:"state"`
+	RequestKey     string          `json:"request_key,omitempty"`
+	issuedSequence int64
+	superseded     bool
 }
+
+// Superseded reports that a coherent ledger read found a newer reconciliation,
+// policy or profile revision. Such unused commitments stay charged until their retirement commits.
+func (g BrokerGrant) Superseded() bool { return g.superseded }
+
 type BrokerGrantBatch struct {
 	ID               string            `json:"id"`
 	ExpectedSequence int64             `json:"expected_sequence"`
@@ -117,7 +124,9 @@ func grantProfileMatches(g BrokerGrantSpec, r PlacementRequest, a StockProviderA
 	return g.Authority == a && g.Resources == r.Resources && reflect.DeepEqual(g.Execution, e) && contains(r.Hosts, g.Host)
 }
 func sqliteBrokerGrants(tx *sql.Tx) ([]BrokerGrant, error) {
-	rows, e := tx.Query("SELECT grant_id,payload,payload_hash,state,COALESCE(request_key,'') FROM broker_grants WHERE payload!='' ORDER BY grant_id LIMIT 100001")
+	rows, e := tx.Query(`SELECT g.grant_id,g.payload,g.payload_hash,g.state,COALESCE(g.request_key,''),b.sequence
+ FROM broker_grants g JOIN broker_grant_batches b ON b.batch_id=g.batch_id
+ WHERE g.payload!='' ORDER BY g.grant_id LIMIT 100001`)
 	if e != nil {
 		return nil, e
 	}
@@ -126,7 +135,7 @@ func sqliteBrokerGrants(tx *sql.Tx) ([]BrokerGrant, error) {
 	for rows.Next() {
 		var g BrokerGrant
 		var raw, hash string
-		if e = rows.Scan(&g.ID, &raw, &hash, &g.State, &g.RequestKey); e != nil {
+		if e = rows.Scan(&g.ID, &raw, &hash, &g.State, &g.RequestKey, &g.issuedSequence); e != nil {
 			return nil, e
 		}
 		if len(out) >= 100000 || !bindingFingerprint(g.ID) || len(raw) > 16384 || json.Unmarshal([]byte(raw), &g.Spec) != nil || !validGrantSpec(g.Spec) {
@@ -285,6 +294,13 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 		if v.Grants, e = sqliteBrokerGrants(tx); e != nil {
 			return e
 		}
+		var enrolled map[string]BrokerPoolProfile
+		if v.Policy.Revision > 0 {
+			enrolled = v.PoolProfiles
+		}
+		if e = markSupersededGrants(tx, v.Grants, enrolled); e != nil {
+			return e
+		}
 		if v.ArtifactOverheads, e = sqliteNativeArtifactOverheads(tx); e != nil {
 			return e
 		}
@@ -412,7 +428,16 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		if e != nil {
 			return e
 		}
+		shared, e := readSharedAdmission(tx, policy, allocated)
+		if e != nil {
+			return e
+		}
 		for _, g := range b.Grants {
+			id := g.Authority.PoolID
+			if !shared.permitsCharge(id, g.Resources, g.Resources.Runners, allocated.Pools[id].Runners) ||
+				!shared.permitsExecution(id, g.Execution, &g.Authority) || !shared.permitsHost(id, g.Host, g.HostBindingSequence, config) {
+				return ErrBrokerGrant
+			}
 			host, ok := config.Hosts[g.Host]
 			pool, pok := config.Pools[g.Authority.PoolID]
 			binding, bok := bindings[g.Host]
@@ -424,6 +449,9 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 				return ErrBrokerGrant
 			}
 			allocated.Hosts[g.Host], allocated.Pools[g.Authority.PoolID] = h, p
+			if shared != nil {
+				shared.runners[shared.profiles[id].Repository] += g.Resources.Runners
+			}
 		}
 		if e = sqliteAudit(tx, "broker_grants_issued", b.ID, now); e != nil {
 			return e
@@ -460,38 +488,120 @@ func brokerGrantID(batch string, index int) string {
 // RetireUnusedBrokerGrant never releases a consumed/in-flight reservation. The
 // transition is permanent, including when the wall clock subsequently rolls back.
 func (s *SQLiteStore) RetireUnusedBrokerGrant(ctx context.Context, id string, expire bool) error {
+	target := "revoked"
+	if expire {
+		target = "expired"
+	}
+	return s.retireUnusedBrokerGrant(ctx, id, target, false)
+}
+
+// RetireSupersededBrokerGrant is the bounded maintenance path for a grant
+// that can no longer be redeemed. A snapshot selection grants no authority
+// to revoke: the issuer sequence and its superseding fence are checked here.
+func (s *SQLiteStore) RetireSupersededBrokerGrant(ctx context.Context, id string) error {
+	return s.retireUnusedBrokerGrant(ctx, id, "revoked", true)
+}
+
+func (s *SQLiteStore) retireUnusedBrokerGrant(ctx context.Context, id, target string, requireSuperseded bool) error {
 	if !bindingFingerprint(id) {
 		return ErrBrokerGrant
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		g, e := lookupBrokerGrant(tx, id)
-		if e != nil {
-			return e
-		}
-		target := "revoked"
-		if expire {
-			target = "expired"
+		g, err := lookupBrokerGrant(tx, id)
+		if err != nil {
+			return err
 		}
 		if g.State == target {
 			return nil
 		}
-		if g.State != "unused" || (expire && s.now().Before(g.Spec.ExpiresAt)) {
+		if g.State != "unused" || (target == "expired" && s.now().Before(g.Spec.ExpiresAt)) {
 			return ErrBrokerGrant
 		}
-		if _, e = tx.Exec("UPDATE broker_grants SET state=? WHERE grant_id=? AND state='unused'", target, id); e != nil {
-			return e
+		if requireSuperseded {
+			if err := checkSupersededGrant(tx, g); err != nil {
+				return err
+			}
+		}
+		result, err := tx.Exec("UPDATE broker_grants SET state=? WHERE grant_id=? AND state='unused' AND request_key IS NULL", target, id)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrBrokerGrant
 		}
 		return sqliteAudit(tx, "broker_grant_"+target, id, s.now())
 	})
 }
 
-func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, now time.Time, config Config, allocated Allocations) (BrokerGrant, error) {
+func checkSupersededGrant(tx *sql.Tx, g BrokerGrant) error {
+	// Only a live issuance with its original audit event supplies a sequence.
+	if err := tx.QueryRow(`SELECT b.sequence FROM broker_grants g
+		JOIN broker_grant_batches b ON g.batch_id=b.batch_id
+		JOIN audit a ON a.sequence=b.sequence AND a.kind='broker_grants_issued' AND a.request_key=b.batch_id
+		WHERE g.grant_id=? AND g.payload!='' AND b.payload!=''`, g.ID).Scan(&g.issuedSequence); err != nil {
+		return err
+	}
+	if g.issuedSequence <= 0 {
+		return ErrBrokerGrant
+	}
+	policy, err := sqliteBrokerPolicy(tx)
+	if err != nil {
+		return err
+	}
+	var enrolled map[string]BrokerPoolProfile
+	if policy.Revision > 0 {
+		enrolled, err = sqliteBrokerPoolProfiles(tx)
+		if err != nil {
+			return err
+		}
+	}
+	grants := []BrokerGrant{g}
+	if err := markSupersededGrants(tx, grants, enrolled); err != nil {
+		return err
+	}
+	if !grants[0].Superseded() {
+		return ErrBrokerGrant
+	}
+	return nil
+}
+
+func markSupersededGrants(tx *sql.Tx, grants []BrokerGrant, profiles map[string]BrokerPoolProfile) error {
+	var barrier int64
+	if err := tx.QueryRow("SELECT COALESCE(max(sequence),0) FROM audit WHERE kind IN ('reconciliation_completed','advisory_broker_policy_replaced')").Scan(&barrier); err != nil {
+		return err
+	}
+	for i, g := range grants {
+		if g.State == "unused" {
+			grants[i].superseded = g.issuedSequence <= max(barrier, profiles[g.Spec.Authority.PoolID].Sequence)
+		}
+	}
+	return nil
+}
+
+func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, now time.Time, config Config, allocated Allocations, shared *sharedAdmission) (BrokerGrant, error) {
 	all, e := sqliteBrokerGrants(tx)
 	if e != nil {
 		return BrokerGrant{}, e
 	}
+	// The batch audit sequence orders issuance against completed reconciliations,
+	// saved policy revisions and the selected pool's profile. A stale unused
+	// grant stays charged until its durable terminal transition.
+	var enrolled map[string]BrokerPoolProfile
+	if shared != nil {
+		enrolled = shared.profiles
+		if !shared.permitsCharge(r.Pool, r.Resources, 0, allocated.Pools[r.Pool].Runners) || !shared.permitsExecution(r.Pool, r.Execution, &a) {
+			return BrokerGrant{}, ErrBrokerGrant
+		}
+	}
+	if e = markSupersededGrants(tx, all, enrolled); e != nil {
+		return BrokerGrant{}, e
+	}
 	for _, g := range all {
-		if g.State != "unused" || !g.Spec.ExpiresAt.After(now) || !grantProfileMatches(g.Spec, r, a) {
+		if g.State != "unused" || g.Superseded() || !g.Spec.ExpiresAt.After(now) || !grantProfileMatches(g.Spec, r, a) {
 			continue
 		}
 		host, hostOK := config.Hosts[g.Spec.Host]
@@ -508,7 +618,7 @@ func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, 
 		if err != nil {
 			return BrokerGrant{}, err
 		}
-		if sequence != g.Spec.HostBindingSequence {
+		if sequence != g.Spec.HostBindingSequence || !shared.permitsHost(r.Pool, g.Spec.Host, sequence, config) {
 			continue
 		}
 		return g, nil
