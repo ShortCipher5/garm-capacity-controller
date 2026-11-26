@@ -567,10 +567,6 @@ func (s *UsageAttachmentStore) position(job JobKey) (int, bool) {
 // attachment times, including after a later read or restart. A later
 // observation may update only the same runner and measured window.
 func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet) error {
-	return s.attach(ctx, claim, set, nil, nil)
-}
-
-func (s *UsageAttachmentStore) attach(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet, window *CompletedUsageWindow, current func() bool) error {
 	if s == nil || len(set.Samples) > MaxJobResourceSamples {
 		return ErrUsageAttachment
 	}
@@ -581,6 +577,11 @@ func (s *UsageAttachmentStore) attach(ctx context.Context, claim JobAttributionC
 	}
 	s.history.mu.Lock()
 	defer s.history.mu.Unlock()
+	return s.attachLocked(ctx, claim, set, nil, nil)
+}
+
+// Both store locks are held in sidecar-then-history order.
+func (s *UsageAttachmentStore) attachLocked(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet, window *CompletedUsageWindow, current func() bool) error {
 	now := s.now().UTC()
 	if window != nil {
 		receiptsCurrent := current

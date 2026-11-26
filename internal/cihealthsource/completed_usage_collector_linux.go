@@ -247,19 +247,25 @@ func collectCounterWindow(ctx context.Context, matrix cihealth.AttributionCapabi
 			asOf = at
 		}
 	}
-	set := cihealth.VerifiedUsageSampleSet{
+	window := cihealth.VerifiedUsageSampleSet{
 		Scope: cihealth.JobResourceScope{Job: job, RunnerIncarnation: w.initial.RunnerIncarnation, StartedAt: x.StartedAt,
 			EndAt: x.EndedAt, AsOf: asOf, MaxGap: w.maxGap},
 		Initial: &w.initial, Closing: &w.closing, Execution: &w.execution,
 	}
 	// Check origin, epoch, job brackets and expiry before fetching points.
-	if reason := cihealth.CheckJobUsageWindow(matrix, claim, set, now()); reason != cihealth.UsageOmissionNone {
+	if reason := cihealth.CheckJobUsageWindow(matrix, claim, window, now()); reason != cihealth.UsageOmissionNone {
 		return reason
 	}
+	set := window
 	set.Samples = make([]cihealth.JobResourceSample, 0, w.count)
 	for i := range w.count {
 		if !active() || !w.current() {
 			return cihealth.UsageOmissionCollectionUnavailable
+		}
+		// Each read needs the original independent observations to still
+		// be fresh. Keep the window sample-free for this fixed-cost check.
+		if reason := cihealth.CheckJobUsageWindow(matrix, claim, window, now()); reason != cihealth.UsageOmissionNone {
+			return reason
 		}
 		sample, runtime, err := w.read(ctx, i)
 		if err != nil {

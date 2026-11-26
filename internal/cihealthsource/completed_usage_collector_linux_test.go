@@ -180,6 +180,11 @@ func TestCollectorRefusesBeforeAttach(t *testing.T) {
 		{"missing allocation", func(f *counterFixture) { f.w.origin = cihealth.VerifiedProviderOrigin{} }, cihealth.UsageOmissionJoinUnsupported, 0},
 		{"foreign enrolled pool", func(f *counterFixture) { f.reg.enrollment.PoolID = f.reg.row.RepositoryID }, cihealth.UsageOmissionEvidenceMismatch, 0},
 		{"reused closing runtime", func(f *counterFixture) { f.w.closing.Runtime.ProcessStartTicks++ }, cihealth.UsageOmissionEvidenceMismatch, 0},
+		{"missing opening observation", func(f *counterFixture) { f.w.initial.ObservedAt = time.Time{} }, cihealth.UsageOmissionUnbracketed, 0},
+		{"opening predates cadence", func(f *counterFixture) {
+			f.w.maxGap = time.Second
+			f.w.initial.ObservedAt = f.reg.execution.StartedAt.Add(-time.Second - time.Nanosecond)
+		}, cihealth.UsageOmissionUnbracketed, 0},
 		{"late first bracket", func(f *counterFixture) { f.w.initial.ObservedAt = f.points[1].At }, cihealth.UsageOmissionUnbracketed, 0},
 		{"too many points", func(f *counterFixture) { f.w.count = completedUsageSampleLimit + 1 }, cihealth.UsageOmissionCollectionUnavailable, 0},
 		{"uncaptured short job", func(f *counterFixture) { f.w.count = 0 }, cihealth.UsageOmissionJobTooShort, 0},
@@ -211,6 +216,33 @@ func TestCollectorRefusesBeforeAttach(t *testing.T) {
 	var collector *completedJobCollector
 	if reason := collector.collect(t.Context(), cihealth.HistoryCursor{}, cihealth.JobKey{}, "", 1); reason != cihealth.UsageOmissionJoinUnsupported {
 		t.Fatal(reason)
+	}
+}
+
+func TestCollectorRechecksEverySupportingSourceBeforeNextRead(t *testing.T) {
+	for _, source := range []string{"GARM registration", "GitHub execution", "provider close", "exclusive execution"} {
+		t.Run(source, func(t *testing.T) {
+			f := newCounterFixture()
+			end := f.reg.execution.EndedAt
+			// Only the selected observation expires at the next read.
+			f.w.closing.ObservedAt = end.Add(time.Second)
+			switch source {
+			case "GARM registration":
+				f.reg.row.ObservedAt = end
+				f.w.origin.Row = f.reg.row
+			case "GitHub execution":
+				f.reg.execution.ObservedAt = end
+			case "provider close":
+				f.w.closing.ObservedAt = end
+			case "exclusive execution":
+				f.w.execution.ObservedAt = end
+			}
+			f.now = end.Add(cihealth.MaxJobResourceGap - time.Nanosecond)
+			f.afterRead = func(i int) { f.now = end.Add(cihealth.MaxJobResourceGap) }
+			if reason := f.collect(t.Context()); reason != cihealth.UsageOmissionStaleEvidence || f.reads != 1 || f.commits != 0 {
+				t.Fatalf("expired %s: reason %q, reads %d, attachments %d", source, reason, f.reads, f.commits)
+			}
+		})
 	}
 }
 

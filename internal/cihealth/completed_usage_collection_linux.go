@@ -16,18 +16,39 @@ type CompletedUsageWindow struct {
 	start, end, issued           time.Time
 }
 
+// tryCollectionLocks keeps a bounded collection from queuing behind file I/O
+// on either store. Check cancellation again after acquiring both locks.
+func (s *UsageAttachmentStore) tryCollectionLocks(ctx context.Context, job JobKey, expected *History) func() {
+	if s == nil || !historyActive(ctx) || !s.mu.TryLock() {
+		return nil
+	}
+	h := s.history
+	if h == nil || (expected != nil && h != expected) || !s.enrolled(usageScopeOf(job)) || !h.mu.TryLock() {
+		s.mu.Unlock()
+		return nil
+	}
+	unlock := func() {
+		h.mu.Unlock()
+		s.mu.Unlock()
+	}
+	if !historyActive(ctx) || s.root == nil || s.currentFD == nil || s.failed || s.now == nil ||
+		h.currentFD == nil || h.failed {
+		unlock()
+		return nil
+	}
+	return unlock
+}
+
 func (s *UsageAttachmentStore) BeginCompletedUsage(ctx context.Context, h *History, cursor HistoryCursor, job JobKey) (CompletedUsageWindow, bool) {
 	var none CompletedUsageWindow
-	if s == nil || h == nil || cursor.Revision <= 0 || !validKey(job.Attempt) || job.JobID <= 0 || !historyActive(ctx) {
+	if h == nil || cursor.Revision <= 0 || !validKey(job.Attempt) || job.JobID <= 0 {
 		return none, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.history != h || s.root == nil || !s.enrolled(usageScopeOf(job)) {
+	unlock := s.tryCollectionLocks(ctx, job, h)
+	if unlock == nil {
 		return none, false
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	defer unlock()
 	_, cp := h.currentCheckpoint(historyScope(job.Attempt))
 	if cp.Cursor != cursor {
 		return none, false
@@ -49,14 +70,11 @@ func (w CompletedUsageWindow) Endpoints() (time.Time, time.Time) { return w.star
 // Current is a local revision check during collection. Attach repeats it
 // while holding both locks and revalidates retained membership and custody.
 func (w CompletedUsageWindow) Current(ctx context.Context) bool {
-	s := w.store
-	if s == nil || !historyActive(ctx) {
+	unlock := w.store.tryCollectionLocks(ctx, w.job, nil)
+	if unlock == nil {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.history.mu.Lock()
-	defer s.history.mu.Unlock()
+	defer unlock()
 	return w.currentLocked() && historyActive(ctx)
 }
 
@@ -70,9 +88,14 @@ func (w CompletedUsageWindow) currentLocked() bool {
 // Attach rechecks the source's short-lived local receipts under the store
 // locks. current must only inspect local proof, and must never enter a store.
 func (w CompletedUsageWindow) Attach(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet, current func() bool) error {
-	if w.store == nil || current == nil || w.job != claim.Job || !w.start.Equal(set.Scope.StartedAt) || !w.end.Equal(set.Scope.EndAt) ||
+	if len(set.Samples) > MaxJobResourceSamples || current == nil || w.job != claim.Job || !w.start.Equal(set.Scope.StartedAt) || !w.end.Equal(set.Scope.EndAt) ||
 		claim.Execution.State != StockJobObservedEnded || !w.end.Equal(claim.Execution.EndedAt) {
 		return ErrUsageAttachment
 	}
-	return w.store.attach(ctx, claim, set, &w, current)
+	unlock := w.store.tryCollectionLocks(ctx, w.job, nil)
+	if unlock == nil {
+		return ErrUsageAttachment
+	}
+	defer unlock()
+	return w.store.attachLocked(ctx, claim, set, &w, current)
 }

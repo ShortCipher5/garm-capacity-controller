@@ -18,7 +18,9 @@ numeric source, repository, workflow, run, attempt, job, runner registration
 and both execution endpoints. The GARM report checks the owner's independently
 approved repository, controller, pool, provider, ownership fingerprint, row and
 numeric registration. Both reports must still release the same evidence while
-the collector runs.
+the collector runs. Before every counter read, the collector verifies the
+original row, execution and closing observation times again. Contention on
+either local store lock ends collection immediately.
 
 The owner opens the window only against the exact retained history instance,
 committed workflow cursor and enrolled terminal job. The largest eligible
@@ -34,7 +36,12 @@ provider allocation for the exact row, immutable daemon/project/instance
 incarnation, boot ID and process start ticks, and exclusive assignment for
 the entire completed interval. It must supply independently observed opening
 and closing brackets and bind every point to the same job and process epoch.
-Overlapping or ambiguous assignment must produce an omission. A reader may
+For a separately authorized acceptance run, prime the independent bracket
+and counter capture before dispatching the job. After completion, require the
+opening observation to identify the selected incarnation at or before the
+actual start, within the allowed cadence. A missing opening observation
+leaves that job unavailable. Overlapping or ambiguous assignment must
+produce an omission. A reader may
 only supply metrics qualified for its evidence class. Read bytes, write bytes
 and occupied bytes each require their own unit qualification. The stock Incus 7.0.2
 named runtime-health reader observes CPU time and memory on its chosen
