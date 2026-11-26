@@ -1,6 +1,7 @@
 package adminview
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -45,6 +46,7 @@ type ciAttemptView struct {
 }
 
 type ciJobView struct {
+	Usage           json.RawMessage     `json:"resource_usage,omitempty"`
 	ID              string              `json:"id"`
 	LinkHandle      string              `json:"job_link_handle,omitempty"`
 	Status          string              `json:"status"`

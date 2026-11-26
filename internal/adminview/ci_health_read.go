@@ -14,6 +14,18 @@ const (
 	maxCIResponseBytes = 1 << 20
 )
 
+type ciUsageResponse struct {
+	body    []byte
+	current func() bool
+}
+
+type ciTimingResponse struct {
+	State    string       `json:"state"`
+	At       time.Time    `json:"observed_at"`
+	Coverage string       `json:"coverage"`
+	View     ciTimingView `json:"timing"`
+}
+
 // CIHealthRepository is an exact identity from already-authorized startup
 // configuration. Authenticated dashboard readers have the existing owner-wide
 // read role, not individual per-repository permissions.
@@ -34,6 +46,7 @@ type CIHealthSnapshot struct {
 	generation *ciHealthGeneration
 	body       []byte
 	history    ciHistoryResponse
+	usage      ciUsageResponse
 	jobLinks   map[string]ciJobLinkTarget
 	runLinks   map[string]ciRunLinkTarget
 	stopped    bool
@@ -123,12 +136,7 @@ func (s *CIHealthSnapshot) publishTiming(observedAt time.Time, facts []cihealth.
 	if boundedPartial {
 		coverage = "bounded_partial"
 	}
-	wire, err := json.Marshal(struct {
-		State    string       `json:"state"`
-		At       time.Time    `json:"observed_at"`
-		Coverage string       `json:"coverage"`
-		View     ciTimingView `json:"timing"`
-	}{State: "observed", At: at, Coverage: coverage, View: view})
+	wire, err := json.Marshal(ciTimingResponse{State: "observed", At: at, Coverage: coverage, View: view})
 	if err != nil || len(wire) > maxCIResponseBytes {
 		return errCIProjection
 	}
@@ -157,6 +165,7 @@ func (s *CIHealthSnapshot) commitTiming(at time.Time, lease *ciHealthGeneration,
 	}
 	s.latest, s.body, s.generation = at, wire, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
+	s.usage = ciUsageResponse{}
 	s.workflows, s.jobLinks, s.runLinks = workflows, jobLinks, runLinks
 	return nil
 }
@@ -205,6 +214,7 @@ func (s *CIHealthSnapshot) Stop() {
 func (s *CIHealthSnapshot) fenceLocked() {
 	s.body, s.generation = nil, &ciHealthGeneration{}
 	s.history = ciHistoryResponse{}
+	s.usage = ciUsageResponse{}
 	s.workflows, s.jobLinks = nil, nil
 	if s.checked.After(s.latest) {
 		s.latest = s.checked
@@ -218,13 +228,24 @@ func (s *CIHealthSnapshot) read() []byte {
 	if !stable || now.Before(s.latest) || !now.Before(s.latest.Add(ciDisplayLifetime)) {
 		s.body = nil
 		s.history = ciHistoryResponse{}
+		s.usage = ciUsageResponse{}
 		s.workflows, s.jobLinks = nil, nil
+	}
+	if s.usage.current != nil && !s.usage.current() {
+		s.usage = ciUsageResponse{}
+		s.history.withUsage = nil
 	}
 	if s.history.body != nil {
 		if now.Before(s.history.expires) && s.history.source.Current() {
+			if s.usage.body != nil && s.history.withUsage != nil {
+				return s.history.withUsage
+			}
 			return s.history.body
 		}
 		s.history = ciHistoryResponse{}
+	}
+	if s.usage.body != nil {
+		return s.usage.body
 	}
 	return s.body
 }
