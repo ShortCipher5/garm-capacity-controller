@@ -5,19 +5,56 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
-	common "github.com/cloudbase/garm-provider-common/params"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/admission"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/garmprotocol"
+	common "github.com/cloudbase/garm-provider-common/params"
 )
 
 func stockAuthority() admission.StockProviderAuthority {
 	return admission.StockProviderAuthority{Controller: "controller-a", PoolID: "pool-a", ProviderName: "stock-incus", ClientFingerprint: strings.Repeat("b", 64)}
 }
+func TestInstalledLedgerRefusesStockCreateThroughGenericHandle(t *testing.T) {
+	ctx := t.Context()
+	_, fixture, _, _ := facadeFixture(t)
+	snapshot, err := fixture.ReadSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ledger.db")
+	if err := admission.InitializeSQLite(path, filepath.Join(dir, "identity"), snapshot.Config); err != nil {
+		t.Fatal(err)
+	}
+	store, err := admission.OpenSQLite(path, admission.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Even through a generic handle, reject installed stock traffic before
+	// inspecting command fields or looking up a historical placement.
+	direct := &Facade{store: store}
+	native := &NativeStock{store: store}
+	for label, create := range map[string]func(context.Context, common.BootstrapInstance, admission.StockProviderAuthority) (common.ProviderInstance, error){
+		"direct": direct.CreateStockProvider,
+		"native": native.CreateStockProvider,
+	} {
+		if _, err := create(ctx, common.BootstrapInstance{}, stockAuthority()); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("%s ingress reached stock command validation: %v", label, err)
+		}
+	}
+}
+
 func TestStockDigestStableAndSecretIndependent(t *testing.T) {
 	b := bootstrap("runner-a", "pool-a")
 	b.Labels = []string{"z", "a"}
