@@ -88,8 +88,9 @@ current history remain available.
 | Updated qualified publisher | Updated | Each v2 counter shows its own coverage. For legacy totals, coverage applies to reads and the write coverage is unrecorded. |
 | Updated publisher | Earlier dashboard | The request omits the capability header and receives the existing timing response, with any current history. |
 
-Publish rebuilt dashboard assets through the configured admin assets directory.
-Either the assets or the publisher can be rolled back independently. Rolling
-back the assets drops the request header. Rolling back to the timing-only
-publisher omits the enrichment. Neither rollback changes private history or
+Install the rebuilt dashboard assets through the configured admin assets
+directory before enabling a qualified publisher. To roll back, disable
+that publisher first and then restore the earlier assets. During a mixed
+deployment, older assets omit the request header and a timing-only publisher
+omits the enrichment. These changes preserve private timing history and
 usage retention. The production gateway currently publishes timing only.
