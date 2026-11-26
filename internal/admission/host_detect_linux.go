@@ -54,6 +54,13 @@ func (s *SQLiteStore) enrollHostTx(tx *sql.Tx, hostID string, budget Resources, 
 	if _, exists := config.Hosts[hostID]; exists {
 		return ErrConflict
 	}
+	var withdrawn bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM audit WHERE kind='host_draft_removed' AND request_key=?)", hostID).Scan(&withdrawn); err != nil {
+		return err
+	}
+	if withdrawn {
+		return ErrConflict
+	}
 	config.Hosts[hostID] = Host{Budget: budget, Mode: mode, Healthy: false, ObservedAt: observedAt, Detected: detected}
 	if observedAt.IsZero() {
 		host := config.Hosts[hostID]

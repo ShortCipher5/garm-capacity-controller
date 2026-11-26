@@ -13,9 +13,11 @@ import (
 )
 
 var ErrPolicyConflict = errors.New("policy changed; refresh before retrying")
+var ErrHostActivation = errors.New("host placement prerequisites are unavailable")
+var ErrHostDraftRemoval = errors.New("disabled server draft still has a binding or retained state")
 
-// PolicyChange only edits existing ledger policy. It never registers a host or
-// pool, contacts Garm, drains runners, deletes resources or releases charges.
+// PolicyChange edits existing ledger policy and can discard an unused disabled
+// discovery enrollment. It never contacts Garm or deletes resources.
 type PolicyChange struct {
 	Revision     string     `json:"revision"`
 	Action       string     `json:"action"`
@@ -68,11 +70,22 @@ func validAdminText(value string, max int) bool {
 // charged allocation is allowed, but blocks further claims, never frees charges.
 // Every effective edit closes readiness and invalidates any collector fence.
 func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange) error {
+	return s.applyPolicyChange(ctx, change, false, false)
+}
+
+// ApplyAdminPolicyChange restricts browser activation to configured placement
+// candidates with a verified daemon binding and a fresh reconciled inventory.
+// A successful change still requires a new reconciliation before admission.
+func (s *SQLiteStore) ApplyAdminPolicyChange(ctx context.Context, change PolicyChange, provisioning bool) error {
+	return s.applyPolicyChange(ctx, change, true, provisioning)
+}
+
+func (s *SQLiteStore) applyPolicyChange(ctx context.Context, change PolicyChange, managed, provisioning bool) error {
 	if len(change.Revision) != 64 || !validAdminText(change.Reason, 256) || len(change.Target) > 256 || (change.Target != "" && !validAdminText(change.Target, 256)) {
 		return ErrDenied
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		config, _, _, _, err := sqliteMetadata(tx)
+		config, ready, _, _, err := sqliteMetadata(tx)
 		if err != nil {
 			return err
 		}
@@ -108,13 +121,35 @@ func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange
 				old = host.Budget
 				host.Budget = *change.Budget
 			} else {
-				if change.Budget != nil || change.CPUCapMillis != nil || (change.Mode != "enabled" && change.Mode != "disabled") {
+				if change.Budget != nil || change.CPUCapMillis != nil || (change.Mode != "enabled" && change.Mode != "disabled" && change.Mode != "draining") {
 					return ErrDenied
+				}
+				if managed && change.Mode == "enabled" && host.Mode != "enabled" {
+					if err := s.checkHostActivation(tx, config, change.Target, ready && provisioning); err != nil {
+						return err
+					}
 				}
 				old = host.Mode
 				host.Mode = change.Mode
 			}
 			config.Hosts[change.Target] = host
+		case "host_draft_remove":
+			if change.Budget != nil || change.CPUCapMillis != nil || change.Mode != "" {
+				return ErrDenied
+			}
+			host, exists := config.Hosts[change.Target]
+			if !exists || provisioning || host.Mode != "disabled" || host.Healthy ||
+				len(config.Hosts) <= 1 || hostHasPool(config, change.Target) {
+				return ErrHostDraftRemoval
+			}
+			if err := checkHostDraftRemoval(tx, change.Target); err != nil {
+				return err
+			}
+			old = host
+			delete(config.Hosts, change.Target)
+			if err := sqliteAudit(tx, "host_draft_removed", change.Target, s.now()); err != nil {
+				return err
+			}
 		case "pool_budget":
 			pool, ok := config.Pools[change.Target]
 			if !ok || change.Mode != "" || change.Budget == nil || change.CPUCapMillis != nil {
@@ -152,4 +187,66 @@ func (s *SQLiteStore) ApplyPolicyChange(ctx context.Context, change PolicyChange
 		}
 		return sqliteAudit(tx, "admin_policy_change", string(audit), s.now())
 	})
+}
+
+func (s *SQLiteStore) checkHostActivation(tx *sql.Tx, config Config, id string, ready bool) error {
+	host := config.Hosts[id]
+	age := s.now().Sub(host.ObservedAt)
+	if !ready || !host.Healthy || age < 0 || age > config.MaxObservationAge ||
+		host.Budget.CPU <= 0 || host.Budget.RAM <= 0 || host.Budget.Runners <= 0 {
+		return ErrHostActivation
+	}
+	bindings, err := sqliteHostBindings(tx, config)
+	if err != nil {
+		return err
+	}
+	if _, ok := bindings[id]; !ok {
+		return ErrHostActivation
+	}
+	var excluded bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM host_binding_history_exclusions WHERE host=?)", id).Scan(&excluded); err != nil {
+		return err
+	}
+	if excluded {
+		return ErrHostActivation
+	}
+	if !hostHasPool(config, id) {
+		return ErrHostActivation
+	}
+	return nil
+}
+
+func hostHasPool(config Config, id string) bool {
+	for _, pool := range config.Pools {
+		if contains(pool.Hosts, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// Require a consumed discovery review and no retained state associated with
+// the draft. Bindings and immutable enrollment history survive lifecycle edits.
+func checkHostDraftRemoval(tx *sql.Tx, id string) error {
+	const query = `SELECT EXISTS(SELECT 1 FROM onboarding_reviews WHERE consumed_by=:host),
+		EXISTS(
+			SELECT 1 FROM host_bindings WHERE host=:host
+			UNION ALL SELECT 1 FROM host_binding_history_exclusions WHERE host=:host
+			UNION ALL SELECT 1 FROM reservations WHERE host=:host
+			UNION ALL SELECT 1 FROM inventory WHERE host=:host
+			UNION ALL SELECT 1 FROM native_domain_bindings WHERE host=:host
+			UNION ALL SELECT 1 FROM native_domain_overheads WHERE host=:host
+			UNION ALL SELECT 1 FROM native_artifact_overheads WHERE host=:host
+			UNION ALL SELECT 1 FROM runner_mixes WHERE host=:host
+			UNION ALL SELECT 1 FROM usage_samples WHERE host=:host
+			UNION ALL SELECT 1 FROM audit WHERE kind IN ('host_detected','host_draft_removed') AND request_key=:host
+		)`
+	var discovery, retained bool
+	if err := tx.QueryRow(query, sql.Named("host", id)).Scan(&discovery, &retained); err != nil {
+		return err
+	}
+	if !discovery || retained {
+		return ErrHostDraftRemoval
+	}
+	return nil
 }

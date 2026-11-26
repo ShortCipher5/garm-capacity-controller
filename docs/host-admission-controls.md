@@ -23,6 +23,28 @@ Existing creating, idle, running, failed, deleting and unknown allocations remai
 
 The Garm provider's mTLS RPC deliberately has no host-mode/policy route. A future separate admin API must add reviewed authentication, authorization, attributable administrator identity and CSRF/session handling as appropriate before exposing this method. The primitive records host/mode target events, not a complete authenticated admin identity/retention system.
 
+## Server controls in the admin UI
+
+The optional management role can edit the configured budget, pause placement or
+record a drain request from a server card. The UI shows recorded backend health,
+its timestamp, the daemon binding, and any retirement blockers. The write token
+and reviewed revision are required for each change.
+
+Enabling placement requires that the gateway provisioning mode is enabled, the
+server is in a ledger pool, CPU, RAM and runner budgets are positive, and the
+ledger is ready with an authenticated binding and fresh healthy inventory. The
+writer checks those conditions in the same transaction as the mode edit. The
+change closes readiness and invalidates prior collectors. Apply a new barrier
+before resuming claims. Independent physical-host and stock-route qualification
+still governs live admission.
+
+With provisioning off, an operator can discard an unused disabled enrollment
+created through a discovery review. The server must have no pool, binding, or
+retained state. Removal preserves the consumed discovery review and reserves
+the discarded alias permanently. If either audit write fails, the enrollment
+remains present. Server ownership, remote trust, and all retained resources
+require independent retirement evidence before a placed server can be removed.
+
 ## Tested invariants
 
 - Every resource/reservation and its conservative charge survives drain/disable/enable unchanged.
