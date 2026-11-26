@@ -70,7 +70,10 @@ func (c *completedJobCollector) collect(ctx context.Context, cursor cihealth.His
 	if !matrix.Supports(cihealth.FactProviderOriginJoin) || !matrix.Supports(cihealth.FactProcessEpoch) {
 		return cihealth.UsageOmissionJoinUnsupported
 	}
-	if c == nil || c.garm == nil || c.counters == nil || !c.busy.CompareAndSwap(false, true) {
+	if c == nil || c.garm == nil {
+		return cihealth.UsageOmissionCollectionUnavailable
+	}
+	if _, qualified := qualifiedMetrics(matrix, c.counters); !qualified || !c.busy.CompareAndSwap(false, true) {
 		return cihealth.UsageOmissionCollectionUnavailable
 	}
 	defer c.busy.Store(false)
@@ -166,6 +169,46 @@ func (t jobUsageTarget) registration(a demandrepair.CIAttempt, receipt demandrep
 	}, true
 }
 
+type collectorMetrics struct {
+	cpu, ram, readBytes, writeBytes, usedBytes bool
+}
+
+// Qualification applies to the producer that will actually be called. Facts
+// independently proved by some unrelated reader cannot authorize this one.
+func qualifiedMetrics(matrix cihealth.AttributionCapabilityMatrix, source exclusiveJobCounterSource) (collectorMetrics, bool) {
+	if source == nil {
+		return collectorMetrics{}, false
+	}
+	class := source.EvidenceClass()
+	proves := func(fact cihealth.AttributionFact) bool { return matrix.ClassProves(class, fact) }
+	if !proves(cihealth.FactProviderOriginJoin) || !proves(cihealth.FactProcessEpoch) || !proves(cihealth.FactExclusiveJobWindow) {
+		return collectorMetrics{}, false
+	}
+	disk := proves(cihealth.FactDiskCounters)
+	m := collectorMetrics{cpu: proves(cihealth.FactCPUCounters), ram: proves(cihealth.FactRAMCounters),
+		readBytes: disk && proves(cihealth.FactDiskReadBytes), writeBytes: disk && proves(cihealth.FactDiskWriteBytes), usedBytes: disk && proves(cihealth.FactDiskUsedBytes)}
+	return m, m != (collectorMetrics{})
+}
+
+// Only qualified quantities enter the reducer and the sidecar input digest.
+func (m collectorMetrics) restrict(sample *cihealth.JobResourceSample) {
+	if !m.cpu {
+		sample.CPUTimeNanos = cihealth.ResourceValue{}
+	}
+	if !m.ram {
+		sample.RAMBytes = cihealth.ResourceValue{}
+	}
+	if !m.readBytes {
+		sample.DiskReadBytes = cihealth.ResourceValue{}
+	}
+	if !m.writeBytes {
+		sample.DiskWriteBytes = cihealth.ResourceValue{}
+	}
+	if !m.usedBytes {
+		sample.DiskUsedBytes = cihealth.ResourceValue{}
+	}
+}
+
 type attachUsage func(context.Context, cihealth.JobAttributionClaim, cihealth.VerifiedUsageSampleSet, func() bool) error
 
 func collectCounterWindow(ctx context.Context, matrix cihealth.AttributionCapabilityMatrix, reg jobRegistration, counters exclusiveJobCounterSource,
@@ -174,12 +217,8 @@ func collectCounterWindow(ctx context.Context, matrix cihealth.AttributionCapabi
 	if !matrix.Supports(cihealth.FactProviderOriginJoin) || !matrix.Supports(cihealth.FactProcessEpoch) {
 		return cihealth.UsageOmissionJoinUnsupported
 	}
-	class := counters.EvidenceClass()
-	cpu := matrix.ClassProves(class, cihealth.FactCPUCounters)
-	ram := matrix.ClassProves(class, cihealth.FactRAMCounters)
-	disk := matrix.ClassProves(class, cihealth.FactDiskCounters)
-	if (!cpu && !ram && !disk) || !matrix.ClassProves(class, cihealth.FactProviderOriginJoin) ||
-		!matrix.ClassProves(class, cihealth.FactProcessEpoch) || !active() {
+	metrics, qualified := qualifiedMetrics(matrix, counters)
+	if !qualified || !active() {
 		return cihealth.UsageOmissionCollectionUnavailable
 	}
 	w, reason := counters.openExclusive(ctx, reg.execution, reg.row)
@@ -233,18 +272,7 @@ func collectCounterWindow(ctx context.Context, matrix cihealth.AttributionCapabi
 			i > 0 && !sample.At.After(set.Samples[i-1].At) {
 			return cihealth.UsageOmissionUnbracketed
 		}
-		// Capabilities of other readers cannot qualify this producer's
-		// units or counters. The reducer separately checks and omits
-		// inputs unsupported by the entire matrix.
-		if !cpu && matrix.Supports(cihealth.FactCPUCounters) {
-			sample.CPUTimeNanos = cihealth.ResourceValue{}
-		}
-		if !ram && matrix.Supports(cihealth.FactRAMCounters) {
-			sample.RAMBytes = cihealth.ResourceValue{}
-		}
-		if !disk && matrix.Supports(cihealth.FactDiskCounters) {
-			sample.DiskReadBytes, sample.DiskWriteBytes, sample.DiskUsedBytes = cihealth.ResourceValue{}, cihealth.ResourceValue{}, cihealth.ResourceValue{}
-		}
+		metrics.restrict(&sample)
 		set.Samples = append(set.Samples, sample)
 	}
 	result := cihealth.BuildVerifiedJobUsage(matrix, claim, set, now())

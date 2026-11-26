@@ -35,7 +35,8 @@ incarnation, boot ID and process start ticks, and exclusive assignment for
 the entire completed interval. It must supply independently observed opening
 and closing brackets and bind every point to the same job and process epoch.
 Overlapping or ambiguous assignment must produce an omission. A reader may
-only supply metrics qualified for its evidence class. The stock Incus 7.0.2
+only supply metrics qualified for its evidence class. Read bytes, write bytes
+and occupied bytes each require their own unit qualification. The stock Incus 7.0.2
 named runtime-health reader observes CPU time and memory on its chosen
 subject. Its gauges, process ID and timestamps cannot establish the missing
 links. The hosted disposable counter fixture does not change this matrix.

@@ -248,8 +248,14 @@ func (s *UsageAttachmentStore) publish(ctx context.Context, payload []byte, curr
 	if current != nil && !current() {
 		return ErrUsageAttachment
 	}
-	if !historyActive(ctx) || !s.ownsCurrent() || !s.missing(usageAttachmentStage) || !historyActive(ctx) {
+	if !s.ownsCurrent() || !s.missing(usageAttachmentStage) {
 		s.failed = true
+		return ErrUsageAttachment
+	}
+	if !historyActive(ctx) {
+		if current == nil {
+			s.failed = true
+		}
 		return ErrUsageAttachment
 	}
 	file, err := s.root.OpenFile(usageAttachmentStage, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0600)
@@ -264,7 +270,7 @@ func (s *UsageAttachmentStore) publish(ctx context.Context, payload []byte, curr
 	}()
 	s.failed = true
 	info, err := file.Stat()
-	if err != nil || !historyPrivate(info, false) || info.Size() != 0 || !historyActive(ctx) {
+	if err != nil || !historyPrivate(info, false) || info.Size() != 0 || (current == nil && !historyActive(ctx)) {
 		return ErrUsageAttachment
 	}
 	n, err := file.Write(payload)
@@ -277,13 +283,16 @@ func (s *UsageAttachmentStore) publish(ctx context.Context, payload []byte, curr
 		!s.ownsCurrent() {
 		return ErrUsageAttachment
 	}
-	if !historyActive(ctx) || (current != nil && !current()) {
+	if current != nil && (!historyActive(ctx) || !current()) {
 		// The unpublished stage still matches our held descriptor and the
 		// original committed file is intact. Discard only this known stage.
 		// An uncertain unlink or directory sync leaves the handle fenced.
 		if s.root.Remove(usageAttachmentStage) == nil && s.dir.Sync() == nil && s.missing(usageAttachmentStage) && s.ownsCurrent() {
 			s.failed = false
 		}
+		return ErrUsageAttachment
+	}
+	if current == nil && !historyActive(ctx) {
 		return ErrUsageAttachment
 	}
 	fd := int(s.dir.Fd())
@@ -576,8 +585,11 @@ func (s *UsageAttachmentStore) attach(ctx context.Context, claim JobAttributionC
 	if window != nil {
 		receiptsCurrent := current
 		current = func() bool {
-			_, fresh := usageObservationTime(claim, set, s.now().UTC())
-			return fresh && historyActive(ctx) && receiptsCurrent()
+			at := s.now().UTC()
+			_, fresh := usageObservationTime(claim, set, at)
+			// Locks pin enrollment and the timing cursor through rename. Also
+			// recheck the timing file's custody after the stage has synced.
+			return fresh && !at.Before(window.issued) && s.history.available(ctx) && receiptsCurrent()
 		}
 		if !window.currentLocked() || !current() {
 			return ErrUsageAttachment
