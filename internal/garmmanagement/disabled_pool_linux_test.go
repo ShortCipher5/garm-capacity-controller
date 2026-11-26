@@ -31,6 +31,7 @@ type stageFixture struct {
 	postStatus, getStatus int
 	badPost               bool
 	templateID            uint64
+	failRead              int
 	beforePost, beforeGet func()
 }
 
@@ -53,6 +54,10 @@ func stageSetup(t *testing.T, enabled ...bool) (*Manager, *Journal, *garmapi.Man
 		}
 		if r.Method == "GET" && r.URL.Path == "/api/v1/repositories/"+repoID {
 			f.reads++
+			if f.reads == f.failRead {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]any{"id": repoID, "owner": "example", "name": "app", "pool_balancing_type": "roundrobin"})
 			return
 		}
@@ -523,5 +528,29 @@ func TestStockDisabledPoolKeepsProtocolAndTemplatesAcrossReplay(t *testing.T) {
 	changed.TemplateID = 0
 	if _, err := manager.CreateDisabledPool(ctx, requestID, repoID, expected, changed, "stage stock disabled pool"); !errors.Is(err, ErrRequestConflict) || fixture.posts+fixture.gets+fixture.reads != calls {
 		t.Fatalf("changed protocol replay reached stock GARM: %v", err)
+	}
+}
+
+func TestStockDisabledPoolRejectsFailedSecondReadBeforePOST(t *testing.T) {
+	manager, journal, client, fixture, _ := stageSetup(t, false, true)
+	ctx := t.Context()
+	spec := nativeStageSpec()
+	spec.TemplateID = 12
+	fixture.templateID = spec.TemplateID
+	expected := stageExpected(t, client)
+	fixture.failRead = fixture.reads + 2
+	if _, err := manager.CreateDisabledPool(ctx, requestID, repoID, expected, spec, "stage stock disabled pool"); !errors.Is(err, garmapi.ErrManagementNotDispatched) {
+		t.Fatalf("a proven pre-POST failure was classified as unknown: %v", err)
+	}
+	if fixture.posts != 0 || fixture.gets != 0 || fixture.reads != fixture.failRead {
+		t.Fatal("failed preflight did not stop before dispatch")
+	}
+	status, err := manager.Status(ctx)
+	if err != nil || status.WriteBlocked {
+		t.Fatalf("a proven pre-POST failure left a pending operation: %+v %v", status, err)
+	}
+	audit, err := journal.Audit(ctx, 0, 100)
+	if err != nil || len(audit) != 2 || audit[len(audit)-1].Kind != "rejected" {
+		t.Fatalf("missing definitive non-dispatch audit: %+v %v", audit, err)
 	}
 }
