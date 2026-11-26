@@ -136,3 +136,56 @@ func RetainedDisplayFixture(t *testing.T, attempt AttemptFacts) (*UsageAttachmen
 	s.stop = nil
 	return s, h, cursor
 }
+
+func TestUsageDisplayRejectsContradictoryRetainedMembershipPhases(t *testing.T) {
+	f := newAttachmentFixture(t)
+	a := f.attach(t)
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start, end := a.WindowStart, a.WindowEnd
+	for _, tc := range []struct {
+		name               string
+		row                Clock
+		running, completed bool
+	}{
+		{"skipped", Clock{Phase: Skipped, ObservedAt: end}, false, false},
+		{"late queue", Clock{Phase: Queued, ObservedAt: start.Add(time.Second)}, false, false},
+		{"earlier queue", Clock{Phase: Queued, ObservedAt: start.Add(-time.Second)}, true, true},
+		{"terminal already observed", Clock{Phase: Completed, ObservedAt: end.Add(-time.Second)}, false, false},
+		{"terminal at window end", Clock{Phase: Completed, ObservedAt: end}, false, true},
+		{"terminal later", Clock{Phase: Completed, ObservedAt: end.Add(time.Second)}, true, true},
+		{"running at window end", Clock{Phase: Running, ObservedAt: end}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, dir := snapshotRoot(t)
+			h := snapshotOpenMode(t, dir, true, true)
+			scope := historyScope(a.Job.Attempt)
+			cursor := HistoryCursor{Revision: 1}
+			row := AttemptFacts{Key: a.Job.Attempt, AsOf: f.at, Clock: Clock{Phase: Unknown, ObservedAt: f.at}, Jobs: []JobFacts{{Key: a.Job, Clock: tc.row}}}
+			if err := h.Apply(t.Context(), scope, HistoryCursor{}, cursor, []AttemptFacts{row}, f.at); err != nil {
+				t.Fatal(err)
+			}
+			f.in.History = h
+			f.open(t, false)
+			close(f.store.stop)
+			<-f.store.done
+			f.store.stop = nil
+			for _, phase := range []Phase{Running, Completed} {
+				live := Clock{Phase: phase, StartedAt: start, ObservedAt: end}
+				want := tc.running
+				if phase == Completed {
+					live.CompletedAt = end
+					want = tc.completed
+				}
+				view, ok := f.store.ObserveDisplay(t.Context(), h, cursor, a.Job, live, f.at)
+				if ok != want || view.Current() != want {
+					t.Fatalf("live phase %v: got %v, want %v", phase, ok, want)
+				}
+			}
+			if err := f.store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

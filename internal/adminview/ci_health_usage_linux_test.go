@@ -43,7 +43,7 @@ func TestCIHealthUsageOnExactJobFallsBackToOriginalTiming(t *testing.T) {
 	key := facts[1].Jobs[0].Key
 	foreign := key
 	foreign.Attempt.RepositoryID++
-	wire := json.RawMessage(`{"state":"unavailable","reason":"job_too_short"}`)
+	wire := json.RawMessage(`{"state":"unavailable","reason":"job_too_short_uncaptured"}`)
 	s.attachJobUsage(now, map[cihealth.JobKey]ciUsageJob{foreign: {wire, active.Load}})
 	if !bytes.Equal(call(), base) {
 		t.Fatal("foreign data rendered")

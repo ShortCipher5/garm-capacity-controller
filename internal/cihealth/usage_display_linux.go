@@ -61,7 +61,7 @@ func (s *UsageAttachmentStore) ObserveDisplay(ctx context.Context, h *History, c
 	}
 	a, retained, expires, err := s.readCurrent(ctx, job, now)
 	if err != nil || a.Job != job || !validTime(live.ObservedAt) || cycleAt.After(now) || live.ObservedAt.After(cycleAt) || a.EvidenceAsOf.After(cycleAt) || !live.StartedAt.Equal(a.WindowStart) ||
-		!timingAllowsUsageWindow(live, a.WindowStart, a.WindowEnd) || live.ObservedAt.Before(a.WindowEnd) {
+		!timingAllowsUsageWindow(live, a.WindowStart, a.WindowEnd) || live.ObservedAt.Before(a.WindowEnd) || !displayPhasesCompatible(retained, live) {
 		return none, false
 	}
 	expires = minUsageDeadline(expires, a.EvidenceAsOf.Add(usageAttachmentRetention))
@@ -69,8 +69,7 @@ func (s *UsageAttachmentStore) ObserveDisplay(ctx context.Context, h *History, c
 	switch live.Phase {
 	case Completed:
 		// A shorter sampled prefix cannot be labeled as the whole completed job.
-		if !live.CompletedAt.Equal(a.WindowEnd) || (!retained.CompletedAt.IsZero() && !retained.CompletedAt.Equal(live.CompletedAt)) ||
-			(retained.Phase == Running && !retained.ObservedAt.Before(live.CompletedAt)) {
+		if !live.CompletedAt.Equal(a.WindowEnd) || (!retained.CompletedAt.IsZero() && !retained.CompletedAt.Equal(live.CompletedAt)) {
 			return none, false
 		}
 	case Running:
@@ -92,6 +91,26 @@ func (s *UsageAttachmentStore) ObserveDisplay(ctx context.Context, h *History, c
 		return none, false
 	}
 	return JobUsageDisplay{s, s.currentFD, h.currentFD, now, expires, raw}, true
+}
+
+// Sparse timing rows can still positively contradict execution. Apply
+// their independently observed phases even when their endpoints are absent.
+func displayPhasesCompatible(retained, live Clock) bool {
+	switch retained.Phase {
+	case Skipped:
+		return false
+	case Queued:
+		return !retained.ObservedAt.IsZero() && !retained.ObservedAt.After(live.StartedAt)
+	case Completed:
+		if live.Phase == Running {
+			return !retained.ObservedAt.IsZero() && live.ObservedAt.Before(retained.ObservedAt)
+		}
+		return retained.ObservedAt.IsZero() || !retained.ObservedAt.Before(live.CompletedAt)
+	case Running:
+		return live.Phase != Completed || (!retained.ObservedAt.IsZero() && retained.ObservedAt.Before(live.CompletedAt))
+	default:
+		return true
+	}
 }
 
 func minUsageDeadline(a, b time.Time) time.Time {
