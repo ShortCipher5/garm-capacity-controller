@@ -31,9 +31,12 @@ install -m 0644 -- "$status" "$local_work/status"
 stage="$local_work/stage"
 # The disposable resolver writes here; the host temp parent is private (0700).
 install -d -m 0777 -- "$stage"
+# APT fetches as _apt; its root coordinator must chmod and move files in
+# the _apt-owned mode-0700 partial directories on the private tmpfs.
 timeout --kill-after=10s 380s docker --host unix:///var/run/docker.sock run \
   --rm --platform linux/amd64 --interactive \
   --read-only --cap-drop=ALL --cap-add=CHOWN --cap-add=SETGID --cap-add=SETUID \
+  --cap-add=FOWNER --cap-add=DAC_OVERRIDE \
   --security-opt=no-new-privileges --pids-limit=128 \
   --tmpfs /tmp:rw,nosuid,nodev,size=768m \
   --mount "type=bind,src=$local_work/status,dst=/guest.status,readonly" \
