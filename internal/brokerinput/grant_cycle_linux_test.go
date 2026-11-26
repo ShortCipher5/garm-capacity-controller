@@ -199,7 +199,7 @@ func TestCycleBatchRealLedgerConcurrentReplayAndRestart(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			expiryErrors <- retireExpiredCycleGrants(ctx, reopened, after.Grants, time.Now())
+			expiryErrors <- retireCycleGrants(ctx, reopened, after.Grants, time.Now())
 		}()
 	}
 	wg.Wait()
