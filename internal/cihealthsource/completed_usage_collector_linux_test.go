@@ -55,7 +55,7 @@ func newCounterFixture() *counterFixture {
 		StockSourceID: scope.SourceIdentity, StockPoolUUID: scope.PoolID, StockInstanceUUID: row.RowID, Runtime: epoch, ObservedAt: start, State: cihealth.StockRunnerObservedRunning}
 	f := &counterFixture{now: end.Add(3 * time.Second), retained: true, reg: jobRegistration{x, row, scope, func() bool { return true }}, matrix: cihealth.DocumentedMatrix()}
 	f.matrix.Sources = append(f.matrix.Sources, cihealth.AttributionCapability{Class: "fixture", Proves: []cihealth.AttributionFact{
-		cihealth.FactProviderOriginJoin, cihealth.FactProcessEpoch, cihealth.FactDiskCounters, cihealth.FactCPUCounters, cihealth.FactRAMCounters}})
+		cihealth.FactProviderOriginJoin, cihealth.FactProcessEpoch, cihealth.FactExclusiveJobWindow, cihealth.FactDiskCounters, cihealth.FactDiskReadBytes, cihealth.FactDiskWriteBytes, cihealth.FactDiskUsedBytes, cihealth.FactCPUCounters, cihealth.FactRAMCounters}})
 	f.w = exclusiveCounterWindow{origin: cihealth.VerifiedProviderOrigin{Row: row, Incarnation: epoch, InstanceCreatedAt: epoch.StartedAt, AllocationObservedAt: epoch.StartedAt},
 		initial: binding, closing: binding, execution: x, count: 3, maxGap: cihealth.MaxJobResourceGap, current: func() bool { return true }}
 	f.w.closing.ObservedAt = end
@@ -120,14 +120,46 @@ func TestCollectorReadsIndependentCoverageAndSourceTime(t *testing.T) {
 
 	f = newCounterFixture()
 	f.w.maxGap = 4 * time.Second
-	f.matrix.Sources[len(f.matrix.Sources)-1].Proves = []cihealth.AttributionFact{cihealth.FactProviderOriginJoin, cihealth.FactProcessEpoch, cihealth.FactCPUCounters, cihealth.FactRAMCounters}
+	f.matrix.Sources[len(f.matrix.Sources)-1].Proves = []cihealth.AttributionFact{cihealth.FactProviderOriginJoin, cihealth.FactProcessEpoch, cihealth.FactExclusiveJobWindow, cihealth.FactCPUCounters, cihealth.FactRAMCounters}
 	if reason := f.collect(t.Context()); reason != "" {
 		t.Fatal(reason)
 	}
 	m = f.result.Measured
 	if f.result.State != cihealth.VerifiedUsagePartial || m.CPU.CoveredNanoseconds != "3000000000" || m.RAM.CoveredNanoseconds != "3000000000" ||
-		m.Disk.Read != nil || m.Disk.Write != nil || m.Disk.Used != nil || m.Disk.Reason != cihealth.UsageOmissionDiskUnsupported {
+		m.Disk.Read != nil || m.Disk.Write != nil || m.Disk.Used != nil || m.Disk.Reason != cihealth.UsageOmissionDiskUnmeasured {
 		t.Fatalf("unsupported disk or lost cadence: %+v", m)
+	}
+}
+
+func TestCollectorOmitsUnqualifiedMetricsAndPreservesObservedZero(t *testing.T) {
+	for _, metric := range []cihealth.AttributionFact{cihealth.FactCPUCounters, cihealth.FactRAMCounters, cihealth.FactDiskReadBytes, cihealth.FactDiskWriteBytes, cihealth.FactDiskUsedBytes} {
+		t.Run(string(metric), func(t *testing.T) {
+			f := newCounterFixture()
+			f.matrix.Sources[len(f.matrix.Sources)-1].Proves = []cihealth.AttributionFact{
+				cihealth.FactProviderOriginJoin, cihealth.FactProcessEpoch, cihealth.FactExclusiveJobWindow, cihealth.FactDiskCounters, metric,
+			}
+			// All raw readings are present. Exposing one metric class cannot
+			// release the others, even if a different reader supports them.
+			for i := range f.points {
+				zero := cihealth.ResourceValue{Known: true}
+				f.points[i].CPUTimeNanos, f.points[i].RAMBytes = zero, zero
+				f.points[i].DiskReadBytes, f.points[i].DiskWriteBytes, f.points[i].DiskUsedBytes = zero, zero, zero
+			}
+			if reason := f.collect(t.Context()); reason != cihealth.UsageOmissionNone || f.result.Measured == nil {
+				t.Fatal("qualified zero omitted", reason)
+			}
+			m := f.result.Measured
+			if (m.CPU != nil) != (metric == cihealth.FactCPUCounters) || (m.RAM != nil) != (metric == cihealth.FactRAMCounters) ||
+				(m.Disk.Read != nil) != (metric == cihealth.FactDiskReadBytes) || (m.Disk.Write != nil) != (metric == cihealth.FactDiskWriteBytes) ||
+				(m.Disk.Used != nil) != (metric == cihealth.FactDiskUsedBytes) {
+				t.Fatal("unqualified metric reached the wire")
+			}
+			if m.CPU != nil && (m.CPU.AverageMilliCPU != "0" || m.CPU.PeakMilliCPU != "0" || !m.CPU.Complete) ||
+				m.RAM != nil && (m.RAM.MeanBytes != "0" || m.RAM.SamplePeakBytes != "0" || !m.RAM.Complete) ||
+				m.Disk.Read != nil && m.Disk.Read.Bytes != "0" || m.Disk.Write != nil && m.Disk.Write.Bytes != "0" || m.Disk.Used != nil && m.Disk.Used.SamplePeakBytes != "0" {
+				t.Fatal("measured zero or coverage changed")
+			}
+		})
 	}
 }
 
@@ -140,6 +172,9 @@ func TestCollectorRefusesBeforeAttach(t *testing.T) {
 	}{
 		{"stock", func(f *counterFixture) { f.matrix = cihealth.DocumentedMatrix() }, cihealth.UsageOmissionJoinUnsupported, 0},
 		{"unqualified producer class", func(f *counterFixture) { f.matrix.Sources[len(f.matrix.Sources)-1].Class = "different-source" }, cihealth.UsageOmissionCollectionUnavailable, 0},
+		{"origin and epoch without exclusivity", func(f *counterFixture) {
+			f.matrix.Sources[len(f.matrix.Sources)-1].Proves = []cihealth.AttributionFact{cihealth.FactProviderOriginJoin, cihealth.FactProcessEpoch, cihealth.FactCPUCounters}
+		}, cihealth.UsageOmissionCollectionUnavailable, 0},
 		{"overlap", func(f *counterFixture) { f.reason = cihealth.UsageOmissionOverlap }, cihealth.UsageOmissionOverlap, 0},
 		{"different exclusive attempt", func(f *counterFixture) { f.w.execution.Job.Attempt.Attempt++ }, cihealth.UsageOmissionOverlap, 0},
 		{"missing allocation", func(f *counterFixture) { f.w.origin = cihealth.VerifiedProviderOrigin{} }, cihealth.UsageOmissionJoinUnsupported, 0},

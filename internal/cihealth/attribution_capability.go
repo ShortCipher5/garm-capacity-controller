@@ -56,10 +56,17 @@ const (
 	// and an Incus read proves only its chosen subject. A name, mutable
 	// provider label, timing, or separate TLS on both reads cannot supply it.
 	FactProviderOriginJoin AttributionFact = "provider_origin_join"
+	// FactExclusiveJobWindow is positive evidence that only this job was
+	// assigned to this incarnation over the entire sampled interval.
+	FactExclusiveJobWindow AttributionFact = "exclusive_job_window"
 	// FactDiskCounters is per-instance attributable disk usage/I-O. The
 	// runtime health read supplies no disk counters; host free disk is not
 	// job usage.
 	FactDiskCounters AttributionFact = "disk_counters"
+	// A collection producer must separately qualify each released disk unit.
+	FactDiskReadBytes  AttributionFact = "disk_cumulative_read_bytes"
+	FactDiskWriteBytes AttributionFact = "disk_cumulative_write_bytes"
+	FactDiskUsedBytes  AttributionFact = "disk_occupied_bytes_gauge"
 )
 
 // AttributionCapability documents one evidence source: the exact facts its
@@ -92,11 +99,15 @@ func DocumentedMatrix() AttributionCapabilityMatrix {
 			NeverProves: []AttributionFact{
 				FactExactStockRow,
 				FactProviderOriginJoin,
+				FactExclusiveJobWindow,
 				FactIncusIncarnation,
 				FactProcessEpoch,
 				FactCPUCounters,
 				FactRAMCounters,
 				FactDiskCounters,
+				FactDiskReadBytes,
+				FactDiskWriteBytes,
+				FactDiskUsedBytes,
 			},
 		},
 		{
@@ -112,11 +123,15 @@ func DocumentedMatrix() AttributionCapabilityMatrix {
 				FactExactJobIdentity,
 				FactPositiveRunnerRegistration,
 				FactProviderOriginJoin,
+				FactExclusiveJobWindow,
 				FactIncusIncarnation,
 				FactProcessEpoch,
 				FactCPUCounters,
 				FactRAMCounters,
 				FactDiskCounters,
+				FactDiskReadBytes,
+				FactDiskWriteBytes,
+				FactDiskUsedBytes,
 			},
 		},
 		{
@@ -133,7 +148,11 @@ func DocumentedMatrix() AttributionCapabilityMatrix {
 				FactExactStockRow,
 				FactPositiveStockRowAgent,
 				FactProviderOriginJoin,
+				FactExclusiveJobWindow,
 				FactDiskCounters,
+				FactDiskReadBytes,
+				FactDiskWriteBytes,
+				FactDiskUsedBytes,
 			},
 		},
 	}}
