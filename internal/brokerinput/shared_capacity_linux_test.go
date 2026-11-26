@@ -1,7 +1,6 @@
 package brokerinput
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -55,12 +54,19 @@ func scExecution() admission.ExecutionImage {
 // enforces freshness against it.
 func sharedCapacityStoreFixture(t *testing.T, stock *httptest.Server, trust *tls.Config) (*admission.SQLiteStore, string) {
 	t.Helper()
-	ctx := context.Background()
+	return enrolledSharedCapacityStore(t, stock, trust, scPools, []string{scPoolA, scPoolB, scPoolC})
+}
+
+func enrolledSharedCapacityStore(t *testing.T, stock *httptest.Server, trust *tls.Config, identities []scPool, held []string) (*admission.SQLiteStore, string) {
+	t.Helper()
+	ctx := t.Context()
 	now := time.Now().UTC()
 	controllerID := "controller"
 	domain := strings.Repeat("a", 64)
-	repos := []string{scRepoA, scRepoB, scRepoC}
-	pools := []string{scPoolA, scPoolB, scPoolC}
+	var pools []string
+	for _, p := range identities {
+		pools = append(pools, p.id)
+	}
 	policyPools := map[string]nativeapi.Pool{}
 	for _, pool := range pools {
 		policyPools[pool] = nativeapi.Pool{Flavor: "small", Image: "image", Fingerprint: strings.Repeat("b", 64), Type: "container", Arch: "amd64", ExpectedProfiles: []string{"runner"}, StoragePool: "storage", Bridge: "bridge"}
@@ -93,9 +99,16 @@ func sharedCapacityStoreFixture(t *testing.T, stock *httptest.Server, trust *tls
 		Hosts: map[string]admission.Host{"host": {Budget: total, Healthy: true, Mode: "enabled", ObservedAt: now}},
 		Pools: map[string]admission.Pool{}}
 	policy := admission.BrokerPolicy{Revision: 0}
-	for i := range repos {
-		policy.Repositories = append(policy.Repositories, admission.BrokerRepositoryPolicy{ID: repos[i], Weight: 1, MaxRunners: 4, Pools: []admission.BrokerPoolPolicy{{ID: pools[i], MaxRunners: 4}}})
-		config.Pools[pools[i]] = admission.Pool{Budget: total, Hosts: []string{"host"}}
+	repoIndex := map[string]int{}
+	for _, p := range identities {
+		i, found := repoIndex[p.repo]
+		if !found {
+			i = len(policy.Repositories)
+			repoIndex[p.repo] = i
+			policy.Repositories = append(policy.Repositories, admission.BrokerRepositoryPolicy{ID: p.repo, Weight: 1, MaxRunners: 4})
+		}
+		policy.Repositories[i].Pools = append(policy.Repositories[i].Pools, admission.BrokerPoolPolicy{ID: p.id, MaxRunners: 4})
+		config.Pools[p.id] = admission.Pool{Budget: total, Hosts: []string{"host"}}
 	}
 	path := filepath.Join(t.TempDir(), "ledger.db")
 	store, err := admission.OpenSQLite(path, config)
@@ -140,13 +153,15 @@ func sharedCapacityStoreFixture(t *testing.T, stock *httptest.Server, trust *tls
 	if err = store.CompleteReconciliation(ctx, fence, admission.InventorySnapshot{Hosts: []admission.HostObservation{{Host: "host", ObservedAt: time.Now().UTC(), Healthy: true, GarmComplete: true, IncusComplete: true, OperationsComplete: true, Bounded: true}}}); err != nil {
 		t.Fatal(err)
 	}
+	if len(held) == 0 {
+		return store, path
+	}
 	state, err := store.ReadBrokerGrantState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Three durable grants are already committed: one slot remains.
-	grants := make([]admission.BrokerGrantSpec, 0, 3)
-	for _, pool := range pools {
+	grants := make([]admission.BrokerGrantSpec, 0, len(held))
+	for _, pool := range held {
 		grants = append(grants, admission.BrokerGrantSpec{Authority: scAuthority(pool), Host: "host", HostBindingSequence: binding.Sequence, Resources: scSize, Execution: scExecution(), ExpiresAt: now.Add(time.Hour)})
 	}
 	batchID := sha256.Sum256([]byte("shared-capacity-fixture-grants"))

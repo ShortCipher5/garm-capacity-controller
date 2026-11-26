@@ -34,7 +34,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 29
+const sqliteCurrentVersion = 30
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -464,6 +464,19 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 30 {
+			// Older v29 handles check user_version before every write. Fence
+			// them out before enforcing the new shared admission semantics.
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS shared_admission_barriers ON audit(sequence)
+ WHERE kind IN ('reconciliation_completed','advisory_broker_policy_replaced');
+ UPDATE metadata SET ready=0,nonce='',began_at='' WHERE id=1;
+ PRAGMA user_version=30;`); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v30", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -834,6 +847,24 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 		allocated, err := sqliteAllocationsWithGrants(tx, config, reservations, inventory, released)
 		if err != nil {
 			return err
+		}
+		policy, err := sqliteBrokerPolicy(tx)
+		if err != nil {
+			return err
+		}
+		shared, err := readSharedAdmission(tx, policy, allocated)
+		if err != nil {
+			return err
+		}
+		if shared != nil {
+			bindings, err := sqliteHostBindings(tx, config)
+			if err != nil {
+				return err
+			}
+			if !shared.permitsCharge(req.Pool, req.Resources, req.Resources.Runners, allocated.Pools[req.Pool].Runners) ||
+				!shared.permitsHost(req.Pool, req.Host, bindings[req.Host].Sequence, config) {
+				return deny("denied_shared_policy", ErrDenied)
+			}
 		}
 		if !fits(allocated.Global, req.Resources, config.Global) || !fits(allocated.Hosts[req.Host], req.Resources, host.Budget) || !fits(allocated.Pools[req.Pool], req.Resources, pool.Budget) {
 			return deny("denied_capacity", ErrDenied)
