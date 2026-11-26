@@ -18,8 +18,20 @@ done
 sudo -n true
 version='1:7.0.2-ubuntu24.04-202611021332'
 publisher='4EFC590696CB15B87C73A3AD82CC8797C838DCFD'
-work="$(mktemp -d)"
-trap 'rm -rf -- "$work"' EXIT
+work="$(mktemp -d /tmp/gcc-noble-incus.XXXXXXXX)"
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  # apt-get runs as root and may create protected state under this exact directory.
+  if [[ $work == /tmp/gcc-noble-incus.* && -d $work && ! -L $work ]]; then
+    if ! timeout 15s sudo -n rm -rf -- "$work"; then
+      printf 'Could not remove the temporary APT workspace\n' >&2
+      if (( rc == 0 )); then rc=1; fi
+    fi
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 chmod 755 "$work"
 mkdir -m 0755 "$work/sources" "$work/lists" "$work/archives"
 mkdir -m 0700 "$work/gnupg"

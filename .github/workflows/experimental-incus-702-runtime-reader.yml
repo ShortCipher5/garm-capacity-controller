@@ -1,11 +1,11 @@
 name: experimental-incus-702-runtime-reader
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/experimental-incus-702-runtime-reader.yml
       - deploy/runtime/hosted-incus/exact-noble-runtime.sh
       - deploy/runtime/hosted-incus/install-noble-incus-702.sh
-      - deploy/runtime/hosted-incus/probe-noble-incus-index.sh
       - deploy/runtime/hosted-incus/runtime_health_702_test.go
       - internal/incusapi/**
       - go.mod
@@ -38,13 +38,3 @@ jobs:
         shell: bash
         run: |
           echo 'Experimental only; not a required check. This can test authenticated Incus runtime reads, not a deployed GARM integration or actual GitHub job attribution.' >> "$GITHUB_STEP_SUMMARY"
-  discover-native-incus:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 4
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: List Incus packages in the authenticated Noble LTS index
-        shell: bash
-        run: bash deploy/runtime/hosted-incus/probe-noble-incus-index.sh
