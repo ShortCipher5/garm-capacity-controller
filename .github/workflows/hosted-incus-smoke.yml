@@ -1,0 +1,40 @@
+name: hosted-incus-stock-garm-smoke
+on:
+  pull_request:
+    paths:
+      - .github/workflows/hosted-incus-smoke.yml
+      - Dockerfile
+      - .dockerignore
+      - deploy/**
+      - cmd/**
+      - internal/**
+      - go.mod
+      - go.sum
+      - integration/garm-v0.2.1/**
+      - web/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: hosted-incus-smoke-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  stock-garm-incus-coexistence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Exercise real Incus beside the stock GARM packaging specimen
+        shell: bash
+        run: bash deploy/runtime/hosted-incus/smoke.sh
+      - name: State the test boundary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Hosted Incus and stock GARM coexistence smoke'
+            echo 'This checks a disposable Incus guest and the existing isolated stock GARM/gateway specimen on the same worker.'
+            echo 'It does not exercise authenticated gateway-to-Incus reads, GitHub runner registration, production capacity enforcement, queue recovery or exact-job attribution.'
+          } >> "$GITHUB_STEP_SUMMARY"

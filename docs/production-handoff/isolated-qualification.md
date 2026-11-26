@@ -26,6 +26,12 @@ Production trackers [#53](https://github.com/ShortCipher5/garm-capacity-controll
 - **Pass evidence.** The current reconciliation proves the relevant scope, and the continuing fence has fresh post-barrier evidence. The guarded transaction credits exactly the original vector once. Retry and restart show the same tombstone and zero additional credit. Wrong generation, retained storage, stale fence, disputed outcome and reappearing inventory preserve or restore the applicable charge or hold without implying reusable capacity.
 - **Stop condition.** Any witness relies on a name, a successful provider acknowledgment, a missing row, or incomplete visibility. Preserve the charge. [Plan #392](https://github.com/ShortCipher5/garm-capacity-controller/pull/392)
 
+## Queued job recovery after retirement
+
+- Record the exact waiting GitHub repository, run, attempt and numeric job before exhausting eligible headroom. Predeclare the observation window and the events that start and end it. Once independently verified retirement restores eligible headroom, observe whether that same job starts within the window.
+- **Pass evidence.** The attempt-scoped GitHub job record shows the original waiting job started. A free ledger slot, a ready runner, a successful request or a different job starting is not recovery. Record budget enforcement, capacity restoration and queue recovery as separate results. See [the stock scaling release boundary](../stock-scaling-release-boundary.md).
+- **Where to run it.** Public contributor CI can exercise deterministic queue events and a local disposable backend without credentials. Real GitHub registration and assignment belong in a separate trusted workflow on a reviewed revision against dedicated fixture repositories, with no credentials exposed to fork code and no access to production runners. Keep installed-environment checks separate.
+
 ## Per-job usage and retention
 
 - Join the exact enrolled source, repository, workflow, run, attempt and job to the assigned numeric runner registration. Prove the original GARM row and provider allocation lead to the immutable runtime incarnation, including process epoch. Bracket the independently observed job window and compare each supported measure with the installed source's documented units and sampling behavior.
