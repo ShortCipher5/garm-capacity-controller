@@ -33,9 +33,6 @@ jobs:
       - name: Exercise real Incus beside the stock GARM packaging specimen
         shell: bash
         run: bash deploy/runtime/hosted-incus/smoke.sh
-      - name: Authenticate to an isolated stock GARM inventory
-        shell: bash
-        run: timeout --kill-after=15s 360s bash deploy/runtime/stock-inventory/smoke.sh
       - name: State the test boundary
         if: always()
         shell: bash
@@ -43,6 +40,22 @@ jobs:
           {
             echo '## Hosted Incus and stock GARM coexistence smoke'
             echo 'This checks the controller Incus client over authenticated loopback TLS, using disposable native project restriction, and runs the existing stock GARM/gateway specimen on the same worker.'
-            echo 'Stock GARM empty inventory is tested separately using a fresh fixture-only daemon and credentials, not an enrolled runner.'
             echo 'Incus client inventory reads are proven separately from the gateway process. Live counter inputs may feed a synthetic exact-job join; this does not prove live GitHub job assignment or release authority.'
           } >> "$GITHUB_STEP_SUMMARY"
+  stock-garm-authenticated-inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Check stock inventory probe assertions
+        run: python3 -B -m unittest discover -s deploy/runtime/stock-inventory -v
+      - name: Authenticate to an isolated stock GARM inventory
+        shell: bash
+        run: timeout --kill-after=15s 360s bash deploy/runtime/stock-inventory/smoke.sh
+      - name: State the stock inventory test boundary
+        if: always()
+        shell: bash
+        run: |
+          echo 'Stock GARM fixture-only admin authentication and empty inventory; no enrolled runner, gateway integration or live qualification.' >> "$GITHUB_STEP_SUMMARY"

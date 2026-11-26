@@ -45,8 +45,10 @@ sudo install -m 0600 -o 65532 -g 65532 "$work/fixture/private/ca.pem" "$work/pro
 sudo chown -R 65530:65530 "$work/fixture/private" "$work/fixture/state"
 
 base=(--read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --cpus 1 --memory 512m)
-! docker container inspect "$name" >/dev/null 2>&1
-! docker container inspect "$probe_name" >/dev/null 2>&1
+if docker container inspect "$name" >/dev/null 2>&1 || docker container inspect "$probe_name" >/dev/null 2>&1; then
+  echo 'Unexpected existing stock fixture container' >&2
+  exit 1
+fi
 daemon_owned=true
 docker run -d --name "$name" --network none "${base[@]}" --user 65530:65530 --workdir / \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65530,gid=65530,mode=0700 \
@@ -75,8 +77,10 @@ docker stop --time 30 "$name" >/dev/null
 [[ $(docker inspect --format '{{.State.ExitCode}}' "$name") = 0 ]]
 docker rm "$name" >/dev/null
 daemon_owned=false
-! docker container inspect "$name" >/dev/null 2>&1
-! docker container inspect "$probe_name" >/dev/null 2>&1
+if docker container inspect "$name" >/dev/null 2>&1 || docker container inspect "$probe_name" >/dev/null 2>&1; then
+  echo 'Stock fixture container remains' >&2
+  exit 1
+fi
 sudo rm -rf -- "$work"
 trap - EXIT
 echo "PASS authenticated stock empty inventory fixture cleaned up; no enrolled runner or live qualification"

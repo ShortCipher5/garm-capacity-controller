@@ -20,6 +20,10 @@ are disabled. No secret, private API response, or raw identity is printed.
   prior reservation retired and eligible headroom for the waiting job was
   restored in the same resource/budget scope. Review its byte digest separately.
   Scope and distinct reservation digests must be independently reconciled.
+  Independently bind the replacement allocation to its exact numeric GitHub
+  runner registration before reviewing the receipt. Do not derive the expected
+  registration solely from the same job response the observer checks, and do not
+  accept a display name as registration identity.
   An arbitrary JSON fixture, timestamp or stock-model simulation is **not** a
   qualified receipt. This repository currently does not produce the necessary
   qualification evidence for actual stock GARM. Do not enable a required live
@@ -32,6 +36,7 @@ checkout** with the following exact keys:
 - `reviewed_sha`: exact reviewed controller commit (40 lowercase hex)
 - `repo`: exact allowlisted GitHub owner/repository
 - `repo_id`, `run_id`, `attempt`, `job_id`: positive JSON integers
+- `expected_runner_id`: exact independently reviewed numeric replacement registration
 - `run_head_sha`: reviewed fixture workflow commit (40 lowercase hex)
 - `scope_digest`: reviewed shared-capacity scope (64 lowercase hex)
 - `receipt_sha256`: exact reviewed receipt bytes (64 lowercase hex)
@@ -41,7 +46,7 @@ checkout** with the following exact keys:
 The reviewed receipt uses these exact keys:
 
 - `schema`: `capacity-retirement-observation-v1`
-- `repo_id`, `run_id`, `attempt`, `job_id`, `scope_digest`: exact policy bindings
+- `repo_id`, `run_id`, `attempt`, `job_id`, `scope_digest`, `expected_runner_id`: exact policy bindings
 - `blocked_reservation_digest`, `retired_reservation_digest`: distinct 64-character lowercase hex
 - `queued_at`, `released_at`: UTC timestamps with `Z` suffix
 
@@ -70,11 +75,14 @@ Do not expose it to fork PRs, arbitrary-ref checkouts, or setup/build steps.
 The launcher should not run from a public PR, and this contribution deliberately
 does not enable a secret-bearing workflow without approved evidence sources.
 
-A pass means the exact original fixture job is assigned and started **strictly
-after** the independently reviewed release time and inside the declared window.
-No inference from a different started job or from a vacant slot. Ambiguous
-same-second order is a block. It is not a claim about production or an assertion
-that unrelated jobs are safe to proceed.
+A pass means the exact original fixture job started on the independently
+reviewed replacement runner registration **strictly after** the reviewed
+release time and inside the declared window. A different runner ID is rejected,
+even when the display name matches. No inference from a different started job
+or from a vacant slot. Ambiguous same-second order is a block. The observer
+accepts an in-progress job with observed start, so a pass does not establish
+job completion or completed-lifecycle acceptance. It is not a production claim
+or an assertion that unrelated jobs are safe to proceed.
 
 No-secret component tests can run in ordinary GitHub Actions:
 

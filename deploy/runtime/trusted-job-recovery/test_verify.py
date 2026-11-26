@@ -13,21 +13,23 @@ NOW = datetime(2026, 11, 25, 12, tzinfo=timezone.utc)
 RUN = 9007199254740993
 JOB = 9007199254740995
 REPO = 9007199254740997
+RUNNER = 9007199254740999
 
 
 def fixtures():
     policy = dict(schema="recovery-policy-v1", reviewed_sha="a" * 40,
                   repo="fixture-org/recovery-fixture", repo_id=REPO, run_id=RUN, attempt=3,
                   job_id=JOB, run_head_sha="b" * 40, scope_digest="c" * 64,
-                  declared_at="2026-11-25T11:40:00Z", window_seconds=30)
+                  declared_at="2026-11-25T11:40:00Z", window_seconds=30, expected_runner_id=RUNNER)
     receipt = dict(schema="capacity-retirement-observation-v1", repo_id=REPO, run_id=RUN,
                    attempt=3, job_id=JOB, scope_digest="c" * 64,
                    queued_at="2026-11-25T11:45:00Z", released_at="2026-11-25T11:51:00Z",
-                   blocked_reservation_digest="d" * 64, retired_reservation_digest="e" * 64)
+                   blocked_reservation_digest="d" * 64, retired_reservation_digest="e" * 64,
+                   expected_runner_id=RUNNER)
     run = dict(repository=dict(id=REPO, full_name=policy["repo"]), id=RUN, run_attempt=3,
                head_sha="b" * 40, head_repository=dict(id=REPO, full_name=policy["repo"]))
     job = dict(id=JOB, run_id=RUN, run_attempt=3, head_sha="b" * 40, status="completed",
-               conclusion="success", runner_id=17, started_at="2026-11-25T11:51:23Z",
+               conclusion="success", runner_id=RUNNER, runner_name="fixture-runner", started_at="2026-11-25T11:51:23Z",
                completed_at="2026-11-25T11:51:58Z")
     jobs = dict(jobs=[dict(job, id=JOB-1), job], total_count=2)
     return policy, receipt, run, jobs
@@ -62,6 +64,8 @@ class RecoveryEvidenceTest(unittest.TestCase):
             ("other job started", "job", "id", JOB+1),
             ("wrong job ancestry", "job", "run_attempt", 2),
             ("no runner", "job", "runner_id", None),
+            ("same name but different registration", "job", "runner_id", RUNNER + 1),
+            ("runner ID is not numeric", "job", "runner_id", str(RUNNER)),
             ("queued", "job", "status", "queued"),
             ("skipped", "job", "conclusion", "skipped"),
             ("unknown completion", "job", "conclusion", "unknown"),
@@ -89,6 +93,9 @@ class RecoveryEvidenceTest(unittest.TestCase):
         cases = [
             ("receipt", "job_id", JOB-1), ("receipt", "scope_digest", "f"*64),
             ("receipt", "retired_reservation_digest", receipt["blocked_reservation_digest"]),
+            ("receipt", "expected_runner_id", RUNNER + 1),
+            ("receipt", "expected_runner_id", True),
+            ("policy", "expected_runner_id", "9007199254740999"),
             ("receipt", "queued_at", receipt["released_at"]),
             ("receipt", "released_at", "2026-11-26T11:51:00Z"),
             ("policy", "declared_at", receipt["released_at"]),
@@ -102,6 +109,19 @@ class RecoveryEvidenceTest(unittest.TestCase):
                 dict(policy=p, receipt=r)[description][key] = value
                 with self.assertRaises(verify.Invalid):
                     verify.observe(p, bind(p, r), NOW, lambda _: self.fail("unexpected request"))
+
+    def test_missing_runner_registration_fields(self):
+        for target in ("policy", "receipt", "GitHub job"):
+            with self.subTest(target=target):
+                policy, receipt, run, jobs = fixtures()
+                if target == "GitHub job":
+                    del jobs["jobs"][1]["runner_id"]
+                    get = lambda path: jobs if "/jobs?" in path else run
+                else:
+                    del {"policy": policy, "receipt": receipt}[target]["expected_runner_id"]
+                    get = lambda _: self.fail("malformed reviewed inputs reached the network")
+                with self.assertRaises(verify.Invalid):
+                    verify.observe(policy, bind(policy, receipt), NOW, get)
 
     def test_ref_protection_before_loading_token(self):
         bad_env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",

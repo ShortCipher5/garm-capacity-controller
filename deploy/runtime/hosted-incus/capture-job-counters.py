@@ -33,41 +33,53 @@ def process_ticks(pid):
     return positive(int(stat.rsplit(")", 1)[1].split()[19]), "process start ticks")
 
 
-def incus(project, *arguments):
+def incus(*arguments):
     return subprocess.run(
         ["sudo", "-n", "env", "-u", "INCUS_DIR", "-u", "INCUS_REMOTE",
-         "incus", "--project", project, *arguments],
+         "incus", *arguments],
         check=True, capture_output=True, timeout=12,
     ).stdout
 
 
-def capture(guest, project):
-    instance = f"local:/1.0/instances/{guest}"
-    metadata = json.loads(incus(project, "query", instance))
+def query(path, project):
+    # Incus 6 rejects the global --project flag for raw query. Keep the
+    # project in the API URI and local socket selection explicit.
+    return json.loads(incus("query", f"{path}?project={project}"))
+
+
+def guest_identity(metadata, guest, project):
     if metadata["name"] != guest or metadata["type"] != "container" or metadata["status"] != "Running":
         raise ValueError("incorrect guest metadata")
     if metadata.get("project", project) != project:
         raise ValueError("incorrect guest project")
     config = metadata["config"]
+    return identity_uuid(config["volatile.uuid"]), identity_uuid(config["volatile.uuid.generation"])
+
+
+def capture(guest, project):
+    instance = f"local:/1.0/instances/{guest}"
+    identity = guest_identity(query(instance, project), guest, project)
     observed = datetime.datetime.now(datetime.timezone.utc)
-    state = json.loads(incus(project, "query", f"{instance}/state"))
+    state = query(f"{instance}/state", project)
     if state["status"] != "Running" or state["status_code"] != 103:
         raise ValueError("guest not running")
     pid = positive(state["pid"], "guest PID")
     if not 1 < pid <= 2**31 - 1:
         raise ValueError("invalid guest PID")
     ticks = process_ticks(pid)
-    confirmed = json.loads(incus(project, "query", f"{instance}/state"))
+    confirmed = query(f"{instance}/state", project)
     if confirmed["pid"] != pid or confirmed["status"] != "Running" or process_ticks(pid) != ticks:
         raise ValueError("guest process changed during sample")
+    if guest_identity(query(instance, project), guest, project) != identity:
+        raise ValueError("guest incarnation changed during sample")
     btime = next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines()
                  if line.startswith("btime "))
     tick_hz = positive(os.sysconf("SC_CLK_TCK"), "kernel tick rate")
     return {
         "project": project,
         "name": guest,
-        "uuid": identity_uuid(config["volatile.uuid"]),
-        "generation": identity_uuid(config["volatile.uuid.generation"]),
+        "uuid": identity[0],
+        "generation": identity[1],
         "boot_id": identity_uuid(Path("/proc/sys/kernel/random/boot_id").read_text().strip()),
         "pid": pid,
         "start_ticks": ticks,
@@ -91,15 +103,23 @@ def main():
     output = Path(destination)
     if work not in output.resolve().parents:
         raise SystemExit("output must stay under runner temp")
-    before = capture(guest, project)
-    # Run only this finite, known workload on the disposable guest.
-    incus(project, "exec", f"local:{guest}", "--", "/bin/sh", "-ec",
-          'i=0; while [ "$i" -lt 20000 ]; do i=$((i+1)); done')
-    time.sleep(0.25)
-    after = capture(guest, project)
-    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump([before, after], stream, separators=(",", ":"))
+    stage = "before-sample"
+    try:
+        before = capture(guest, project)
+        # Run only this finite, known workload on the disposable guest.
+        stage = "workload"
+        incus("--project", project, "exec", f"local:{guest}", "--", "/bin/sh", "-ec",
+              'i=0; while [ "$i" -lt 20000 ]; do i=$((i+1)); done')
+        time.sleep(0.25)
+        stage = "after-sample"
+        after = capture(guest, project)
+        stage = "private-output"
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump([before, after], stream, separators=(",", ":"))
+    except (IndexError, KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
+        # Report only the fixed stage, not stderr, metadata, paths, or argv.
+        raise SystemExit(f"could not capture disposable guest counter evidence: {stage}") from None
     print("Captured private real Incus counters for synthetic job qualification")
 
 

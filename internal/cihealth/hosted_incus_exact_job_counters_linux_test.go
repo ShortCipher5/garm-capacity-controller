@@ -111,11 +111,12 @@ func assertHostedIncusJobReduction(t *testing.T, rows [2]hostedIncusCounter) {
 	}
 	got := BuildVerifiedJobUsage(fixtureJoinMatrix(), claim, set, end)
 	wantCPU := (after.CPUNS - before.CPUNS) * 1000 / uint64(end.Sub(begin))
+	wantRAM := (before.RAMBytes + after.RAMBytes) / 2
 	m := got.Measured
 	if got.State != VerifiedUsageVerified || got.Job != claim.Job || m == nil ||
-		m.CPU == nil || m.CPU.AverageMilliCPU != wantCPU || !m.CPU.Coverage.Complete ||
+		m.CPU == nil || m.CPU.AverageMilliCPU != wantCPU || m.CPU.PeakIntervalMilliCPU != wantCPU || !m.CPU.Coverage.Complete ||
 		m.RAM == nil || m.RAM.SampleMax != max(before.RAMBytes, after.RAMBytes) ||
-		m.RAM.Latest != after.RAMBytes || m.RAMMean == nil || !m.RAMMean.Coverage.Complete ||
+		m.RAM.Latest != after.RAMBytes || m.RAMMean == nil || m.RAMMean.Bytes != wantRAM || !m.RAMMean.Coverage.Complete ||
 		m.DiskRead != nil || m.DiskWrite != nil || m.DiskUsed != nil {
 		t.Fatal("real CPU and RAM did not reduce exactly under the synthetic job model")
 	}

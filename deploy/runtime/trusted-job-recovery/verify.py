@@ -16,10 +16,12 @@ MAX_ID = 2**63 - 1
 POLICY_KEYS = {
     "schema", "reviewed_sha", "repo", "repo_id", "run_id", "attempt", "job_id",
     "run_head_sha", "scope_digest", "receipt_sha256", "declared_at", "window_seconds",
+    "expected_runner_id",
 }
 RECEIPT_KEYS = {
     "schema", "repo_id", "run_id", "attempt", "job_id", "scope_digest",
     "queued_at", "released_at", "blocked_reservation_digest", "retired_reservation_digest",
+    "expected_runner_id",
 }
 
 
@@ -89,6 +91,7 @@ def validate_evidence(policy, receipt_raw, now):
     require(all(digest(policy[k], 40) for k in ("reviewed_sha", "run_head_sha")) and
             all(digest(policy[k], 64) for k in ("scope_digest", "receipt_sha256")),
             "missing reviewed revision, scope or receipt digest")
+    require(positive_id(policy["expected_runner_id"]), "missing expected runner registration ID")
     limit = policy["window_seconds"]
     require(type(limit) is int and 1 <= limit <= 300, "observation window must be 1–300 seconds")
     require(len(receipt_raw) <= BOUND and hashlib.sha256(receipt_raw).hexdigest() == policy["receipt_sha256"],
@@ -101,6 +104,9 @@ def validate_evidence(policy, receipt_raw, now):
                 "retirement receipt not scoped to exact waiting job")
     require(receipt["scope_digest"] == policy["scope_digest"],
             "retirement receipt not scoped to declared shared budget")
+    require(positive_id(receipt["expected_runner_id"]) and
+            receipt["expected_runner_id"] == policy["expected_runner_id"],
+            "reviewed receipt not scoped to expected replacement registration")
     blocked, retired = receipt["blocked_reservation_digest"], receipt["retired_reservation_digest"]
     require(digest(blocked, 64) and digest(retired, 64) and blocked != retired,
             "waiting and retired reservations must be distinct and identified")
@@ -169,8 +175,10 @@ def observe(policy, receipt_raw, now, get):
         require(positive_id(match.get(remote)) and match[remote] == policy[local],
                 "GitHub job ancestry mismatch")
     require(match.get("head_sha") == policy["run_head_sha"], "job revision mismatch")
-    require(match.get("status") in ("in_progress", "completed") and positive_id(match.get("runner_id")),
+    require(match.get("status") in ("in_progress", "completed"),
             "original waiting job has no observed execution")
+    require(positive_id(match.get("runner_id")) and match["runner_id"] == policy["expected_runner_id"],
+            "original waiting job was not assigned to the expected replacement registration")
     started = parse_time(match.get("started_at"))
     require(released < started <= min(deadline, now), "original job did not start inside recovery window")
     if match["status"] == "completed":
@@ -204,7 +212,7 @@ def main():
     except (OSError, TimeoutError):
         print("BLOCKED: cannot read reviewed recovery inputs or observe GitHub", file=sys.stderr)
         return 1
-    print("PASS: GitHub observed the exact waiting job start inside the reviewed retirement window")
+    print("PASS: GitHub observed the exact waiting job start on the reviewed replacement registration inside the retirement window")
     return 0
 
 
