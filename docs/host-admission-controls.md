@@ -33,8 +33,10 @@ and reviewed revision are required for each change.
 Enabling placement requires that the gateway provisioning mode is enabled, the
 server is in a ledger pool, CPU, RAM and runner budgets are positive, and the
 ledger is ready with an authenticated binding and fresh healthy inventory. The
-writer checks those conditions in the same transaction as the mode edit. The
-change closes readiness and invalidates prior collectors. Apply a new barrier
+writer checks those conditions in the same transaction as the mode edit. If an
+older build refreshed the host's placement health from discovery, the writer
+requires a subsequent completed reconciliation. A mode change closes readiness
+and invalidates prior collectors. Apply a new barrier
 before resuming claims. Independent physical-host and stock-route qualification
 still governs live admission.
 
