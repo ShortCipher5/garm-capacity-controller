@@ -60,6 +60,26 @@ slot as pool/repository updates. Confirmed request-ID replay returns historical
 recorded evidence with **no remote traffic**, not a fresh observation. Changed
 request-ID reuse is rejected.
 
+## Stock disabled staging
+
+The separate stock staging opt-in accepts a fixed positive Linux bootstrap
+template ID from trusted configuration. Stock receives a single disabled
+repository-pool POST with minimum idle zero and a bounded positive maximum.
+Acknowledgment and readback must preserve the exact repository, provider, pool
+UUID, template ID and execution settings with empty runner inventory. The
+existing durable intent, UUID capture, unresolved-write barrier and replay
+semantics apply. Protocol and template participate in the spec and replay
+fingerprint. Earlier native template-zero journal entries retain their format.
+The two creation permissions are independent, and the stock evidence cannot be
+registered as a native route.
+
+The existing entity inspection view can show a configured repository with zero
+pools observed in the configured provider scope. Inspect runner-size and host
+mappings by the exact pool UUID. This observation cannot establish the absence
+of other pools, scale sets, runners or unsettled operations. Repository/pool
+retirement and route activation remain blocked until their evidence is complete.
+The stock staging opt-in has no production configuration or browser write route.
+
 ## Failure and recovery behavior
 
 - Lost/failed/redirected POST response: unknown, globally blocked, no retry.

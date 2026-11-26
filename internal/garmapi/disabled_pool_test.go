@@ -24,7 +24,7 @@ type disabledPoolFixture struct {
 	afterPost   func(*disabledPoolFixture)
 }
 
-func disabledPoolServer(t *testing.T, enabled bool) (*ManagementClient, *disabledPoolFixture) {
+func disabledPoolServer(t *testing.T, enabled bool, stock ...bool) (*ManagementClient, *disabledPoolFixture) {
 	t.Helper()
 	f := &disabledPoolFixture{pool: map[string]any{"id": otherID, "repo_id": managedRepoID, "provider_name": "capacity", "max_runners": 2, "generation": 1, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "tags": []any{map[string]any{"name": "linux"}}, "enable_shell": false, "extra_specs": map[string]any{}}}
 	server, trust := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +63,7 @@ func disabledPoolServer(t *testing.T, enabled bool) (*ManagementClient, *disable
 			w.WriteHeader(404)
 		}
 	}))
-	client, err := NewManagement(ManagementConfig{Endpoint: server.URL, Token: "fixture-stage-token", Trust: trust, Providers: []string{"capacity"}, RepositoryIDs: []string{managedRepoID}, AllowWrites: true, AllowDisabledPoolCreation: enabled})
+	client, err := NewManagement(ManagementConfig{Endpoint: server.URL, Token: "fixture-stage-token", Trust: trust, Providers: []string{"capacity"}, RepositoryIDs: []string{managedRepoID}, AllowWrites: true, AllowDisabledPoolCreation: enabled, AllowStockDisabledPoolCreation: len(stock) > 0 && stock[0]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,5 +154,53 @@ func TestDisabledPoolPostErrorsAndMalformedReadbacksNeverRetry(t *testing.T) {
 				t.Fatal("invalid POST receipt authorized GET")
 			}
 		})
+	}
+}
+
+func TestStockDisabledCreationPinsPositiveTemplateAndSeparateOptIn(t *testing.T) {
+	ctx := t.Context()
+	spec := disabledSpec()
+	spec.TemplateID = 12
+	native, fixture := disabledPoolServer(t, true)
+	if _, err := native.PostDisabledRepoPool(ctx, managedRepoID, disabledExpected(t, native), spec); !errors.Is(err, ErrManagementDisabled) || fixture.posts != 0 {
+		t.Fatalf("native permission dispatched stock create: %v", err)
+	}
+
+	stock, fixture := disabledPoolServer(t, false, true)
+	expected := disabledExpected(t, stock)
+	if _, err := stock.PostDisabledRepoPool(ctx, managedRepoID, expected, disabledSpec()); !errors.Is(err, ErrManagementDisabled) || fixture.posts != 0 {
+		t.Fatalf("stock permission dispatched native create: %v", err)
+	}
+	fixture.pool["template_id"] = spec.TemplateID
+	receipt, err := stock.PostDisabledRepoPool(ctx, managedRepoID, expected, spec)
+	if err != nil || receipt.SpecFingerprint() == DisabledPoolSpecFingerprint(disabledSpec()) {
+		t.Fatalf("stock receipt did not pin protocol and template: %v", err)
+	}
+	if string(fixture.body["template_id"]) != "12" || fixture.posts != 1 || fixture.gets != 0 || len(fixture.body) != 12 {
+		t.Fatalf("unexpected stock create calls or payload: %v", fixture.body)
+	}
+	pool, err := stock.VerifyDisabledRepoPool(ctx, receipt, spec)
+	if err != nil || pool.Enabled || pool.MinIdleRunners != 0 {
+		t.Fatalf("verified stock pool was unavailable or unsafe: %+v %v", pool, err)
+	}
+	fixture.mu.Lock()
+	delete(fixture.pool, "template_id")
+	fixture.mu.Unlock()
+	if _, err := stock.VerifyDisabledRepoPool(ctx, receipt, spec); !errors.Is(err, ErrManagementOutcomeUnknown) {
+		t.Fatalf("readback accepted an omitted stock template: %v", err)
+	}
+}
+
+func TestStockDisabledCreationDoesNotAuthorizeReadbackAfterWrongTemplate(t *testing.T) {
+	stock, fixture := disabledPoolServer(t, false, true)
+	spec := disabledSpec()
+	spec.TemplateID = 12
+	fixture.pool["template_id"] = 99
+	receipt, err := stock.PostDisabledRepoPool(t.Context(), managedRepoID, disabledExpected(t, stock), spec)
+	if !errors.Is(err, ErrManagementOutcomeUnknown) || receipt.PoolID() != otherID || fixture.posts != 1 {
+		t.Fatalf("mismatched template lost the original acknowledgement: %+v %v", receipt, err)
+	}
+	if _, err := stock.VerifyDisabledRepoPool(t.Context(), receipt, spec); !errors.Is(err, ErrManagementUnsafe) || fixture.gets != 0 {
+		t.Fatalf("invalid acknowledgement authorized readback: %v", err)
 	}
 }
