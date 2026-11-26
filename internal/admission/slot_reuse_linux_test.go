@@ -616,25 +616,46 @@ func ExampleClassifySlotReuse() {
 
 func TestSlotReuseHoldsConflictingIncarnationAcrossHosts(t *testing.T) {
 	registerSlotReuseFixtureSource(t)
-	for _, orphan := range []bool{false, true} {
-		t.Run(fmt.Sprintf("orphan=%t", orphan), func(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		orphan, otherRoute bool
+	}{
+		{"same ID linked", false, false},
+		{"same ID orphan", true, false},
+		{"different route linked", false, true},
+		{"different route orphan", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			s, req, _ := slotReuseHold(t)
 			second := req
 			second.Key, second.Host, second.Pool = evidenceDigest([]byte("other repository job")), "b", "api"
-			id := slotReuseFixtureEvidence(req, 0, s.now()).Identity.ResourceID
-			rows := []InventoryResource{
-				{ID: id, Host: req.Host, Pool: req.Pool, ReservationKey: req.Key, Resources: req.Resources, State: "deleting"},
-				{ID: id, Host: second.Host, Pool: second.Pool, Resources: second.Resources, State: "idle"},
+			evidenceFor := func(target Request, epoch int64) SlotReuseEvidence {
+				e := slotReuseFixtureEvidence(target, epoch, s.now())
+				if tc.otherRoute && target == second {
+					e.Identity.Route = strings.Repeat("d", 64)
+					e.Identity.ResourceID = slotReuseResourceID(e.Identity)
+					digest := slotReuseIdentityDigest(e.Identity)
+					e.Settlement.IdentityDigest, e.Teardown.IdentityDigest, e.Fence.IdentityDigest = digest, digest, digest
+				}
+				return e
 			}
-			if !orphan {
+			firstID, secondID := evidenceFor(req, 0).Identity.ResourceID, evidenceFor(second, 0).Identity.ResourceID
+			if (firstID != secondID) != tc.otherRoute {
+				t.Fatal("unexpected route-scoped ID match")
+			}
+			rows := []InventoryResource{
+				{ID: firstID, Host: req.Host, Pool: req.Pool, ReservationKey: req.Key, Resources: req.Resources, State: "deleting"},
+				{ID: secondID, Host: second.Host, Pool: second.Pool, Resources: second.Resources, State: "idle"},
+			}
+			if !tc.orphan {
 				if _, err := s.Admit(ctx, second); err != nil {
 					t.Fatal(err)
 				}
 				rows[1].ReservationKey = second.Key
 			}
 			reconcileSQLite(t, s, rows)
-			if orphan {
+			if tc.orphan {
 				// Omission leaves the other host's last observation charged as unknown.
 				rows = rows[:1]
 			} else {
@@ -650,7 +671,7 @@ func TestSlotReuseHoldsConflictingIncarnationAcrossHosts(t *testing.T) {
 			}
 			defer other.Close()
 			targets := []Request{req, second}
-			if orphan {
+			if tc.orphan {
 				targets = []Request{req, req}
 			}
 			decisions := make([]SlotReuseDecision, len(targets))
@@ -659,7 +680,10 @@ func TestSlotReuseHoldsConflictingIncarnationAcrossHosts(t *testing.T) {
 			var wg sync.WaitGroup
 			for i, handle := range []*SQLiteStore{s, other} {
 				target := targets[i]
-				e := slotReuseFixtureEvidence(target, fence.Epoch, s.now())
+				e := evidenceFor(target, fence.Epoch)
+				if ClassifySlotReuse(target, e, s.now()).Status != SlotReuseCandidateComplete {
+					t.Fatal("incomplete candidate")
+				}
 				wg.Go(func() {
 					<-start
 					decisions[i], errs[i] = handle.ReleaseRetiredSlot(ctx, target, e)
@@ -693,7 +717,8 @@ func TestSlotReuseTombstoneFollowsIncarnationAcrossRebindAndRestart(t *testing.T
 	}
 	s = reopenSlotReuseStore(t, s)
 	defer s.Close()
-	for i, sameGeneration := range []bool{true, false} {
+	// Release the independently identified new generation while it is the only inventory row.
+	for i, sameGeneration := range []bool{false, true} {
 		// A newly enrolled route and a different request and host give
 		// the same physical instance a different scoped resource ID.
 		next := req
@@ -730,8 +755,12 @@ func TestSlotReuseTombstoneFollowsIncarnationAcrossRebindAndRestart(t *testing.T
 		} else if err != nil || decision.Replay {
 			t.Fatalf("distinct generation refused: %+v %v", decision, err)
 		}
-		if got := slotReuseCharged(t, s); got != req.Resources {
-			t.Fatalf("rebound charge lost: %+v", got)
+		var want Resources
+		if sameGeneration {
+			want = req.Resources
+		}
+		if got := slotReuseCharged(t, s); got != want {
+			t.Fatalf("rebound charge: got %+v, want %+v", got, want)
 		}
 	}
 	if replay, err := s.ReleaseRetiredSlot(ctx, req, first); err != nil || !replay.Replay {

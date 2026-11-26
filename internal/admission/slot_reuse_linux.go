@@ -364,30 +364,29 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 			holdDecision.Status = SlotReuseAwaitingTeardownEvidence
 			return ErrSlotReuseEvidence
 		}
-		// The charged inventory row must still be the exact original
-		// incarnation. A missing row is not absence proof, and a reappearing
-		// or renamed resource under the same key is a conflict: both keep
-		// the charge.
+		// An inventory ID hashes the enrolled route along with the physical
+		// identity. A second opaque ID can therefore be an alias of this same
+		// incarnation, even under another host, pool or request. The current
+		// inventory format can support a new release only for a single row.
+		var competing bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inventory LIMIT 1 OFFSET 1)").Scan(&competing); err != nil {
+			return err
+		}
+		if competing {
+			return ErrConflict
+		}
 		rows, err := sqliteInventory(tx)
 		if err != nil {
 			return err
 		}
 		want := InventoryResource{ID: evidence.Identity.ResourceID, Host: hold.Host, Pool: hold.Pool,
 			ReservationKey: hold.Key, Resources: hold.Resources, State: "deleting"}
-		linked := 0
-		for _, item := range rows {
-			// Inventory keys include the host. Another host can report the
-			// same incarnation, even as an unlinked or unknown charge.
-			if item.ReservationKey == hold.Key || item.ID == want.ID {
-				if item != want {
-					return ErrConflict
-				}
-				linked++
-			}
-		}
-		if linked != 1 {
+		if len(rows) == 0 || (rows[0].ReservationKey != hold.Key && rows[0].ID != want.ID) {
 			holdDecision.Status = SlotReuseAwaitingStorageEvidence
 			return ErrSlotReuseEvidence
+		}
+		if rows[0] != want {
+			return ErrConflict
 		}
 
 		if err := checkPriorSlotIncarnations(ctx, tx, evidence.Identity); err != nil {
