@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 )
 
 // Safe runner-slot reuse: evidence contract, classifier and the guarded
@@ -244,6 +246,59 @@ type SlotReuseDecision struct {
 	Replay         bool            `json:"replay"`
 }
 
+// A permanent tombstone belongs to the original physical incarnation even if
+// a later enrollment gives it a different request, host or provider route.
+// Check existing records in place so pre-upgrade releases keep this protection.
+// An identical UUID and generation across different fingerprints can reflect a
+// moved or cloned resource. Do not infer that the new route is independent.
+func checkPriorSlotIncarnations(ctx context.Context, tx *sql.Tx, candidate SlotReuseIdentity) error {
+	rows, err := tx.QueryContext(ctx, "SELECT request_key,absence_digest,record FROM releases")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, digest string
+		var raw []byte
+		if err := rows.Scan(&key, &digest, &raw); err != nil {
+			return err
+		}
+		var prior struct {
+			Version  string `json:"version"`
+			Identity struct {
+				SlotReuseIdentity
+				Subject incusapi.InstanceIdentitySubject `json:"subject"`
+			} `json:"identity"`
+		}
+		if evidenceDigest(raw) != digest || json.Unmarshal(raw, &prior) != nil {
+			return ErrSlotReuseEvidence
+		}
+		id := prior.Identity
+		switch prior.Version {
+		case "slot-reuse-evidence/v1", SlotReuseEvidenceVersion:
+			if id.RequestKey != key || !bindingFingerprint(id.Daemon) || !bindingFingerprint(id.Project) ||
+				!routeUUID(id.Instance) || !routeUUID(id.Generation) || id.ResourceID == "" {
+				return ErrSlotReuseEvidence
+			}
+			if id.ResourceID == candidate.ResourceID ||
+				(id.Instance == candidate.Instance && id.Generation == candidate.Generation) {
+				return ErrConflict
+			}
+		case "":
+			subject := id.Subject
+			if subject.ReservationKey != key || !routeUUID(subject.UUID) || !routeUUID(subject.Generation) {
+				return ErrSlotReuseEvidence
+			}
+			if subject.UUID == candidate.Instance && subject.Generation == candidate.Generation {
+				return ErrConflict
+			}
+		default:
+			return ErrSlotReuseEvidence
+		}
+	}
+	return rows.Err()
+}
+
 // ReleaseRetiredSlot is the guarded accounting transition for the exact
 // retired runner. One BEGIN IMMEDIATE transaction rechecks readiness,
 // observation freshness, the reconciliation epoch and its barrier time, the exact hold in state
@@ -309,28 +364,33 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 			holdDecision.Status = SlotReuseAwaitingTeardownEvidence
 			return ErrSlotReuseEvidence
 		}
-		// The charged inventory row must still be the exact original
-		// incarnation. A missing row is not absence proof, and a reappearing
-		// or renamed resource under the same key is a conflict: both keep
-		// the charge.
+		// An inventory ID hashes the enrolled route along with the physical
+		// identity. A second opaque ID can therefore be an alias of this same
+		// incarnation, even under another host, pool or request. The current
+		// inventory format can support a new release only for a single row.
+		var competing bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inventory LIMIT 1 OFFSET 1)").Scan(&competing); err != nil {
+			return err
+		}
+		if competing {
+			return ErrConflict
+		}
 		rows, err := sqliteInventory(tx)
 		if err != nil {
 			return err
 		}
 		want := InventoryResource{ID: evidence.Identity.ResourceID, Host: hold.Host, Pool: hold.Pool,
 			ReservationKey: hold.Key, Resources: hold.Resources, State: "deleting"}
-		linked := 0
-		for _, item := range rows {
-			if item.ReservationKey == hold.Key {
-				if item != want {
-					return ErrConflict
-				}
-				linked++
-			}
-		}
-		if linked != 1 {
+		if len(rows) == 0 || (rows[0].ReservationKey != hold.Key && rows[0].ID != want.ID) {
 			holdDecision.Status = SlotReuseAwaitingStorageEvidence
 			return ErrSlotReuseEvidence
+		}
+		if rows[0] != want {
+			return ErrConflict
+		}
+
+		if err := checkPriorSlotIncarnations(ctx, tx, evidence.Identity); err != nil {
+			return err
 		}
 
 		// Use one clock sample after acquiring the writer lock and checking
