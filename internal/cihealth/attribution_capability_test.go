@@ -16,7 +16,11 @@ func TestDocumentedMatrixProvesOnlyPublishedSourceFacts(t *testing.T) {
 		// The whole point of the matrix: no documented read proves the
 		// provider-origin join or per-instance disk counters.
 		FactProviderOriginJoin: false,
+		FactExclusiveJobWindow: false,
 		FactDiskCounters:       false,
+		FactDiskReadBytes:      false,
+		FactDiskWriteBytes:     false,
+		FactDiskUsedBytes:      false,
 	} {
 		if got := m.Supports(fact); got != supported {
 			t.Fatalf("matrix support for %q = %t, want %t", fact, got, supported)
