@@ -455,8 +455,9 @@ func scanStockApplyOperation(row interface{ Scan(...any) error }) (StockApplyOpe
 const stockApplyOperationColumns = "operation_id,scope,pool_id,repository_id,source,fingerprint,observed,suggested,charged,direction,plan_expires_at,state,drift,created_at,updated_at"
 
 type stockApplyScopeState struct {
-	paused    bool
-	operation *StockApplyOperation
+	paused       bool
+	modeRecorded bool
+	operation    *StockApplyOperation
 }
 
 // loadStockApplyScope reads both rows inside the caller's SQLite transaction.
@@ -467,6 +468,7 @@ func loadStockApplyScope(tx *sql.Tx, scope string, includeProven bool) (stockApp
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return stockApplyScopeState{}, ErrStockApplyJournal
 	}
+	state.modeRecorded = err == nil
 	states := "('proposed','dispatched','outcome_unknown')"
 	if includeProven {
 		states = "('proposed','dispatched','outcome_unknown','applied_when_proven')"
@@ -601,10 +603,7 @@ func (c *StockApplyController) Pause(ctx context.Context, scope [sha256.Size]byt
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
 	return c.journal.transaction(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.Exec("INSERT INTO stock_apply_mode(scope,paused,reason,updated_at) VALUES(?,1,?,?) ON CONFLICT(scope) DO UPDATE SET paused=1,reason=excluded.reason,updated_at=excluded.updated_at", key, reason, now.UTC().Format(time.RFC3339Nano)); err != nil {
-			return ErrStockApplyJournal
-		}
-		return stockApplyAudit(tx, key, "", "pause_entered", reason)
+		return writeStockApplyMode(tx, key, true, "pause_entered", reason, now)
 	})
 }
 
@@ -621,10 +620,7 @@ func (c *StockApplyController) Resume(ctx context.Context, scope [sha256.Size]by
 	defer c.leave()
 	key := hex.EncodeToString(scope[:])
 	return c.journal.transaction(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.Exec("INSERT INTO stock_apply_mode(scope,paused,reason,updated_at) VALUES(?,0,?,?) ON CONFLICT(scope) DO UPDATE SET paused=0,reason=excluded.reason,updated_at=excluded.updated_at", key, reason, now.UTC().Format(time.RFC3339Nano)); err != nil {
-			return ErrStockApplyJournal
-		}
-		return stockApplyAudit(tx, key, "", "pause_exited", reason)
+		return writeStockApplyMode(tx, key, false, "pause_exited", reason, now)
 	})
 }
 
