@@ -151,6 +151,11 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 		if _, exists := reservations[request.Key]; exists {
 			return deny("placement_denied_legacy_plan", ErrExecutionPlan)
 		}
+		if stock != nil {
+			if err := requireOfflineBroker(tx); err != nil {
+				return err
+			}
+		}
 		if len(request.Hosts) == 0 || len(request.Hosts) > 128 || (request.Strategy != "first_fit" && request.Strategy != "least_runners") {
 			return deny("placement_denied_policy", ErrExecutionPlan)
 		}
@@ -281,7 +286,16 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 				return err
 			}
 		}
-		return sqliteAudit(tx, "placement_reserved", req.Key, now)
+		if err := sqliteAudit(tx, "placement_reserved", req.Key, now); err != nil {
+			return err
+		}
+		if stockGrant != nil {
+			last := s.now()
+			if last.Before(now) || !stockGrant.RedeemableAt(last) || !sqliteObservationsFresh(config, last) {
+				return ErrReconciliation
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return ExecutionPlan{}, err

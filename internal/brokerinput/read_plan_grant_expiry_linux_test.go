@@ -14,7 +14,7 @@ func TestReadPlanCannotOutliveProvisionallyReusedGrant(t *testing.T) {
 	profile.Authority = admission.StockProviderAuthority{PoolID: pool}
 	profiles[pool] = profile
 	expiry := opt.Now.Add(5 * time.Second)
-	state.Grants = []admission.BrokerGrant{{ID: "durable", State: "unused", Spec: admission.BrokerGrantSpec{Host: "host", HostBindingSequence: 1, Authority: profile.Authority, Resources: profile.Size, ExpiresAt: expiry}}}
+	state.Grants = []admission.BrokerGrant{{ID: "durable", State: "unused", IssuedAt: opt.Now.Add(-time.Minute), EvidenceBound: true, Spec: admission.BrokerGrantSpec{Host: "host", HostBindingSequence: 1, Authority: profile.Authority, Resources: profile.Size, ExpiresAt: expiry}}}
 	state.HostBindings = map[string]admission.HostBinding{"host": {Sequence: 1}}
 	state.Allocated = admission.Allocations{Global: profile.Size, Hosts: map[string]admission.Resources{"host": profile.Size}, Pools: map[string]admission.Resources{pool: profile.Size}}
 	charges := []admission.BrokerPlanningCharge{{ID: "durable", Host: "host", Pool: pool, Resources: profile.Size}}
@@ -49,7 +49,7 @@ func TestReadPlanGrantDeadlineAlsoBoundsWarmSupply(t *testing.T) {
 	profile.Authority = admission.StockProviderAuthority{PoolID: pool}
 	profiles[pool] = profile
 	expiry := opt.Now.Add(5 * time.Second)
-	state.Grants = []admission.BrokerGrant{{ID: "durable", State: "unused", Spec: admission.BrokerGrantSpec{Host: "host", HostBindingSequence: 1, Authority: profile.Authority, Resources: profile.Size, ExpiresAt: expiry}}}
+	state.Grants = []admission.BrokerGrant{{ID: "durable", State: "unused", IssuedAt: opt.Now.Add(-time.Minute), EvidenceBound: true, Spec: admission.BrokerGrantSpec{Host: "host", HostBindingSequence: 1, Authority: profile.Authority, Resources: profile.Size, ExpiresAt: expiry}}}
 	state.HostBindings = map[string]admission.HostBinding{"host": {Sequence: 1}}
 	state.Allocated = admission.Allocations{Global: profile.Size, Hosts: map[string]admission.Resources{"host": profile.Size}, Pools: map[string]admission.Resources{pool: profile.Size}}
 	state.Policy.Repositories[0].Pools[0].WarmIdle = 1

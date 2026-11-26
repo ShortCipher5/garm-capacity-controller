@@ -104,7 +104,7 @@ func TestLedgerOutstandingReuseRequiresCurrentExactGrantBinding(t *testing.T) {
 			profile := profiles[pool]
 			profile.Authority = admission.StockProviderAuthority{PoolID: pool}
 			profiles[pool] = profile
-			grant := admission.BrokerGrant{ID: "durable", State: "unused", Spec: admission.BrokerGrantSpec{
+			grant := admission.BrokerGrant{ID: "durable", State: "unused", IssuedAt: opt.Now.Add(-time.Minute), EvidenceBound: true, Spec: admission.BrokerGrantSpec{
 				Host: "host", HostBindingSequence: 1, Authority: profile.Authority, Resources: profile.Size, ExpiresAt: opt.Now.Add(time.Hour)}}
 			s.Allocated = admission.Allocations{Global: profile.Size, Hosts: map[string]admission.Resources{"host": profile.Size}, Pools: map[string]admission.Resources{pool: profile.Size}}
 			s.HostBindings = map[string]admission.HostBinding{"host": {Sequence: 1}}

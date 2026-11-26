@@ -28,7 +28,13 @@ type GrantCycleResult struct {
 // source identity. It does not mutate pool settings, retire physical reservations, or activate
 // native execution. The existing grant batch is the durable cycle intent.
 func GrantCycle(ctx context.Context, store *admission.SQLiteStore, source *garmapi.DemandClient, opt capacitybroker.Options, ttl time.Duration) (GrantCycleResult, error) {
-	if ctx == nil || ctx.Err() != nil || store == nil || source == nil || ttl < time.Minute || ttl > time.Hour {
+	if ctx == nil || ctx.Err() != nil || store == nil || ttl < time.Minute || ttl > time.Hour {
+		return GrantCycleResult{}, capacitybroker.ErrSnapshot
+	}
+	if err := store.CheckOfflineBroker(ctx); err != nil {
+		return GrantCycleResult{}, ErrRuntimeAuthority
+	}
+	if source == nil {
 		return GrantCycleResult{}, capacitybroker.ErrSnapshot
 	}
 	observation, err := source.Observe(ctx)
@@ -154,7 +160,20 @@ func enrolledCycle(state admission.BrokerGrantState, charges []admission.BrokerP
 	if err != nil {
 		return fail()
 	}
-	batch := admission.BrokerGrantBatch{ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision}
+	// Demand starts aging at request start. The planner's timestamp is the
+	// oldest participating demand or capacity observation. The ledger can
+	// independently require a shorter freshness window for host observations.
+	expires := opt.Now.Add(ttl)
+	for _, cutoff := range []time.Time{plan.ObservedAt.Add(opt.MaxAge), snapshot.ObservedAt.Add(state.Config.MaxObservationAge)} {
+		if cutoff.Before(expires) {
+			expires = cutoff
+		}
+	}
+	if len(plan.Assignments) > 0 && !expires.After(opt.Now) {
+		return fail()
+	}
+	observed := opt.Now.UTC()
+	batch := admission.BrokerGrantBatch{ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision, EvidenceNotBefore: &observed}
 	// A single durable identity for this source/ledger revision makes competing
 	// workers conflict rather than creating a second logical cycle. The complete
 	// canonical batch payload is separately checked by IssueBrokerGrants replay.
@@ -170,7 +189,7 @@ func enrolledCycle(state admission.BrokerGrantState, charges []admission.BrokerP
 		if !ok || !exists || resources(p.Resources) != a.Resources {
 			return fail()
 		}
-		batch.Grants = append(batch.Grants, admission.BrokerGrantSpec{Authority: p.Authority, Host: a.Host, HostBindingSequence: d.HostBindingSequence, Resources: p.Resources, Execution: p.Execution, ExpiresAt: opt.Now.Add(ttl)})
+		batch.Grants = append(batch.Grants, admission.BrokerGrantSpec{Authority: p.Authority, Host: a.Host, HostBindingSequence: d.HostBindingSequence, Resources: p.Resources, Execution: p.Execution, ExpiresAt: expires})
 	}
 	return plan, batch, nil
 }
@@ -181,7 +200,13 @@ func enrolledCycle(state admission.BrokerGrantState, charges []admission.BrokerP
 // plans or counts. The caller owns the concrete client/store lifecycle; there is
 // intentionally no production startup wiring until native authority is ready.
 func RunGrantCycles(ctx context.Context, store *admission.SQLiteStore, source *garmapi.DemandClient, opt capacitybroker.Options, ttl, interval time.Duration, report func(GrantCycleResult, error)) error {
-	if ctx == nil || store == nil || source == nil || report == nil || interval < time.Minute || interval > time.Hour || ttl < time.Minute || ttl > time.Hour {
+	if ctx == nil || store == nil || report == nil || interval < time.Minute || interval > time.Hour || ttl < time.Minute || ttl > time.Hour {
+		return capacitybroker.ErrSnapshot
+	}
+	if err := store.CheckOfflineBroker(ctx); err != nil {
+		return ErrRuntimeAuthority
+	}
+	if source == nil {
 		return capacitybroker.ErrSnapshot
 	}
 	for {

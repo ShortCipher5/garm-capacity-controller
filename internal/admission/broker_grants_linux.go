@@ -31,6 +31,8 @@ type BrokerGrant struct {
 	State          string          `json:"state"`
 	RequestKey     string          `json:"request_key,omitempty"`
 	issuedSequence int64
+	IssuedAt       time.Time `json:"-"`
+	EvidenceBound  bool      `json:"-"`
 	superseded     bool
 }
 
@@ -38,11 +40,21 @@ type BrokerGrant struct {
 // policy or profile revision. Such unused commitments stay charged until their retirement commits.
 func (g BrokerGrant) Superseded() bool { return g.superseded }
 
+// RedeemableAt checks only the grant's state and clock window. A caller
+// still needs the current scope, binding and full capacity checks.
+func (g BrokerGrant) RedeemableAt(now time.Time) bool {
+	return g.State == "unused" && !g.Superseded() && !g.IssuedAt.IsZero() &&
+		!now.Before(g.IssuedAt) && g.Spec.ExpiresAt.After(now)
+}
+
+// EvidenceNotBefore is the time at which the broker validated its evidence.
+// The spec expiries supply the upper bound. Older manifests omit the lower bound.
 type BrokerGrantBatch struct {
-	ID               string            `json:"id"`
-	ExpectedSequence int64             `json:"expected_sequence"`
-	PolicyRevision   int64             `json:"policy_revision"`
-	Grants           []BrokerGrantSpec `json:"grants"`
+	ID                string            `json:"id"`
+	ExpectedSequence  int64             `json:"expected_sequence"`
+	PolicyRevision    int64             `json:"policy_revision"`
+	Grants            []BrokerGrantSpec `json:"grants"`
+	EvidenceNotBefore *time.Time        `json:"evidence_not_before,omitempty"`
 }
 type BrokerGrantState struct {
 	ArtifactOverheads []NativeArtifactOverhead
@@ -118,14 +130,26 @@ func validGrantSpec(g BrokerGrantSpec) bool {
 	r := Request{Pool: g.Authority.PoolID, Host: g.Host, Resources: g.Resources, Key: executionKey(e, g.Authority.PoolID)}
 	return validRequest(r) && validExecution(e, r) && validStockOrigin(stockProviderOrigin{Authority: g.Authority, CommandDigest: fmt.Sprintf("%064d", 0)}, PlacementRequest{Pool: r.Pool, Execution: e})
 }
+func validBatchGrantSpecs(b BrokerGrantBatch) bool {
+	if b.EvidenceNotBefore != nil && b.EvidenceNotBefore.IsZero() {
+		return false
+	}
+	for _, g := range b.Grants {
+		if !validGrantSpec(g) || (b.EvidenceNotBefore != nil && !g.ExpiresAt.After(*b.EvidenceNotBefore)) {
+			return false
+		}
+	}
+	return true
+}
 func grantProfileMatches(g BrokerGrantSpec, r PlacementRequest, a StockProviderAuthority) bool {
 	e := r.Execution
 	e.Name = ""
 	return g.Authority == a && g.Resources == r.Resources && reflect.DeepEqual(g.Execution, e) && contains(r.Hosts, g.Host)
 }
 func sqliteBrokerGrants(tx *sql.Tx) ([]BrokerGrant, error) {
-	rows, e := tx.Query(`SELECT g.grant_id,g.payload,g.payload_hash,g.state,COALESCE(g.request_key,''),b.sequence
- FROM broker_grants g JOIN broker_grant_batches b ON b.batch_id=g.batch_id
+	rows, e := tx.Query(`SELECT g.grant_id,g.payload,g.payload_hash,g.state,COALESCE(g.request_key,''),b.sequence,a.recorded_at
+ FROM broker_grants g LEFT JOIN broker_grant_batches b ON b.batch_id=g.batch_id
+ LEFT JOIN audit a ON a.sequence=b.sequence AND a.kind='broker_grants_issued' AND a.request_key=b.batch_id
  WHERE g.payload!='' ORDER BY g.grant_id LIMIT 100001`)
 	if e != nil {
 		return nil, e
@@ -135,10 +159,17 @@ func sqliteBrokerGrants(tx *sql.Tx) ([]BrokerGrant, error) {
 	for rows.Next() {
 		var g BrokerGrant
 		var raw, hash string
-		if e = rows.Scan(&g.ID, &raw, &hash, &g.State, &g.RequestKey, &g.issuedSequence); e != nil {
+		var issuance sql.NullString
+		var sequence sql.NullInt64
+		if e = rows.Scan(&g.ID, &raw, &hash, &g.State, &g.RequestKey, &sequence, &issuance); e != nil {
 			return nil, e
 		}
-		if len(out) >= 100000 || !bindingFingerprint(g.ID) || len(raw) > 16384 || json.Unmarshal([]byte(raw), &g.Spec) != nil || !validGrantSpec(g.Spec) {
+		g.issuedSequence = sequence.Int64
+		g.IssuedAt, e = time.Parse(time.RFC3339Nano, issuance.String)
+		if e != nil || !sequence.Valid || g.IssuedAt.IsZero() || g.issuedSequence <= 0 {
+			return nil, ErrBrokerGrant
+		}
+		if len(out) >= 100000 || !bindingFingerprint(g.ID) || len(raw) > 16384 || json.Unmarshal([]byte(raw), &g.Spec) != nil || !validGrantSpec(g.Spec) || !g.Spec.ExpiresAt.After(g.IssuedAt) {
 			return nil, ErrBrokerGrant
 		}
 		canonical, digest, e := grantHash(g.Spec)
@@ -329,6 +360,26 @@ func (s *SQLiteStore) ReadBrokerGrantState(ctx context.Context) (BrokerGrantStat
 	return v, e
 }
 
+// CheckOfflineBroker checks persisted authority on the same connection that
+// will perform local admission. The mutation transactions repeat the check.
+func (s *SQLiteStore) CheckOfflineBroker(ctx context.Context) error {
+	if s == nil || ctx == nil {
+		return ErrBrokerGrant
+	}
+	return s.transaction(ctx, requireOfflineBroker)
+}
+
+func requireOfflineBroker(tx *sql.Tx) error {
+	var kind string
+	if err := tx.QueryRow("SELECT runtime_kind FROM ledger_lineage WHERE id=1").Scan(&kind); err != nil {
+		return err
+	}
+	if kind != "offline" {
+		return ErrBrokerGrant
+	}
+	return nil
+}
+
 // IssueBrokerGrants validates one exact coherent read revision and commits all
 // grants plus audit under BEGIN IMMEDIATE. Caller is the trusted broker, not a
 // public API. Exact batch retry cannot allocate twice, even after terminal state.
@@ -355,10 +406,8 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		return nil, ErrBrokerGrant
 	}
 	b = owned
-	for _, g := range b.Grants {
-		if !validGrantSpec(g) {
-			return nil, ErrBrokerGrant
-		}
+	if !validBatchGrantSpecs(b) {
+		return nil, ErrBrokerGrant
 	}
 	var result []BrokerGrant
 	e = s.transaction(ctx, func(tx *sql.Tx) error {
@@ -382,6 +431,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 			return err
 		}
 
+		// An installed ledger has no qualified stock admission authority.
+		// Existing batch replay above remains a historical lookup.
+		if err := requireOfflineBroker(tx); err != nil {
+			return err
+		}
 		var grantCount, batchCount int
 		if tx.QueryRow("SELECT count(*) FROM broker_grants WHERE payload!=''").Scan(&grantCount) != nil || tx.QueryRow("SELECT count(*) FROM broker_grant_batches WHERE payload!=''").Scan(&batchCount) != nil {
 			return ErrBrokerGrant
@@ -400,12 +454,18 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		if policy.Revision != b.PolicyRevision {
 			return ErrBrokerConflict
 		}
+		// New shared commitments must be usable under the same evidence
+		// contract as redemption. Exact historical batches replay above.
+		if policy.Revision > 0 && b.EvidenceNotBefore == nil {
+			return ErrBrokerGrant
+		}
 		config, ready, epoch, _, e := sqliteMetadata(tx)
 		if e != nil {
 			return e
 		}
 		now := s.now()
-		if !ready || epoch == int64(1<<63-1) || !sqliteObservationsFresh(config, now) {
+		if !ready || epoch == int64(1<<63-1) || !sqliteObservationsFresh(config, now) ||
+			(b.EvidenceNotBefore != nil && now.Before(*b.EvidenceNotBefore)) {
 			return ErrReconciliation
 		}
 		reservations, e := sqliteReservations(tx)
@@ -432,7 +492,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		if e != nil {
 			return e
 		}
+		expires := b.Grants[0].ExpiresAt
 		for _, g := range b.Grants {
+			if g.ExpiresAt.Before(expires) {
+				expires = g.ExpiresAt
+			}
 			id := g.Authority.PoolID
 			if !shared.permitsCharge(id, g.Resources, g.Resources.Runners, allocated.Pools[id].Runners) ||
 				!shared.permitsExecution(id, g.Execution, &g.Authority) || !shared.permitsHost(id, g.Host, g.HostBindingSequence, config) {
@@ -453,7 +517,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 				shared.runners[shared.profiles[id].Repository] += g.Resources.Runners
 			}
 		}
-		if e = sqliteAudit(tx, "broker_grants_issued", b.ID, now); e != nil {
+		issuedAt := s.now()
+		if issuedAt.Before(now) || !expires.After(issuedAt) || !sqliteObservationsFresh(config, issuedAt) {
+			return ErrReconciliation
+		}
+		if e = sqliteAudit(tx, "broker_grants_issued", b.ID, issuedAt); e != nil {
 			return e
 		}
 		if e = tx.QueryRow("SELECT max(sequence) FROM audit").Scan(&seq); e != nil {
@@ -471,7 +539,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 			if _, e = tx.Exec("INSERT INTO broker_grants VALUES(?,?,?,?,'unused',NULL)", id, b.ID, payload, digest); e != nil {
 				return e
 			}
-			result = append(result, BrokerGrant{ID: id, Spec: g, State: "unused"})
+			result = append(result, BrokerGrant{ID: id, Spec: g, State: "unused", issuedSequence: seq, IssuedAt: issuedAt, EvidenceBound: b.EvidenceNotBefore != nil})
+		}
+		last := s.now()
+		if last.Before(issuedAt) || !expires.After(last) || !sqliteObservationsFresh(config, last) {
+			return ErrReconciliation
 		}
 		return nil
 	})
@@ -513,6 +585,9 @@ func (s *SQLiteStore) retireUnusedBrokerGrant(ctx context.Context, id, target st
 		}
 		if g.State == target {
 			return nil
+		}
+		if err := requireOfflineBroker(tx); err != nil {
+			return err
 		}
 		if g.State != "unused" || (target == "expired" && s.now().Before(g.Spec.ExpiresAt)) {
 			return ErrBrokerGrant
@@ -601,7 +676,7 @@ func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, 
 		return BrokerGrant{}, e
 	}
 	for _, g := range all {
-		if g.State != "unused" || g.Superseded() || !g.Spec.ExpiresAt.After(now) || !grantProfileMatches(g.Spec, r, a) {
+		if (shared != nil && !g.EvidenceBound) || !g.RedeemableAt(now) || !grantProfileMatches(g.Spec, r, a) {
 			continue
 		}
 		host, hostOK := config.Hosts[g.Spec.Host]
@@ -666,9 +741,9 @@ func validateBrokerGrantHistory(tx *sql.Tx, grants []BrokerGrant) error {
 		return ErrBrokerGrant
 	}
 
-	byID := map[string]BrokerGrant{}
-	for _, g := range grants {
-		byID[g.ID] = g
+	byID := make(map[string]int, len(grants))
+	for i, g := range grants {
+		byID[g.ID] = i
 	}
 	rows, e := tx.Query("SELECT b.batch_id,b.payload,b.payload_hash,a.kind,a.request_key FROM broker_grant_batches b LEFT JOIN audit a ON a.sequence=b.sequence WHERE b.payload!='' ORDER BY b.batch_id LIMIT 100001")
 	if e != nil {
@@ -687,12 +762,8 @@ func validateBrokerGrantHistory(tx *sql.Tx, grants []BrokerGrant) error {
 		if e = rows.Scan(&id, &raw, &hash, &kind, &key); e != nil {
 			return e
 		}
-		var b BrokerGrantBatch
-		if len(raw) > 1<<20 || json.Unmarshal([]byte(raw), &b) != nil || b.ID != id || !bindingFingerprint(id) || len(b.Grants) == 0 || len(b.Grants) > 1000 || !kind.Valid || kind.String != "broker_grants_issued" || !key.Valid || key.String != id {
-			return ErrBrokerGrant
-		}
-		canonical, digest, e := grantHash(b)
-		if e != nil || canonical != raw || digest != hash {
+		b, e := decodeBrokerBatch(raw, hash, id)
+		if e != nil || !kind.Valid || kind.String != "broker_grants_issued" || !key.Valid || key.String != id {
 			return ErrBrokerGrant
 		}
 		for i, spec := range b.Grants {
@@ -700,10 +771,12 @@ func validateBrokerGrantHistory(tx *sql.Tx, grants []BrokerGrant) error {
 			if expected > 100000 {
 				return ErrBrokerGrant
 			}
-			g, ok := byID[brokerGrantID(id, i)]
-			if !ok || !reflect.DeepEqual(g.Spec, spec) {
+			index, ok := byID[brokerGrantID(id, i)]
+			if !ok || !reflect.DeepEqual(grants[index].Spec, spec) ||
+				(b.EvidenceNotBefore != nil && grants[index].IssuedAt.Before(*b.EvidenceNotBefore)) {
 				return ErrBrokerGrant
 			}
+			grants[index].EvidenceBound = b.EvidenceNotBefore != nil
 		}
 	}
 	if e = rows.Err(); e != nil {
