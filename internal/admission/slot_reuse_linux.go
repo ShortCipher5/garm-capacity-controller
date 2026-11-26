@@ -9,8 +9,6 @@ import (
 	"errors"
 	"strings"
 	"time"
-
-	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 )
 
 // Safe runner-slot reuse: evidence contract, classifier and the guarded
@@ -246,59 +244,6 @@ type SlotReuseDecision struct {
 	Replay         bool            `json:"replay"`
 }
 
-// A permanent tombstone belongs to the original physical incarnation even if
-// a later enrollment gives it a different request, host or provider route.
-// Check existing records in place so pre-upgrade releases keep this protection.
-// An identical UUID and generation across different fingerprints can reflect a
-// moved or cloned resource. Do not infer that the new route is independent.
-func checkPriorSlotIncarnations(ctx context.Context, tx *sql.Tx, candidate SlotReuseIdentity) error {
-	rows, err := tx.QueryContext(ctx, "SELECT request_key,absence_digest,record FROM releases")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var key, digest string
-		var raw []byte
-		if err := rows.Scan(&key, &digest, &raw); err != nil {
-			return err
-		}
-		var prior struct {
-			Version  string `json:"version"`
-			Identity struct {
-				SlotReuseIdentity
-				Subject incusapi.InstanceIdentitySubject `json:"subject"`
-			} `json:"identity"`
-		}
-		if evidenceDigest(raw) != digest || json.Unmarshal(raw, &prior) != nil {
-			return ErrSlotReuseEvidence
-		}
-		id := prior.Identity
-		switch prior.Version {
-		case "slot-reuse-evidence/v1", SlotReuseEvidenceVersion:
-			if id.RequestKey != key || !bindingFingerprint(id.Daemon) || !bindingFingerprint(id.Project) ||
-				!routeUUID(id.Instance) || !routeUUID(id.Generation) || id.ResourceID == "" {
-				return ErrSlotReuseEvidence
-			}
-			if id.ResourceID == candidate.ResourceID ||
-				(id.Instance == candidate.Instance && id.Generation == candidate.Generation) {
-				return ErrConflict
-			}
-		case "":
-			subject := id.Subject
-			if subject.ReservationKey != key || !routeUUID(subject.UUID) || !routeUUID(subject.Generation) {
-				return ErrSlotReuseEvidence
-			}
-			if subject.UUID == candidate.Instance && subject.Generation == candidate.Generation {
-				return ErrConflict
-			}
-		default:
-			return ErrSlotReuseEvidence
-		}
-	}
-	return rows.Err()
-}
-
 // ReleaseRetiredSlot is the guarded accounting transition for the exact
 // retired runner. One BEGIN IMMEDIATE transaction rechecks readiness,
 // observation freshness, the reconciliation epoch and its barrier time, the exact hold in state
@@ -320,7 +265,6 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		return holdDecision, ErrSlotReuseEvidence
 	}
 	digest := evidenceDigest(encoded)
-	preflight := ClassifySlotReuse(hold, evidence, s.now())
 	var result SlotReuseDecision
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		// An immutable tombstone answers historical replay even if the store
@@ -335,6 +279,8 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		at := s.now().UTC()
+		preflight := ClassifySlotReuse(hold, evidence, at)
 		if preflight.Status != SlotReuseCandidateComplete {
 			holdDecision.Status = preflight.Status
 			return ErrSlotReuseEvidence
@@ -349,58 +295,14 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		if evidence.Identity.Epoch != epoch || evidence.Fence.Epoch != epoch {
 			return ErrSlotReuseEvidence
 		}
-		reservations, err := sqliteReservations(tx)
-		if err != nil {
-			return err
-		}
-		reservation, exists := reservations[hold.Key]
-		if !exists {
-			return ErrSlotReuseEvidence
-		}
-		if reservation.Request != hold {
-			return ErrConflict
-		}
-		if reservation.State != "deleting" {
-			holdDecision.Status = SlotReuseAwaitingTeardownEvidence
-			return ErrSlotReuseEvidence
-		}
-		// An inventory ID hashes the enrolled route along with the physical
-		// identity. A second opaque ID can therefore be an alias of this same
-		// incarnation, even under another host, pool or request. The current
-		// inventory format can support a new release only for a single row.
-		var competing bool
-		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inventory LIMIT 1 OFFSET 1)").Scan(&competing); err != nil {
-			return err
-		}
-		if competing {
-			return ErrConflict
-		}
-		rows, err := sqliteInventory(tx)
-		if err != nil {
-			return err
-		}
-		want := InventoryResource{ID: evidence.Identity.ResourceID, Host: hold.Host, Pool: hold.Pool,
-			ReservationKey: hold.Key, Resources: hold.Resources, State: "deleting"}
-		if len(rows) == 0 || (rows[0].ReservationKey != hold.Key && rows[0].ID != want.ID) {
-			holdDecision.Status = SlotReuseAwaitingStorageEvidence
-			return ErrSlotReuseEvidence
-		}
-		if rows[0] != want {
-			return ErrConflict
-		}
-
-		if err := checkPriorSlotIncarnations(ctx, tx, evidence.Identity); err != nil {
+		if err := checkDeletingSlot(tx, hold); err != nil {
+			if errors.Is(err, ErrDenied) {
+				holdDecision.Status = SlotReuseAwaitingTeardownEvidence
+				return ErrSlotReuseEvidence
+			}
 			return err
 		}
 
-		// Use one clock sample after acquiring the writer lock and checking
-		// the durable charge. A pre-lock classification may have expired.
-		at := s.now().UTC()
-		verdict := ClassifySlotReuse(hold, evidence, at)
-		if verdict.Status != SlotReuseCandidateComplete {
-			holdDecision.Status = verdict.Status
-			return ErrSlotReuseEvidence
-		}
 		if !sqliteObservationsFresh(config, at) {
 			return ErrReconciliation
 		}
@@ -419,6 +321,13 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 			holdDecision.Status = SlotReuseFenceUnproven
 			return ErrSlotReuseEvidence
 		}
+		if err := checkSlotIncarnation(ctx, tx, hold, evidence, epoch); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				holdDecision.Status = SlotReuseAwaitingStorageEvidence
+				return ErrSlotReuseEvidence
+			}
+			return err
+		}
 		removed, err := tx.Exec("DELETE FROM inventory WHERE reservation_key=?", hold.Key)
 		if err != nil {
 			return err
@@ -426,12 +335,27 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		if count, err := removed.RowsAffected(); err != nil || count != 1 {
 			return ErrConflict
 		}
-		if _, err := tx.Exec("INSERT INTO releases(request_key,pool,host,cpu,ram,disk,runners,absence_digest,record,released_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-			hold.Key, hold.Pool, hold.Host, hold.Resources.CPU, hold.Resources.RAM, hold.Resources.Disk, hold.Resources.Runners, digest, encoded, at.Format(time.RFC3339Nano)); err != nil {
+
+		if _, err := tx.Exec("INSERT INTO releases(request_key,pool,host,cpu,ram,disk,runners,absence_digest,record,released_at,scoped_resource_id,physical_pair) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+			hold.Key, hold.Pool, hold.Host, hold.Resources.CPU, hold.Resources.RAM, hold.Resources.Disk, hold.Resources.Runners, digest, encoded, at.Format(time.RFC3339Nano), evidence.Identity.ResourceID, evidence.Identity.Instance+"/"+evidence.Identity.Generation); err != nil {
 			return err
 		}
 		if err := sqliteAudit(tx, "slot_reuse_released", hold.Key, at); err != nil {
 			return err
+		}
+		// The writer lock fixes lineage, fence and epoch throughout this
+		// transaction. Time can still invalidate evidence or the inventory
+		// while staging writes. Roll back even the audit entry in that case.
+		final := s.now().UTC()
+		if final.Before(at) {
+			return ErrSlotReuseEvidence
+		}
+		if verdict := ClassifySlotReuse(hold, evidence, final); verdict.Status != SlotReuseCandidateComplete {
+			holdDecision.Status = verdict.Status
+			return ErrSlotReuseEvidence
+		}
+		if !sqliteObservationsFresh(config, final) {
+			return ErrReconciliation
 		}
 		result = SlotReuseDecision{Request: hold, Status: SlotReuseCandidateComplete, EvidenceDigest: digest, ReleasedAt: at}
 		return nil
