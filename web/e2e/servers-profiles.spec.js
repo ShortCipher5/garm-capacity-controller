@@ -73,6 +73,20 @@ test("read-only discovery, reviewed enrollment and honest duplicate error", asyn
   await discovery.getByLabel("Enrollment management token", { exact: true }).fill(write);
   await discovery.getByRole("button", { name: "Enroll host", exact: true }).click();
   await expect(discovery.getByText(/host already enrolled/)).toBeVisible();
+
+  await enrolled.getByRole("link", { name: "Manage host-b in Ledger policy management" }).click();
+  const controls = page.locator("#management");
+  await expect(controls.getByLabel("Policy target")).toHaveValue("host-b");
+  await expect(controls.getByRole("option", { name: "Enable placement after reconciliation" })).toBeDisabled();
+  await expect(controls.getByText("No ledger pool is configured to place runners here.")).toBeVisible();
+  await controls.getByLabel("New host mode").selectOption("draining");
+  await controls.getByLabel("Audit reason").fill("exercise local drain request");
+  await controls.getByRole("button", { name: "Review change" }).click();
+  await expect(controls.getByText(/awaiting retirement evidence/)).toBeVisible();
+  await controls.getByLabel("Management write token").fill(write);
+  await controls.getByRole("button", { name: "Apply reviewed change" }).click();
+  await expect(enrolled.getByText(/Drain requested. Existing runners may still receive jobs./)).toBeVisible();
+  await expect(enrolled.getByRole("link", { name: "Inspect retirement blockers" })).toBeVisible();
 });
 
 test("usage chart renders observations without inventing interval coverage", async ({ page }) => {
@@ -135,18 +149,11 @@ test("usage history deadline ends loading for only the held server card", async 
   }
 });
 
-test("runner-size profile CRUD, validation and per-host fit estimates including an honest zero", async ({ page }) => {
+test("runner-size profile CRUD uses the actual eligible-host estimates", async ({ page }) => {
+  const overview = page.waitForResponse(r => r.url().endsWith("/admin/api/v1/overview") && r.ok());
   await connect(page);
-  // admin.spec.js leaves host-a disabled: estimates only cover enabled hosts,
-  // so re-enable it through the existing reviewed management control first.
-  await page.getByLabel(/^Policy control/).selectOption("host_mode");
-  await page.getByLabel(/^Policy target/).selectOption("host-a");
-  await page.getByLabel(/^New host mode/).selectOption("enabled");
-  await page.getByLabel("Audit reason", { exact: true }).fill("re-enable host-a for estimate view");
-  await page.getByRole("button", { name: "Review change", exact: true }).click();
-  await page.getByLabel("Management write token", { exact: true }).fill(write);
-  await page.getByRole("button", { name: "Apply reviewed change", exact: true }).click();
-  await expect(page.getByText("Policy saved.")).toBeVisible();
+  const snapshot = await (await overview).json();
+  const enabled = snapshot.hosts.find(host => host.id === "host-a").mode === "enabled";
   await page.getByRole("link", { name: "Profiles", exact: true }).click();
   const profiles = page.locator("#profile-management");
   await profiles.getByRole("button", { name: "New profile", exact: true }).click();
@@ -162,7 +169,7 @@ test("runner-size profile CRUD, validation and per-host fit estimates including 
   await profiles.getByLabel("Profile management write token", { exact: true }).fill(write);
   await profiles.getByRole("button", { name: "Save profile", exact: true }).click();
   await expect(profiles.getByText("Runner-size profile e2e-small saved.")).toBeVisible();
-  await expect(profiles.locator("tr", { hasText: "e2e-small" })).toContainText("~1 runners fit on host-a");
+  await expect(profiles.locator("tr", { hasText: "e2e-small" })).toContainText(enabled ? "~1 runners fit on host-a" : "No enabled hosts");
   await profiles.getByRole("button", { name: "New profile", exact: true }).click();
   await profiles.getByLabel("Profile name", { exact: true }).fill("e2e-large");
   await profiles.getByLabel("CPU (vCPUs)", { exact: true }).fill("4");
@@ -170,7 +177,7 @@ test("runner-size profile CRUD, validation and per-host fit estimates including 
   await profiles.getByLabel("Disk (MiB)", { exact: true }).fill("0");
   await profiles.getByLabel("Profile management write token", { exact: true }).fill(write);
   await profiles.getByRole("button", { name: "Save profile", exact: true }).click();
-  await expect(profiles.locator("tr", { hasText: "e2e-large" })).toContainText("~0 runners fit on host-a (no remaining budget)");
+  await expect(profiles.locator("tr", { hasText: "e2e-large" })).toContainText(enabled ? "~0 runners fit on host-a (no remaining budget)" : "No enabled hosts");
   await profiles.locator("tr", { hasText: "e2e-small" }).getByRole("button", { name: "Edit", exact: true }).click();
   await profiles.getByLabel("Memory (MiB)", { exact: true }).fill("2048");
   await profiles.getByLabel("Profile management write token", { exact: true }).fill(write);
@@ -211,4 +218,30 @@ test('profile controls follow admin capability and discard a draft on downgrade'
  await expect(panel.getByLabel('Profile management write token')).toHaveValue('');
  await expect(page).toHaveURL(/#profiles$/);
  expect(writes).toBe(0);
+});
+
+test("reviewed removal discards only a disabled discovery enrollment", async ({ page }) => {
+  await connect(page);
+  const enrolled = page.locator('#servers [data-host="host-b"]');
+  await enrolled.getByRole("link", { name: "Manage host-b in Ledger policy management" }).click();
+  const controls = page.locator("#management");
+  await expect(controls.getByLabel("Policy target")).toHaveValue("host-b");
+  await controls.getByLabel("Policy control").selectOption("host_draft_remove");
+  await expect(controls.getByRole("button", { name: "Review change" })).toBeDisabled();
+  await controls.getByLabel("Policy control").selectOption("host_mode");
+  await controls.getByLabel("New host mode").selectOption("disabled");
+  await controls.getByLabel("Audit reason").fill("stop new placement before withdrawal");
+  await controls.getByRole("button", { name: "Review change" }).click();
+  await controls.getByLabel("Management write token").fill(write);
+  await controls.getByRole("button", { name: "Apply reviewed change" }).click();
+  await expect(enrolled).toContainText("Configured mode: disabled");
+  await controls.getByLabel("Policy control").selectOption("host_draft_remove");
+  await expect(controls.getByLabel("Policy target")).toHaveValue("host-b");
+  await controls.getByLabel("Audit reason").fill("discard unused enrollment");
+  await controls.getByRole("button", { name: "Review change" }).click();
+  await controls.getByLabel("Management write token").fill(write);
+  await controls.getByRole("button", { name: "Apply reviewed change" }).click();
+  await expect(controls.getByRole("status")).toContainText("Its alias remains reserved");
+  await expect(enrolled).toHaveCount(0);
+  await expect(page.locator('#servers [data-host="host-a"]')).toBeVisible();
 });

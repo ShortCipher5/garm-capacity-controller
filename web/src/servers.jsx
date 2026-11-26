@@ -8,6 +8,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { fetchProfileDiscovery, enrollHost } from "./discovery-client.js";
 import { hostBudgetGuidance, assessBudget, runnerMix, runnerProfileMaximum, DIMENSIONS, RUNNER_PRESETS, plannedRunnerLimit, reviewedRunnerBudget, runnerPlanningReviewWindow } from "./host-budget.js";
 import { Usage } from "./usage-bars.jsx";
+import { Management } from "./management.jsx";
+import { drainView } from "./lifecycle.js";
 import { RunnerDiskHealth } from "./runner-disk-health.jsx";
 import { UsageChart, USAGE_DIMENSIONS, formatSampleAge } from "./usage-chart.jsx";
 
@@ -92,7 +94,8 @@ export function UsageHistoryDetail({ samples, dimension, source, onSourceChange,
     </>
   );
 }
-export function ServerCard({ host, readUsage }) {
+export function ServerCard({ host, readUsage, onManage }) {
+  const drain = drainView(host.drain_assessment);
   return (
     <article className="card host" data-host={host.id}>
       <div className="host-heading">
@@ -105,7 +108,16 @@ export function ServerCard({ host, readUsage }) {
           {host.new_claims_paused ? "New claims paused" : "New claims allowed"}
         </span>
       </div>
-      <p className="muted">Mode and budget changes stay in <a href="#management">Ledger policy management</a>. They pause new claims only; they never drain runners or release charges.</p>
+      <p>Backend connection observation: {host.observation_fresh
+        ? (host.last_observed_healthy ? "Healthy" : "Unhealthy")
+        : "Unavailable or stale"}
+      {host.observation_fresh && <> · <time dateTime={host.observed_at}>{date(host.observed_at)}</time></>}
+      </p>
+      <p className="muted">Backend binding: {host.backend_binding_status === "bound_observation"
+        ? "Authenticated daemon observed"
+        : (host.backend_binding_status === "legacy_scope_import_required" ? "Qualified scope import required" : "Unbound")}</p>
+      {onManage && <a href="#management" onClick={() => onManage(host.id)}>Manage {host.id} in Ledger policy management</a>}
+      {host.mode === "draining" && <p className="drain-warning">Drain requested. Existing runners may still receive jobs. {drain ? `${drain.tracked} tracked allocation(s) still charged.` : "Allocation status unavailable."} <a href="#lifecycle">Inspect retirement blockers</a>.</p>}
       <Usage allocation={host} />
       <p className="detected-line">
         <span className="muted">Backend-reported totals from last discovery:</span>{" "}
@@ -304,6 +316,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh, readOverhead
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [enrolling, setEnrolling] = useState("");
+  const [policyTarget, setPolicyTarget] = useState(null);
   const mounted = useRef(true), generation = useRef(0), active = useRef(null), token = useRef(null);
   useEffect(() => {
     mounted.current = true;
@@ -355,7 +368,7 @@ export function Servers({ data, readOnboarding, readUsage, refresh, readOverhead
       await enrollHost(credential, { name, budget, review: result.review, mode: String(form.get("mode")) }, { signal: controller.signal });
       if (mounted.current && current === generation.current) {
         setEnrolling("");
-        setMessage(`Host ${name} enrolled using the reviewed discovery snapshot. It remains paused and unqualified: enabling is a separate reviewed action in Ledger policy management.`);
+        setMessage(`Host ${name} enrolled using the reviewed discovery snapshot. It remains paused. Review placement prerequisites in Ledger policy management.`);
         await refresh();
       }
     } catch (error) {
@@ -415,12 +428,14 @@ export function Servers({ data, readOnboarding, readUsage, refresh, readOverhead
         )}
         {message && <p role="status">{message}</p>}
       </div>
-      <p className="muted" role="status">Configured mode and budget controls stay in Ledger policy management. Detected totals are discovery display data; admission budgets and fits never read them.</p>
+      <Management data={data} refresh={refresh} hostRequest={policyTarget} />
       {data.hosts.length === 0 ? (
         <p className="empty">No hosts configured in this ledger.</p>
       ) : (
         <div className="hosts">
-          {data.hosts.map((host) => <ServerCard key={host.id} host={host} readUsage={readUsage} />)}
+          {data.hosts.map((host) => <ServerCard key={host.id} host={host} readUsage={readUsage} onManage={data.management_enabled
+            ? id => setPolicyTarget({ host: id })
+            : undefined} />)}
         </div>
       )}
     </section>

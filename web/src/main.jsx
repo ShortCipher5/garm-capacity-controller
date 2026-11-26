@@ -17,7 +17,6 @@ import { GarmManagement } from "./garm-management.jsx";
 import { filterHosts } from "./host-filter.js";
 import { poolPlacementSummary } from "./pool-placement.js";
 import { AuditEvents } from "./audit-events.jsx";
-import { Management } from "./management.jsx";
 import { Servers } from "./servers.jsx";
 import { Profiles } from "./profiles.jsx";
 import { Usage, dimensions, allocationText } from "./usage-bars.jsx";
@@ -152,7 +151,6 @@ export function Dashboard({ data, busy, refresh, disconnect, readGarm, readOnboa
         {showCIHealth && <CIHealthPanel enabled={ciHealthAvailable} read={readCIHealth} />}
         {showCISizing && <CISizingPanel enabled={ciHealthSizingAvailable} read={readCISizing} />}
         <Lifecycle data={data} readRetirementStatus={readRetirementStatus} />
-        <Management data={data} refresh={refresh} />
         {data.garm_management_available && <GarmManagement read={readGarm} {...entityReaders} />}
         {data.onboarding_preflight_available && <OnboardingPreflight read={readOnboarding} />}
         <div className="metrics">

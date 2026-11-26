@@ -36,7 +36,7 @@ test("server cards render detected totals, cpu cap and link mode controls withou
   try {
     const { ServerCard, DiscoveryResultView } = await server.ssrLoadModule("/src/servers.jsx");
     const readUsage = async () => [];
-    const html = renderToStaticMarkup(React.createElement(ServerCard, { host: host(), readUsage }));
+    const html = renderToStaticMarkup(React.createElement(ServerCard, { host: host(), readUsage, onManage: () => {} }));
     assert.match(html, /Backend-reported totals from last discovery/);
     assert.match(html, /These totals do not verify whole-host capacity or current headroom/);
     assert.doesNotMatch(html, /Detected physical totals/);
@@ -46,12 +46,14 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.match(html, /CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB · Runners not measured by discovery/);
     assert.match(html, /CPU fair-use cap: 3,000 millicores/);
     assert.match(html, /Ledger policy management/);
+    assert.match(html, /Backend connection observation/);
     assert.doesNotMatch(html, /<select aria-label="New host mode"/);
     const unknown = renderToStaticMarkup(React.createElement(ServerCard, { host: host({ detected: undefined, cpu_cap_millis: 0 }), readUsage }));
     assert.match(unknown, /unknown — no discovery totals recorded for this host/);
     assert.doesNotMatch(unknown, /CPU fair-use cap/);
     const stale = renderToStaticMarkup(React.createElement(ServerCard, { host: host({ observation_fresh: false }), readUsage }));
     assert.match(stale, /Stale or unavailable observation/);
+    assert.doesNotMatch(stale, /Ledger policy management/);
     const view = renderToStaticMarkup(React.createElement(DiscoveryResultView, { result: discovery }));
     assert.match(view, /Discovery observation · candidate-discover/);
     assert.match(view, /Backend-reported totals \(complete\): CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB/);
