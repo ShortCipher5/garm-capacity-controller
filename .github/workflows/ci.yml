@@ -26,6 +26,11 @@ jobs:
         run: python3 -B -m unittest discover -s internal/nativeprovision -p diagnostic_test.py -v
       - name: Validate bounded native asset upload recipe
         run: python3 -B -m unittest discover -s internal/nativeassettransfer -p '*test.py' -v
+      - name: Validate stock inventory and GitHub recovery observers without secrets
+        run: |
+          python3 -B -m unittest discover -s deploy/runtime/hosted-incus -p 'test_*.py' -v
+          python3 -B -m unittest discover -s deploy/runtime/stock-inventory -p 'test_*.py' -v
+          python3 -B -m unittest discover -s deploy/runtime/trusted-job-recovery -p 'test_*.py' -v
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       - name: Require actual Unix packet sender credentials and pidfd
