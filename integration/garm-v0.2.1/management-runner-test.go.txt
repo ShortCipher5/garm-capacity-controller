@@ -5,6 +5,7 @@ import (
  "encoding/json"
 
  commonParams "github.com/cloudbase/garm-provider-common/params"
+ dbCommon "github.com/cloudbase/garm/database/common"
  "github.com/cloudbase/garm/params"
 )
 
@@ -93,4 +94,48 @@ func (s *RepoTestSuite) TestCapacityManagementDisabledPoolCreateBoundary() {
  repo,err:=s.Fixtures.Store.GetRepositoryByID(s.Fixtures.AdminContext,repoID)
  s.Require().NoError(err)
  s.Require().Len(repo.Pools,1,"failed attempts did not insert extra pools")
+}
+
+// Schedule a second official Runner call after the original Runner has
+// authorized and validated its request, immediately before the real SQLite
+// store runs its transaction. Both callers use the unmodified store.
+type capacityManagementInterleavedStore struct {
+	dbCommon.Store
+	beforeUpdate func()
+}
+
+func (s capacityManagementInterleavedStore) UpdateEntityPool(ctx context.Context, entity params.ForgeEntity, poolID string, update params.UpdatePoolParams) (params.Pool, error) {
+	s.beforeUpdate()
+	return s.Store.UpdateEntityPool(ctx, entity, poolID, update)
+}
+
+func (s *PoolTestSuite) TestCapacityManagementMatchingMaximumBeforeOriginalCommits() {
+	pool := s.Fixtures.Pools[0]
+	desired := pool.MaxRunners + 1
+	other := desired + 1
+	ctx, cancel := context.WithCancel(s.adminCtx)
+	defer cancel()
+	original := &Runner{store: capacityManagementInterleavedStore{
+		Store: s.Fixtures.Store,
+		beforeUpdate: func() {
+			cancel()
+			// An independently authorized entity-route call supplies the desired
+			// maximum while the original generic-route call has yet to write.
+			_, err := s.Runner.UpdateOrgPool(s.adminCtx, pool.OrgID, pool.ID, params.UpdatePoolParams{MaxRunners: &desired})
+			s.Require().NoError(err)
+			observed, err := s.Runner.GetPoolByID(s.adminCtx, pool.ID)
+			s.Require().NoError(err)
+			s.Require().Equal(desired, observed.MaxRunners)
+			s.Require().Equal(pool.Generation, observed.Generation)
+			changed, err := s.Runner.UpdateOrgPool(s.adminCtx, pool.OrgID, pool.ID, params.UpdatePoolParams{MaxRunners: &other})
+			s.Require().NoError(err)
+			s.Require().Equal(other, changed.MaxRunners)
+		},
+	}}
+	_, err := original.UpdatePoolByID(ctx, pool.ID, params.UpdatePoolParams{MaxRunners: &desired})
+	s.Require().NoError(err)
+	observed, err := s.Runner.GetPoolByID(s.adminCtx, pool.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(desired, observed.MaxRunners)
+	s.Require().Equal(pool.Generation, observed.Generation)
 }

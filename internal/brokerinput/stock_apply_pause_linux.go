@@ -101,6 +101,15 @@ type StockApplyRecovery struct {
 	Operation    *StockApplyOperation `json:"operation,omitempty"`
 	Withdrawable bool                 `json:"withdrawable"`
 	Reason       string               `json:"reason"`
+	// RecoverScope includes the most recently journaled comparison for the open operation.
+	RecordedReadback *StockApplyRecordedReadback `json:"last_recorded_readback,omitempty"`
+}
+
+// StockApplyRecordedReadback describes historical evidence at local audit time.
+// The journal does not attest to capture freshness or upstream causality.
+type StockApplyRecordedReadback struct {
+	Comparison string    `json:"comparison"`
+	RecordedAt time.Time `json:"recorded_at"`
 }
 
 const (
@@ -127,12 +136,47 @@ func (c *StockApplyController) RecoverScope(ctx context.Context, scope [sha256.S
 	err := c.journal.transaction(ctx, func(tx *sql.Tx) error {
 		var err error
 		recovery, err = c.scopeRecovery(tx, key)
+		if err != nil || recovery.Operation == nil {
+			return err
+		}
+		recovery.RecordedReadback, err = lastStockApplyReadback(tx, recovery.Operation)
 		return err
 	})
 	if err != nil {
 		return StockApplyRecovery{}, err
 	}
 	return recovery, nil
+}
+
+// Walk back only to this operation's latest observation or initial proposal.
+// The audit sequence orders commits even when two wall clock readings agree.
+func lastStockApplyReadback(tx *sql.Tx, op *StockApplyOperation) (*StockApplyRecordedReadback, error) {
+	var kind, stamp, detail string
+	err := tx.QueryRow(`SELECT kind, recorded_at, detail FROM stock_apply_audit
+		WHERE scope=? AND operation_id=? AND kind IN ('observation','proposal_recorded')
+		ORDER BY sequence DESC LIMIT 1`, op.Scope, op.OperationID).Scan(&kind, &stamp, &detail)
+	if err != nil {
+		return nil, ErrStockApplyJournal
+	}
+	if kind == "proposal_recorded" {
+		return nil, nil
+	}
+	maximum, err := strconv.ParseInt(detail, 10, 64)
+	if err != nil || maximum < 0 || maximum > 1000000 || detail != strconv.FormatInt(maximum, 10) {
+		return nil, ErrStockApplyJournal
+	}
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil || at.IsZero() {
+		return nil, ErrStockApplyJournal
+	}
+	comparison := "differs_from_both"
+	switch maximum {
+	case op.Observed:
+		comparison = "matches_proposal_baseline"
+	case op.Suggested:
+		comparison = "matches_proposal_target"
+	}
+	return &StockApplyRecordedReadback{Comparison: comparison, RecordedAt: at.UTC()}, nil
 }
 
 // ChangeScopePause changes local mode only if the reviewed mode revision
