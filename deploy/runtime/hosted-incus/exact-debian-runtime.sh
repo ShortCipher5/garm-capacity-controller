@@ -207,7 +207,9 @@ startup_phase() {
 }
 startup_phase incus-socket timeout --kill-after=5s 30s systemctl start incus.socket
 startup_phase incus-daemon-ready timeout --kill-after=5s 35s incus admin waitready --timeout 25
-inner() { timeout --kill-after=5s 45s incus "$@"; }
+# Some Incus CLI commands treat non-terminal stdin as YAML. Never give the
+# CLI the remaining guest shell heredoc; no command below requires stdin.
+inner() { timeout --kill-after=5s 45s incus "$@" </dev/null; }
 [[ -z ${INCUS_REMOTE:-} && $(inner remote get-default) == local ]]
 [[ $(inner version | awk '$1=="Server" && $2=="version:" {print $3}') == 7.0.2 ]]
 export RUNNER_TEMP=/root/gcc-runtime
@@ -221,6 +223,7 @@ export GCC_HOSTED_INCUS_AUTH_PROJECT=garm-ci-project-runtime
 export GCC_HOSTED_INCUS_AUTH_GUEST=garm-ci-runtime
 export GCC_HOSTED_INCUS_AUTH_ENDPOINT=https://127.0.0.1:8443
 export GCC_HOSTED_INCUS_RUNTIME_METADATA=$GCC_HOSTED_INCUS_AUTH_DIR/runtime-instance.json
+echo 'Preparing isolated Incus project, storage and image'
 inner project create "$GCC_HOSTED_INCUS_AUTH_PROJECT" -c features.images=false >/dev/null
 inner storage create gcc-dir dir >/dev/null
 inner image import /root/gcc-offline/alpine.meta /root/gcc-offline/alpine.meta.root local: --alias gcc-source >/dev/null
@@ -228,6 +231,7 @@ inner image import /root/gcc-offline/alpine.meta /root/gcc-offline/alpine.meta.r
 inner init "$f" "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH_PROJECT" --storage gcc-dir --no-profiles \
   -c user.runner-controller-id=11111111-1111-4111-8111-111111111111 \
   -c user.runner-pool-id=22222222-2222-4222-8222-222222222222 >/dev/null
+echo 'Starting the nested fixture container'
 inner start "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH_PROJECT"
 inner config trust add-certificate "$GCC_HOSTED_INCUS_AUTH_DIR/allowed.pem" --restricted --projects "$GCC_HOSTED_INCUS_AUTH_PROJECT"
 inner config set core.https_address 127.0.0.1:8443
@@ -235,6 +239,7 @@ timeout 10 openssl s_client -verify_return_error -verify_ip 127.0.0.1 \
   -CAfile "$GCC_HOSTED_INCUS_AUTH_DIR/daemon.pem" -connect 127.0.0.1:8443 </dev/null >/dev/null 2>&1
 inner query "/1.0/instances/$GCC_HOSTED_INCUS_AUTH_GUEST?project=$GCC_HOSTED_INCUS_AUTH_PROJECT" > "$GCC_HOSTED_INCUS_RUNTIME_METADATA"
 chmod 0600 "$GCC_HOSTED_INCUS_RUNTIME_METADATA"
+echo 'Running the authenticated Incus 7.0.2 runtime reader'
 timeout 90 /root/controller-incus.test -test.run '^TestHostedIncusRuntimeHealth702$' -test.v | tee "$RUNNER_TEMP/reader.log"
 grep -Eq '^--- PASS: TestHostedIncusRuntimeHealth702 \(' "$RUNNER_TEMP/reader.log"
 inner delete "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH_PROJECT" --force >/dev/null
