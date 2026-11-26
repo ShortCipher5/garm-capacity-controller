@@ -143,7 +143,28 @@ for name in incus-base incus-client; do
   done
   [[ $n == 1 ]]
 done
-timeout 270 apt-get --no-download --no-remove --no-install-recommends install -y "${debs[@]}"
+# APT's --no-download also suppresses acquisition of the explicit local
+# archives. Allow its local archive methods only, with no repository sources or
+# cached indexes. Bundle provenance and exact contents were verified above.
+apt_work=$(mktemp -d /var/tmp/gcc-offline-apt.XXXXXXXX)
+chmod 0755 "$apt_work"
+mkdir -m 0755 "$apt_work/sources" "$apt_work/lists" "$apt_work/methods" "$apt_work/debs"
+for method in copy file store; do
+  [[ -x /usr/lib/apt/methods/$method ]]
+  ln -s "/usr/lib/apt/methods/$method" "$apt_work/methods/$method"
+done
+install -m 0644 -- "${debs[@]}" "$apt_work/debs/"
+(cd "$apt_work/debs" && sha256sum --strict --check "$bundle/SHA256SUMS" >/dev/null)
+echo "Installing ${#debs[@]} verified Debian archives with local-only APT methods"
+timeout 270 apt-get \
+  -o "Dir::Etc::sourcelist=/dev/null" \
+  -o "Dir::Etc::sourceparts=$apt_work/sources" \
+  -o "Dir::State::lists=$apt_work/lists" \
+  -o "Dir::Bin::Methods=$apt_work/methods" \
+  -o 'Dir::Cache::pkgcache=' -o 'Dir::Cache::srcpkgcache=' \
+  --no-remove --no-install-recommends install -y "$apt_work"/debs/*.deb
+rm -rf -- "$apt_work"
+echo 'Verified local package installation complete'
 [[ $(dpkg-query -W -f='${Version}' incus-base) == "$v" ]]
 [[ $(dpkg-query -W -f='${Version}' incus-client) == "$v" ]]
 timeout 30 systemctl start incus.socket
