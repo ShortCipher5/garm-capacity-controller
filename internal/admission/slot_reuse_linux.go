@@ -249,8 +249,8 @@ type SlotReuseDecision struct {
 // A permanent tombstone belongs to the original physical incarnation even if
 // a later enrollment gives it a different request, host or provider route.
 // Check existing records in place so pre-upgrade releases keep this protection.
-// The versionless project-absence format has no comparable daemon/project
-// fingerprints. Its UUID and generation can exclude a different incarnation.
+// An identical UUID and generation across different fingerprints can reflect a
+// moved or cloned resource. Do not infer that the new route is independent.
 func checkPriorSlotIncarnations(ctx context.Context, tx *sql.Tx, candidate SlotReuseIdentity) error {
 	rows, err := tx.QueryContext(ctx, "SELECT request_key,absence_digest,record FROM releases")
 	if err != nil {
@@ -280,8 +280,8 @@ func checkPriorSlotIncarnations(ctx context.Context, tx *sql.Tx, candidate SlotR
 				!routeUUID(id.Instance) || !routeUUID(id.Generation) || id.ResourceID == "" {
 				return ErrSlotReuseEvidence
 			}
-			if id.ResourceID == candidate.ResourceID || (id.Daemon == candidate.Daemon && id.Project == candidate.Project &&
-				id.Instance == candidate.Instance && id.Generation == candidate.Generation) {
+			if id.ResourceID == candidate.ResourceID ||
+				(id.Instance == candidate.Instance && id.Generation == candidate.Generation) {
 				return ErrConflict
 			}
 		case "":
