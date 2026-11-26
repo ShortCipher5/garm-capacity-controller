@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 )
 
 const slotReuseFixtureSource = SlotReuseSourceClass("fixture_qualified_retirement")
@@ -609,4 +612,199 @@ func ExampleClassifySlotReuse() {
 	verdict := ClassifySlotReuse(req, SlotReuseEvidence{Version: SlotReuseEvidenceVersion}, time.Now())
 	fmt.Println(verdict.Status)
 	// Output: unsupported_source
+}
+
+func TestSlotReuseHoldsConflictingIncarnationAcrossHosts(t *testing.T) {
+	registerSlotReuseFixtureSource(t)
+	for _, orphan := range []bool{false, true} {
+		t.Run(fmt.Sprintf("orphan=%t", orphan), func(t *testing.T) {
+			ctx := t.Context()
+			s, req, _ := slotReuseHold(t)
+			second := req
+			second.Key, second.Host, second.Pool = evidenceDigest([]byte("other repository job")), "b", "api"
+			id := slotReuseFixtureEvidence(req, 0, s.now()).Identity.ResourceID
+			rows := []InventoryResource{
+				{ID: id, Host: req.Host, Pool: req.Pool, ReservationKey: req.Key, Resources: req.Resources, State: "deleting"},
+				{ID: id, Host: second.Host, Pool: second.Pool, Resources: second.Resources, State: "idle"},
+			}
+			if !orphan {
+				if _, err := s.Admit(ctx, second); err != nil {
+					t.Fatal(err)
+				}
+				rows[1].ReservationKey = second.Key
+			}
+			reconcileSQLite(t, s, rows)
+			if orphan {
+				// Omission leaves the other host's last observation charged as unknown.
+				rows = rows[:1]
+			} else {
+				if _, err := s.MarkDeleting(ctx, second); err != nil {
+					t.Fatal(err)
+				}
+				rows[1].State = "deleting"
+			}
+			fence := reconcileSQLite(t, s, rows)
+			other, err := OpenSQLite(s.path, Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer other.Close()
+			targets := []Request{req, second}
+			if orphan {
+				targets = []Request{req, req}
+			}
+			decisions := make([]SlotReuseDecision, len(targets))
+			errs := make([]error, len(targets))
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i, handle := range []*SQLiteStore{s, other} {
+				target := targets[i]
+				e := slotReuseFixtureEvidence(target, fence.Epoch, s.now())
+				wg.Go(func() {
+					<-start
+					decisions[i], errs[i] = handle.ReleaseRetiredSlot(ctx, target, e)
+				})
+			}
+			close(start)
+			wg.Wait()
+			for i, target := range targets {
+				if !errors.Is(errs[i], ErrConflict) {
+					t.Fatalf("request %s: %+v %v", target.Key, decisions[i], errs[i])
+				}
+				assertNoSlotReuseCredit(t, decisions[i])
+				if _, err := s.LookupRelease(ctx, target.Key); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatal(err)
+				}
+			}
+			if got, want := slotReuseCharged(t, s), (Resources{CPU: 2 * req.Resources.CPU, RAM: 2 * req.Resources.RAM, Disk: 2 * req.Resources.Disk, Runners: 2}); got != want {
+				t.Fatalf("conflicting pair charged %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestSlotReuseTombstoneFollowsIncarnationAcrossRebindAndRestart(t *testing.T) {
+	registerSlotReuseFixtureSource(t)
+	ctx := t.Context()
+	s, req, epoch := slotReuseHold(t)
+	first := slotReuseFixtureEvidence(req, epoch, s.now())
+	if got, err := s.ReleaseRetiredSlot(ctx, req, first); err != nil || got.Replay {
+		t.Fatalf("first release: %+v %v", got, err)
+	}
+	s = reopenSlotReuseStore(t, s)
+	defer s.Close()
+	for i, sameGeneration := range []bool{true, false} {
+		// A newly enrolled route and a different request and host give
+		// the same physical instance a different scoped resource ID.
+		next := req
+		next.Key, next.Pool, next.Host = evidenceDigest([]byte(fmt.Sprintf("rebound-%d", i))), "api", "b"
+		if _, err := s.Admit(ctx, next); err != nil {
+			t.Fatal(err)
+		}
+		build := func(epoch int64) SlotReuseEvidence {
+			e := slotReuseFixtureEvidence(next, epoch, s.now())
+			e.Identity.Route = strings.Repeat("d", 64)
+			if !sameGeneration {
+				e.Identity.Generation = "33333333-3333-4333-8333-333333333333"
+			}
+			e.Identity.ResourceID = slotReuseResourceID(e.Identity)
+			digest := slotReuseIdentityDigest(e.Identity)
+			e.Settlement.IdentityDigest, e.Teardown.IdentityDigest, e.Fence.IdentityDigest = digest, digest, digest
+			return e
+		}
+		row := InventoryResource{ID: build(0).Identity.ResourceID, Host: next.Host, Pool: next.Pool, ReservationKey: next.Key, Resources: next.Resources, State: "idle"}
+		reconcileSQLite(t, s, []InventoryResource{row})
+		if _, err := s.MarkDeleting(ctx, next); err != nil {
+			t.Fatal(err)
+		}
+		row.State = "deleting"
+		fence := reconcileSQLite(t, s, []InventoryResource{row})
+		e := build(fence.Epoch)
+		decision, err := s.ReleaseRetiredSlot(ctx, next, e)
+		if sameGeneration {
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("second request claimed original incarnation: %+v %v", decision, err)
+			}
+			assertNoSlotReuseCredit(t, decision)
+		} else if err != nil || decision.Replay {
+			t.Fatalf("distinct generation refused: %+v %v", decision, err)
+		}
+		if got := slotReuseCharged(t, s); got != req.Resources {
+			t.Fatalf("rebound charge lost: %+v", got)
+		}
+	}
+	if replay, err := s.ReleaseRetiredSlot(ctx, req, first); err != nil || !replay.Replay {
+		t.Fatalf("original replay: %+v %v", replay, err)
+	}
+}
+
+func TestSlotReusePriorReleaseFormats(t *testing.T) {
+	registerSlotReuseFixtureSource(t)
+	for _, tc := range []struct {
+		name      string
+		version   string
+		different bool
+		want      error
+	}{
+		{"opaque v1 has same incarnation", "slot-reuse-evidence/v1", false, ErrConflict},
+		{"different v1 generation", "slot-reuse-evidence/v1", true, nil},
+		{"old project absence has same UUID and generation", "", false, ErrConflict},
+		{"old project absence has different generation", "", true, nil},
+		{"unrecognized record", "future", true, ErrSlotReuseEvidence},
+		{"unreadable blob", "unreadable", true, ErrSlotReuseEvidence},
+		{"record no longer matches digest", "bad digest", true, ErrSlotReuseEvidence},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			s, req, epoch := slotReuseHold(t)
+			priorReq := req
+			priorReq.Key = evidenceDigest([]byte("old release"))
+			candidate := slotReuseFixtureEvidence(req, epoch, s.now())
+			prior := slotReuseFixtureEvidence(priorReq, 1, s.now())
+			prior.Identity.ResourceID = "old-opaque-inventory-key"
+			if tc.different {
+				prior.Identity.Generation = "33333333-3333-4333-8333-333333333333"
+			}
+			prior.Version = tc.version
+			var history any = prior
+			if tc.version == "" {
+				history = incusapi.ProjectAbsenceRecord{Identity: incusapi.InstanceIdentityObservation{
+					Subject: incusapi.InstanceIdentitySubject{ReservationKey: priorReq.Key, UUID: prior.Identity.Instance, Generation: prior.Identity.Generation},
+				}}
+			}
+			raw, err := json.Marshal(history)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.version == "unreadable" {
+				raw = []byte("unreadable")
+			}
+			digest := evidenceDigest(raw)
+			if tc.version == "bad digest" {
+				digest = evidenceDigest([]byte("different record"))
+			}
+			_, err = s.db.ExecContext(ctx, `INSERT INTO releases(request_key,pool,host,cpu,ram,disk,runners,absence_digest,record,released_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				priorReq.Key, priorReq.Pool, priorReq.Host, priorReq.Resources.CPU, priorReq.Resources.RAM, priorReq.Resources.Disk, priorReq.Resources.Runners, digest, raw, s.now().UTC().Format(time.RFC3339Nano))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := s.ReleaseRetiredSlot(ctx, req, candidate)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("historical record: %+v %v, want %v", decision, err, tc.want)
+			}
+			if tc.want == nil {
+				if decision.Replay || slotReuseCharged(t, s) != (Resources{}) {
+					t.Fatal("unrelated history changed eligible release", decision)
+				}
+			} else {
+				assertNoSlotReuseCredit(t, decision)
+				if slotReuseCharged(t, s) != req.Resources {
+					t.Fatal("historical conflict refunded charge")
+				}
+				if _, err := s.LookupRelease(ctx, req.Key); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
 }
