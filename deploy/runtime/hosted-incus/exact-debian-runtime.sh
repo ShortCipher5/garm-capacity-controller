@@ -97,8 +97,11 @@ printf '%s\n' "$alpine_fingerprint" > "$work/alpine.fingerprint"
 outer exec "$outer_guest" -- install -d -m 0700 /root/gcc-offline /root/gcc-offline/debs
 outer file push --uid=0 --gid=0 --mode=0600 "${debs[@]}" "$work/bundle/SHA256SUMS" "$outer_guest/root/gcc-offline/debs/"
 outer file push --uid=0 --gid=0 --mode=0600 "$work/alpine.meta" "$work/alpine.meta.root" "$work/alpine.fingerprint" "$outer_guest/root/gcc-offline/"
-sudo timeout --kill-after=15s 650s incus exec "$outer_guest" -- /bin/bash -se <<'INNER'
+sudo timeout --kill-after=15s 650s incus exec "$outer_guest" \
+  --env "GITHUB_ACTIONS=$GITHUB_ACTIONS" --env "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+  -- /bin/bash -se <<'INNER'
 set -euo pipefail
+[[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted ]]
 umask 077
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
@@ -167,8 +170,32 @@ rm -rf -- "$apt_work"
 echo 'Verified local package installation complete'
 [[ $(dpkg-query -W -f='${Version}' incus-base) == "$v" ]]
 [[ $(dpkg-query -W -f='${Version}' incus-client) == "$v" ]]
-timeout 30 systemctl start incus.socket
-timeout 35 incus admin waitready --timeout 25
+# These diagnostics run only inside the disposable NIC-less Debian guest.
+startup_diagnostics() {
+  timeout 6 systemctl --no-pager list-jobs || true
+  timeout 6 systemctl --no-pager show \
+    -p Id -p ActiveState -p SubState -p Result -p Requires -p Wants -p After \
+    incus.socket incus.service incus-startup.service lxcfs.service network-online.target \
+    systemd-networkd-wait-online.service || true
+  timeout 8 journalctl --boot --no-pager -n 60 -o short-monotonic \
+    -u incus.socket -u incus.service -u incus-startup.service -u lxcfs.service \
+    -u systemd-networkd-wait-online.service || true
+}
+startup_phase() {
+  local phase=$1 rc
+  shift
+  printf 'Starting fixture phase: %s\n' "$phase"
+  if "$@"; then
+    printf 'Completed fixture phase: %s\n' "$phase"
+  else
+    rc=$?
+    printf 'Fixture phase failed: %s (exit %d)\n' "$phase" "$rc" >&2
+    startup_diagnostics
+    return "$rc"
+  fi
+}
+startup_phase incus-socket timeout --kill-after=5s 30s systemctl start incus.socket
+startup_phase incus-daemon-ready timeout --kill-after=5s 35s incus admin waitready --timeout 25
 inner() { timeout --kill-after=5s 45s incus "$@"; }
 [[ -z ${INCUS_REMOTE:-} && $(inner remote get-default) == local ]]
 [[ $(inner version | awk '$1=="Server" && $2=="version:" {print $3}') == 7.0.2 ]]
