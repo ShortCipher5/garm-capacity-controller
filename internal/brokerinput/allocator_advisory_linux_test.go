@@ -741,6 +741,56 @@ func TestAllocatorZeroIdleAndWarmFloorsPredictable(t *testing.T) {
 	}
 }
 
+func TestAllocatorExplainsUnmetWarmFloor(t *testing.T) {
+	t.Run("competing queue takes the last slot", func(t *testing.T) {
+		in, state := allocatorFixture(t)
+		size := in.Snapshot.Pools[pool].Size
+		in.Observation.Jobs = nil
+		allocatorEnrollPool(&in, &state, allocatorRepoB, allocatorPoolB, "fingerprint-b", 1, size, 2, 2, 0)
+		allocatorSetCaps(&in, &state, 2, 2, 1)
+		allocatorSetBudgets(&state, size[0], size[1], size[2], 1)
+		allocatorQueueJob(&in, allocatorRepoB, allocatorPoolB, 2, in.Options.Now)
+		allocatorRebuild(t, state, nil, &in)
+		proposal, err := PlanAllocatorProposal(in)
+		if err != nil || len(proposal.Awards) != 1 || proposal.Awards[0].Pool != allocatorPoolB || proposal.Awards[0].Warm {
+			t.Fatalf("queued job must get the last slot before the quiet floor: %+v %v", proposal.Awards, err)
+		}
+		if got := allocatorDecision(proposal, pool); got.RemainingQueued != 0 || got.AdditionalWarm != 0 || got.Reason != allocatorDecisionBlockedGlobal {
+			t.Fatalf("unfunded floor needs a budget explanation: %+v", got)
+		}
+	})
+	t.Run("floor partly funded", func(t *testing.T) {
+		in, state := allocatorFixture(t)
+		size := in.Snapshot.Pools[pool].Size
+		in.Observation.Jobs = nil
+		allocatorSetCaps(&in, &state, 2, 2, 2)
+		allocatorSetBudgets(&state, size[0], size[1], size[2], 1)
+		allocatorRebuild(t, state, nil, &in)
+		proposal, err := PlanAllocatorProposal(in)
+		if err != nil || len(proposal.Awards) != 1 || !proposal.Awards[0].Warm {
+			t.Fatalf("expected one funded warm slot only: %+v %v", proposal.Awards, err)
+		}
+		if got := allocatorDecision(proposal, pool); got.AdditionalWarm != 1 || got.Reason != allocatorDecisionPartial {
+			t.Fatalf("partial floor must not look fully funded: %+v", got)
+		}
+	})
+	t.Run("idle already spent on a job", func(t *testing.T) {
+		in, state := allocatorFixture(t)
+		size := in.Snapshot.Pools[pool].Size
+		allocatorSetCaps(&in, &state, 2, 2, 1)
+		allocatorSetBudgets(&state, size[0], size[1], size[2], 1)
+		charges := []admission.BrokerPlanningCharge{allocatorObserveIdleRunner(&in, &state, pool, "row-1", "runner-1", size)}
+		allocatorRebuild(t, state, charges, &in)
+		proposal, err := PlanAllocatorProposal(in)
+		if err != nil || len(proposal.Awards) != 0 {
+			t.Fatalf("the assigned idle runner already takes the only slot: %+v %v", proposal.Awards, err)
+		}
+		if got := allocatorDecision(proposal, pool); got.CoveredByIdle != 1 || got.RemainingQueued != 0 || got.Reason != allocatorDecisionBlockedGlobal {
+			t.Fatalf("the same runner cannot cover the queued job and the spare floor: %+v", got)
+		}
+	})
+}
+
 func TestAllocatorGrowthNeverTreatsLowerMaxUnknownOrMissingAsFree(t *testing.T) {
 	in, state := allocatorFixture(t)
 	size := in.Snapshot.Pools[pool].Size
