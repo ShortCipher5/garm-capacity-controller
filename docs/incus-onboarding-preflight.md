@@ -86,10 +86,10 @@ credential. No automatic startup or polling probe is performed.
   initial `mode` must be `disabled` or `draining`; `enabled` is always
   rejected — activation after qualification and authoritative reconciliation
   is a separate explicit action. When `detected` is present it is recorded as
-  the host's last discovery totals with a fresh observation
-  (`admission.SetHostDetected`: Detected + ObservedAt + Healthy=true, durable
-  audit, one BEGIN IMMEDIATE transaction). Enrolled hosts start in no pool and
-  admission stays blocked for them until ordinary reconciliation observes them.
+  the host's last discovery totals. A later totals update checks the freshness
+  of its sample and audits the change. Only a completed bounded inventory
+  updates placement health and its observation timestamp. Enrolled hosts start in
+  no pool and admission stays blocked for them until reconciliation observes them.
 
 ## Discovery result semantics
 

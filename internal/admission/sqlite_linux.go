@@ -1152,7 +1152,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (SQLiteSnapshot, error) {
 			if err := rows.Scan(&event.Sequence, &event.Kind, &event.RequestKey, &at); err != nil {
 				return err
 			}
-			if strings.HasPrefix(event.Kind, "host_mode_") {
+			if strings.HasPrefix(event.Kind, "host_mode_") || event.Kind == "host_draft_removed" {
 				event.Host = event.RequestKey
 				event.RequestKey = ""
 			}

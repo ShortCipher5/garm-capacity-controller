@@ -54,6 +54,13 @@ func (s *SQLiteStore) enrollHostTx(tx *sql.Tx, hostID string, budget Resources, 
 	if _, exists := config.Hosts[hostID]; exists {
 		return ErrConflict
 	}
+	var withdrawn bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM audit WHERE kind='host_draft_removed' AND request_key=?)", hostID).Scan(&withdrawn); err != nil {
+		return err
+	}
+	if withdrawn {
+		return ErrConflict
+	}
 	config.Hosts[hostID] = Host{Budget: budget, Mode: mode, Healthy: false, ObservedAt: observedAt, Detected: detected}
 	if observedAt.IsZero() {
 		host := config.Hosts[hostID]
@@ -73,15 +80,10 @@ func (s *SQLiteStore) enrollHostTx(tx *sql.Tx, hostID string, budget Resources, 
 	return sqliteAudit(tx, "host_enrolled", hostID, s.now())
 }
 
-// SetHostDetected records the last discovered physical totals for an existing
-// host in one BEGIN IMMEDIATE transaction. It refreshes the host observation
-// (ObservedAt, Healthy=true) so a fresh discovery view is also a fresh health
-// observation. A nil detected clears the stored totals; a non-nil value must
-// be non-negative. The observation must be fresh: not zero, not in the future
-// and not older than the configured maximum observation age, so this can never
-// mint health from a stale or fabricated observation. Detected is display
-// data: readiness and fences are left untouched because admission semantics
-// do not change.
+// SetHostDetected records or clears display-only physical totals from a fresh
+// discovery observation. Only bounded reconciliation refreshes placement health
+// and its timestamp. Keep the audit kind distinct from older discovery writes
+// that also changed those placement fields.
 func (s *SQLiteStore) SetHostDetected(ctx context.Context, hostID string, detected *Resources, observedAt time.Time) error {
 	if !validHostID(hostID) || observedAt.IsZero() {
 		return ErrDenied
@@ -109,8 +111,6 @@ func (s *SQLiteStore) SetHostDetected(ctx context.Context, hostID string, detect
 			value := *detected
 			host.Detected = &value
 		}
-		host.ObservedAt = observedAt.UTC()
-		host.Healthy = true
 		config.Hosts[hostID] = host
 		if err := validateConfig(config); err != nil {
 			return err
@@ -122,6 +122,6 @@ func (s *SQLiteStore) SetHostDetected(ctx context.Context, hostID string, detect
 		if _, err = tx.Exec("UPDATE metadata SET config=? WHERE id=1", encoded); err != nil {
 			return err
 		}
-		return sqliteAudit(tx, "host_detected", hostID, now)
+		return sqliteAudit(tx, "host_totals_observed", hostID, now)
 	})
 }
