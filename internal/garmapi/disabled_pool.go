@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -97,7 +98,7 @@ func (m *ManagementClient) PostDisabledRepoPool(ctx context.Context, repo, expec
 	}
 	before, err := m.repository(ctx, repo)
 	if err != nil {
-		return DisabledPoolReceipt{}, err
+		return DisabledPoolReceipt{}, fmt.Errorf("%w: %w", ErrManagementNotDispatched, err)
 	}
 	if before.Fingerprint != expected {
 		return DisabledPoolReceipt{}, ErrManagementConflict

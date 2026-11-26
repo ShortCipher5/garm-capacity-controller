@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	// ErrManagementNotDispatched is returned only before any PUT is attempted.
+	// ErrManagementNotDispatched is returned only before any mutating request is attempted.
 	// It is not evidence for resolving an old pending intent after a crash.
 	ErrManagementNotDispatched = errors.New("Garm write was not dispatched")
 	ErrManagement              = errors.New("Garm management unavailable")
