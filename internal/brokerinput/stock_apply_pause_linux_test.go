@@ -241,7 +241,7 @@ func TestStockApplyPauseAckHoldsUnresolvedAndResumeStaysBlocked(t *testing.T) {
 		t.Fatal("stock claim resolved an uncertain outcome", err)
 	}
 	readback := plan.Suggested
-	if err := controller.RecordObservation(ctx, plan.Scope, readback, 2, now.Add(8*time.Second)); err != nil {
+	if err := controller.RecordObservation(ctx, plan.Scope, operationID, readback, 2, now.Add(8*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	view, err := controller.View(ctx, plan.Scope, stockApplyEval(now.Add(9*time.Second), claim, 2, &readback, true))
@@ -390,7 +390,7 @@ func TestStockApplyZeroScopeRejected(t *testing.T) {
 		"dispatch":    controller.MarkDispatched(ctx, scope, claim, now),
 		"uncertain":   controller.MarkOutcomeUncertain(ctx, scope, now),
 		"prove":       controller.RecordProvenOutcome(ctx, scope, claim, StockApplyOutcomeProof{}, now),
-		"observe":     controller.RecordObservation(ctx, scope, 1, 1, now),
+		"observe":     controller.RecordObservation(ctx, scope, "00000000000000000000000000000000", 1, 1, now),
 	} {
 		if !errors.Is(err, ErrStockApplyConflict) {
 			t.Errorf("%s accepted zero scope or reported a different error: %v", name, err)
@@ -525,7 +525,7 @@ func TestStockApplyGuardedResumeKeepsUnknownHeld(t *testing.T) {
 	if err := c.MarkOutcomeUncertain(ctx, scope, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.RecordObservation(ctx, scope, plan.Suggested, 4, now.Add(time.Second)); err != nil {
+	if err := c.RecordObservation(ctx, scope, viewOperationID(t, c, scope), plan.Suggested, 4, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Pause(ctx, scope, "local stop", now); err != nil {
