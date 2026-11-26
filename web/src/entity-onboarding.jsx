@@ -13,10 +13,10 @@ export function ExistingEntityOnboarding({ snapshot, onInspect }) {
     <h3>Choose existing GARM scope</h3>
     <p>Viewing existing pools does not recreate them or authorize changes. Counts cover only configured providers, not all pools on the GARM server.</p>
     {!view.available && <p role="status">Discovery unavailable. Any rows shown are stale and cannot be selected.</p>}
-    {view.available && view.entities.length === 0 && <p>No pool-owning entities returned by this server observation.</p>}
+    {view.available && view.entities.length === 0 && <p>No pool-owning entities returned by this server observation. No configured repository settings were observed.</p>}
     <label>Existing entity <select aria-label="Existing entity" value={choice ? selected : ""} disabled={!view.available} onChange={event => setSelection({ key: event.target.value, snapshot })}>
       <option value="">Select an entity</option>
-      {view.entities.map(row => <option key={`${row.type}/${row.id}`} value={`${row.type}/${row.id}`}>{row.type} {row.id} ({row.pool_count} pools)</option>)}
+      {view.entities.map(row => <option key={`${row.type}/${row.id}`} value={`${row.type}/${row.id}`}>{row.type} {row.id} ({row.pool_count} observed pools{row.configured ? ", configured repository" : ""})</option>)}
     </select></label>
     <button type="button" disabled={!choice || typeof onInspect !== "function"} onClick={() => { const current = existingEntityChoice(snapshot, selected); if (current && typeof onInspect === "function") onInspect(current); }}>View existing pools</button>
   </section>;

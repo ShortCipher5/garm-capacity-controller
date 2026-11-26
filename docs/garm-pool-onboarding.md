@@ -18,7 +18,7 @@ A disabled pool with minimum idle zero still needs `max_runners >= 1`; zero is
 rejected by upstream validation. Stock/unopted Garm rejects an explicit
 `template_id: 0`. The separate source8 native bootstrap protocol permits explicit
 zero only for its correctly opted-in provider and stores SQL NULL, avoiding a
-legacy bootstrap template. This foundation exclusively requests that native
+legacy bootstrap template. The native staging path exclusively requests that
 zero mode. It does not create a positive-template pool and silently change its
 generation later. A client opt-in expresses intent, not proof that the installed
 Garm is patched, compatible or qualified.
@@ -59,6 +59,26 @@ There is no schema migration. It shares the same cross-process single unresolved
 slot as pool/repository updates. Confirmed request-ID replay returns historical
 recorded evidence with **no remote traffic**, not a fresh observation. Changed
 request-ID reuse is rejected.
+
+## Stock disabled staging
+
+The separate stock staging opt-in accepts a fixed positive Linux bootstrap
+template ID from trusted configuration. Stock receives a single disabled
+repository-pool POST with minimum idle zero and a bounded positive maximum.
+Acknowledgment and readback must preserve the exact repository, provider, pool
+UUID, template ID and execution settings with empty runner inventory. The
+existing durable intent, UUID capture, unresolved-write barrier and replay
+semantics apply. Protocol and template participate in the spec and replay
+fingerprint. Earlier native template-zero journal entries retain their format.
+The two creation permissions are independent, and the stock evidence cannot be
+registered as a native route.
+
+The existing entity inspection view can show a configured repository with zero
+pools observed in the configured provider scope. Inspect runner-size and host
+mappings by the exact pool UUID. This observation cannot establish the absence
+of other pools, scale sets, runners or unsettled operations. Repository/pool
+retirement and route activation remain blocked until their evidence is complete.
+The stock staging opt-in has no production configuration or browser write route.
 
 ## Failure and recovery behavior
 

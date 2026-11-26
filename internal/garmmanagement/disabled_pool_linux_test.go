@@ -30,6 +30,8 @@ type stageFixture struct {
 	posts, gets, reads    int
 	postStatus, getStatus int
 	badPost               bool
+	templateID            uint64
+	failRead              int
 	beforePost, beforeGet func()
 }
 
@@ -52,6 +54,10 @@ func stageSetup(t *testing.T, enabled ...bool) (*Manager, *Journal, *garmapi.Man
 		}
 		if r.Method == "GET" && r.URL.Path == "/api/v1/repositories/"+repoID {
 			f.reads++
+			if f.reads == f.failRead {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]any{"id": repoID, "owner": "example", "name": "app", "pool_balancing_type": "roundrobin"})
 			return
 		}
@@ -91,6 +97,9 @@ func stageSetup(t *testing.T, enabled ...bool) (*Manager, *Journal, *garmapi.Man
 			return
 		}
 		pool := map[string]any{"id": poolID, "repo_id": repoID, "provider_name": "capacity", "max_runners": 2, "generation": 1, "image": "linux", "flavor": "small", "os_type": "linux", "os_arch": "amd64", "enable_shell": false, "extra_specs": map[string]any{}, "tags": []any{map[string]any{"name": "linux"}}, "endpoint": map[string]any{"name": "disposable-forge"}}
+		if f.templateID > 0 {
+			pool["template_id"] = f.templateID
+		}
 		if f.observationEdit != nil && r.Method == "GET" {
 			f.observationEdit(pool)
 		}
@@ -102,7 +111,7 @@ func stageSetup(t *testing.T, enabled ...bool) (*Manager, *Journal, *garmapi.Man
 	t.Cleanup(server.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
-	client, err := garmapi.NewManagement(garmapi.ManagementConfig{Endpoint: server.URL, Token: "private-stage-fixture-token", Trust: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, Providers: []string{"capacity"}, RepositoryIDs: []string{repoID}, AllowWrites: true, AllowDisabledPoolCreation: len(enabled) == 0 || enabled[0]})
+	client, err := garmapi.NewManagement(garmapi.ManagementConfig{Endpoint: server.URL, Token: "private-stage-fixture-token", Trust: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, Providers: []string{"capacity"}, RepositoryIDs: []string{repoID}, AllowWrites: true, AllowDisabledPoolCreation: len(enabled) == 0 || enabled[0], AllowStockDisabledPoolCreation: len(enabled) > 1 && enabled[1]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,5 +490,67 @@ func TestDisabledPoolConfirmedMissingReplayCannotBeMistakenForNewIntent(t *testi
 	}
 	if f.posts != 1 {
 		t.Fatal("damaged replay caused another POST")
+	}
+}
+
+func TestStockDisabledPoolKeepsProtocolAndTemplatesAcrossReplay(t *testing.T) {
+	manager, journal, client, fixture, path := stageSetup(t, false, true)
+	ctx := t.Context()
+	spec := nativeStageSpec()
+	spec.TemplateID = 12
+	fixture.templateID = spec.TemplateID
+	expected := stageExpected(t, client)
+	result, err := manager.CreateDisabledPool(ctx, requestID, repoID, expected, spec, "stage stock disabled pool")
+	if err != nil || result.Protocol != garmapi.StockDisabledPoolProtocol || !result.DisabledReadback ||
+		!result.RouteRequired || result.RouteInstalled || result.ActivationAllowed {
+		t.Fatalf("invalid stock result: %+v %v", result, err)
+	}
+	facts, err := manager.ConfirmedDisabledPool(ctx, requestID)
+	if err != nil || facts.Protocol != garmapi.StockDisabledPoolProtocol || facts.TemplateID != spec.TemplateID ||
+		facts.PoolID != result.PoolID || facts.Enabled {
+		t.Fatalf("invalid stock creation evidence: %+v %v", facts, err)
+	}
+	calls := fixture.posts + fixture.gets + fixture.reads
+	reopened, err := OpenJournal(path, journal.Lineage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	manager, err = New(client, reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := manager.CreateDisabledPool(ctx, requestID, repoID, expected, spec, "stage stock disabled pool")
+	if err != nil || replayed != result || fixture.posts+fixture.gets+fixture.reads != calls {
+		t.Fatalf("exact restart replay dispatched or changed the result: %+v %v", replayed, err)
+	}
+	changed := spec
+	changed.TemplateID = 0
+	if _, err := manager.CreateDisabledPool(ctx, requestID, repoID, expected, changed, "stage stock disabled pool"); !errors.Is(err, ErrRequestConflict) || fixture.posts+fixture.gets+fixture.reads != calls {
+		t.Fatalf("changed protocol replay reached stock GARM: %v", err)
+	}
+}
+
+func TestStockDisabledPoolRejectsFailedSecondReadBeforePOST(t *testing.T) {
+	manager, journal, client, fixture, _ := stageSetup(t, false, true)
+	ctx := t.Context()
+	spec := nativeStageSpec()
+	spec.TemplateID = 12
+	fixture.templateID = spec.TemplateID
+	expected := stageExpected(t, client)
+	fixture.failRead = fixture.reads + 2
+	if _, err := manager.CreateDisabledPool(ctx, requestID, repoID, expected, spec, "stage stock disabled pool"); !errors.Is(err, garmapi.ErrManagementNotDispatched) {
+		t.Fatalf("a proven pre-POST failure was classified as unknown: %v", err)
+	}
+	if fixture.posts != 0 || fixture.gets != 0 || fixture.reads != fixture.failRead {
+		t.Fatal("failed preflight did not stop before dispatch")
+	}
+	status, err := manager.Status(ctx)
+	if err != nil || status.WriteBlocked {
+		t.Fatalf("a proven pre-POST failure left a pending operation: %+v %v", status, err)
+	}
+	audit, err := journal.Audit(ctx, 0, 100)
+	if err != nil || len(audit) != 2 || audit[len(audit)-1].Kind != "rejected" {
+		t.Fatalf("missing definitive non-dispatch audit: %+v %v", audit, err)
 	}
 }

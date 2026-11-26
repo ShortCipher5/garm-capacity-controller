@@ -7,8 +7,9 @@ import (
 	"errors"
 )
 
-// Broker policy is advisory configuration only. It does not enroll a pool,
-// grant capacity, change GARM or remove any existing resource charge.
+// Repository policy guides advisory planning. Once saved, its runner ceilings
+// also constrain new SQLite commitments for observed pool owners. A policy
+// edit cannot enroll a pool, issue a grant or release an outstanding charge.
 type BrokerRepositoryPolicy struct {
 	ID         string             `json:"id"`
 	Weight     uint32             `json:"weight"`

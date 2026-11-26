@@ -66,7 +66,7 @@ func (m *Manager) confirmedStage(ctx context.Context, id string) (confirmedStage
 			return ErrJournal
 		}
 		var intent disabledPoolIntent
-		if json.Unmarshal(desired, &intent) != nil || intent.Operation != "create_disabled_pool" || intent.Protocol != DisabledPoolProtocol || !bytes.Equal(encoded(intent), desired) {
+		if json.Unmarshal(desired, &intent) != nil || intent.Operation != "create_disabled_pool" || intent.Protocol != garmapi.DisabledPoolProtocol(intent.Spec) || !bytes.Equal(encoded(intent), desired) {
 			return ErrJournal
 		}
 		canonical, err := garmapi.CanonicalDisabledPoolSpec(intent.Spec)
@@ -122,5 +122,5 @@ func (m *Manager) ConfirmedDisabledPool(ctx context.Context, requestID string) (
 	if pool.ID != record.stage.PoolID || pool.RepositoryID != record.stage.RepositoryID || pool.ProviderName != record.stage.ProviderName || pool.Generation != record.stage.Generation || pool.Fingerprint != record.stage.PoolFingerprint || pool.Enabled || pool.MinIdleRunners != 0 || pool.MaxRunners != record.spec.MaxRunners || observed.ForgeEndpointName == "" || observed.ObservedAt.IsZero() || ctx.Err() != nil {
 		return DisabledPoolFacts{}, ErrStagedPoolObservation
 	}
-	return DisabledPoolFacts{Protocol: DisabledPoolProtocol, ManagementIdentity: record.stage.ManagementIdentity, JournalLineage: record.stage.JournalLineage, RequestID: requestID, PoolID: pool.ID, RepositoryID: pool.RepositoryID, ProviderName: pool.ProviderName, ForgeEndpointName: observed.ForgeEndpointName, Generation: pool.Generation, SpecFingerprint: record.stage.SpecFingerprint, PoolFingerprint: pool.Fingerprint, Image: record.spec.Image, Flavor: record.spec.Flavor, OSType: "linux", OSArch: record.spec.Arch, ExtraSpecsEmpty: true, MaxRunners: pool.MaxRunners, ObservedAt: observed.ObservedAt}, nil
+	return DisabledPoolFacts{Protocol: record.stage.Protocol, TemplateID: record.spec.TemplateID, ManagementIdentity: record.stage.ManagementIdentity, JournalLineage: record.stage.JournalLineage, RequestID: requestID, PoolID: pool.ID, RepositoryID: pool.RepositoryID, ProviderName: pool.ProviderName, ForgeEndpointName: observed.ForgeEndpointName, Generation: pool.Generation, SpecFingerprint: record.stage.SpecFingerprint, PoolFingerprint: pool.Fingerprint, Image: record.spec.Image, Flavor: record.spec.Flavor, OSType: "linux", OSArch: record.spec.Arch, ExtraSpecsEmpty: true, MaxRunners: pool.MaxRunners, ObservedAt: observed.ObservedAt}, nil
 }

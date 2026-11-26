@@ -10,7 +10,7 @@ Production trackers [#53](https://github.com/ShortCipher5/garm-capacity-controll
 
 ## Shared admission under competing demand
 
-- Stage two or more isolated ordinary repository pools with a common enforced resource budget and one remaining slot. Exercise simultaneous demand plus an already accepted create. Repeat at exact CPU and RAM boundaries where a runner slot alone would otherwise fit. Capture the durable decision and effective footprint before backend effects, and reconcile provider operations to those decisions.
+- Stage two or more isolated ordinary repository pools with a common enforced resource budget and one remaining slot. Exercise simultaneous demand plus an already accepted create. Repeat at exact CPU, RAM and applicable disk boundaries where a runner slot alone would otherwise fit. Exercise a repository with a nonzero idle floor and a higher-weight competitor alongside an already charged grant. Verify that pending supply is counted once and unknown observations do not contribute capacity. Capture the durable decision and effective footprint before backend effects, and reconcile provider operations to those decisions.
 - **Pass evidence.** At most one eligible allocation commits the final slot. Current scope, profile, readiness and actual vector are validated at admission. Other create paths either hit the same authority and budget or are independently blocked. Failed, pending, or ambiguous allocations remain charged after restart. Stale, incomplete or wrong-scope observations refuse new growth.
 - **Stop condition.** A native provider, alternate route, queued request or privileged writer can exceed the tested limit, or a changed pool setting is the only apparent enforcement. Leave enforcement disabled. A whole-host claim requires independent accounting or exclusion of all other consumers. [Plan #394](https://github.com/ShortCipher5/garm-capacity-controller/pull/394)
 
@@ -23,7 +23,7 @@ Production trackers [#53](https://github.com/ShortCipher5/garm-capacity-controll
 ## Natural retirement and slot reuse
 
 - Capture the exact original completed one-job runner, its registration and immutable backend allocation, and the full charged resource vector. Obtain independent positive job settlement, post-job completion, assignment and reconnect closure, original-incarnation teardown, and disposition of processes and charged storage. Hold the independent late-work fence. Wait for the new durable reconciliation barrier to return before collecting bounded inventory or observing the continuing fence. Collect new evidence for each barrier.
-- **Pass evidence.** The current reconciliation proves the relevant scope, and the continuing fence has fresh post-barrier evidence. The guarded transaction credits exactly the original vector once. Retry and restart show the same tombstone and zero additional credit. Wrong generation, retained storage, stale fence, disputed outcome and reappearing inventory preserve or restore the applicable charge or hold without implying reusable capacity.
+- **Pass evidence.** The current reconciliation proves the relevant scope, and the continuing fence has fresh post-barrier evidence. The guarded transaction credits exactly the original vector once. Retry and restart show the same tombstone and zero additional credit. Wrong generation, a conflicting view of the same incarnation on another host, retained storage, stale fence, disputed outcome and reappearing inventory preserve or restore the applicable charge or hold without implying reusable capacity.
 - **Stop condition.** Any witness relies on a name, a successful provider acknowledgment, a missing row, or incomplete visibility. Preserve the charge. [Plan #392](https://github.com/ShortCipher5/garm-capacity-controller/pull/392)
 
 ## Queued job recovery after retirement
@@ -37,6 +37,35 @@ Production trackers [#53](https://github.com/ShortCipher5/garm-capacity-controll
 - Join the exact enrolled source, repository, workflow, run, attempt and job to the assigned numeric runner registration. Prove the original GARM row and provider allocation lead to the immutable runtime incarnation, including process epoch. Bracket the independently observed job window and compare each supported measure with the installed source's documented units and sampling behavior.
 - **Pass evidence.** CPU is derived from valid cumulative intervals, memory mean and sampled peak retain distinct semantics, and each supported disk counter has independent coverage. Gauge timestamps are in the observed window. Missing metrics stay unavailable. Foreign scope, wrong generation, overlapping jobs, reset and teardown prevent attribution across those boundaries. Verify bounded runtime/API impact and isolation from admission. Test retention revocation, reopen, duplicate/conflicting observations and physical expiry with no new writes, including restart.
 - **Stop condition.** A link has only a name, mutable provider ID, apparent timing match, or an unproven original allocation. Keep live usage and retention disabled and verify GitHub timing and navigation still work. Roll out the [#399](https://github.com/ShortCipher5/garm-capacity-controller/pull/399) dashboard before any measured-v2 producer. [Plan #395](https://github.com/ShortCipher5/garm-capacity-controller/pull/395)
+
+## Server, repository and pool lifecycle
+
+- Discover an isolated server under the approved read-only connection. Check that
+  lost transport, a changed peer, and incomplete inventory leave health or placement
+  unavailable. Enroll it disabled. Edit the full CPU, RAM, runner and disk defaults,
+  inspect the before/after revision and audit record, and verify that held capacity
+  does not move. Race a stale review against a committed edit through another handle.
+- For a previously reviewed target, close new claims, record a drain request, and
+  independently show what happens to already admitted work and idle job eligibility.
+  Attempt removal while a runner, an uncertain operation, a binding, or retained
+  storage remains. Removing an unused discovery enrollment is a local operation.
+  Check that it preserves the consumed review and alias reservation across restart.
+- On the stock repository and pool path, preserve the exact repository owner, pool,
+  provider, image, runner size and resolved host scope. Start with a disabled
+  ordinary repository pool and confirm the returned UUID, settings and empty
+  child inventory. Repeat after a lost creation response and require one confirmation
+  for the exact original operation. Any unresolved result blocks further changes.
+- **Pass evidence.** Current reconciled host health and placement policy agree under
+  the admission barrier. A verified stock route uses an eligible server and the
+  exact reviewed size, with all resources charged there. A real drain includes a
+  continuing job-assignment fence. Removal of a placed server, pool or repository
+  requires independent positive closure of every affected runner and operation,
+  with no surviving pooled route or charge. A stock GET or a matching name alone
+  cannot establish any of these results.
+- **Stop condition.** The observed scope is partial, the installed write contract
+  lacks exact recovery evidence, or there is no job-assignment fence. Keep affected
+  remote writes and deletion blocked. A local draft or a recorded drain request
+  supplies no authorization for remote cleanup.
 
 ## Rollback and evidence handoff
 
