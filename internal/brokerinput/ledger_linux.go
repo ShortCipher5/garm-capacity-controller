@@ -100,7 +100,7 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 	// once as provisional planned supply and suppress extra warm issuance.
 	// IDs and states remain durable in the ledger; no job-to-runner claim.
 	for _, g := range state.Grants {
-		if g.State == "unused" && !g.Superseded() {
+		if g.RedeemableAt(opt.Now) && (state.Policy.Revision == 0 || g.EvidenceBound) {
 			profile, exists := profiles[g.Spec.Authority.PoolID]
 			binding, bound := state.HostBindings[g.Spec.Host]
 			host, hostKnown := s.Hosts[g.Spec.Host]
@@ -113,7 +113,7 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 			if !withinBudget(state.Allocated.Global, state.Config.Global) ||
 				!withinBudget(state.Allocated.Hosts[g.Spec.Host], state.Config.Hosts[g.Spec.Host].Budget) ||
 				!withinBudget(state.Allocated.Pools[g.Spec.Authority.PoolID], state.Config.Pools[g.Spec.Authority.PoolID].Budget) ||
-				!exists || !bound || binding.Sequence != g.Spec.HostBindingSequence || !hostKnown || !host.AcceptNew || !eligible || !g.Spec.ExpiresAt.After(opt.Now) || g.Spec.Resources != profile.Size ||
+				!exists || !bound || binding.Sequence != g.Spec.HostBindingSequence || !hostKnown || !host.AcceptNew || !eligible || g.Spec.Resources != profile.Size ||
 				profile.Authority != g.Spec.Authority || !reflect.DeepEqual(profile.Execution, g.Spec.Execution) {
 				// Expired or obsolete-profile grants stay charged, but cannot
 				// represent demand service. Only durable retirement frees them.

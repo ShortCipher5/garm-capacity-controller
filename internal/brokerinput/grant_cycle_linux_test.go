@@ -73,7 +73,7 @@ func TestEnrolledCycleBuildsBoundedRevisionBatch(t *testing.T) {
 	if err != nil || next.ID == batch.ID {
 		t.Fatal("new revision reused cycle identity")
 	}
-	if batch.Grants[0].HostBindingSequence != 4 || batch.Grants[0].Execution.Name != "" || batch.Grants[0].ExpiresAt != opt.Now.Add(time.Minute) {
+	if batch.Grants[0].HostBindingSequence != 4 || batch.Grants[0].Execution.Name != "" || !batch.Grants[0].ExpiresAt.Equal(obs.StartedAt.Add(opt.MaxAge)) {
 		t.Fatal("grant lost enrolled binding")
 	}
 }
@@ -118,7 +118,7 @@ func TestEnrolledCycleReusesDurableGrantAfterRestart(t *testing.T) {
 	// Model the subsequent coherent read after a successful or uncertain commit;
 	// the same queued job must reuse the existing charged grant, not issue again.
 	state.Sequence++
-	state.Grants = []admission.BrokerGrant{{ID: strings.Repeat("a", 64), State: "unused", Spec: batch.Grants[0]}}
+	state.Grants = []admission.BrokerGrant{{ID: strings.Repeat("a", 64), State: "unused", IssuedAt: opt.Now.Add(-time.Minute), EvidenceBound: true, Spec: batch.Grants[0]}}
 	charge := admission.BrokerPlanningCharge{ID: "grant:" + state.Grants[0].ID, Host: "host", Pool: pool, Resources: batch.Grants[0].Resources}
 	state.Allocated = admission.Allocations{Global: charge.Resources, Hosts: map[string]admission.Resources{"host": charge.Resources}, Pools: map[string]admission.Resources{pool: charge.Resources}}
 	plan, next, err := enrolledCycle(state, []admission.BrokerPlanningCharge{charge}, obs, source, opt, time.Minute)
@@ -228,5 +228,24 @@ func TestCycleBatchRealLedgerConcurrentReplayAndRestart(t *testing.T) {
 	stable, e := recovered.ReadBrokerGrantState(ctx)
 	if e != nil || stable.Allocated.Global.Runners != 0 || stable.Grants[0].State != "expired" {
 		t.Fatal("restart lost terminal expiry", e)
+	}
+}
+
+func TestEnrolledCycleDeadlineUsesOldestLiveEvidence(t *testing.T) {
+	state, obs, source, opt := enrolledCycleFixture(t)
+	// The host is inside the planner's window, but its ledger freshness
+	// deadline is shorter than the one for either demand or the grant TTL.
+	opt.MaxAge = 2 * time.Minute
+	host := state.Config.Hosts["host"]
+	host.ObservedAt = opt.Now.Add(-30 * time.Second)
+	state.Config.Hosts["host"] = host
+	state.Config.MaxObservationAge = 40 * time.Second
+	_, batch, err := enrolledCycle(state, nil, obs, source, opt, time.Hour)
+	if err != nil || len(batch.Grants) != 1 || !batch.Grants[0].ExpiresAt.Equal(host.ObservedAt.Add(40*time.Second)) {
+		t.Fatalf("grant did not retain the shorter host deadline: %+v %v", batch, err)
+	}
+	opt.Now = host.ObservedAt.Add(40 * time.Second)
+	if _, _, err := enrolledCycle(state, nil, obs, source, opt, time.Minute); err == nil {
+		t.Fatal("grant issued at the closed host boundary")
 	}
 }

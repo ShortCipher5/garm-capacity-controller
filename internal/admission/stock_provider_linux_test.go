@@ -203,7 +203,7 @@ func TestStockOriginCancellationClaimRaceAcrossHandles(t *testing.T) {
 	}
 }
 
-func TestStockOriginActiveRuntimeDoesNotRelaxOriginalPath(t *testing.T) {
+func TestActiveRuntimeDeniesStockAndRequiresOriginalPreparation(t *testing.T) {
 	path, id := runtimeFixture(t)
 	s, e := OpenRuntimeSQLite(path, id)
 	if e != nil {
@@ -218,10 +218,37 @@ func TestStockOriginActiveRuntimeDoesNotRelaxOriginalPath(t *testing.T) {
 	if e = s.CompleteReconciliation(context.Background(), fence, InventorySnapshot{Hosts: observations(snap.Config, s.now())}); e != nil {
 		t.Fatal(e)
 	}
-	p, b := stockPlan(t, s, "stock")
-	if _, e = s.ExecuteStockProviderDispatch(context.Background(), p, b, stockAuthority(), stockDigest(), stockSuccess); e != nil {
-		t.Fatalf("active stock: %v", e)
+	ctx := t.Context()
+	state, e := s.ReadBrokerGrantState(ctx)
+	if e != nil {
+		t.Fatal(e)
 	}
+	stock := placementRequest("stock")
+	execution := stock.Execution
+	execution.Name = ""
+	batch := BrokerGrantBatch{
+		ID: strings.Repeat("a", 64), ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision,
+		Grants: []BrokerGrantSpec{{Authority: stockAuthority(), Host: "a", HostBindingSequence: state.HostBindings["a"].Sequence,
+			Resources: stock.Resources, Execution: execution, ExpiresAt: s.now().Add(time.Minute)}},
+	}
+	generic, e := OpenSQLite(path, Config{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer generic.Close()
+	for _, handle := range []*SQLiteStore{s, generic} {
+		if _, e := handle.IssueBrokerGrants(ctx, batch); !errors.Is(e, ErrBrokerGrant) {
+			t.Fatalf("installed ledger granted stock capacity: %v", e)
+		}
+		if _, e := handle.AdmitStockProviderPlacement(ctx, stock, stockAuthority(), stockDigest()); !errors.Is(e, ErrBrokerGrant) {
+			t.Fatalf("installed ledger admitted stock placement: %v", e)
+		}
+	}
+	after, e := s.ReadBrokerGrantState(ctx)
+	if e != nil || len(after.Grants) != 0 || after.Allocated.Global != state.Allocated.Global || after.Sequence != state.Sequence {
+		t.Fatalf("denied stock operation changed the ledger: %+v %v", after, e)
+	}
+
 	legacy, e := s.AdmitPlacement(context.Background(), placementRequest("legacy"))
 	if e != nil {
 		t.Fatal(e)
