@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Experimental, secretless GitHub-hosted amd64 runner only. Never on a server.
 set -euo pipefail
+export LC_ALL=C
 [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted ]]
 [[ ${ImageOS:-} == ubuntu24 && ${RUNNER_ARCH:-} == X64 && $(uname -m) == x86_64 ]]
 [[ ${GITHUB_EVENT_NAME:-} == pull_request || ${GITHUB_EVENT_NAME:-} == workflow_dispatch ]]
@@ -8,24 +9,26 @@ set -euo pipefail
 [[ $# == 1 && $1 == /* && -x $1 && -f $1 && ! -L $1 ]]
 : "${RUNNER_TEMP:?need disposable hosted workspace}"
 test_binary=$1
+cd "$(dirname "$0")/../../.."
 [[ -z ${INCUS_DIR:-} && -z ${INCUS_CONF:-} && -z ${INCUS_REMOTE:-} ]]
 if command -v incus >/dev/null || [[ -e /var/lib/incus || -L /var/lib/incus ]]; then
   echo 'Refusing preexisting Incus state or binary' >&2; exit 1
 fi
 sudo timeout 150 apt-get update -qq
-sudo timeout 30 apt-get -s --no-install-recommends install incus dnsmasq-base > "$RUNNER_TEMP/gcc-exact-incus-apt-plan.txt"
+sudo timeout 30 apt-get -s --no-install-recommends install incus > "$RUNNER_TEMP/gcc-exact-incus-apt-plan.txt"
 if grep -Eq '^(Remv|Purg) ' "$RUNNER_TEMP/gcc-exact-incus-apt-plan.txt"; then
   echo 'Outer Incus install would remove an existing package' >&2; exit 1
 fi
-sudo timeout 210 apt-get --no-remove --no-install-recommends install -y incus dnsmasq-base
+sudo timeout 210 apt-get --no-remove --no-install-recommends install -y incus
 sudo timeout 30 systemctl start incus.socket
 sudo timeout 35 incus admin waitready --timeout 25
 outer() { sudo timeout --kill-after=10s 60s incus "$@"; }
 [[ $(outer remote get-default) == local ]]
 work=$(mktemp -d "$RUNNER_TEMP/gcc-exact-incus.XXXXXXXX")
 suffix=${work##*.}; suffix=${suffix,,}
-pool="gcce-dir-$suffix"; ip_bridge="gcce-$suffix"; outer_guest="gcce-debian-$suffix"; alias="gcce-image-$suffix"
-guest_owned=false; network_owned=false; pool_owned=false; image_owned=false
+pool="gcce-dir-$suffix"; outer_guest="gcce-debian-$suffix"; alias="gcce-image-$suffix"
+guest_owned=false; pool_owned=false; image_owned=false; alpine_owned=false
+alpine_alias="gcce-alpine-$suffix"
 cleanup() {
   local rc=$?
   trap - EXIT; set +e
@@ -33,7 +36,7 @@ cleanup() {
     outer delete "$outer_guest" --force >/dev/null || rc=1
     outer list --format=json | python3 -c 'import json,sys; sys.exit(any(x["name"]==sys.argv[1] for x in json.load(sys.stdin)))' "$outer_guest" || rc=1
   fi
-  if [[ $network_owned == true ]]; then outer network delete "$ip_bridge" >/dev/null || rc=1; fi
+  if [[ $alpine_owned == true ]]; then outer image delete "$alpine_alias" >/dev/null || rc=1; fi
   if [[ $image_owned == true ]]; then outer image delete "$alias" >/dev/null || rc=1; fi
   if [[ $pool_owned == true ]]; then outer storage delete "$pool" >/dev/null || rc=1; fi
   rm -rf -- "$work" || rc=1
@@ -42,22 +45,59 @@ cleanup() {
 }
 trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 outer storage create "$pool" dir >/dev/null; pool_owned=true
-# The guest uses this dedicated NAT bridge for package/image retrieval. No host port
-# publishes, proxy devices, raw LXC settings, or host firewall overrides.
-outer network create "$ip_bridge" ipv4.address=auto ipv4.nat=true ipv6.address=none >/dev/null
-network_owned=true
+# Require the fixed public HTTPS simplestreams origin, not an alternate remote.
+outer remote list --format=csv | python3 -c '
+import csv, sys
+rows = [r for r in csv.reader(sys.stdin) if r and r[0] == "images"]
+if len(rows) != 1 or rows[0][1].rstrip("/") != "https://images.linuxcontainers.org" or rows[0][2:5] != ["simplestreams", "none", "YES"]:
+    raise SystemExit("unexpected image origin")'
 fingerprint=$(outer image info images:debian/13 | awk '/^Fingerprint: / {print $2}')
 [[ $fingerprint =~ ^[a-f0-9]{64}$ ]]
 sudo timeout --kill-after=10s 180s incus image copy "images:$fingerprint" local: --alias "$alias" >/dev/null
 image_owned=true
-outer init "$fingerprint" "$outer_guest" --storage "$pool" --no-profiles --network "$ip_bridge" \
+outer init "$fingerprint" "$outer_guest" --storage "$pool" --no-profiles \
   -c security.privileged=false -c security.nesting=true -c limits.cpu=2 -c limits.memory=2GiB >/dev/null
 guest_owned=true
 [[ $(outer config get "$outer_guest" security.privileged) == false ]]
 [[ $(outer config get "$outer_guest" security.nesting) == true ]]
+outer query "/1.0/instances/$outer_guest" | python3 -c '
+import json, sys
+x = json.load(sys.stdin)
+devices = list(x["expanded_devices"].values())
+if x["type"] != "container" or x["profiles"] or len(devices) != 1:
+    raise SystemExit("expected a NIC-less and profile-less Debian container")
+d = devices[0]
+if (d.get("type"), d.get("path"), d.get("pool")) != ("disk", "/", sys.argv[1]) or d.get("source"):
+    raise SystemExit("unexpected Debian root device")' "$pool"
 outer start "$outer_guest"
 outer file push --uid=0 --gid=0 --mode=0755 "$test_binary" "$outer_guest/root/controller-incus.test"
-sudo timeout --kill-after=15s 1050s incus exec "$outer_guest" -- /bin/bash -se <<'INNER'
+# Resolve Debian dependencies outside the NIC-less guest using its actual
+# package status. The helper authenticates the signed Debian repository.
+mkdir -m 0700 "$work/bundle"
+outer file pull "$outer_guest/var/lib/dpkg/status" "$work/guest.status"
+[[ -s $work/guest.status ]]
+timeout --kill-after=15s 450s bash deploy/runtime/hosted-incus/stage-debian-runtime-702.sh "$work/guest.status" "$work/bundle"
+shopt -s nullglob
+debs=("$work"/bundle/*.deb)
+(( ${#debs[@]} > 0 ))
+[[ -f $work/bundle/SHA256SUMS && ! -L $work/bundle/SHA256SUMS ]]
+for deb in "${debs[@]}"; do [[ -f $deb && ! -L $deb ]]; done
+
+# Resolve the public images: simple streams trust over HTTPS, then use the
+# published full fingerprint. Incus split fingerprints hash metadata+rootfs.
+# This is a per-run image pin, not a separately signed or perpetual image pin.
+alpine_fingerprint=$(outer image info images:alpine/3.22 | awk '/^Fingerprint: / {print $2}')
+[[ $alpine_fingerprint =~ ^[a-f0-9]{64}$ ]]
+sudo timeout --kill-after=10s 150s incus image copy "images:$alpine_fingerprint" local: --alias "$alpine_alias" >/dev/null
+alpine_owned=true
+sudo timeout --kill-after=10s 120s incus image export "$alpine_fingerprint" "$work/alpine.meta" >/dev/null
+[[ -s $work/alpine.meta && -s $work/alpine.meta.root ]]
+[[ $(cat "$work/alpine.meta" "$work/alpine.meta.root" | sha256sum | cut -d' ' -f1) == "$alpine_fingerprint" ]]
+printf '%s\n' "$alpine_fingerprint" > "$work/alpine.fingerprint"
+outer exec "$outer_guest" -- install -d -m 0700 /root/gcc-offline /root/gcc-offline/debs
+outer file push --uid=0 --gid=0 --mode=0600 "${debs[@]}" "$work/bundle/SHA256SUMS" "$outer_guest/root/gcc-offline/debs/"
+outer file push --uid=0 --gid=0 --mode=0600 "$work/alpine.meta" "$work/alpine.meta.root" "$work/alpine.fingerprint" "$outer_guest/root/gcc-offline/"
+sudo timeout --kill-after=15s 650s incus exec "$outer_guest" -- /bin/bash -se <<'INNER'
 set -euo pipefail
 umask 077
 export DEBIAN_FRONTEND=noninteractive
@@ -65,41 +105,45 @@ export DEBIAN_FRONTEND=noninteractive
 [[ $ID == debian && $VERSION_CODENAME == trixie && $(dpkg --print-architecture) == amd64 ]]
 [[ -r /usr/share/keyrings/debian-archive-keyring.gpg ]]
 [[ ! -e /var/lib/incus && ! -L /var/lib/incus ]]
+command -v openssl >/dev/null || { echo "Debian guest lacks fixture TLS tooling" >&2; exit 1; }
 v=7.0.2-3~bpo13+1
-# The disposable bridge is IPv4-only. Fail if updates cannot obtain fresh,
-# signature-checked indexes rather than falling back to the image's cache.
-if ip -4 route show default | grep -q '^default '; then
-  echo 'Disposable guest IPv4 default route: present'
-else
-  echo 'Disposable guest IPv4 default route: absent'
-fi
-for host in deb.debian.org snapshot.debian.org; do
-  if timeout 5 getent ahostsv4 "$host" >/dev/null; then
-    echo "IPv4 resolution for $host: present"
-  else
-    echo "IPv4 resolution for $host: absent"
-  fi
-done
-apt_v4=(apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=1
-  -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12)
-timeout 150 "${apt_v4[@]}" --error-on=any update -qq
-timeout 100 "${apt_v4[@]}" --no-remove --no-install-recommends install -y openssl ca-certificates
-cat >/etc/apt/sources.list.d/gcc-exact-incus.sources <<'SOURCES'
-Types: deb
-URIs: https://snapshot.debian.org/archive/debian/20261104T143429Z/
-Suites: trixie-backports
-Components: main
-# This pinned historical index is expired; APT still verifies Debian signatures.
-Check-Valid-Until: no
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-SOURCES
-timeout 150 "${apt_v4[@]}" --error-on=any update -qq
+bundle=/root/gcc-offline/debs
+# Accept only a complete manifest of local regular .debs, with no paths,
+# and then verify actual transferred bytes.
+shopt -s nullglob
+debs=("$bundle"/*.deb)
+(( ${#debs[@]} > 0 && ${#debs[@]} <= 128 ))
+for deb in "${debs[@]}"; do [[ -f $deb && ! -L $deb ]]; done
+(
+  cd "$bundle"
+  awk '
+    NF!=2 || length($1)!=64 || $1 !~ /^[0-9a-f]+$/ ||
+    $2 !~ /^[0-9A-Za-z][0-9A-Za-z._+~%:-]*[.]deb$/ || seen[$2]++ {exit 1}
+    END {if (!NR) exit 1}
+  ' SHA256SUMS
+  diff -u <(awk '{print $2}' SHA256SUMS | LC_ALL=C sort) \
+    <(printf '%s\n' *.deb | LC_ALL=C sort)
+  sha256sum --strict --check SHA256SUMS >/dev/null
+)
+f=$(cat /root/gcc-offline/alpine.fingerprint)
+[[ $f =~ ^[a-f0-9]{64}$ ]]
+[[ $(cat /root/gcc-offline/alpine.meta /root/gcc-offline/alpine.meta.root | sha256sum | cut -d' ' -f1) == "$f" ]]
 # Incus may auto-start on package install. Deposit a deliberate one-job TLS
 # identity before that first start; standard peer verification must accept IP SAN.
 install -d -m 0700 /var/lib/incus
 openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj /CN=localhost \
   -addext subjectAltName=IP:127.0.0.1 -keyout /var/lib/incus/server.key -out /var/lib/incus/server.crt
-timeout 270 "${apt_v4[@]}" --no-remove --no-install-recommends install -y "incus-base=$v" "incus-client=$v"
+for name in incus-base incus-client; do
+  n=0
+  for deb in "${debs[@]}"; do
+    if [[ $(dpkg-deb -f "$deb" Package) == "$name" ]]; then
+      [[ $(dpkg-deb -f "$deb" Version) == "$v" && $(dpkg-deb -f "$deb" Architecture) == amd64 ]]
+      n=$((n + 1))
+    fi
+  done
+  [[ $n == 1 ]]
+done
+timeout 270 apt-get --no-download --no-remove --no-install-recommends install -y "${debs[@]}"
 [[ $(dpkg-query -W -f='${Version}' incus-base) == "$v" ]]
 [[ $(dpkg-query -W -f='${Version}' incus-client) == "$v" ]]
 timeout 30 systemctl start incus.socket
@@ -120,9 +164,8 @@ export GCC_HOSTED_INCUS_AUTH_ENDPOINT=https://127.0.0.1:8443
 export GCC_HOSTED_INCUS_RUNTIME_METADATA=$GCC_HOSTED_INCUS_AUTH_DIR/runtime-instance.json
 inner project create "$GCC_HOSTED_INCUS_AUTH_PROJECT" -c features.images=false >/dev/null
 inner storage create gcc-dir dir >/dev/null
-f=$(inner image info images:alpine/3.22 | awk '/^Fingerprint: / {print $2}')
-[[ $f =~ ^[a-f0-9]{64}$ ]]
-timeout 150 incus image copy "images:$f" local: --alias gcc-source >/dev/null
+inner image import /root/gcc-offline/alpine.meta /root/gcc-offline/alpine.meta.root local: --alias gcc-source >/dev/null
+[[ $(inner image info gcc-source | awk '/^Fingerprint: / {print $2}') == "$f" ]]
 inner init "$f" "$GCC_HOSTED_INCUS_AUTH_GUEST" --project "$GCC_HOSTED_INCUS_AUTH_PROJECT" --storage gcc-dir --no-profiles \
   -c user.runner-controller-id=11111111-1111-4111-8111-111111111111 \
   -c user.runner-pool-id=22222222-2222-4222-8222-222222222222 >/dev/null
