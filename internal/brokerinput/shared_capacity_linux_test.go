@@ -165,7 +165,7 @@ func enrolledSharedCapacityStore(t *testing.T, stock *httptest.Server, trust *tl
 		grants = append(grants, admission.BrokerGrantSpec{Authority: scAuthority(pool), Host: "host", HostBindingSequence: binding.Sequence, Resources: scSize, Execution: scExecution(), ExpiresAt: now.Add(time.Hour)})
 	}
 	batchID := sha256.Sum256([]byte("shared-capacity-fixture-grants"))
-	if _, err := store.IssueBrokerGrants(ctx, admission.BrokerGrantBatch{ID: hex.EncodeToString(batchID[:]), ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision, Grants: grants}); err != nil {
+	if _, err := store.IssueBrokerGrants(ctx, admission.BrokerGrantBatch{ID: hex.EncodeToString(batchID[:]), ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision, EvidenceNotBefore: &now, Grants: grants}); err != nil {
 		t.Fatal("issue grants:", err)
 	}
 	return store, path
@@ -502,8 +502,9 @@ func TestSharedCapacityExistingLedgerContentionAndRestart(t *testing.T) {
 	before := state.Sequence
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
+	fixtureObservedAt := time.Now().UTC()
 	for i, pool := range []string{scPoolA, scPoolB} {
-		batch := admission.BrokerGrantBatch{ID: strings.Repeat(fmt.Sprint(i+1), 64), ExpectedSequence: before, PolicyRevision: state.Policy.Revision, Grants: []admission.BrokerGrantSpec{{Authority: scAuthority(pool), Host: "host", HostBindingSequence: state.HostBindings["host"].Sequence, Resources: scSize, Execution: scExecution(), ExpiresAt: time.Now().UTC().Add(time.Hour)}}}
+		batch := admission.BrokerGrantBatch{ID: strings.Repeat(fmt.Sprint(i+1), 64), ExpectedSequence: before, PolicyRevision: state.Policy.Revision, EvidenceNotBefore: &fixtureObservedAt, Grants: []admission.BrokerGrantSpec{{Authority: scAuthority(pool), Host: "host", HostBindingSequence: state.HostBindings["host"].Sequence, Resources: scSize, Execution: scExecution(), ExpiresAt: time.Now().UTC().Add(time.Hour)}}}
 		wg.Go(func() { _, errs[i] = store.IssueBrokerGrants(t.Context(), batch) })
 	}
 	wg.Wait()

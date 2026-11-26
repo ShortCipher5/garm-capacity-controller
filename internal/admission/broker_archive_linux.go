@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"time"
 )
 
 const sqliteBrokerArchiveSchema = `
@@ -62,10 +63,8 @@ func decodeBrokerBatch(raw, hash, id string) (BrokerGrantBatch, error) {
 	if e != nil || canonical != raw || digest != hash {
 		return b, ErrBrokerGrant
 	}
-	for _, g := range b.Grants {
-		if !validGrantSpec(g) {
-			return b, ErrBrokerGrant
-		}
+	if !validBatchGrantSpecs(b) {
+		return b, ErrBrokerGrant
 	}
 	return b, nil
 }
@@ -365,10 +364,25 @@ func loadBrokerBatch(tx *sql.Tx, id string) (BrokerGrantBatch, error) {
 
 // Reconstruct at most one manifest page without repeated decompression per grant.
 func brokerBatchGrantRows(tx *sql.Tx, b BrokerGrantBatch) ([]BrokerGrant, error) {
+	var sequence int64
+	var stamp string
+	e := tx.QueryRow(`SELECT b.sequence,a.recorded_at FROM broker_grant_batches b
+		JOIN audit a ON a.sequence=b.sequence AND a.kind='broker_grants_issued' AND a.request_key=b.batch_id
+		WHERE b.batch_id=?`, b.ID).Scan(&sequence, &stamp)
+	if e != nil {
+		return nil, e
+	}
+	issuedAt, e := time.Parse(time.RFC3339Nano, stamp)
+	if e != nil || issuedAt.IsZero() || sequence <= 0 || (b.EvidenceNotBefore != nil && issuedAt.Before(*b.EvidenceNotBefore)) {
+		return nil, ErrBrokerGrant
+	}
 	out := make([]BrokerGrant, len(b.Grants))
 	indices := map[string]int{}
 	for i, g := range b.Grants {
-		out[i] = BrokerGrant{ID: brokerGrantID(b.ID, i), Spec: g}
+		if !g.ExpiresAt.After(issuedAt) {
+			return nil, ErrBrokerGrant
+		}
+		out[i] = BrokerGrant{ID: brokerGrantID(b.ID, i), Spec: g, issuedSequence: sequence, IssuedAt: issuedAt, EvidenceBound: b.EvidenceNotBefore != nil}
 		indices[out[i].ID] = i
 	}
 	rows, e := tx.Query("SELECT grant_id,payload,payload_hash,state,COALESCE(request_key,'') FROM broker_grants WHERE batch_id=? ORDER BY grant_id LIMIT 1001", b.ID)

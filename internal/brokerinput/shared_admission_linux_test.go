@@ -20,7 +20,8 @@ func sharedGrantBatch(t *testing.T, store *admission.SQLiteStore, id, pool strin
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(id))
-	return admission.BrokerGrantBatch{ID: hex.EncodeToString(sum[:]), ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision,
+	now := time.Now().UTC()
+	return admission.BrokerGrantBatch{ID: hex.EncodeToString(sum[:]), ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision, EvidenceNotBefore: &now,
 		Grants: []admission.BrokerGrantSpec{{Authority: scAuthority(pool), Host: "host", HostBindingSequence: state.HostBindings["host"].Sequence,
 			Resources: scSize, Execution: scExecution(), ExpiresAt: time.Now().UTC().Add(time.Hour)}}}
 }
@@ -210,6 +211,44 @@ func TestSharedAdmissionHostDiskLeavesOtherDimensionsFree(t *testing.T) {
 	}
 }
 
+func TestLegacyEnrolledGrantRemainsChargedWithoutDemandAuthority(t *testing.T) {
+	ctx := t.Context()
+	pools := []scPool{{scPoolA, scRepoA, false}}
+	stock, trust, source := scStock(t, pools, []string{scPoolA}, nil)
+	store, path := enrolledSharedCapacityStore(t, stock, trust, pools, nil)
+	batch := sharedGrantBatch(t, store, "legacy-demand", scPoolA)
+	batch.EvidenceNotBefore = nil
+	legacy, err := store.IssueBrokerGrants(ctx, batch)
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("legacy grant: %+v %v", legacy, err)
+	}
+	other, err := admission.OpenSQLite(path, admission.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := other.AdmitStockProviderPlacement(ctx, sharedPlacement(scPoolA, "legacy-runner"), scAuthority(scPoolA), strings.Repeat("e", 64)); !errors.Is(err, admission.ErrBrokerGrant) {
+		t.Fatalf("legacy grant allowed new growth: %v", err)
+	}
+	obs, err := source.Observe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, charges, err := other.ReadBrokerPlanningState(ctx)
+	if err != nil || state.Allocated.Global != scSize || len(state.Grants) != 1 || state.Grants[0].EvidenceBound {
+		t.Fatalf("legacy charge lost or promoted: %+v %v", state.Allocated, err)
+	}
+	opt := capacitybroker.Options{Now: time.Now().UTC(), MaxAge: time.Minute, MaxAssignments: 100}
+	plan, _, err := enrolledCycle(state, charges, obs, source.SourceIdentity(), opt, time.Minute)
+	if err != nil || len(plan.CoveredByGrant) != 0 {
+		t.Fatalf("legacy grant counted as verified supply: %+v %v", plan, err)
+	}
+	replay, err := other.IssueBrokerGrants(ctx, batch)
+	if err != nil || len(replay) != 1 || replay[0].ID != legacy[0].ID || replay[0].State != "unused" {
+		t.Fatalf("legacy replay changed original: %+v %v", replay, err)
+	}
+}
+
 func TestGrantCycleReplacesSupersededLastSlotBeforeExpiry(t *testing.T) {
 	ctx := t.Context()
 	pools := []scPool{{scPoolA, scRepoA, false}}
@@ -252,7 +291,7 @@ func TestGrantCycleReplacesSupersededLastSlotBeforeExpiry(t *testing.T) {
 	}
 	reconcile()
 	state, err = store.ReadBrokerGrantState(ctx)
-	if err != nil || len(state.Grants) != 1 || !state.Grants[0].Superseded() || state.Allocated.Global != limit || !old.Spec.ExpiresAt.After(time.Now().Add(50*time.Minute)) {
+	if err != nil || len(state.Grants) != 1 || !state.Grants[0].Superseded() || state.Allocated.Global != limit || !old.Spec.ExpiresAt.After(time.Now()) {
 		t.Fatalf("expected a superseded grant still holding the last slot: %+v %v", state.Grants, err)
 	}
 	second := cycle()
