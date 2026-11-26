@@ -150,7 +150,7 @@ func openUsageAttachments(ctx context.Context, in UsageAttachmentInput, matrix A
 		if err != nil {
 			return nil, ErrUsageAttachment
 		}
-		if err = s.publish(ctx, payload); err != nil {
+		if err = s.publish(ctx, payload, nil); err != nil {
 			return nil, err
 		}
 	} else {
@@ -244,7 +244,10 @@ func (s *UsageAttachmentStore) available(ctx context.Context) bool {
 // publish atomically replaces the snapshot with stage+rename and directory
 // fsync, mirroring the reviewed timing-history discipline. An incomplete
 // stage is never interpreted on restart; the handle fences instead.
-func (s *UsageAttachmentStore) publish(ctx context.Context, payload []byte) error {
+func (s *UsageAttachmentStore) publish(ctx context.Context, payload []byte, current func() bool) error {
+	if current != nil && !current() {
+		return ErrUsageAttachment
+	}
 	if !historyActive(ctx) || !s.ownsCurrent() || !s.missing(usageAttachmentStage) || !historyActive(ctx) {
 		s.failed = true
 		return ErrUsageAttachment
@@ -271,7 +274,16 @@ func (s *UsageAttachmentStore) publish(ctx context.Context, payload []byte) erro
 	info, err = file.Stat()
 	now, statErr := s.root.Lstat(usageAttachmentStage)
 	if err != nil || statErr != nil || !historySame(info, now) || info.Size() != int64(len(payload)) ||
-		!s.ownsCurrent() || !historyActive(ctx) {
+		!s.ownsCurrent() {
+		return ErrUsageAttachment
+	}
+	if !historyActive(ctx) || (current != nil && !current()) {
+		// The unpublished stage still matches our held descriptor and the
+		// original committed file is intact. Discard only this known stage.
+		// An uncertain unlink or directory sync leaves the handle fenced.
+		if s.root.Remove(usageAttachmentStage) == nil && s.dir.Sync() == nil && s.missing(usageAttachmentStage) && s.ownsCurrent() {
+			s.failed = false
+		}
 		return ErrUsageAttachment
 	}
 	fd := int(s.dir.Fd())
@@ -457,12 +469,12 @@ func (s *UsageAttachmentStore) enrolled(scope UsageAttachmentScope) bool {
 	return pos < len(s.state.Enrolled) && s.state.Enrolled[pos] == scope
 }
 
-func (s *UsageAttachmentStore) commit(ctx context.Context, next usageAttachmentState) error {
+func (s *UsageAttachmentStore) commit(ctx context.Context, next usageAttachmentState, current func() bool) error {
 	data, err := json.Marshal(next)
 	if err != nil || len(data) > usageAttachmentMaxBytes {
 		return ErrUsageAttachment
 	}
-	if err := s.publish(ctx, data); err != nil {
+	if err := s.publish(ctx, data, current); err != nil {
 		return err
 	}
 	s.state = next
@@ -501,7 +513,7 @@ func (s *UsageAttachmentStore) SetEnrolled(ctx context.Context, scope UsageAttac
 		}
 		next.Enrolled = append(next.Enrolled[:pos], next.Enrolled[pos+1:]...)
 	}
-	return s.commit(ctx, next)
+	return s.commit(ctx, next, nil)
 }
 
 // Callers hold the sidecar mutex followed by the timing history mutex. The
@@ -546,6 +558,10 @@ func (s *UsageAttachmentStore) position(job JobKey) (int, bool) {
 // attachment times, including after a later read or restart. A later
 // observation may update only the same runner and measured window.
 func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet) error {
+	return s.attach(ctx, claim, set, nil, nil)
+}
+
+func (s *UsageAttachmentStore) attach(ctx context.Context, claim JobAttributionClaim, set VerifiedUsageSampleSet, window *CompletedUsageWindow, current func() bool) error {
 	if s == nil || len(set.Samples) > MaxJobResourceSamples {
 		return ErrUsageAttachment
 	}
@@ -557,6 +573,16 @@ func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionC
 	s.history.mu.Lock()
 	defer s.history.mu.Unlock()
 	now := s.now().UTC()
+	if window != nil {
+		receiptsCurrent := current
+		current = func() bool {
+			_, fresh := usageObservationTime(claim, set, s.now().UTC())
+			return fresh && historyActive(ctx) && receiptsCurrent()
+		}
+		if !window.currentLocked() || !current() {
+			return ErrUsageAttachment
+		}
+	}
 	row, _, member := s.currentJobClock(ctx, claim.Job, now)
 	if !validTime(now) || !member {
 		return ErrUsageAttachment
@@ -589,6 +615,9 @@ func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionC
 		}
 	}
 	record := BuildVerifiedJobUsage(s.matrix, claim, set, now)
+	if window != nil && record.State != VerifiedUsagePartial && record.State != VerifiedUsageVerified {
+		return ErrUsageAttachment
+	}
 	if record.AsOf.After(now) || !record.AsOf.After(now.Add(-usageAttachmentRetention)) {
 		return ErrUsageAttachment
 	}
@@ -625,7 +654,7 @@ func (s *UsageAttachmentStore) Attach(ctx context.Context, claim JobAttributionC
 	}
 	state := s.state
 	state.Attachments = rows
-	if err := s.commit(ctx, state); err != nil {
+	if err := s.commit(ctx, state, current); err != nil {
 		return err
 	}
 	select {
@@ -698,7 +727,7 @@ func (s *UsageAttachmentStore) prune(ctx context.Context, now time.Time) error {
 	if len(next.Attachments) == len(s.state.Attachments) {
 		return nil
 	}
-	return s.commit(ctx, next)
+	return s.commit(ctx, next, nil)
 }
 
 // The owner wakes at the earliest evidence expiry, with a bounded polling

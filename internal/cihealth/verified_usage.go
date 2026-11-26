@@ -370,6 +370,26 @@ type CollectionDecision struct {
 	Reason  UsageOmissionReason
 }
 
+// CheckJobUsageWindow validates a candidate before a bounded counter read.
+// It requires both identities and independently observed fresh brackets, even
+// when the caller has not obtained any counter points yet.
+func CheckJobUsageWindow(matrix AttributionCapabilityMatrix, claim JobAttributionClaim, set VerifiedUsageSampleSet, now time.Time) UsageOmissionReason {
+	attribution, err := VerifyJobAttribution(matrix, claim, now)
+	if err != nil {
+		return classifyAttributionFailure(claim, now)
+	}
+	if !matrix.Supports(FactCPUCounters) && !matrix.Supports(FactRAMCounters) && !matrix.Supports(FactDiskCounters) {
+		return UsageOmissionCollectionUnavailable
+	}
+	if verdict := classifySampleSet(attribution, set, now); verdict.reason != UsageOmissionNone {
+		return verdict.reason
+	}
+	if _, fresh := usageObservationTime(claim, set, now); !fresh {
+		return UsageOmissionStaleEvidence
+	}
+	return UsageOmissionNone
+}
+
 // DecideCollection decides whether a bounded read-only collection may run
 // for one candidate window. It fails closed at every layer: the documented
 // matrix must prove the provider-origin join, the claim must carry
@@ -387,20 +407,8 @@ func DecideCollection(matrix AttributionCapabilityMatrix, claim JobAttributionCl
 		!matrix.ClassProves(hooks.Producer.EvidenceClass(), FactProviderOriginJoin) {
 		return CollectionDecision{false, UsageOmissionCollectionUnavailable}
 	}
-	attribution, err := VerifyJobAttribution(matrix, claim, now)
-	if err != nil {
-		return CollectionDecision{false, classifyAttributionFailure(claim, now)}
-	}
-	if !matrix.Supports(FactCPUCounters) && !matrix.Supports(FactRAMCounters) && !matrix.Supports(FactDiskCounters) {
-		return CollectionDecision{false, UsageOmissionCollectionUnavailable}
-	}
-	if verdict := classifySampleSet(attribution, set, now); verdict != (omission{VerifiedUsageVerified, UsageOmissionNone}) {
-		return CollectionDecision{false, verdict.reason}
-	}
-	if _, fresh := usageObservationTime(claim, set, now); !fresh {
-		return CollectionDecision{false, UsageOmissionStaleEvidence}
-	}
-	return CollectionDecision{true, UsageOmissionNone}
+	reason := CheckJobUsageWindow(matrix, claim, set, now)
+	return CollectionDecision{reason == UsageOmissionNone, reason}
 }
 
 // Wire is the read-only UI projection of one verified-usage record. Quantity
