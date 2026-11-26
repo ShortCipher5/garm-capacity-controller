@@ -21,20 +21,28 @@ concurrency:
 jobs:
   stock-garm-incus-coexistence:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Exercise real Incus beside the stock GARM packaging specimen
         shell: bash
         run: bash deploy/runtime/hosted-incus/smoke.sh
+      - name: Authenticate to an isolated stock GARM inventory
+        shell: bash
+        run: timeout --kill-after=15s 360s bash deploy/runtime/stock-inventory/smoke.sh
       - name: State the test boundary
         if: always()
         shell: bash
         run: |
           {
             echo '## Hosted Incus and stock GARM coexistence smoke'
-            echo 'This checks a disposable Incus guest and the existing isolated stock GARM/gateway specimen on the same worker.'
-            echo 'It does not exercise authenticated gateway-to-Incus reads, GitHub runner registration, production capacity enforcement, queue recovery or exact-job attribution.'
+            echo 'This checks the controller Incus client over authenticated loopback TLS, using disposable native project restriction, and runs the existing stock GARM/gateway specimen on the same worker.'
+            echo 'Stock GARM empty inventory is tested separately using a fresh fixture-only daemon and credentials, not an enrolled runner.'
+            echo 'Incus client inventory reads are proven separately from the gateway process. Live counter inputs may feed a synthetic exact-job join; this does not prove live GitHub job assignment or release authority.'
           } >> "$GITHUB_STEP_SUMMARY"
