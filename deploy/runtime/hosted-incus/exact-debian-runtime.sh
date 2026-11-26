@@ -106,6 +106,17 @@ umask 077
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 [[ $ID == debian && $VERSION_CODENAME == trixie && $(dpkg --print-architecture) == amd64 ]]
+# The package's service waits for network-online, but this disposable container
+# intentionally has no NIC. Skip only its wait-online helper for this boot.
+[[ $(systemd-detect-virt --container) == lxc ]]
+links=(/sys/class/net/*)
+[[ ${#links[@]} -eq 1 && ${links[0]} == /sys/class/net/lo ]]
+wait_unit=/run/systemd/system/systemd-networkd-wait-online.service.d
+install -d -m 0755 "$wait_unit"
+: >/run/gcc-ci-intentionally-networkless
+printf '[Unit]\nConditionPathExists=!/run/gcc-ci-intentionally-networkless\n' \
+  >"$wait_unit/90-gcc-offline-fixture.conf"
+timeout 10 systemctl daemon-reload
 [[ -r /usr/share/keyrings/debian-archive-keyring.gpg ]]
 [[ ! -e /var/lib/incus && ! -L /var/lib/incus ]]
 command -v openssl >/dev/null || { echo "Debian guest lacks fixture TLS tooling" >&2; exit 1; }
