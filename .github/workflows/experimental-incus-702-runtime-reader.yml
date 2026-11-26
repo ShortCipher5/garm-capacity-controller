@@ -3,8 +3,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/experimental-incus-702-runtime-reader.yml
-      - deploy/runtime/hosted-incus/exact-debian-runtime.sh
-      - deploy/runtime/hosted-incus/stage-debian-runtime-702.sh
+      - deploy/runtime/hosted-incus/exact-noble-runtime.sh
+      - deploy/runtime/hosted-incus/install-noble-incus-702.sh
       - deploy/runtime/hosted-incus/probe-noble-incus-index.sh
       - deploy/runtime/hosted-incus/runtime_health_702_test.go
       - internal/incusapi/**
@@ -30,9 +30,9 @@ jobs:
       - name: Compile the runtime reader fixture
         shell: bash
         run: CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/gcc-incus-runtime.test" ./deploy/runtime/hosted-incus
-      - name: Exercise the exact Debian daemon in a networkless nested fixture
+      - name: Exercise the exact native Ubuntu daemon with a networkless fixture
         shell: bash
-        run: bash deploy/runtime/hosted-incus/exact-debian-runtime.sh "$RUNNER_TEMP/gcc-incus-runtime.test"
+        run: bash deploy/runtime/hosted-incus/exact-noble-runtime.sh "$RUNNER_TEMP/gcc-incus-runtime.test"
       - name: State the experiment boundary
         if: always()
         shell: bash
