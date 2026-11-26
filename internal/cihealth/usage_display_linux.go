@@ -34,6 +34,10 @@ func (v JobUsageDisplay) Current() bool {
 	return !h.failed && h.currentFD == v.timingVersion && !now.Before(v.issued) && now.Before(v.expires)
 }
 
+// ExpiresAt is the latest permissible display time of this retained wire.
+// Local revocation can end the lease sooner.
+func (v JobUsageDisplay) ExpiresAt() time.Time { return v.expires }
+
 func (v JobUsageDisplay) Wire() json.RawMessage {
 	if !v.Current() {
 		return nil

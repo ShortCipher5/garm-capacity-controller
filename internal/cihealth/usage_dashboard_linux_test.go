@@ -135,6 +135,7 @@ func TestOwnerRouteShowsQualifiedLocalUsageOnlyForCurrentExactCycle(t *testing.T
 	read := func() []byte {
 		r := httptest.NewRequest(http.MethodGet, "https://127.0.0.1/admin/api/v1/ci-health", nil)
 		r.Header.Set("Authorization", "Bearer "+auth)
+		r.Header.Set("X-GARM-CI-Usage", "leased-v1")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
 		if w.Code != http.StatusOK {

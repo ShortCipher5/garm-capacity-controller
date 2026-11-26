@@ -15,15 +15,17 @@ const (
 )
 
 type ciUsageResponse struct {
+	expires time.Time
 	body    []byte
 	current func() bool
 }
 
 type ciTimingResponse struct {
-	State    string       `json:"state"`
-	At       time.Time    `json:"observed_at"`
-	Coverage string       `json:"coverage"`
-	View     ciTimingView `json:"timing"`
+	UsageExpiresAt *time.Time   `json:"usage_expires_at,omitempty"`
+	State          string       `json:"state"`
+	At             time.Time    `json:"observed_at"`
+	Coverage       string       `json:"coverage"`
+	View           ciTimingView `json:"timing"`
 }
 
 // CIHealthRepository is an exact identity from already-authorized startup
@@ -221,7 +223,9 @@ func (s *CIHealthSnapshot) fenceLocked() {
 	}
 }
 
-func (s *CIHealthSnapshot) read() []byte {
+func (s *CIHealthSnapshot) read() []byte { return s.timingResponse(false) }
+
+func (s *CIHealthSnapshot) timingResponse(leasedUsage bool) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now, stable := s.wallLocked()
@@ -231,20 +235,20 @@ func (s *CIHealthSnapshot) read() []byte {
 		s.usage = ciUsageResponse{}
 		s.workflows, s.jobLinks = nil, nil
 	}
-	if s.usage.current != nil && !s.usage.current() {
+	if leasedUsage && s.usage.current != nil && (!now.Before(s.usage.expires) || !s.usage.current()) {
 		s.usage = ciUsageResponse{}
 		s.history.withUsage = nil
 	}
 	if s.history.body != nil {
 		if now.Before(s.history.expires) && s.history.source.Current() {
-			if s.usage.body != nil && s.history.withUsage != nil {
+			if leasedUsage && s.usage.body != nil && s.history.withUsage != nil {
 				return s.history.withUsage
 			}
 			return s.history.body
 		}
 		s.history = ciHistoryResponse{}
 	}
-	if s.usage.body != nil {
+	if leasedUsage && s.usage.body != nil {
 		return s.usage.body
 	}
 	return s.body
@@ -278,7 +282,11 @@ func (h *Handler) serveCIHealth(w http.ResponseWriter, r *http.Request, source *
 		serveCIRunLink(w, r, source, handles)
 		return
 	}
-	body := source.read()
+	// Older clients reject new top-level keys. Opt-in changes only the
+	// representation for the already authenticated owner GET.
+	versions := r.Header.Values("X-GARM-CI-Usage")
+	leasedUsage := len(versions) == 1 && versions[0] == "leased-v1" && sameOrigin(r)
+	body := source.timingResponse(leasedUsage)
 	if body == nil {
 		_, _ = w.Write([]byte("{\"state\":\"unavailable\",\"timing\":{\"attempts\":[]}}\n"))
 		return

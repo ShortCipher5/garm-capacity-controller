@@ -28,7 +28,7 @@ func (s *CIHealthSnapshot) PublishLiveTimingWithUsage(cycle cihealthsource.Cycle
 		if _, dup := checked[key]; dup {
 			return nil
 		}
-		checked[key] = ciUsageJob{wire, u.Current}
+		checked[key] = ciUsageJob{wire, u.ExpiresAt(), u.Current}
 	}
 	s.attachJobUsage(cycle.ObservedAt(), checked)
 	return nil
@@ -38,6 +38,7 @@ const maxUsageJobs = 32
 
 type ciUsageJob struct {
 	wire    json.RawMessage
+	expires time.Time
 	current func() bool
 }
 
@@ -60,13 +61,17 @@ func (s *CIHealthSnapshot) attachJobUsage(at time.Time, checked map[cihealth.Job
 		k := key.Attempt
 		byRow[[6]string{k.Source, ciInt(k.RepositoryID), ciInt(k.WorkflowID), ciInt(k.RunID), ciInt(k.Attempt), ciInt(key.JobID)}] = entry
 	}
+	expires := at.Add(ciDisplayLifetime).UTC()
 	var checks []func() bool
 	for _, attempt := range response.View.Attempts {
 		for i := range attempt.Jobs {
 			row := &attempt.Jobs[i]
 			entry, ok := byRow[[6]string{attempt.Source, attempt.RepoID, attempt.Workflow, attempt.Run, attempt.Attempt, row.ID}]
-			if !ok || entry.current == nil || !entry.current() {
+			if !ok || !entry.expires.After(at) || entry.current == nil || !entry.current() {
 				continue
+			}
+			if entry.expires.Before(expires) {
+				expires = entry.expires.UTC()
 			}
 			row.Usage = entry.wire
 			checks = append(checks, entry.current)
@@ -83,13 +88,14 @@ func (s *CIHealthSnapshot) attachJobUsage(at time.Time, checked map[cihealth.Job
 		}
 		return true
 	}
+	response.UsageExpiresAt = &expires
 	combined, err := json.Marshal(response)
 	if err != nil || len(combined) > maxCIResponseBytes {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current == s.generation && s.history.body == nil && ready() {
-		s.usage = ciUsageResponse{body: combined, current: ready}
+	if current == s.generation && s.history.body == nil && s.clock().Before(expires) && ready() {
+		s.usage = ciUsageResponse{body: combined, expires: expires, current: ready}
 	}
 }

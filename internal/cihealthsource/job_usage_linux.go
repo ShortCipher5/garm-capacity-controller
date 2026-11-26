@@ -50,6 +50,15 @@ func (u ObservedJobUsage) Current() bool {
 	return u.proof.current(time.Now()) && u.view.Current()
 }
 
+// ExpiresAt bounds the live source proof and retained display independently.
+func (u ObservedJobUsage) ExpiresAt() time.Time {
+	until := u.view.ExpiresAt()
+	if u.proof.wallDeadline.Before(until) {
+		return u.proof.wallDeadline
+	}
+	return until
+}
+
 func (u ObservedJobUsage) ForCycle(c Cycle, reader *demandobserver.CIHealthSource) (cihealth.JobKey, json.RawMessage, bool) {
 	if reader == nil || c.source.observer != reader || u.proof.owner != c.source || u.proof.sealedAt != c.sealedAt || !u.Current() {
 		return cihealth.JobKey{}, nil, false
