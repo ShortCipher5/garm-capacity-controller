@@ -25,3 +25,15 @@ test("entity auth rejection ends session and error details are redacted",async()
  const s=sessionOf(async()=>({ok:false,status:401}));await s.connect("a".repeat(64));await assert.rejects(s.entityInventorySnapshot(),/authorization ended/);await assert.rejects(s.garmSnapshot(),SessionEnded);
  const bad=sessionOf(async()=>{throw Error("private-token")});await bad.connect("a".repeat(64));await assert.rejects(bad.entityInventorySnapshot(),e=>!e.message.includes("private-token"));
 });
+
+test("a configured repository with no observed pools is still inspectable",async()=>{
+ const v=snapshot();
+ v.settings_available=true;
+ v.settings.repositories=[{id:owner,owner:"example",name:"app",pool_balancing_type:"roundrobin",fingerprint:"f".repeat(64)}];
+ const reader=createEntityInventoryReader(async()=>v);
+ const found=await reader.readEntities();
+ assert.deepEqual(found.entities,[{type:"organization",id:owner,pool_count:1},{type:"repository",id:owner,pool_count:0,configured:true}]);
+ assert.deepEqual(await reader.readEntityPools({type:"repository",id:owner}),{available:true,pools:[]});
+ v.settings_available=false;
+ await assert.rejects(reader.readEntityPools({type:"repository",id:owner}));
+});

@@ -46,6 +46,8 @@ type ManagementConfig struct {
 	AllowWrites   bool
 	// Independent off-by-default foundation opt-in; not wired to HTTP/UI.
 	AllowDisabledPoolCreation bool
+	// Separate stock template staging opt-in, with no installed runtime wiring.
+	AllowStockDisabledPoolCreation bool
 	// Independent off-by-default experimental opt-in for the native conditional
 	// settings client; not wired to HTTP/UI. See conditional.go. The zero value
 	// leaves all existing management behavior unchanged.
@@ -53,16 +55,17 @@ type ManagementConfig struct {
 }
 
 type ManagementClient struct {
-	managedIdentity      string
-	managedSource        *managedsource.Client
-	client               *Client
-	base                 string
-	pools                map[string]bool
-	repositories         map[string]bool
-	writes               bool
-	disabledPoolCreation bool
-	mu                   managementMutex
-	discoveryGate        chan struct{}
+	managedIdentity           string
+	managedSource             *managedsource.Client
+	client                    *Client
+	base                      string
+	pools                     map[string]bool
+	repositories              map[string]bool
+	writes                    bool
+	disabledPoolCreation      bool
+	stockDisabledPoolCreation bool
+	mu                        managementMutex
+	discoveryGate             chan struct{}
 }
 
 // ManagedPool deliberately omits provider specs, instance/job payloads and secrets.
@@ -117,7 +120,7 @@ func NewManagement(config ManagementConfig) (*ManagementClient, error) {
 	if err != nil {
 		return nil, ErrManagement
 	}
-	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation, discoveryGate: make(chan struct{}, 1)}
+	m := &ManagementClient{client: c, base: strings.TrimSuffix(c.endpoint, "/instances"), pools: map[string]bool{}, repositories: map[string]bool{}, writes: config.AllowWrites, disabledPoolCreation: config.AllowDisabledPoolCreation, stockDisabledPoolCreation: config.AllowStockDisabledPoolCreation, discoveryGate: make(chan struct{}, 1)}
 	for _, pair := range []struct {
 		ids   []string
 		scope map[string]bool
