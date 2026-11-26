@@ -140,6 +140,98 @@ func TestBrokerGrantExpiryRetainsChargeUntilDurableRetirement(t *testing.T) {
 		t.Fatal("revived grant")
 	}
 }
+func TestBrokerGrantEvidenceExpiryAtCommitRollsBack(t *testing.T) {
+	s := placementFixture(t)
+	ctx := t.Context()
+	state, err := s.ReadBrokerGrantState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := s.LookupHostBinding(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := placementRequest("commit-boundary")
+	execution := request.Execution
+	execution.Name = ""
+	now := s.now().Add(time.Millisecond)
+	expires := now.Add(time.Second)
+	batch := BrokerGrantBatch{
+		ID: strings.Repeat("c", 64), ExpectedSequence: state.Sequence, PolicyRevision: state.Policy.Revision,
+		Grants: []BrokerGrantSpec{{Authority: stockAuthority(), Host: "a", HostBindingSequence: binding.Sequence,
+			Resources: request.Resources, Execution: execution, ExpiresAt: expires}},
+	}
+	batch.EvidenceNotBefore = &now
+	s.now = func() time.Time { return now.Add(-time.Nanosecond) }
+	if _, err := s.IssueBrokerGrants(ctx, batch); !errors.Is(err, ErrReconciliation) {
+		t.Fatalf("issuance before evidence existed: %v", err)
+	}
+	ticks := 0
+	s.now = func() time.Time {
+		ticks++
+		if ticks >= 3 {
+			return expires
+		}
+		return now
+	}
+	if _, err := s.IssueBrokerGrants(ctx, batch); !errors.Is(err, ErrReconciliation) {
+		t.Fatalf("issuance at evidence deadline: %v", err)
+	}
+	after, err := s.ReadBrokerGrantState(ctx)
+	if err != nil || after.Sequence != state.Sequence || len(after.Grants) != 0 || after.Allocated.Global != (Resources{}) {
+		t.Fatalf("failed issuance changed state: %+v %v", after, err)
+	}
+	s.now = func() time.Time { return now }
+	if _, err := s.IssueBrokerGrants(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	ticks = 0
+	s.now = func() time.Time {
+		ticks++
+		if ticks >= 2 {
+			return expires
+		}
+		return now
+	}
+	if _, err := s.AdmitStockProviderPlacement(ctx, request, stockAuthority(), stockDigest()); !errors.Is(err, ErrReconciliation) {
+		t.Fatalf("redemption at evidence deadline: %v", err)
+	}
+	snapshot, err := s.ReadSnapshot(ctx)
+	if err != nil || len(snapshot.Reservations) != 0 || snapshot.Allocated.Global != request.Resources {
+		t.Fatalf("failed redemption changed charge: %+v %v", snapshot, err)
+	}
+	s.now = func() time.Time { return now }
+	if _, err := s.AdmitStockProviderPlacement(ctx, request, stockAuthority(), stockDigest()); err != nil {
+		t.Fatalf("rollback did not preserve unused grant: %v", err)
+	}
+}
+
+func TestBrokerGrantClockRollbackAcrossHandles(t *testing.T) {
+	s := placementFixture(t)
+	ctx := t.Context()
+	now := s.now().Add(5 * time.Second)
+	s.now = func() time.Time { return now }
+	grant := issueStockTestGrant(t, s, "future")
+	reopened, err := OpenSQLite(s.path, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopened.now = func() time.Time { return grant.IssuedAt.Add(-time.Second) }
+	request := placementRequest("clock-rollback")
+	if _, err := reopened.AdmitStockProviderPlacement(ctx, request, stockAuthority(), stockDigest()); !errors.Is(err, ErrBrokerGrant) {
+		t.Fatalf("grant visible before its issuance: %v", err)
+	}
+	snapshot, err := reopened.ReadSnapshot(ctx)
+	if err != nil || len(snapshot.Reservations) != 0 || snapshot.Allocated.Global != grant.Spec.Resources {
+		t.Fatalf("rollback changed charge: %+v %v", snapshot, err)
+	}
+	reopened.now = func() time.Time { return grant.IssuedAt }
+	if _, err := reopened.AdmitStockProviderPlacement(ctx, request, stockAuthority(), stockDigest()); err != nil {
+		t.Fatalf("grant unavailable at issuance: %v", err)
+	}
+}
+
 func TestBrokerGrantExactBatchReplayAndStaleRevision(t *testing.T) {
 	s := placementFixture(t)
 	ctx := context.Background()
@@ -152,8 +244,10 @@ func TestBrokerGrantExactBatchReplayAndStaleRevision(t *testing.T) {
 	if e := json.Unmarshal([]byte(raw), &b); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.IssueBrokerGrants(ctx, b); e != nil {
-		t.Fatal(e)
+	firstReplay, e := s.IssueBrokerGrants(ctx, b)
+	if e != nil || len(firstReplay) != 1 || !firstReplay[0].IssuedAt.Equal(g.IssuedAt) ||
+		firstReplay[0].RedeemableAt(g.IssuedAt.Add(-time.Second)) || !firstReplay[0].RedeemableAt(g.IssuedAt) {
+		t.Fatalf("retry lost original eligibility window: %+v %v", firstReplay, e)
 	}
 	if e := s.RetireUnusedBrokerGrant(ctx, g.ID, false); e != nil {
 		t.Fatal(e)

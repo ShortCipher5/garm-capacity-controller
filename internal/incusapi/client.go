@@ -574,6 +574,7 @@ func (c *Client) CreateAndWait(ctx context.Context, spec InstanceSpec) (Created,
 
 // Instance is a minimal allocation view, excluding user-data and credentials.
 type Instance struct {
+	ListedIdentity ListedInstanceIdentity `json:"-"`
 	Name           string
 	Status         int
 	CPUMillis      int64
@@ -688,6 +689,12 @@ func (c *Client) Instance(ctx context.Context, instanceName string) (Instance, e
 }
 
 func (c *Client) Instances(ctx context.Context) ([]Instance, error) {
+	fence, _ := ctx.Value(inventoryFenceKey{}).([32]byte)
+	var pinned *PhysicalServerIdentity
+	if c.pin != nil {
+		pinned = c.pin.observed.Load()
+	}
+	started := time.Now().UTC()
 	if err := c.trusted(ctx, false); err != nil {
 		return nil, err
 	}
@@ -703,6 +710,7 @@ func (c *Client) Instances(ctx context.Context) ([]Instance, error) {
 	if len(trimmed) == 0 || trimmed[0] != '[' || json.Unmarshal(response.metadata, &rows) != nil {
 		return nil, ErrResponse
 	}
+	completed := time.Now().UTC()
 	result := make([]Instance, 0, len(rows))
 	seen := map[string]bool{}
 	for _, row := range rows {
@@ -714,6 +722,7 @@ func (c *Client) Instances(ctx context.Context) ([]Instance, error) {
 			return nil, ErrResponse
 		}
 		seen[instance.Name] = true
+		instance.ListedIdentity = c.listedIdentity(fence, pinned, response, row, instance, started, completed)
 		result = append(result, instance)
 	}
 	return result, nil

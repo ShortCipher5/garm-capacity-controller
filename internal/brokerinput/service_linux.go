@@ -84,7 +84,9 @@ func (s *Service) Run(ctx context.Context) error {
 	s.status.StoppedAt = time.Time{}
 	s.status.State = "starting"
 	s.status.ReasonCode = ""
-	if s.runtimeBound {
+	s.mu.Unlock()
+	if s.runtimeBound || (s.reader != nil && s.reader.store.CheckOfflineBroker(ctx) != nil) {
+		s.mu.Lock()
 		s.status.State = "blocked"
 		s.status.ReasonCode = "native_management_authority_unavailable"
 		s.status.StoppedAt = time.Now().UTC()
@@ -92,7 +94,6 @@ func (s *Service) Run(ctx context.Context) error {
 		s.mu.Unlock()
 		return ErrRuntimeAuthority
 	}
-	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.running = false
