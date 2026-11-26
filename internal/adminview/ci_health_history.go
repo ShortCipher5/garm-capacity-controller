@@ -9,9 +9,10 @@ import (
 )
 
 type ciHistoryResponse struct {
-	body    []byte
-	expires time.Time
-	source  cihealthsource.WorkflowTrendsSnapshot
+	body      []byte
+	withUsage []byte
+	expires   time.Time
+	source    cihealthsource.WorkflowTrendsSnapshot
 }
 
 type ciHistoryView struct {
@@ -143,6 +144,10 @@ func (s *CIHealthSnapshot) PublishRetainedTrends(source cihealthsource.WorkflowT
 	if !source.Current() {
 		return errCIProjection
 	}
-	s.history = ciHistoryResponse{combined, expires, source}
+	s.history = ciHistoryResponse{body: combined, expires: expires, source: source}
+	if usage := s.usage.body; len(usage) > 0 && len(usage)+len(key)+len(extra) <= maxCIResponseBytes {
+		// Preserve history if usage is independently withdrawn later.
+		s.history.withUsage = append(append([]byte(nil), usage[:len(usage)-1]...), combined[len(s.body)-1:]...)
+	}
 	return nil
 }
