@@ -138,7 +138,7 @@ func (s *SQLiteStore) applyPolicyChange(ctx context.Context, change PolicyChange
 				return ErrDenied
 			}
 			host, exists := config.Hosts[change.Target]
-			if !exists || provisioning || host.Mode != "disabled" || host.Healthy ||
+			if !managed || provisioning || !exists || host.Mode != "disabled" || host.Healthy ||
 				len(config.Hosts) <= 1 || hostHasPool(config, change.Target) {
 				return ErrHostDraftRemoval
 			}
@@ -203,11 +203,17 @@ func (s *SQLiteStore) checkHostActivation(tx *sql.Tx, config Config, id string, 
 	if _, ok := bindings[id]; !ok {
 		return ErrHostActivation
 	}
-	var excluded bool
-	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM host_binding_history_exclusions WHERE host=?)", id).Scan(&excluded); err != nil {
+	// Older discovery writes replaced Healthy and ObservedAt without a new
+	// bounded inventory. Only a later completed reconciliation supersedes
+	// that persisted state, including across a close and reopen.
+	const current = `SELECT NOT EXISTS(SELECT 1 FROM host_binding_history_exclusions WHERE host=:host)
+		AND EXISTS(SELECT 1 FROM audit WHERE kind='reconciliation_completed' AND sequence >
+			(SELECT COALESCE(max(sequence),0) FROM audit WHERE kind='host_detected' AND request_key=:host))`
+	var authoritative bool
+	if err := tx.QueryRow(current, sql.Named("host", id)).Scan(&authoritative); err != nil {
 		return err
 	}
-	if excluded {
+	if !authoritative {
 		return ErrHostActivation
 	}
 	if !hostHasPool(config, id) {
@@ -239,7 +245,7 @@ func checkHostDraftRemoval(tx *sql.Tx, id string) error {
 			UNION ALL SELECT 1 FROM native_artifact_overheads WHERE host=:host
 			UNION ALL SELECT 1 FROM runner_mixes WHERE host=:host
 			UNION ALL SELECT 1 FROM usage_samples WHERE host=:host
-			UNION ALL SELECT 1 FROM audit WHERE kind IN ('host_detected','host_draft_removed') AND request_key=:host
+			UNION ALL SELECT 1 FROM audit WHERE kind IN ('host_detected','host_totals_observed','host_draft_removed') AND request_key=:host
 		)`
 	var discovery, retained bool
 	if err := tx.QueryRow(query, sql.Named("host", id)).Scan(&discovery, &retained); err != nil {

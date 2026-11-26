@@ -199,6 +199,78 @@ func TestAdminHostActivationRequiresCurrentVerifiedPlacement(t *testing.T) {
 	}
 }
 
+func TestDiscoveryCannotEstablishPlacementHealth(t *testing.T) {
+	for _, tc := range []string{"stale", "unhealthy", "legacy persisted health"} {
+		t.Run(tc, func(t *testing.T) {
+			ctx := t.Context()
+			now := time.Now().UTC()
+			config := fixture(now)
+			host := config.Hosts["a"]
+			host.Mode = "disabled"
+			host.Healthy = tc == "stale"
+			config.Hosts["a"] = host
+			s := sqliteFixtureStore(t, config, false)
+			s.now = func() time.Time { return now }
+			fence, bindings := bindingFixture(t, s)
+			if err := s.BindHostIdentities(ctx, fence, bindings); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CompleteReconciliation(ctx, fence, InventorySnapshot{Hosts: observations(config, now)}); err != nil {
+				t.Fatal(err)
+			}
+			if tc == "stale" {
+				now = now.Add(config.MaxObservationAge + time.Second)
+			}
+			if tc == "legacy persisted health" {
+				// Reproduce the pre-fix transaction and audit event. The old
+				// write reports healthy even though reconciliation said otherwise.
+				_, err := s.db.Exec(`UPDATE metadata SET config=CAST(json_set(config, '$.hosts.a.healthy', json('true'), '$.hosts.a.observed_at', ?) AS BLOB) WHERE id=1;
+					INSERT INTO audit(kind,request_key,recorded_at) VALUES ('host_detected','a',?)`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := s.path
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s, err = OpenSQLite(path, Config{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close()
+				s.now = func() time.Time { return now }
+				persisted := sqliteSnapshot(t, s)
+				if !persisted.Ready || !persisted.Config.Hosts["a"].Healthy || !persisted.Config.Hosts["a"].ObservedAt.Equal(now) {
+					t.Fatal("legacy discovery did not persist apparently healthy, ready state")
+				}
+			}
+			detected := Resources{CPU: 8000, RAM: 8192, Disk: 32768}
+			if err := s.SetHostDetected(ctx, "a", &detected, now); err != nil {
+				t.Fatal(err)
+			}
+			enable := PolicyChange{Revision: PolicyRevision(config), Action: "host_mode", Target: "a", Mode: "enabled", Reason: "resume server placement"}
+			if err := s.ApplyAdminPolicyChange(ctx, enable, true); !errors.Is(err, ErrHostActivation) {
+				t.Fatalf("accepted discovery as placement health: %v", err)
+			}
+			fence, err := s.BeginReconciliation(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			host.Healthy = true
+			config.Hosts["a"] = host
+			if err := s.CompleteReconciliation(ctx, fence, InventorySnapshot{Hosts: observations(config, now)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetHostDetected(ctx, "a", nil, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ApplyAdminPolicyChange(ctx, enable, true); err != nil {
+				t.Fatal("fresh reconciled health should permit activation", err)
+			}
+		})
+	}
+}
+
 func TestRemoveUnusedDiscoveryEnrollmentPreservesHistory(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -217,6 +289,9 @@ func TestRemoveUnusedDiscoveryEnrollmentPreservesHistory(t *testing.T) {
 	remove := PolicyChange{
 		Revision: PolicyRevision(before.Config), Action: "host_draft_remove", Target: "new-server",
 		Reason: "discard staged server",
+	}
+	if err := s.ApplyPolicyChange(ctx, remove); !errors.Is(err, ErrHostDraftRemoval) {
+		t.Fatalf("generic policy interface removed a managed draft: %v", err)
 	}
 	if err := s.ApplyAdminPolicyChange(ctx, remove, true); !errors.Is(err, ErrHostDraftRemoval) {
 		t.Fatalf("removed draft with provisioning on: %v", err)
@@ -292,5 +367,25 @@ func TestDraftRemovalRefusesConfiguredOrBoundServer(t *testing.T) {
 	after := sqliteSnapshot(t, s)
 	if !reflect.DeepEqual(after.Config, before.Config) || !reflect.DeepEqual(after.HostBindings, before.HostBindings) || len(after.Audit) != len(before.Audit) {
 		t.Fatal("failed removal touched the configuration, bindings or audit")
+	}
+}
+
+func TestDiscoveryTotalsAuditPreventsDraftRemoval(t *testing.T) {
+	ctx := t.Context()
+	store := sqliteFixtureStore(t, fixture(time.Now()), false)
+	review, err := store.RecordDiscoveryReview(ctx, "11111111-1111-4111-8111-111111111111", "discovery", time.Now().UTC(), []byte(`{}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnrollHostFromReview(ctx, "draft", Resources{}, "disabled", review); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetHostDetected(ctx, "draft", nil, store.now()); err != nil {
+		t.Fatal(err)
+	}
+	snap := sqliteSnapshot(t, store)
+	remove := PolicyChange{Revision: PolicyRevision(snap.Config), Action: "host_draft_remove", Target: "draft", Reason: "discard draft"}
+	if err := store.ApplyAdminPolicyChange(ctx, remove, false); !errors.Is(err, ErrHostDraftRemoval) {
+		t.Fatalf("lost retained detection history: %v", err)
 	}
 }
