@@ -96,6 +96,8 @@ export function UsageHistoryDetail({ samples, dimension, source, onSourceChange,
 }
 export function ServerCard({ host, readUsage, onManage }) {
   const drain = drainView(host.drain_assessment);
+  const bound = host.backend_binding_status === "bound_observation";
+  const observed = bound && host.observation_fresh;
   return (
     <article className="card host" data-host={host.id}>
       <div className="host-heading">
@@ -108,12 +110,12 @@ export function ServerCard({ host, readUsage, onManage }) {
           {host.new_claims_paused ? "New claims paused" : "New claims allowed"}
         </span>
       </div>
-      <p>Backend connection observation: {host.observation_fresh
+      <p>Backend connection observation: {observed
         ? (host.last_observed_healthy ? "Healthy" : "Unhealthy")
-        : "Unavailable or stale"}
-      {host.observation_fresh && <> · <time dateTime={host.observed_at}>{date(host.observed_at)}</time></>}
+        : (bound ? "Unavailable or stale" : "Unverified")}
+      {observed && <> · <time dateTime={host.observed_at}>{date(host.observed_at)}</time></>}
       </p>
-      <p className="muted">Backend binding: {host.backend_binding_status === "bound_observation"
+      <p className="muted">Backend binding: {bound
         ? "Authenticated daemon observed"
         : (host.backend_binding_status === "legacy_scope_import_required" ? "Qualified scope import required" : "Unbound")}</p>
       {onManage && <a href="#management" onClick={() => onManage(host.id)}>Manage {host.id} in Ledger policy management</a>}
