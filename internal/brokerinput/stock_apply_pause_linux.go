@@ -108,8 +108,9 @@ type StockApplyRecovery struct {
 // StockApplyRecordedReadback describes historical evidence at local audit time.
 // The journal does not attest to capture freshness or upstream causality.
 type StockApplyRecordedReadback struct {
-	Comparison string    `json:"comparison"`
-	RecordedAt time.Time `json:"recorded_at"`
+	Status     string     `json:"status"`
+	Comparison string     `json:"comparison,omitempty"`
+	RecordedAt *time.Time `json:"recorded_at,omitempty"`
 }
 
 const (
@@ -148,13 +149,23 @@ func (c *StockApplyController) RecoverScope(ctx context.Context, scope [sha256.S
 	return recovery, nil
 }
 
-// Walk back only to this operation's latest observation or initial proposal.
-// The audit sequence orders commits even when two wall clock readings agree.
+// Bound the scan on the v1 audit table's integer primary key. A journal with
+// many unrelated events can still report the unresolved operation and charge.
+const stockApplyReadbackWindow = 256
+
 func lastStockApplyReadback(tx *sql.Tx, op *StockApplyOperation) (*StockApplyRecordedReadback, error) {
 	var kind, stamp, detail string
+	var latest int64
+	if err := tx.QueryRow("SELECT COALESCE(max(sequence),0) FROM stock_apply_audit").Scan(&latest); err != nil {
+		return nil, ErrStockApplyJournal
+	}
+	floor := latest - stockApplyReadbackWindow
 	err := tx.QueryRow(`SELECT kind, recorded_at, detail FROM stock_apply_audit
-		WHERE scope=? AND operation_id=? AND kind IN ('observation','proposal_recorded')
-		ORDER BY sequence DESC LIMIT 1`, op.Scope, op.OperationID).Scan(&kind, &stamp, &detail)
+		WHERE sequence>? AND scope=? AND operation_id=? AND kind IN ('operation_observation','observation','proposal_recorded')
+		ORDER BY sequence DESC LIMIT 1`, floor, op.Scope, op.OperationID).Scan(&kind, &stamp, &detail)
+	if errors.Is(err, sql.ErrNoRows) && floor > 0 {
+		return &StockApplyRecordedReadback{Status: "history_outside_inspection_window"}, nil
+	}
 	if err != nil {
 		return nil, ErrStockApplyJournal
 	}
@@ -169,6 +180,12 @@ func lastStockApplyReadback(tx *sql.Tx, op *StockApplyOperation) (*StockApplyRec
 	if err != nil || at.IsZero() {
 		return nil, ErrStockApplyJournal
 	}
+	at = at.UTC()
+	if kind == "observation" {
+		// Earlier versions attached captures to whichever operation was current
+		// at record time, without checking the operation at collection.
+		return &StockApplyRecordedReadback{Status: "legacy_scope_only", RecordedAt: &at}, nil
+	}
 	comparison := "differs_from_both"
 	switch maximum {
 	case op.Observed:
@@ -176,7 +193,7 @@ func lastStockApplyReadback(tx *sql.Tx, op *StockApplyOperation) (*StockApplyRec
 	case op.Suggested:
 		comparison = "matches_proposal_target"
 	}
-	return &StockApplyRecordedReadback{Comparison: comparison, RecordedAt: at.UTC()}, nil
+	return &StockApplyRecordedReadback{Status: "operation_matched", Comparison: comparison, RecordedAt: &at}, nil
 }
 
 // ChangeScopePause changes local mode only if the reviewed mode revision

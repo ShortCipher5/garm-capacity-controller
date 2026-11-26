@@ -312,7 +312,7 @@ func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 	for i, readback := range []int64{plan.Suggested, plan.Observed, plan.Suggested} {
 		// The ledger baseline moves while the operation is open; the held
 		// capacity display must follow it without touching the outcome.
-		if err := controller.RecordObservation(context.Background(), plan.Scope, readback, int64(5+i), now.Add(time.Duration(3+i)*time.Second)); err != nil {
+		if err := controller.RecordObservation(context.Background(), plan.Scope, operationID, readback, int64(5+i), now.Add(time.Duration(3+i)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		view, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(time.Duration(3+i)*time.Second), claim, 5, &readback, true))
@@ -363,7 +363,7 @@ func TestStockApplyMatchingReadbackNeverAppliesOrReleases(t *testing.T) {
 		t.Fatal("proven outcome", view.State, view.Charged)
 	}
 	old := plan.Observed
-	if err := controller.RecordObservation(context.Background(), plan.Scope, old, 9, now.Add(12*time.Second)); err != nil {
+	if err := controller.RecordObservation(context.Background(), plan.Scope, operationID, old, 9, now.Add(12*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	view, err = controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(12*time.Second), claim, 9, &old, true))
@@ -386,7 +386,8 @@ func TestStockApplyDriftBlocksDispatchWithVisibleReason(t *testing.T) {
 	if err := controller.RecordProposal(context.Background(), plan, 1, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.RecordObservation(context.Background(), plan.Scope, 99, 1, now.Add(time.Second)); err != nil {
+	id := viewOperationID(t, controller, plan.Scope)
+	if err := controller.RecordObservation(context.Background(), plan.Scope, id, 99, 1, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	view, err := controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(2*time.Second), claim, 1, nil, true))
@@ -403,7 +404,7 @@ func TestStockApplyDriftBlocksDispatchWithVisibleReason(t *testing.T) {
 		t.Fatal("drifted proposal dispatched", err)
 	}
 	// Drift is sticky: a matching readback afterwards does not silently clear it.
-	if err := controller.RecordObservation(context.Background(), plan.Scope, plan.Observed, 1, now.Add(4*time.Second)); err != nil {
+	if err := controller.RecordObservation(context.Background(), plan.Scope, id, plan.Observed, 1, now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	view, err = controller.View(context.Background(), plan.Scope, stockApplyEval(now.Add(4*time.Second), claim, 1, nil, true))
@@ -517,16 +518,17 @@ func TestStockApplyObservationAndViewInputBounds(t *testing.T) {
 	if err := controller.RecordProposal(context.Background(), plan, 1, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.RecordObservation(context.Background(), scope, -1, 0, now); !errors.Is(err, ErrStockApplyConflict) {
+	id := viewOperationID(t, controller, scope)
+	if err := controller.RecordObservation(context.Background(), scope, id, -1, 0, now); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("negative readback admitted", err)
 	}
-	if err := controller.RecordObservation(context.Background(), scope, 1000001, 0, now); !errors.Is(err, ErrStockApplyConflict) {
+	if err := controller.RecordObservation(context.Background(), scope, id, 1000001, 0, now); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("unbounded readback admitted", err)
 	}
-	if err := controller.RecordObservation(context.Background(), scope, 1, -1, now); !errors.Is(err, ErrStockApplyConflict) {
+	if err := controller.RecordObservation(context.Background(), scope, id, 1, -1, now); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("negative charged baseline admitted", err)
 	}
-	if err := controller.RecordObservation(context.Background(), scope, 1, 100001, now); !errors.Is(err, ErrStockApplyConflict) {
+	if err := controller.RecordObservation(context.Background(), scope, id, 1, 100001, now); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatal("unbounded charged baseline admitted", err)
 	}
 	if _, err := controller.View(context.Background(), scope, stockApplyEval(time.Time{}, StockApplyCapabilityClaim{}, 0, nil, true)); !errors.Is(err, ErrStockApplyConflict) {
@@ -589,7 +591,8 @@ func TestStockApplyHeldCapacityFollowsBaselineAcrossRestart(t *testing.T) {
 	if err := controller.RecordProposal(context.Background(), plan, 2, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.RecordObservation(context.Background(), plan.Scope, plan.Observed, 6, now.Add(time.Second)); err != nil {
+	id := viewOperationID(t, controller, plan.Scope)
+	if err := controller.RecordObservation(context.Background(), plan.Scope, id, plan.Observed, 6, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	controller.Close()
@@ -610,14 +613,15 @@ func TestStockApplyDelayedObservationCannotReplaceRecordedCharge(t *testing.T) {
 	if err := controller.RecordProposal(ctx, plan, 1, now); err != nil {
 		t.Fatal(err)
 	}
+	id := viewOperationID(t, controller, plan.Scope)
 	// Even a fresh observation with the same count advances the timestamp.
 	for _, n := range []time.Duration{2, 4} {
-		if err := controller.RecordObservation(ctx, plan.Scope, plan.Observed, 3, now.Add(n*time.Second)); err != nil {
+		if err := controller.RecordObservation(ctx, plan.Scope, id, plan.Observed, 3, now.Add(n*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, n := range []time.Duration{3, 4} {
-		if err := controller.RecordObservation(ctx, plan.Scope, plan.Observed+90, 0, now.Add(n*time.Second)); !errors.Is(err, ErrStockApplyConflict) {
+		if err := controller.RecordObservation(ctx, plan.Scope, id, plan.Observed+90, 0, now.Add(n*time.Second)); !errors.Is(err, ErrStockApplyConflict) {
 			t.Fatalf("accepted stale observation at +%ds: %v", n, err)
 		}
 	}
@@ -636,7 +640,8 @@ func TestStockApplyRestartWithClockRegressionHoldsLastRecordedCharge(t *testing.
 	if err := c.RecordProposal(ctx, plan, 2, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.RecordObservation(ctx, scope, plan.Observed, 4, now.Add(2*time.Second)); err != nil {
+	id := viewOperationID(t, c, scope)
+	if err := c.RecordObservation(ctx, scope, id, plan.Observed, 4, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.MarkDispatched(ctx, scope, claim, now); !errors.Is(err, ErrStockApplyStale) {
@@ -646,10 +651,9 @@ func TestStockApplyRestartWithClockRegressionHoldsLastRecordedCharge(t *testing.
 		t.Fatal(err)
 	}
 	captured := now.Add(5 * time.Second)
-	if err := c.RecordObservation(ctx, scope, plan.Suggested, 7, captured); err != nil {
+	if err := c.RecordObservation(ctx, scope, id, plan.Suggested, 7, captured); err != nil {
 		t.Fatal(err)
 	}
-	id := viewOperationID(t, c, scope)
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +662,7 @@ func TestStockApplyRestartWithClockRegressionHoldsLastRecordedCharge(t *testing.
 		t.Fatal(err)
 	}
 	staleCapture := now.Add(4 * time.Second)
-	if err := c.RecordObservation(ctx, scope, plan.Observed, 0, staleCapture); !errors.Is(err, ErrStockApplyConflict) {
+	if err := c.RecordObservation(ctx, scope, id, plan.Observed, 0, staleCapture); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatalf("restart accepted a delayed zero charge: %v", err)
 	}
 	recovery, err := c.RecoverScope(ctx, scope, now)
@@ -675,8 +679,42 @@ func TestStockApplyRestartWithClockRegressionHoldsLastRecordedCharge(t *testing.
 	if err := c.RecordProvenOutcome(ctx, scope, claim, proof, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.RecordObservation(ctx, scope, plan.Observed, 0, staleCapture); !errors.Is(err, ErrStockApplyConflict) {
+	if err := c.RecordObservation(ctx, scope, id, plan.Observed, 0, staleCapture); !errors.Is(err, ErrStockApplyConflict) {
 		t.Fatalf("outcome record erased capture order: %v", err)
+	}
+}
+
+func TestStockApplyRecoveryDistinguishesLegacyAndUninspectedReadbacks(t *testing.T) {
+	c, scope, _, _ := stockApplyTestController(t)
+	plan, now := validatedStockApplyPlan(t, 1)
+	if err := c.RecordProposal(t.Context(), plan, 3, now); err != nil {
+		t.Fatal(err)
+	}
+	id := viewOperationID(t, c, scope)
+	if err := c.RecordObservation(t.Context(), scope, id, plan.Observed, 6, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// A v1 scope-only observer emitted this audit kind. The numeric readback
+	// is well formed but the writer never checked the intended operation.
+	if _, err := c.journal.db.Exec("UPDATE stock_apply_audit SET kind='observation' WHERE kind='operation_observation'"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.RecoverScope(t.Context(), scope, now)
+	if err != nil || got.RecordedReadback == nil || got.RecordedReadback.Status != "legacy_scope_only" || got.RecordedReadback.Comparison != "" || got.RecordedReadback.RecordedAt == nil {
+		t.Fatalf("legacy observation acquired attribution: %+v %v", got, err)
+	}
+	// Simulate a busy, unrelated scope. Inspection must retain open work even
+	// when its observation falls outside the bounded audit window.
+	if _, err := c.journal.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?)
+		INSERT INTO stock_apply_audit(scope,kind,recorded_at,detail)
+		SELECT 'other-scope','pause_entered',?,'maintenance' FROM n`, stockApplyReadbackWindow, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = c.RecoverScope(t.Context(), scope, now)
+	if err != nil || got.Operation == nil || got.Operation.OperationID != id || got.Operation.Charged != 6 ||
+		got.RecordedReadback == nil || got.RecordedReadback.Status != "history_outside_inspection_window" ||
+		got.RecordedReadback.Comparison != "" || got.RecordedReadback.RecordedAt != nil {
+		t.Fatalf("bounded inspection lost charge or invented evidence: %+v %v", got, err)
 	}
 }
 
@@ -686,6 +724,7 @@ func TestStockApplyRecoveryRefusesUnreadableEvidence(t *testing.T) {
 	if err := c.RecordProposal(t.Context(), plan, 6, now); err != nil {
 		t.Fatal(err)
 	}
+	id := viewOperationID(t, c, scope)
 	for i, observation := range []struct {
 		maximum    int64
 		comparison string
@@ -695,7 +734,7 @@ func TestStockApplyRecoveryRefusesUnreadableEvidence(t *testing.T) {
 		{plan.Suggested, "matches_proposal_target"},
 	} {
 		at := now.Add(time.Duration(i+1) * time.Second)
-		if err := c.RecordObservation(t.Context(), scope, observation.maximum, 6, at); err != nil {
+		if err := c.RecordObservation(t.Context(), scope, id, observation.maximum, 6, at); err != nil {
 			t.Fatal(err)
 		}
 		got, err := c.RecoverScope(t.Context(), scope, now)
@@ -704,8 +743,8 @@ func TestStockApplyRecoveryRefusesUnreadableEvidence(t *testing.T) {
 		}
 	}
 	for _, corrupt := range []string{
-		"UPDATE stock_apply_audit SET detail='invalid' WHERE kind='observation'",
-		"UPDATE stock_apply_audit SET detail='1', recorded_at='invalid' WHERE kind='observation'",
+		"UPDATE stock_apply_audit SET detail='invalid' WHERE kind='operation_observation'",
+		"UPDATE stock_apply_audit SET detail='1', recorded_at='invalid' WHERE kind='operation_observation'",
 		"UPDATE stock_apply_operation SET updated_at='invalid'",
 	} {
 		if _, err := c.journal.db.Exec(corrupt); err != nil {
@@ -715,7 +754,7 @@ func TestStockApplyRecoveryRefusesUnreadableEvidence(t *testing.T) {
 			t.Fatalf("served unreadable audit or operation: %+v %v", got, err)
 		}
 	}
-	if err := c.RecordObservation(t.Context(), scope, plan.Observed, 0, now.Add(10*time.Second)); !errors.Is(err, ErrStockApplyJournal) {
+	if err := c.RecordObservation(t.Context(), scope, id, plan.Observed, 0, now.Add(10*time.Second)); !errors.Is(err, ErrStockApplyJournal) {
 		t.Fatalf("overwrote a charge with unreadable ordering evidence: %v", err)
 	}
 }
