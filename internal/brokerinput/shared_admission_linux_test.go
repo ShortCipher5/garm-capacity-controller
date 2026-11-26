@@ -2,8 +2,11 @@ package brokerinput
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -211,6 +214,29 @@ func TestSharedAdmissionHostDiskLeavesOtherDimensionsFree(t *testing.T) {
 	}
 }
 
+func TestNewSharedGrantWithoutDemandEvidenceIsAtomicRefusal(t *testing.T) {
+	ctx := t.Context()
+	pools := []scPool{{scPoolA, scRepoA, false}}
+	stock, trust, _ := scStock(t, pools, []string{scPoolA}, nil)
+	store, _ := enrolledSharedCapacityStore(t, stock, trust, pools, nil)
+	batch := sharedGrantBatch(t, store, "missing-demand", scPoolA)
+	batch.EvidenceNotBefore = nil
+	before, err := store.ReadBrokerGrantState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := store.IssueBrokerGrants(ctx, batch)
+	if !errors.Is(err, admission.ErrBrokerGrant) || len(grants) != 0 {
+		t.Fatalf("missing evidence minted a new grant: %+v %v", grants, err)
+	}
+	after, err := store.ReadBrokerGrantState(ctx)
+	if err != nil || after.Sequence != before.Sequence || len(after.Grants) != len(before.Grants) ||
+		after.Allocated.Global != before.Allocated.Global || after.Allocated.Hosts["host"] != before.Allocated.Hosts["host"] ||
+		after.Allocated.Pools[scPoolA] != before.Allocated.Pools[scPoolA] {
+		t.Fatalf("refused grant changed ledger capacity or audit: %+v %v", after.Allocated, err)
+	}
+}
+
 func TestLegacyEnrolledGrantRemainsChargedWithoutDemandAuthority(t *testing.T) {
 	ctx := t.Context()
 	pools := []scPool{{scPoolA, scRepoA, false}}
@@ -218,10 +244,7 @@ func TestLegacyEnrolledGrantRemainsChargedWithoutDemandAuthority(t *testing.T) {
 	store, path := enrolledSharedCapacityStore(t, stock, trust, pools, nil)
 	batch := sharedGrantBatch(t, store, "legacy-demand", scPoolA)
 	batch.EvidenceNotBefore = nil
-	legacy, err := store.IssueBrokerGrants(ctx, batch)
-	if err != nil || len(legacy) != 1 {
-		t.Fatalf("legacy grant: %+v %v", legacy, err)
-	}
+	legacyID := persistLegacyFixtureBatch(t, path, batch)
 	other, err := admission.OpenSQLite(path, admission.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -244,9 +267,64 @@ func TestLegacyEnrolledGrantRemainsChargedWithoutDemandAuthority(t *testing.T) {
 		t.Fatalf("legacy grant counted as verified supply: %+v %v", plan, err)
 	}
 	replay, err := other.IssueBrokerGrants(ctx, batch)
-	if err != nil || len(replay) != 1 || replay[0].ID != legacy[0].ID || replay[0].State != "unused" {
+	if err != nil || len(replay) != 1 || replay[0].ID != legacyID || replay[0].State != "unused" || replay[0].EvidenceBound {
 		t.Fatalf("legacy replay changed original: %+v %v", replay, err)
 	}
+}
+
+// Write the rows that a pre-evidence writer would have persisted, using
+// the disposable ledger only. The regular issuance API cannot seed history.
+func persistLegacyFixtureBatch(t *testing.T, path string, batch admission.BrokerGrantBatch) string {
+	t.Helper()
+	ctx := t.Context()
+	uri := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_foreign_keys=on&_busy_timeout=2000&_txlock=immediate"}
+	db, err := sql.Open("sqlite3", uri.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, "SELECT max(sequence) FROM audit").Scan(&sequence); err != nil || sequence != batch.ExpectedSequence {
+		t.Fatalf("unexpected prior ledger revision: %d %v", sequence, err)
+	}
+	issued, err := tx.ExecContext(ctx, "INSERT INTO audit(kind,request_key,recorded_at) VALUES('broker_grants_issued',?,?)",
+		batch.ID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence, err = issued.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(payload)
+	if _, err := tx.ExecContext(ctx, "INSERT INTO broker_grant_batches(batch_id,payload,payload_hash,sequence) VALUES(?,?,?,?)",
+		batch.ID, string(payload), hex.EncodeToString(hash[:]), sequence); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(batch.Grants[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash = sha256.Sum256(raw)
+	grantID := sha256.Sum256([]byte(batch.ID + ":0"))
+	id := hex.EncodeToString(grantID[:])
+	if _, err := tx.ExecContext(ctx, "INSERT INTO broker_grants(grant_id,batch_id,payload,payload_hash,state) VALUES(?,?,?,?,'unused')",
+		id, batch.ID, string(raw), hex.EncodeToString(hash[:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestGrantCycleReplacesSupersededLastSlotBeforeExpiry(t *testing.T) {

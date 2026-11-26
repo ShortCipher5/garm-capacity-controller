@@ -454,6 +454,11 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 		if policy.Revision != b.PolicyRevision {
 			return ErrBrokerConflict
 		}
+		// New shared commitments must be usable under the same evidence
+		// contract as redemption. Exact historical batches replay above.
+		if policy.Revision > 0 && b.EvidenceNotBefore == nil {
+			return ErrBrokerGrant
+		}
 		config, ready, epoch, _, e := sqliteMetadata(tx)
 		if e != nil {
 			return e
