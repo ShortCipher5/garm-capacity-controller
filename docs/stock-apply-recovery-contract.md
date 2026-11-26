@@ -98,6 +98,43 @@ reports `upstream_outcome: unresolved`; the other cases report
 `not_observed`. Lifting the local pause preserves the open operation,
 including its charge. The stock adapter remains observe-only.
 
+For a handoff about a particular open operation, take its local
+`operation_id` from the original inspection and supply it on the next read.
+
+```sh
+./capacity-stock-recovery inspect --journal "$journal" --lineage "$lineage" --identity "$identity" --scope "$scope" --operation "$operation_id"
+```
+
+Inspection exits unsuccessfully with no summary if that operation has closed
+or the scope now holds a different operation. A successful inspection describes
+the journal at the transaction that read it. The local ID identifies the
+journal record. GARM has no corresponding recoverable request ID.
+
+A collector must take the operation ID before capturing settings and charge.
+The recording transaction checks that the same ID is still current. A delayed
+capture for a withdrawn proposal cannot change the replacement’s readback,
+drift flag or charge. `inspect` reads the latest 256 local audit sequence
+positions to find the open operation's last readback or its initial proposal.
+
+| `last_recorded_readback` | Meaning |
+| --- | --- |
+| Omitted on inspection | No open operation, or inspection reached its initial proposal before finding a readback. |
+| `status: operation_matched` | The recording transaction verified the supplied operation ID. The comparison reports a baseline match, a target match or a difference from both. |
+| `status: legacy_scope_only` | An earlier writer recorded a readback under the current scope without checking the operation expected by the collector. Capture attribution is unknown. |
+| `status: history_outside_inspection_window` | The recent sequence window contains neither the proposal nor a readback for the open operation. Earlier history is unexamined. |
+
+The `recorded_at` field gives local audit time when a record is available.
+Capture freshness and current pool settings remain unknown. `settings_drift_recorded` remains true
+once the journal records drift for an operation, including after a later match.
+Recording uncertainty after a backward clock change preserves the ordering
+of previously recorded runner charges. An older or equal-time observation
+cannot replace that baseline. The reported count remains historical.
+
+The `stock_capability.refusals` list on every summary names the missing
+completion, ownership and late-writer evidence. An unresolved outcome
+requires the operator to retain the journal and charge across restart.
+Neither a matching readback nor a lifted pause permits retry or rollback.
+
 ## What the durable SQLite and lineage checks establish — and what they do not
 
 The stock-apply journal reuses the management journal's local durability
@@ -204,24 +241,39 @@ refusal per requirement, and the physical-scope refusal.
 
 ## Why the pinned stock interface cannot be adapted today
 
-Stock GARM v0.2.1 has no controller-specific pool-write role and no atomic
-conditional update (`docs/stock-settings-ownership.md`). Concretely, against
-the five requirements:
+In the reviewed stock commit `154638445c3949c1958b01812f69d9a1e4d82684`,
+the pool PUT accepts setting values and returns a pool object. It supplies no
+client operation key, conditional generation or post-interruption result lookup.
+After the handler passes authorization, the store updates the pool in a
+transaction without attaching the caller context. It then reads the pool again
+in a separate call. That final read or delivery of the response can fail after
+the change commits. A timeout, cancellation or missing response leaves both
+acceptance and the final disposition unknown to a recovering client.
+[Request fields](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/params/requests.go#L163-L183)
+· [GET and PUT handlers](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/apiserver/controllers/pools.go#L66-L190)
+· [Store transaction and final read](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/database/sql/pools.go#L405-L432)
 
-- No exclusive boundary: any writer with the pool-write credential can edit
-  settings at any time; the controller cannot fence native UI/CLI, direct
-  database sessions, or queued requests.
-- No authoritative receipt: the only read is a GET of current values. After
-  a timed-out PUT, a matching GET neither proves the write was ours nor that
-  it cannot still settle (`docs/garm-management-recovery.md` documents the
-  pinned handler/transaction semantics).
-- No late-writer fence: admitted requests are not bound to the caller's
-  context, so cancellation cannot be used as a completion fence.
-- Drift indistinguishable from completion: an external edit and our own
-  delayed write produce the same observable state.
-- No safe rollback anchor: with neither exclusive ownership nor receipts,
-  restoring a historical value is a guess that can overwrite another
-  writer's change.
+Both the generic pool route and the owning entity's update route can modify
+the same maximum. The Runner checks admin access and the settings bounds,
+then enters the store without an exclusive field owner or an expected writer
+epoch. Changing the maximum or minimum idle count does not advance the pool
+generation. A matching maximum and unchanged generation can therefore be
+observed while the original request still has a pending write. A blind
+inverse can also overwrite another administrator's newer decision.
+[Generic update](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/pools.go#L74-L112)
+· [Repository update](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/runner/repositories.go#L354-L398)
+· [Generation and update fields](https://github.com/cloudbase/garm/blob/154638445c3949c1958b01812f69d9a1e4d82684/database/sql/util.go#L580-L657)
+
+The disposable pinned test `TestCapacityManagementMatchingMaximumBeforeOriginalCommits`
+runs the generic update up to its call into the store, cancels its caller
+context, and schedules an organization-route writer on the same SQLite pool.
+The second writer sets the desired maximum, a GET reads it, and that writer
+then sets a third value. The original request subsequently enters the actual
+stock transaction and overwrites that edit at the original generation. The
+test controls execution order in the fixture and uses the unmodified stock
+Runner methods and store for every settings change. The existing
+[`management-test.sh`](../integration/garm-v0.2.1/management-test.sh)
+runs this case in the pinned PoolTestSuite.
 
 Until an interface is independently qualified for the installed stack, the
 compatibility gap stands: the controller proposes, pauses, observes, and
