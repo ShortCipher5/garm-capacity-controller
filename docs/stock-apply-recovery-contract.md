@@ -110,12 +110,21 @@ or the scope now holds a different operation. A successful inspection describes
 the journal at the transaction that read it. The local ID identifies the
 journal record. GARM has no corresponding recoverable request ID.
 
-When the journal has recorded a settings observation for that open operation,
-`inspect` includes `last_recorded_readback`. Its `comparison` says whether the
-maximum matched the proposal baseline, matched the target, or differed from
-both. Its `recorded_at` is the local audit time. Capture freshness and current
-pool settings remain unknown. Earlier observations for a withdrawn proposal
-do not carry over to the next proposal. `settings_drift_recorded` remains true
+A collector must take the operation ID before capturing settings and charge.
+The recording transaction checks that the same ID is still current. A delayed
+capture for a withdrawn proposal cannot change the replacement’s readback,
+drift flag or charge. `inspect` reads the latest 256 local audit sequence
+positions to find the open operation's last readback or its initial proposal.
+
+| `last_recorded_readback` | Meaning |
+| --- | --- |
+| Omitted on inspection | No open operation, or inspection reached its initial proposal before finding a readback. |
+| `status: operation_matched` | The recording transaction verified the supplied operation ID. The comparison reports a baseline match, a target match or a difference from both. |
+| `status: legacy_scope_only` | An earlier writer recorded a readback under the current scope without checking the operation expected by the collector. Capture attribution is unknown. |
+| `status: history_outside_inspection_window` | The recent sequence window contains neither the proposal nor a readback for the open operation. Earlier history is unexamined. |
+
+The `recorded_at` field gives local audit time when a record is available.
+Capture freshness and current pool settings remain unknown. `settings_drift_recorded` remains true
 once the journal records drift for an operation, including after a later match.
 Recording uncertainty after a backward clock change preserves the ordering
 of previously recorded runner charges. An older or equal-time observation

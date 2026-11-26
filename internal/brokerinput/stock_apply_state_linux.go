@@ -799,16 +799,13 @@ func stockApplyReadbackConsistent(op StockApplyOperation, readback int64) bool {
 	}
 }
 
-// RecordObservation records one read-only settings observation for the scope's
-// open or proven operation. Matching the old or the new value is retained as
-// an audit observation only; it never changes the operation state and never
-// releases a charge. Charged is the CURRENT ledger-charged runner baseline:
-// it is stored durably so the held-capacity display keeps reflecting live
-// charging, including baseline movements while an operation is open. A
-// readback inconsistent with the journaled operation raises a sticky drift
-// flag that blocks dispatch until the operator reviews.
-func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, readback, charged int64, now time.Time) error {
-	if scope == ([sha256.Size]byte{}) || now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
+// RecordObservation requires the operation ID read before collecting the settings
+// and ledger baseline. It compares that ID with the current operation in the
+// recording transaction, so delayed work cannot be attached to a replacement.
+// A matching setting updates only the audit and the caller's recorded charge.
+// An inconsistent setting raises sticky drift and blocks dispatch.
+func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha256.Size]byte, expectedOperationID string, readback, charged int64, now time.Time) error {
+	if scope == ([sha256.Size]byte{}) || len(expectedOperationID) != 32 || now.IsZero() || readback < 0 || readback > 1000000 || charged < 0 || charged > 100000 {
 		return ErrStockApplyConflict
 	}
 	if err := c.enter(ctx); err != nil {
@@ -829,12 +826,12 @@ func (c *StockApplyController) RecordObservation(ctx context.Context, scope [sha
 		}
 		// Do not let an earlier or same-time observation replace the last
 		// recorded charge. This orders local records, not their authority.
-		if !now.After(op.UpdatedAt) {
+		if op.OperationID != expectedOperationID || !now.After(op.UpdatedAt) {
 			return ErrStockApplyConflict
 		}
 		consistent := stockApplyReadbackConsistent(op, readback)
 		detail := strconv.FormatInt(readback, 10)
-		if err := stockApplyAudit(tx, key, op.OperationID, "observation", detail); err != nil {
+		if err := stockApplyAudit(tx, key, op.OperationID, "operation_observation", detail); err != nil {
 			return err
 		}
 		// Advance ordering even when the reported count is unchanged.
