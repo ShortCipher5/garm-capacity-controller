@@ -118,13 +118,14 @@ func TestEnrollHostRejectsEnabledModeAndInvalidInput(t *testing.T) {
 	}
 }
 
-func TestSetHostDetectedRecordsTotalsAndRefreshesObservation(t *testing.T) {
+func TestSetHostDetectedRecordsTotalsOnly(t *testing.T) {
 	ctx := context.Background()
 	store := detectFixture(t)
 	budget := Resources{CPU: 2000, RAM: 4096, Runners: 2}
 	if err := store.EnrollHost(ctx, "host-b", budget, "disabled"); err != nil {
 		t.Fatal(err)
 	}
+	before := sqliteSnapshot(t, store).Config.Hosts["host-b"]
 	detected := Resources{CPU: 8000, RAM: 32768, Disk: 524288}
 	observedAt := time.Now().Add(-time.Second).UTC()
 	if err := store.SetHostDetected(ctx, "host-b", &detected, observedAt); err != nil {
@@ -135,10 +136,10 @@ func TestSetHostDetectedRecordsTotalsAndRefreshesObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := snapshot.Config.Hosts["host-b"]
-	if host.Detected == nil || *host.Detected != detected || !host.Healthy || !host.ObservedAt.Equal(observedAt) || host.Mode != "disabled" || host.Budget != budget {
+	if host.Detected == nil || *host.Detected != detected || host.Healthy != before.Healthy || !host.ObservedAt.Equal(before.ObservedAt) || host.Mode != "disabled" || host.Budget != budget {
 		t.Fatalf("detected totals not recorded: %+v", host)
 	}
-	if auditKinds(snapshot)["host_detected"] != 1 {
+	if auditKinds(snapshot)["host_totals_observed"] != 1 {
 		t.Fatal("detected audit missing")
 	}
 }
@@ -206,7 +207,7 @@ func TestSetHostDetectedRejectsStaleFutureNegativeAndUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Config.Hosts["host-b"].Detected != nil || snapshot.Config.Hosts["host-b"].Healthy || auditKinds(snapshot)["host_detected"] != 0 {
+	if snapshot.Config.Hosts["host-b"].Detected != nil || snapshot.Config.Hosts["host-b"].Healthy || auditKinds(snapshot)["host_totals_observed"] != 0 {
 		t.Fatal("rejected detected update mutated policy or audited")
 	}
 }

@@ -725,6 +725,11 @@ export async function applyPolicyChange(token, change, { signal, fetcher = globa
   if (response.status === 409) throw new Error("Policy changed since review. Refresh the snapshot, cancel this review and review a new change.");
   if (response.status === 401) throw new Error("Management token rejected. The read token cannot authorize changes.");
   if (response.status === 400) throw new Error("Policy change rejected. No change was applied.");
+  if (response.status === 422) {
+    throw new Error(change.action === "host_draft_remove"
+      ? "Server draft removal refused. Inspect enrollment and retained state."
+      : "Host placement prerequisites are unavailable. Refresh backend and placement status.");
+  }
   if (response.status === 404) throw new Error("Management is disabled on this server.");
   if (!response.ok) throw new Error("Change outcome unavailable. Refresh policy and audit before attempting another change. No automatic retry was made.");
   try {

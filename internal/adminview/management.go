@@ -88,10 +88,14 @@ func (h *Handler) servePolicy(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "invalid policy change")
 		return
 	}
-	err = h.store.ApplyPolicyChange(r.Context(), change)
+	err = h.store.ApplyAdminPolicyChange(r.Context(), change, h.provision)
 	switch {
 	case errors.Is(err, admission.ErrPolicyConflict):
 		fail(http.StatusConflict, "policy changed; refresh before retrying")
+	case errors.Is(err, admission.ErrHostActivation):
+		fail(http.StatusUnprocessableEntity, "host placement prerequisites are unavailable; refresh backend and placement status")
+	case errors.Is(err, admission.ErrHostDraftRemoval):
+		fail(http.StatusUnprocessableEntity, "server draft removal refused; inspect enrollment and retained state")
 	case errors.Is(err, admission.ErrDenied):
 		fail(http.StatusBadRequest, "invalid policy change")
 	case err != nil:
