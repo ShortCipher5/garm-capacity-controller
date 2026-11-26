@@ -46,7 +46,7 @@ test("server cards render detected totals, cpu cap and link mode controls withou
     assert.match(html, /CPU 8,000 millicores · Memory 32,768 MiB · Disk 524,288 MiB · Runners not measured by discovery/);
     assert.match(html, /CPU fair-use cap: 3,000 millicores/);
     assert.match(html, /Ledger policy management/);
-    assert.match(html, /Backend connection observation/);
+    assert.match(html, /Backend connection observation: Unverified/);
     assert.doesNotMatch(html, /<select aria-label="New host mode"/);
     const unknown = renderToStaticMarkup(React.createElement(ServerCard, { host: host({ detected: undefined, cpu_cap_millis: 0 }), readUsage }));
     assert.match(unknown, /unknown — no discovery totals recorded for this host/);
