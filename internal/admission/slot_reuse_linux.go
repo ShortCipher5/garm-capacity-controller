@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 )
 
 // Safe runner-slot reuse: evidence contract, classifier and the guarded
@@ -244,6 +246,59 @@ type SlotReuseDecision struct {
 	Replay         bool            `json:"replay"`
 }
 
+// A permanent tombstone belongs to the original physical incarnation even if
+// a later enrollment gives it a different request, host or provider route.
+// Check existing records in place so pre-upgrade releases keep this protection.
+// The versionless project-absence format has no comparable daemon/project
+// fingerprints. Its UUID and generation can exclude a different incarnation.
+func checkPriorSlotIncarnations(ctx context.Context, tx *sql.Tx, candidate SlotReuseIdentity) error {
+	rows, err := tx.QueryContext(ctx, "SELECT request_key,absence_digest,record FROM releases")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, digest string
+		var raw []byte
+		if err := rows.Scan(&key, &digest, &raw); err != nil {
+			return err
+		}
+		var prior struct {
+			Version  string `json:"version"`
+			Identity struct {
+				SlotReuseIdentity
+				Subject incusapi.InstanceIdentitySubject `json:"subject"`
+			} `json:"identity"`
+		}
+		if evidenceDigest(raw) != digest || json.Unmarshal(raw, &prior) != nil {
+			return ErrSlotReuseEvidence
+		}
+		id := prior.Identity
+		switch prior.Version {
+		case "slot-reuse-evidence/v1", SlotReuseEvidenceVersion:
+			if id.RequestKey != key || !bindingFingerprint(id.Daemon) || !bindingFingerprint(id.Project) ||
+				!routeUUID(id.Instance) || !routeUUID(id.Generation) || id.ResourceID == "" {
+				return ErrSlotReuseEvidence
+			}
+			if id.ResourceID == candidate.ResourceID || (id.Daemon == candidate.Daemon && id.Project == candidate.Project &&
+				id.Instance == candidate.Instance && id.Generation == candidate.Generation) {
+				return ErrConflict
+			}
+		case "":
+			subject := id.Subject
+			if subject.ReservationKey != key || !routeUUID(subject.UUID) || !routeUUID(subject.Generation) {
+				return ErrSlotReuseEvidence
+			}
+			if subject.UUID == candidate.Instance && subject.Generation == candidate.Generation {
+				return ErrConflict
+			}
+		default:
+			return ErrSlotReuseEvidence
+		}
+	}
+	return rows.Err()
+}
+
 // ReleaseRetiredSlot is the guarded accounting transition for the exact
 // retired runner. One BEGIN IMMEDIATE transaction rechecks readiness,
 // observation freshness, the reconciliation epoch and its barrier time, the exact hold in state
@@ -321,7 +376,9 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 			ReservationKey: hold.Key, Resources: hold.Resources, State: "deleting"}
 		linked := 0
 		for _, item := range rows {
-			if item.ReservationKey == hold.Key {
+			// Inventory keys include the host. Another host can report the
+			// same incarnation, even as an unlinked or unknown charge.
+			if item.ReservationKey == hold.Key || item.ID == want.ID {
 				if item != want {
 					return ErrConflict
 				}
@@ -331,6 +388,10 @@ func (s *SQLiteStore) ReleaseRetiredSlot(ctx context.Context, hold Request, evid
 		if linked != 1 {
 			holdDecision.Status = SlotReuseAwaitingStorageEvidence
 			return ErrSlotReuseEvidence
+		}
+
+		if err := checkPriorSlotIncarnations(ctx, tx, evidence.Identity); err != nil {
+			return err
 		}
 
 		// Use one clock sample after acquiring the writer lock and checking
