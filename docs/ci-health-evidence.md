@@ -73,15 +73,23 @@ byte totals and positive covered durations. A sampled used-space peak has
 its own sample count and ordered peak and last-sample timestamps. A measured
 zero stays visible. Missing measurements have no numeric value.
 
+The owner dashboard requests retained usage on the existing authenticated
+CI Health timing GET with `X-GARM-CI-Usage: leased-v1`. A publisher with
+qualified evidence includes the earliest applicable cutoff in the top-level
+`usage_expires_at`. Both disk formats keep their existing per-job payload.
+The browser removes usage at the earlier wall or monotonic cutoff, even
+while the page stays open. Timing, navigation, and any independently
+current history remain available.
+
 | Producer | Dashboard | Result |
 |---|---|---|
-| Legacy | Legacy | Displays the historical disk projection. |
-| Legacy | Updated | Displays legacy totals and assigns the historical coverage to reads. Writes show that coverage was unrecorded. |
-| Updated | Updated | Displays each v2 counter's own coverage and the separately sampled gauge. |
-| Updated | Legacy | The legacy dashboard rejects measured v2 and reports the timing snapshot unavailable. |
+| Earlier timing-only producer | Updated | Timing and any retained history render normally. |
+| Producer supplying usage without a display cutoff | Updated | Timing renders with usage omitted. |
+| Updated qualified publisher | Updated | Each v2 counter shows its own coverage. For legacy totals, coverage applies to reads and the write coverage is unrecorded. |
+| Updated publisher | Earlier dashboard | The request omits the capability header and receives the existing timing response, with any current history. |
 
-An unavailable disk state uses the same shape in both versions. When a
-qualified measured producer exists, roll out the updated dashboard first.
-Roll back the producer before restoring the legacy dashboard. The updated
-dashboard rejects a disk object that mixes both measured shapes. Collection
-and usage retention remain disabled.
+Publish rebuilt dashboard assets through the configured admin assets directory.
+Either the assets or the publisher can be rolled back independently. Rolling
+back the assets drops the request header. Rolling back to the timing-only
+publisher omits the enrichment. Neither rollback changes private history or
+usage retention. The production gateway currently publishes timing only.

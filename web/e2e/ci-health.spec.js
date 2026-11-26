@@ -199,7 +199,7 @@ test("View step opens only the exact attempt and job, then resets with a replace
   expect(reads).toBe(2);
 });
 
-test("owner history expires independently without polling or losing fresh timing", async ({page}) => {
+test("owner usage and history expire independently without polling or losing fresh timing", async ({page}) => {
   const now = new Date();
   await page.clock.install({time: now});
   const at = now.getTime() - 20_000;
@@ -210,10 +210,14 @@ test("owner history expires independently without polling or losing fresh timing
     route.fulfill({json: {...overview, ci_health_available: true}}));
   await page.route(timingRoute, (route) => {
     calls++;
+    expect(route.request().headers()["x-garm-ci-usage"]).toBe("leased-v1");
     const snapshot = timing(iso(at));
+    snapshot.usage_expires_at = iso(at + 35_000);
     const attempt = snapshot.timing.attempts[0];
     attempt.status = "running";
     attempt.jobs[1].conclusion = "failure";
+    attempt.jobs[1].resource_usage = {state: "partial", as_of: iso(at), measured: {samples: 2, window_ns: "2000000000",
+      disk: {state: "verified", version: "disk-measured/v2", read: {bytes: "0", covered_ns: "2000000000", complete: true}}}};
     attempt.jobs[1].steps[0].conclusion = "success";
     snapshot.coverage = "observed_subset";
     const {source, repository_id, workflow_id} = attempt;
@@ -239,7 +243,14 @@ test("owner history expires independently without polling or losing fresh timing
   await history.locator("summary").click();
   await expect(history.getByRole("row").filter({hasText: "Jobs (pooled)"}).filter({hasText: "1/1 (100.0%)"})).toBeVisible();
   expect(calls).toBe(1);
-  await page.clock.fastForward(25_000);
+  const disk = panel.getByText("Disk read", {exact: true});
+  await expect(disk).toBeVisible();
+  await page.clock.fastForward(8_000);
+  await page.clock.setSystemTime(now);
+  await page.clock.fastForward(17_000);
+  await expect(disk).toHaveCount(0);
+  await expect(history).toBeVisible();
+  await expect(panel.getByText("The resource usage display period has ended. Job timing remains available.")).toBeVisible();
   await page.clock.setSystemTime(now);
   await page.clock.fastForward(16_000);
   await expect(history).toHaveCount(0);
@@ -318,10 +329,12 @@ test("measured disk and legacy snapshots display independently through producer 
   };
   const legacy = {state: "verified", read_bytes: "50", write_bytes: "3", covered_ns: "2000000000"};
   let disk = legacy;
+  let leased = true;
   await page.route(overviewRoute, (route) =>
     route.fulfill({json: {...overview, ci_health_available: true}}));
   await page.route(timingRoute, (route) => {
     const snapshot = timing(at);
+    if (leased) snapshot.usage_expires_at = new Date(asOf.getTime() + 120_000).toISOString();
     snapshot.timing.attempts[0].jobs[1].resource_usage = {
       state: "partial", as_of: at, measured: {samples: 3, window_ns: "6000000000", disk},
     };
@@ -362,6 +375,12 @@ test("measured disk and legacy snapshots display independently through producer 
   await expect(panel.getByText("3 B (coverage not recorded for this counter)", {exact: true})).toBeVisible();
   await expect(panel.getByText("Disk used", {exact: true})).toHaveCount(0);
 
+  leased = false;
+  await refresh(legacy);
+  await openJob();
+  await expect(panel.getByText("Disk written", {exact: true})).toHaveCount(0);
+  await expect(panel.getByRole("heading", {name: "Longest measured steps in this snapshot"})).toBeVisible();
+  leased = true;
   await refresh({...split, read_bytes: "50"});
   await expect(panel).toContainText("CI Health timing is unavailable");
   await expect(panel.getByText("Disk written", {exact: true})).toHaveCount(0);

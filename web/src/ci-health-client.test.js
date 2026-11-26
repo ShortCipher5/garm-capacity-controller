@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ciHealthEndpoint, ciJobHandleHeader, ciRunHandleHeader, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, qualifiedCIRunURL, validateCIHealthSnapshot} from "./ci-health-client.js";
+import {ciHealthEndpoint, ciJobHandleHeader, ciRunHandleHeader, ciHealthFresh, ciHealthLease, ciHealthLeaseRemaining, ciUsageLease, qualifiedCIRunURL, validateCIHealthSnapshot} from "./ci-health-client.js";
 import {endpoint, ReadSession, SessionEnded, validateOverview} from "./client.js";
 
 const token = "a".repeat(64);
@@ -64,6 +64,26 @@ test("accepted lease expires on the first wall or monotonic deadline, notwithsta
   assert.equal(ciHealthLeaseRemaining(view, lease, observed + 20_000, 299), 0);
   assert.equal(ciHealthLease(view, observed - 1, 300), null);
   assert.equal(ciHealthLease(view, observed + 120_000, 300), null);
+});
+
+test("resource usage has an independent bounded lease and falls back to timing", () => {
+  const at = "2026-01-01T00:00:00.123456789Z";
+  const view = snapshot(at);
+  view.timing.attempts[0].jobs[0].resource_usage = {state: "stale", as_of: at, reason: "stale_evidence"};
+  const wall = Date.parse(at);
+  for (const deadline of [undefined, at, "bad", "2026-01-01T00:02:00.123456790Z"]) {
+    if (deadline !== undefined) view.usage_expires_at = deadline;
+    const base = validateCIHealthSnapshot(view);
+    assert.deepEqual(base, snapshot(at));
+    assert.equal(ciUsageLease(view, wall, 3), null);
+  }
+  view.usage_expires_at = "2026-01-01T00:00:01.123456789Z";
+  assert.equal(validateCIHealthSnapshot(view), view);
+  const lease = ciUsageLease(view, wall + 100, 20);
+  assert.equal(ciHealthLeaseRemaining(view, lease, wall + 100, 919), 1);
+  assert.equal(ciHealthLeaseRemaining(view, lease, wall, 920), 0);
+  assert.equal(ciHealthLeaseRemaining(view, lease, wall + 1000, 20), 0);
+  assert.ok(ciHealthFresh(view, wall + 1000));
 });
 
 test("malformed, unsafe, unqualified or oversized timing is rejected", () => {
@@ -137,7 +157,7 @@ test("CI Health uses a fixed authenticated GET only after an explicit caller", a
     assert.equal(options.credentials, "omit");
     assert.equal(options.cache, "no-store");
     assert.equal(options.redirect, "error");
-    assert.deepEqual(options.headers, {Authorization: "Bearer " + token, Accept: "application/json"});
+    assert.deepEqual(options.headers, {Authorization: "Bearer " + token, Accept: "application/json", "X-GARM-CI-Usage": "leased-v1"});
     return wire(snapshot());
   });
   await assert.rejects(session.ciHealthSnapshot(), SessionEnded);
