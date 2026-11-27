@@ -1,0 +1,49 @@
+package auth
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"os"
+	"strconv"
+	"testing"
+	"time"
+
+	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cloudbase/garm/params"
+	"github.com/cloudbase/garm/runner/common"
+)
+
+// Check the genuine stock bootstrap token lifetime with synthetic inputs only.
+func TestStockBootstrapTimeoutUsesMinutes(t *testing.T) {
+	configured, err := strconv.ParseUint(os.Getenv("GCC_FIXTURE_BOOTSTRAP_MINUTES"), 10, 32)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), configured)
+	pool := params.Pool{RunnerBootstrapTimeout: uint(configured)}
+
+	key := make([]byte, 32)
+	_, err = rand.Read(key)
+	require.NoError(t, err)
+	secret := hex.EncodeToString(key)
+	issuer, err := NewInstanceTokenGetter(secret)
+	require.NoError(t, err)
+	lifetime := 3*time.Minute + common.PoolReapTimeoutInterval
+	begin := time.Now().Add(lifetime).Truncate(time.Second)
+	token, err := issuer.NewInstanceJWTToken(
+		params.Instance{Name: "fixture-runner"},
+		params.ForgeEntity{Owner: "fixture-owner", Name: "fixture-repo", EntityType: params.ForgeEntityTypeRepository},
+		pool.RunnerTimeout(),
+	)
+	end := time.Now().Add(lifetime).Truncate(time.Second)
+	require.NoError(t, err)
+	claims := &InstanceJWTClaims{}
+	verified, err := jwt.ParseWithClaims(token, claims, func(*jwt.Token) (interface{}, error) {
+		return []byte(secret), nil
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
+	require.NoError(t, err)
+	require.True(t, verified.Valid)
+	require.NotNil(t, claims.ExpiresAt)
+	require.False(t, claims.ExpiresAt.Time.Before(begin))
+	require.False(t, claims.ExpiresAt.Time.After(end))
+}

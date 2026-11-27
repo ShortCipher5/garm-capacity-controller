@@ -1,0 +1,49 @@
+package sql
+
+import (
+	commonParams "github.com/cloudbase/garm-provider-common/params"
+	garmTesting "github.com/cloudbase/garm/internal/testing"
+	"github.com/cloudbase/garm/params"
+)
+
+// Exercise stock selection with the full runs-on label array, not just the custom label.
+func (s *PoolsTestSuite) TestStockPoolRequiresEveryWorkflowLabel() {
+	endpoint := garmTesting.CreateDefaultGithubEndpoint(s.ctx, s.Store, s.T())
+	credentials := garmTesting.CreateTestGithubCredentials(s.ctx, "stock-label-creds", s.Store, s.T(), endpoint)
+	repo, err := s.Store.CreateRepository(s.ctx, "fixture-owner", "fixture-repo", credentials, "fixture-secret", params.PoolBalancerTypeRoundRobin, false)
+	s.Require().NoError(err)
+	entity, err := repo.GetEntity()
+	s.Require().NoError(err)
+
+	poolParams := params.CreatePoolParams{
+		ProviderName: "fixture-provider",
+		MaxRunners:   1,
+		Enabled:      true,
+		Image:        "fixture-image",
+		Flavor:       "fixture-flavor",
+		OSType:       commonParams.Linux,
+		OSArch:       commonParams.Amd64,
+		Tags:         []string{"fixture-qualification"},
+	}
+	incomplete, err := s.Store.CreateEntityPool(s.ctx, entity, poolParams)
+	s.Require().NoError(err)
+
+	matches, err := s.Store.FindPoolsMatchingAllTags(s.ctx, entity.EntityType, entity.ID, poolParams.Tags)
+	s.Require().NoError(err)
+	s.Require().Len(matches, 1)
+	s.Require().Equal(incomplete.ID, matches[0].ID)
+
+	requested := []string{"self-hosted", "fixture-qualification"}
+	matches, err = s.Store.FindPoolsMatchingAllTags(s.ctx, entity.EntityType, entity.ID, requested)
+	s.Require().NoError(err)
+	s.Require().Empty(matches)
+
+	poolParams.Tags = requested
+	complete, err := s.Store.CreateEntityPool(s.ctx, entity, poolParams)
+	s.Require().NoError(err)
+	s.Require().NotEqual(incomplete.ID, complete.ID)
+	matches, err = s.Store.FindPoolsMatchingAllTags(s.ctx, entity.EntityType, entity.ID, requested)
+	s.Require().NoError(err)
+	s.Require().Len(matches, 1)
+	s.Require().Equal(complete.ID, matches[0].ID)
+}
