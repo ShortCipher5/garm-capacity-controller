@@ -19,6 +19,7 @@ ROOT = Path('/probe')
 READ = Path('/run/capacity-stock-reader')
 GW = Path('/run/capacity-private')
 SCOPE = '11111111-1111-4111-8111-111111111111'
+RENEWABLE = os.getenv('CAPACITY_STOCK_LOGIN_ENABLED', 'false') == 'true'
 
 
 def private(path, text):
@@ -136,7 +137,12 @@ def bootstrap():
     assert result==200, ('stock fixture settings',result)
     c=json.loads((READ/'staging.json').read_text())
     c['stock_controller']=json.loads(body)['controller_id']
-    private(READ/'stock.token', token)
+    if RENEWABLE:
+        del c['stock_bearer_file']
+        c.update(stock_login_username=username, stock_login_password_file=str(READ/'stock.password'))
+        private(READ/'stock.password', password)
+    else:
+        private(READ/'stock.token', token)
     private(READ/'inventory.json',json.dumps(c))
     print('PASS disposable stock initialization')
 
@@ -174,6 +180,10 @@ def incus_ready():
 def verify():
     bridge=context('bridge-ca.pem','bridge-reader')
     assert call(BRIDGE,'/api/v1/providers',tls=bridge,sni=URI)[0]==404
+    invalid_login = {'username': 'missingfixture', 'password': 'intentionally-invalid'}
+    status,_ = call(BRIDGE,'/api/v1/auth/login','POST',invalid_login,tls=bridge,sni=URI)
+    assert status in ((401,403) if RENEWABLE else (404,)), ('unexpected login scope',status)
+    assert call(BRIDGE,'/api/v1/auth/login?extra=1','POST',invalid_login,tls=bridge,sni=URI)[0]==404
     assert call(BRIDGE,'/api/v1/controller','POST',tls=bridge,sni=URI)[0]==404
     assert call(BRIDGE,'/api/v1/instances?extra=1',tls=bridge,sni=URI)[0]==404
     assert call(BRIDGE,'/api/v1/instances',tls=bridge,sni=URI)[0] in (401,403)

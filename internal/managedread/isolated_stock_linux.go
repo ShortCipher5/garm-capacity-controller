@@ -1,11 +1,13 @@
 package managedread
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/netip"
@@ -26,13 +28,23 @@ type isolatedStockReads struct {
 	base, bearer, controller, identity, host string
 	client                                   *http.Client
 	revoked                                  atomic.Bool
+	login                                    *stockTokenCache
 }
 
 func newIsolatedStockReads(ctx context.Context, endpoint, controller, serverPin, bearer string, trust *tls.Config) (*isolatedStockReads, error) {
+	return newStockReads(ctx, endpoint, controller, serverPin, bearer, "", "", trust)
+}
+
+var errStockUnauthorized = errors.New("stock inventory authentication rejected")
+
+func newStockReads(ctx context.Context, endpoint, controller, serverPin, bearer, user, passwordFile string, trust *tls.Config) (*isolatedStockReads, error) {
+	if (bearer != "") == (passwordFile != "") || (user != "") != (passwordFile != "") || len(user) > 64 {
+		return nil, ErrConfiguration
+	}
 	u, err := url.Parse(endpoint)
 	if ctx == nil || err != nil || u.Scheme != "https" || u.Opaque != "" || u.User != nil ||
 		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || (u.Path != "" && u.Path != "/") ||
-		!uuid.MatchString(controller) || len(bearer) == 0 || len(bearer) > 16384 ||
+		!uuid.MatchString(controller) || len(bearer) > 16384 ||
 		strings.ContainsAny(bearer, " \t\r\n") || trust == nil || trust.VerifyConnection != nil ||
 		trust.VerifyPeerCertificate != nil || trust.KeyLogWriter != nil ||
 		(trust.MaxVersion != 0 && trust.MaxVersion < tls.VersionTLS13) {
@@ -62,7 +74,14 @@ func newIsolatedStockReads(ctx context.Context, endpoint, controller, serverPin,
 		client: &http.Client{Timeout: 5 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			Transport:     &http.Transport{TLSClientConfig: pinned, DisableKeepAlives: true, ResponseHeaderTimeout: 4 * time.Second}}}
-	if s.verify(ctx) != nil {
+	if passwordFile != "" {
+		if !ip.IsLoopback() {
+			return nil, ErrConfiguration
+		}
+		s.login = &stockTokenCache{passwordFile: passwordFile, username: user, request: s.loginRequest}
+	}
+	token, err := s.token(ctx, "")
+	if err != nil || s.verify(ctx, token) != nil {
 		return nil, ErrConfiguration
 	}
 	return s, nil
@@ -76,7 +95,30 @@ func (s *isolatedStockReads) Identity() string {
 }
 func (s *isolatedStockReads) ControllerID() string { return s.controller }
 
-func (s *isolatedStockReads) get(ctx context.Context, path string) ([]byte, error) {
+func (s *isolatedStockReads) token(ctx context.Context, rejected string) (string, error) {
+	if s.revoked.Load() {
+		return "", ErrConfiguration
+	}
+	if s.login == nil {
+		return s.bearer, nil
+	}
+	return s.login.current(ctx, rejected)
+}
+
+func (s *isolatedStockReads) loginRequest(ctx context.Context, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.base+"/api/v1/auth/login", bytes.NewReader(body))
+	if err != nil {
+		return nil, ErrConfiguration
+	}
+	if s.host != "" {
+		req.Host = s.host
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	return s.client.Do(req)
+}
+
+func (s *isolatedStockReads) get(ctx context.Context, path, token string) ([]byte, error) {
 	if s.revoked.Load() {
 		return nil, ErrConfiguration
 	}
@@ -87,13 +129,16 @@ func (s *isolatedStockReads) get(ctx context.Context, path string) ([]byte, erro
 	if s.host != "" {
 		req.Host = s.host
 	}
-	req.Header.Set("Authorization", "Bearer "+s.bearer)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	r, err := s.client.Do(req)
 	if err != nil {
 		return nil, ErrConfiguration
 	}
 	defer r.Body.Close()
+	if r.StatusCode == http.StatusUnauthorized && s.login != nil {
+		return nil, errStockUnauthorized
+	}
 	if r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden {
 		s.revoked.Store(true)
 	}
@@ -108,10 +153,10 @@ func (s *isolatedStockReads) get(ctx context.Context, path string) ([]byte, erro
 	return raw, nil
 }
 
-func (s *isolatedStockReads) verify(ctx context.Context) error {
-	raw, err := s.get(ctx, "/api/v1/controller")
+func (s *isolatedStockReads) verify(ctx context.Context, token string) error {
+	raw, err := s.get(ctx, "/api/v1/controller", token)
 	if err != nil {
-		return ErrConfiguration
+		return err
 	}
 	var marker struct {
 		ID string `json:"controller_id"`
@@ -126,14 +171,32 @@ func (s *isolatedStockReads) verify(ctx context.Context) error {
 func (s *isolatedStockReads) read(ctx context.Context, path string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	if err := s.verify(ctx); err != nil {
+	token, err := s.token(ctx, "")
+	if err != nil {
+		return nil, ErrConfiguration
+	}
+	raw, err := s.readWithToken(ctx, path, token)
+	if errors.Is(err, errStockUnauthorized) && s.login != nil && !s.revoked.Load() {
+		token, err = s.token(ctx, token)
+		if err == nil {
+			raw, err = s.readWithToken(ctx, path, token)
+		}
+	}
+	if err != nil {
+		return nil, ErrConfiguration
+	}
+	return raw, nil
+}
+
+func (s *isolatedStockReads) readWithToken(ctx context.Context, path, token string) ([]byte, error) {
+	if err := s.verify(ctx, token); err != nil {
 		return nil, err
 	}
-	raw, err := s.get(ctx, path)
+	raw, err := s.get(ctx, path, token)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.verify(ctx); err != nil {
+	if err := s.verify(ctx, token); err != nil {
 		return nil, err
 	}
 	if s.revoked.Load() || ctx.Err() != nil {

@@ -328,3 +328,22 @@ and qualification requirements. Do not publish the reader port or change GARM
 routes to accommodate the reader. Enabling it requires an explicitly verified
 pre-existing private TLS route to stock, separate inventory credentials, and a
 private operator route for the gateway. A read-only view is not autoscaling.
+
+### Optional private stock sign-in and token renewal
+
+The default stock reader uses `stock_bearer_file` and its existing GET-only
+bridge. The renewable mode is opt-in: omit `stock_bearer_file`, set
+`stock_login_username` and `stock_login_password_file` in the reader's private
+configuration, and explicitly set `CAPACITY_STOCK_LOGIN_ENABLED=true` on its
+loopback-only mTLS bridge. Never set a password value in a Compose variable.
+Use a GARM-only credential stored in the existing owner-only reader mount
+(mode 0600, UID 65529); do not share this mount with the dashboard, public relay,
+or GitHub Actions. Prefer atomic updates of the password file within the mount.
+This uses stock login, not first-run setup or a password reset. It does not
+create users, change runner/webhook state, or expose new public paths.
+
+The reader keeps issued tokens in memory and refreshes during a read when
+expiry approaches or the stock API returns 401. A 401 triggers at most one
+retry of the whole identity-checked read; invalid credentials are rate-limited.
+A different controller identity or a 403 fails closed. The login route is
+allowed only at the pinned loopback bridge, for the enrolled reader certificate.

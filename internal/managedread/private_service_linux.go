@@ -25,7 +25,9 @@ type PrivateStockConfig struct {
 	StockClientCertificate string               `json:"stock_client_certificate,omitempty"`
 	StockClientKey         string               `json:"stock_client_key,omitempty"`
 	StockCAFile            string               `json:"stock_ca_file"`
-	StockBearerFile        string               `json:"stock_bearer_file"`
+	StockBearerFile        string               `json:"stock_bearer_file,omitempty"`
+	StockLoginUsername     string               `json:"stock_login_username,omitempty"`
+	StockLoginPasswordFile string               `json:"stock_login_password_file,omitempty"`
 	InventoryTLS           securefiles.TLSFiles `json:"inventory_tls"`
 	GatewayLeaf            string               `json:"gateway_leaf"`
 	Pools                  []string             `json:"pools"`
@@ -95,17 +97,23 @@ func ServePrivateStock(ctx context.Context, c PrivateStockConfig) error {
 		}
 		trust.RootCAs = roots
 	}
-	token, err := securefiles.Read(c.StockBearerFile, 16384)
-	if err != nil {
-		return err
+	var bearer string
+	if c.StockBearerFile != "" {
+		token, err := securefiles.Read(c.StockBearerFile, 16384)
+		if err != nil {
+			return err
+		}
+		bearer = strings.TrimSuffix(strings.TrimSuffix(string(token), "\n"), "\r")
+		clear(token)
+		if bearer == "" || c.StockLoginUsername != "" || c.StockLoginPasswordFile != "" {
+			return ErrConfiguration
+		}
 	}
-	bearer := strings.TrimSuffix(strings.TrimSuffix(string(token), "\n"), "\r")
-	clear(token)
 	inbound, err := securefiles.LoadTLS(c.InventoryTLS)
 	if err != nil {
 		return err
 	}
-	stock, err := newIsolatedStockReads(ctx, c.StockEndpoint, c.StockController, c.StockServerKeyPin, bearer, trust)
+	stock, err := newStockReads(ctx, c.StockEndpoint, c.StockController, c.StockServerKeyPin, bearer, c.StockLoginUsername, c.StockLoginPasswordFile, trust)
 	if err != nil {
 		return err
 	}
