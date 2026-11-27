@@ -98,6 +98,16 @@ FROM scratch AS native-runtime-assets-helper
 COPY --from=native-runtime-assets-build /runtime-assets-out/ /
 
 
+# Standalone opt-in read-only stock inventory service. Never part of gateway.
+FROM go-build AS stock-reader-build
+RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/capacity-stock-reader ./cmd/capacity-stock-reader
+FROM runtime-base AS stock-reader
+USER 65529:65529
+COPY --from=stock-reader-build --chmod=0555 /out/capacity-stock-reader /usr/local/bin/capacity-stock-reader
+ENTRYPOINT ["/usr/local/bin/capacity-stock-reader"]
+CMD ["/run/capacity-stock-reader/inventory.json"]
+
+
 # Explicit disposable-qualification target. This is not the default image and
 # supplies no credentials, config, ports, volumes or automatic server command.
 FROM go-build AS stock-ingress-build

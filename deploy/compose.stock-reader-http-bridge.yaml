@@ -1,0 +1,42 @@
+# Optional companion-only extension for an already verified stock HTTP listener.
+# Merge with compose.stock-reader.yaml in the separate companion project.
+# Do not attach this to the existing stock project or publish the bridge port.
+services:
+  capacity-stock-http-bridge:
+    image: ${CAPACITY_STOCK_BRIDGE_IMAGE:?set a reviewed immutable Caddy image digest}
+    profiles: [capacity-preview]
+    user: "65528:65528"
+    network_mode: "container:${CAPACITY_STOCK_CONTAINER_ID:?set the reviewed existing stock container ID}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 48
+    cpus: 0.5
+    mem_limit: 128m
+    restart: "no"
+    stop_grace_period: 8s
+    entrypoint: ["caddy"]
+    command: ["run", "--config", "/run/capacity-stock-http-bridge/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      CAPACITY_BRIDGE_PORT: ${CAPACITY_STOCK_BRIDGE_PORT:?set an unused private loopback port}
+      CAPACITY_STOCK_HTTP_PORT: ${CAPACITY_STOCK_HTTP_PORT:?set the already verified stock HTTP loopback port}
+      CAPACITY_BRIDGE_SERVER_CERT: /run/capacity-stock-http-bridge/bridge.pem
+      CAPACITY_BRIDGE_SERVER_KEY: /run/capacity-stock-http-bridge/bridge.key
+      CAPACITY_BRIDGE_CLIENT_CA: /run/capacity-stock-http-bridge/reader-ca.pem
+      CAPACITY_BRIDGE_READER_LEAF: /run/capacity-stock-http-bridge/reader.pem
+      XDG_DATA_HOME: /var/lib/caddy-ephemeral
+      XDG_CONFIG_HOME: /var/lib/caddy-ephemeral
+    volumes:
+      - type: bind
+        source: ${CAPACITY_STOCK_BRIDGE_DIR:?set a distinct owner-only bridge directory}
+        target: /run/capacity-stock-http-bridge
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /var/lib/caddy-ephemeral:rw,noexec,nosuid,nodev,size=8m,uid=65528,gid=65528,mode=0700
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "3"

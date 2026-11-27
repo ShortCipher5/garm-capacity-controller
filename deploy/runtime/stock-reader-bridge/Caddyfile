@@ -1,0 +1,43 @@
+{
+	admin off
+	auto_https off
+	persist_config off
+
+	servers {
+		protocols h1
+		timeouts {
+			read_body 4s
+			read_header 3s
+			write 8s
+			idle 10s
+		}
+	}
+}
+
+https://stock-read-bridge.invalid:{$CAPACITY_BRIDGE_PORT} {
+	bind 127.0.0.1
+	tls {$CAPACITY_BRIDGE_SERVER_CERT} {$CAPACITY_BRIDGE_SERVER_KEY} {
+		protocols tls1.3
+		client_auth {
+			mode require_and_verify
+			trust_pool file {$CAPACITY_BRIDGE_CLIENT_CA}
+			verifier leaf file {$CAPACITY_BRIDGE_READER_LEAF}
+		}
+	}
+
+	@inventory {
+		method GET
+		expression `{http.request.uri}.matches('^/api/v1/(controller|jobs|instances|pools(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$')`
+	}
+	handle @inventory {
+		reverse_proxy 127.0.0.1:{$CAPACITY_STOCK_HTTP_PORT} {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+}

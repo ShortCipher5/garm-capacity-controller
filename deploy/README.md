@@ -317,3 +317,14 @@ qualified recovery workflow. Do not use
 See the [disposable qualification plan](qualification.md) before treating any image
 or merged private stack as usable. No container build or runtime qualification is
 claimed from source-level tests alone.
+
+### Optional private stock reader
+
+The optional `stock-reader` image and `compose.stock-reader.yaml` companion project
+are separate from the existing GARM stack. The reader and the gateway share its
+verified loopback network namespace, never each other’s credentials. See
+[`docs/managed-read-facade.md`](../docs/managed-read-facade.md) for safeguards
+and qualification requirements. Do not publish the reader port or change GARM
+routes to accommodate the reader. Enabling it requires an explicitly verified
+pre-existing private TLS route to stock, separate inventory credentials, and a
+private operator route for the gateway. A read-only view is not autoscaling.

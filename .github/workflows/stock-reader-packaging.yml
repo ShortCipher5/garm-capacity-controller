@@ -1,0 +1,31 @@
+name: disposable-stock-reader-packaging
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-reader-packaging.yml'
+      - 'Dockerfile'
+      - 'deploy/compose.stock-reader*'
+      - 'deploy/runtime/stock-reader-bridge/**'
+      - 'deploy/runtime/fixture.py'
+      - 'deploy/runtime/garm-identity.py'
+      - 'deploy/runtime/garm-native-executable.py'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'web/**'
+      - 'go.*'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stock-reader-packaging-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  stock-reader-docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Qualify disposable stock, reader, bridge and gateway containers
+        run: timeout --kill-after=30s 1020s bash deploy/runtime/stock-reader-bridge/smoke.sh
