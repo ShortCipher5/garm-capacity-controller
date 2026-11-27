@@ -74,6 +74,8 @@ def prepare(work):
         copy(pf/sn,probe/dn)
     copy(bridge/'bridge.pem',probe/'bridge-ca.pem')
     copy(gw/'admin.token',probe/'admin.token')
+    copy(gw/'client.pem',probe/'gateway-client.pem')
+    copy(gw/'client.key',probe/'gateway-client.key')
     g = json.loads((gw/'gateway.local.json').read_text())
     g['garm'].update(endpoint=f'https://127.0.0.1:{READER}',managed_proxy=True,
                      proxy_server_key_pin=pin(reader/'server.pem'))
@@ -152,6 +154,23 @@ def bridge_ready():
     print('PASS private bridge ready')
 
 
+def reader_ready():
+    tls = context('ca.pem','gateway-client')
+    for path in ('instances','pools','jobs'):
+        raw = wait(lambda:call(READER,'/api/v1/'+path,tls=tls),200,
+                   'reader could not fetch authorized '+path)
+        assert json.loads(raw)==[], 'unexpected stock fixture inventory'
+    print('PASS reader authenticated to stock and projected inventory')
+
+
+def incus_ready():
+    tls = context('ca.pem','gateway-client')
+    for route in ('/1.0','/1.0/instances?recursion=2&project=runners','/1.0/operations?recursion=1&project=runners'):
+        raw = wait(lambda:call(9553,route,tls=tls),200,'synthetic Incus not ready')
+        assert json.loads(raw)['type']=='sync'
+    print('PASS synthetic Incus ready')
+
+
 def verify():
     bridge=context('bridge-ca.pem','bridge-reader')
     assert call(BRIDGE,'/api/v1/providers',tls=bridge,sni=URI)[0]==404
@@ -165,8 +184,12 @@ def verify():
     ui=context('ca.pem')
     token=(ROOT/'admin.token').read_text()
     endpoint='/admin/api/v1/overview'
-    d=wait(lambda:call(9444,endpoint,token=token,tls=ui),200,'gateway data unavailable')
-    overview=json.loads(d)
+    def reconciled():
+        status, raw = call(9444,endpoint,token=token,tls=ui)
+        if status==200 and json.loads(raw)['admission_ready'] is not True:
+            return 503, b''
+        return status, raw
+    overview=json.loads(wait(reconciled,200,'gateway never completed authenticated stock/Incus reconciliation'))
     assert all(overview[p] is False for p in ('experimental_provisioning_enabled','management_enabled','garm_management_available'))
     assert call(9444,'/',tls=ui)[0]==200
     assert call(9444,endpoint,tls=ui)[0]==401
@@ -192,4 +215,4 @@ def stock_health():
 if __name__=='__main__':
     mode=sys.argv[1]
     if mode=='prepare': prepare(Path(sys.argv[2]))
-    else: {'bootstrap':bootstrap,'bridge-ready':bridge_ready,'verify':verify,'outer':outer,'stock-health':stock_health}[mode]()
+    else: {'bootstrap':bootstrap,'bridge-ready':bridge_ready,'reader-ready':reader_ready,'incus-ready':incus_ready,'verify':verify,'outer':outer,'stock-health':stock_health}[mode]()

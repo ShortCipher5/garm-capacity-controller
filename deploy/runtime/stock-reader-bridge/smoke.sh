@@ -100,6 +100,8 @@ for role in 1 2; do
     --mount "type=bind,src=$base/fixture.py,dst=/synthetic.py,readonly" \
     --mount "type=bind,src=$work/companion/fixture-private,dst=/fixture-private,readonly" \
     "$python" python -B /synthetic.py serve >/dev/null
+  probe 65535 "container:$CAPACITY_STOCK_CONTAINER_ID" incus-ready \
+    --mount "type=bind,src=$work/probe,dst=/probe,readonly"
   for service in "${services[@]}"; do
     "${compose[@]}" up -d --no-deps --no-build --pull never "$service"
     current=$("${compose[@]}" ps -q "$service" | head -1)
@@ -128,15 +130,16 @@ assert {m["Destination"]:m["RW"] for m in x["Mounts"] if m["Type"]=="bind"}==exp
         sleep .25
       done
       [[ $running == true ]]
-      [[ $service != capacity-stock-http-bridge ]] || probe 65535 "container:$CAPACITY_STOCK_CONTAINER_ID" bridge-ready \
+      if [[ $service == capacity-stock-http-bridge ]]; then
+        ready=bridge-ready
+      else
+        ready=reader-ready
+      fi
+      probe 65535 "container:$CAPACITY_STOCK_CONTAINER_ID" "$ready" \
         --mount "type=bind,src=$work/probe,dst=/probe,readonly"
     fi
   done
   probe 65535 "container:$CAPACITY_STOCK_CONTAINER_ID" verify --mount "type=bind,src=$work/probe,dst=/probe,readonly"
-  if docker logs "$project-capacity-gateway-1" 2>&1 | grep -F 'inventory unavailable; admission remains blocked' >/dev/null; then
-    echo 'Gateway did not reconcile with the fixture stock inventory' >&2
-    exit 1
-  fi
   probe 65535 none outer
   # Stop and remove only the three companion fixtures; stock continues serving.
   "${compose[@]}" rm -fs "${services[@]}"
