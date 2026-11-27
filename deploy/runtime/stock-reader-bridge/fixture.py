@@ -121,17 +121,17 @@ def wait(callable_, allowed, message):
 
 def bootstrap():
     wait(lambda:call(STOCK,'/api/v1/controller'),409,'fresh stock unavailable')
-    username='disposable-stock-reader'
+    username='stockfixture'
     password=secrets.token_urlsafe(36)+'a9!'
-    result,_=call(STOCK,'/api/v1/first-run','POST',{'username':username,'email':'reader@example.invalid','password':password})
-    assert result==200
+    result,_=call(STOCK,'/api/v1/first-run','POST',{'username':username,'email':'stockfixture@example.invalid','password':password})
+    assert result==200, ('stock first-run',result)
     result,body=call(STOCK,'/api/v1/auth/login','POST',{'username':username,'password':password})
-    assert result==200
+    assert result==200, ('stock login',result)
     token=json.loads(body)['token']
     assert re.fullmatch(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',token)
     settings={k:f'https://127.0.0.1:{STOCK}' for k in ('metadata_url','callback_url','agent_url','webhook_url')}
     result,body=call(STOCK,'/api/v1/controller','PUT',settings,token)
-    assert result==200
+    assert result==200, ('stock fixture settings',result)
     c=json.loads((READ/'staging.json').read_text())
     c['stock_controller']=json.loads(body)['controller_id']
     private(READ/'stock.token', token)
