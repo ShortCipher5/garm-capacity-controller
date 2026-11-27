@@ -18,6 +18,7 @@ services:
     entrypoint: ["caddy"]
     command: ["run", "--config", "/run/capacity-stock-http-bridge/Caddyfile", "--adapter", "caddyfile"]
     environment:
+      CAPACITY_STOCK_LOGIN_ENABLED: ${CAPACITY_STOCK_LOGIN_ENABLED:-false}
       CAPACITY_BRIDGE_PORT: ${CAPACITY_STOCK_BRIDGE_PORT:?set an unused private loopback port}
       CAPACITY_STOCK_HTTP_PORT: ${CAPACITY_STOCK_HTTP_PORT:?set the already verified stock HTTP loopback port}
       CAPACITY_BRIDGE_SERVER_CERT: /run/capacity-stock-http-bridge/bridge.pem

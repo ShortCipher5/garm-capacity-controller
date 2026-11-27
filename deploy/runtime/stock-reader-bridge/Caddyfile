@@ -25,6 +25,23 @@ https://stock-read-bridge.invalid:{$CAPACITY_BRIDGE_PORT} {
 		}
 	}
 
+	@stock_login {
+		method POST
+		expression `'{$CAPACITY_STOCK_LOGIN_ENABLED:false}' == 'true' && {http.request.uri} == '/api/v1/auth/login'`
+	}
+	handle @stock_login {
+		request_body {
+			max_size 8192
+		}
+		reverse_proxy 127.0.0.1:{$CAPACITY_STOCK_HTTP_PORT} {
+			header_up -Authorization
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+
 	@inventory {
 		method GET
 		expression `{http.request.uri}.matches('^/api/v1/(controller|jobs|instances|pools(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$')`

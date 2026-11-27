@@ -81,6 +81,7 @@ probe() {
   local who="$1" network="$2" mode="$3"; shift 3
   docker run --rm --network "$network" "${restricted[@]}" --user "$who:$who" \
     --mount "type=bind,src=$base/stock-reader-bridge/fixture.py,dst=/fixture.py,readonly" \
+    --env "CAPACITY_STOCK_LOGIN_ENABLED=${CAPACITY_STOCK_LOGIN_ENABLED:-false}" \
     "$@" "$python" python -B /fixture.py "$mode"
 }
 create_stock "$project-stock"
