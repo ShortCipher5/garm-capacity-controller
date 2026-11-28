@@ -10,7 +10,11 @@ import (
 // Identity remains empty until an authenticated response supplies real source
 // provenance. This client has neither a stock credential nor a write transport.
 func NewManagedDemand(endpoint, serverKeyPin, expectedControllerID string, trust *tls.Config, providers, repositoryIDs []string) (*DemandClient, error) {
-	source, err := managedsource.New(endpoint, serverKeyPin, expectedControllerID, trust)
+	return NewManagedDemandWithServerName(endpoint, serverKeyPin, expectedControllerID, "", trust, providers, repositoryIDs)
+}
+
+func NewManagedDemandWithServerName(endpoint, serverKeyPin, expectedControllerID, serverName string, trust *tls.Config, providers, repositoryIDs []string) (*DemandClient, error) {
+	source, err := managedsource.NewWithServerName(endpoint, serverKeyPin, expectedControllerID, serverName, trust)
 	if err != nil {
 		return nil, ErrInventory
 	}

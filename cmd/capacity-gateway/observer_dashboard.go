@@ -33,6 +33,7 @@ type observerStockConfig struct {
 	Endpoint     string               `json:"endpoint"`
 	Controller   string               `json:"controller"`
 	ServerKeyPin string               `json:"server_key_pin"`
+	ServerName   string               `json:"server_name,omitempty"`
 	ClientTLS    securefiles.TLSFiles `json:"client_tls"`
 	Providers    []string             `json:"providers"`
 	Repositories []string             `json:"repositories"`
@@ -89,7 +90,7 @@ func serveObserverDashboard(ctx context.Context, c observerDashboardConfig, list
 	if err != nil {
 		return err
 	}
-	stock, err := garmapi.NewManagedDemand(c.Stock.Endpoint, c.Stock.ServerKeyPin, c.Stock.Controller, stockTLS, c.Stock.Providers, c.Stock.Repositories)
+	stock, err := garmapi.NewManagedDemandWithServerName(c.Stock.Endpoint, c.Stock.ServerKeyPin, c.Stock.Controller, c.Stock.ServerName, stockTLS, c.Stock.Providers, c.Stock.Repositories)
 	if err != nil {
 		return err
 	}

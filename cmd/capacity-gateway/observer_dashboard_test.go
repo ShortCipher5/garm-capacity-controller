@@ -50,15 +50,20 @@ func TestObserverModeNeverFallsThrough(t *testing.T) {
 
 func TestStandaloneObserverUsesStockAndMetricsOverTLS(t *testing.T) {
 	keys := credentials(t)
-	leaf, err := x509.ParseCertificate(keys.server.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
+	const stockDNS = "stock-reader.invalid"
+	stockKeys := credentialsWithServerDNS(t, stockDNS)
+	pin := func(set testCredentials) string {
+		t.Helper()
+		leaf, err := x509.ParseCertificate(set.server.Certificate[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%x", sha256.Sum256(leaf.RawSubjectPublicKeyInfo))
 	}
-	pin := fmt.Sprintf("%x", sha256.Sum256(leaf.RawSubjectPublicKeyInfo))
 	controller := "11111111-1111-4111-8111-111111111111"
 	var stockReads, metricsReads atomic.Int32
-	stock := mutualServer(t, keys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "" {
+	stock := mutualServer(t, stockKeys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "" || r.TLS.ServerName != stockDNS {
 			t.Error("unexpected stock authority")
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -99,11 +104,11 @@ incus_memory_MemFree_bytes{name="fixture",project="default",type="container"} 75
 	cfg := observerDashboardConfig{
 		Listen: listener.Addr().String(), ServerTLS: keys.serverFiles, TokenFile: tokenFile,
 		Stock: observerStockConfig{
-			Endpoint: stock.URL, Controller: controller, ServerKeyPin: pin, ClientTLS: keys.providerFiles,
+			Endpoint: stock.URL, Controller: controller, ServerKeyPin: pin(stockKeys), ServerName: stockDNS, ClientTLS: stockKeys.providerFiles,
 			Providers: []string{"fixture"}, Repositories: []string{"22222222-2222-4222-8222-222222222222"},
 		},
 		Metrics: map[string]observerMetricsConfig{"fixture-host": {
-			Endpoint: metrics.URL, Project: "default", ServerKeyPin: pin, ClientTLS: keys.otherFiles,
+			Endpoint: metrics.URL, Project: "default", ServerKeyPin: pin(keys), ClientTLS: keys.otherFiles,
 		}},
 	}
 	ctx, cancel := context.WithCancel(t.Context())

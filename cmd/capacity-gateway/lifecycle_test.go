@@ -52,6 +52,10 @@ func incusIdentityRoot(keys testCredentials, name string) map[string]any {
 }
 
 func credentials(t *testing.T) testCredentials {
+	return credentialsWithServerDNS(t, "")
+}
+
+func credentialsWithServerDNS(t *testing.T, serverDNS string) testCredentials {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name string, data []byte) string {
@@ -85,6 +89,9 @@ func credentials(t *testing.T) testCredentials {
 		leaf := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "disposable-leaf"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 		if client {
 			leaf.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		} else if serverDNS != "" {
+			leaf.DNSNames = []string{serverDNS}
+			leaf.IPAddresses = nil
 		}
 		encoded, err := x509.CreateCertificate(rand.Reader, leaf, parsed, &private.PublicKey, key)
 		if err != nil {

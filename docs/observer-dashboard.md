@@ -22,6 +22,9 @@ Configuration is owner-only JSON. Required fields:
   authenticated private stock reader. The provider names and repository IDs
   must match the approved reader scope. Do not supply the human GARM password
   or any GARM API write credential.
+  If the private reader's certificate carries a DNS SAN rather than a
+  loopback IP SAN, set `stock.server_name` to that exact name; the connection
+  still dials loopback using the enrolled CA, client key and server SPKI pin.
 - Optional `metrics`, keyed by a dashboard host ID, with `endpoint`, `project`,
   `server_key_pin`, and `client_tls` for each host. Use a separately generated
   Incus metrics-only client certificate restricted to the intended project.

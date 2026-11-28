@@ -29,6 +29,12 @@ type Client struct {
 }
 
 func New(endpoint, pin, controller string, trust *tls.Config) (*Client, error) {
+	return NewWithServerName(endpoint, pin, controller, "", trust)
+}
+
+// NewWithServerName retains the required loopback dial and permits only an
+// explicitly enrolled literal DNS SAN as an additional TLS identity.
+func NewWithServerName(endpoint, pin, controller, serverName string, trust *tls.Config) (*Client, error) {
 	u, e := url.Parse(endpoint)
 	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || (u.Path != "" && u.Path != "/") || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() || !uuid(controller) || trust == nil || len(trust.Certificates) != 1 || trust.VerifyConnection != nil || trust.VerifyPeerCertificate != nil || trust.GetClientCertificate != nil || (trust.MaxVersion != 0 && trust.MaxVersion < tls.VersionTLS13) {
 		return nil, ErrSource
@@ -40,7 +46,42 @@ func New(endpoint, pin, controller string, trust *tls.Config) (*Client, error) {
 	t.MinVersion = tls.VersionTLS13
 	t.KeyLogWriter = nil
 	t.ServerName = u.Hostname()
+	if serverName != "" {
+		if !literalDNSName(serverName) || (trust.ServerName != "" && trust.ServerName != serverName) {
+			return nil, ErrSource
+		}
+		t.ServerName = serverName
+		prior := t.VerifyConnection
+		t.VerifyConnection = func(state tls.ConnectionState) error {
+			if err := prior(state); err != nil {
+				return ErrSource
+			}
+			for _, san := range state.PeerCertificates[0].DNSNames {
+				if strings.EqualFold(san, serverName) {
+					return nil
+				}
+			}
+			return ErrSource
+		}
+	}
 	return &Client{base: strings.TrimSuffix(u.String(), "/"), pin: pin, controller: controller, transport: &http.Transport{TLSClientConfig: t, Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 10 * time.Second}}, nil
+}
+
+func literalDNSName(s string) bool {
+	if len(s) > 253 || net.ParseIP(s) != nil {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c == '-' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+				return false
+			}
+		}
+	}
+	return true
 }
 func (c *Client) Identity() string {
 	c.mu.Lock()
