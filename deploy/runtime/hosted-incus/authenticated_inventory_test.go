@@ -2,9 +2,12 @@ package hostedincus
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,21 +31,30 @@ func TestHostedIncusAuthenticatedInventory(t *testing.T) {
 		!strings.HasPrefix(project, "garm-ci-project-") || !strings.HasPrefix(guest, "garm-ci-") {
 		t.Fatal("unsafe hosted Incus fixture selection")
 	}
-	pem, err := os.ReadFile(filepath.Join(dir, "daemon.pem"))
+	pemData, err := os.ReadFile(filepath.Join(dir, "daemon.pem"))
 	if err != nil {
 		t.Fatalf("load disposable daemon trust: %v", err)
 	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(pem) {
+	if !roots.AppendCertsFromPEM(pemData) {
 		t.Fatal("no disposable daemon trust")
 	}
+	block, _ := pem.Decode(pemData)
+	if block == nil || block.Type != "CERTIFICATE" {
+		t.Fatal("no native daemon certificate")
+	}
+	daemonCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse native daemon certificate: %v", err)
+	}
+	pin := fmt.Sprintf("%x", sha256.Sum256(daemonCert.RawSubjectPublicKeyInfo))
 	client := func(role, sourceProject string) *incusapi.Client {
 		t.Helper()
 		leaf, err := tls.LoadX509KeyPair(filepath.Join(dir, role+".pem"), filepath.Join(dir, role+".key"))
 		if err != nil {
 			t.Fatalf("load disposable %s identity: %v", role, err)
 		}
-		c, err := incusapi.New(endpoint, sourceProject, &tls.Config{
+		c, err := incusapi.NewObserver(endpoint, sourceProject, pin, &tls.Config{
 			RootCAs: roots, Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12,
 		})
 		if err != nil {
@@ -86,5 +98,5 @@ func TestHostedIncusAuthenticatedInventory(t *testing.T) {
 	if rows, err := outsideScope.Instances(ctx); len(rows) != 0 || (err != nil && !errors.Is(err, incusapi.ErrTransport)) {
 		t.Fatalf("different-project identity exposed inventory or lacked a clean refusal: count=%d error=%v", len(rows), err)
 	}
-	t.Log("PASS real Incus TLS authentication, scoped guest/allocation/operation reads, and negative trust/scope controls")
+	t.Log("PASS direct pinned Incus TLS, scoped guest/allocation/operation reads, and negative trust/scope controls; native server write permissions are not qualified by this fixture")
 }

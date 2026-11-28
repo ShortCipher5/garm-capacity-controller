@@ -23,14 +23,14 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gateway"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/gatewayrpc"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/hostmetrics"
-	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
 )
 
 type hostConfiguration struct {
-	Endpoint string               `json:"endpoint"`
-	Project  string               `json:"project"`
-	TLS      securefiles.TLSFiles `json:"tls"`
+	ObservationServerKeyPin string               `json:"observation_server_key_pin,omitempty"`
+	Endpoint                string               `json:"endpoint"`
+	Project                 string               `json:"project"`
+	TLS                     securefiles.TLSFiles `json:"tls"`
 }
 type garmConfiguration struct {
 	ManagedProxy      bool                 `json:"managed_proxy,omitempty"`
@@ -114,6 +114,9 @@ func serveOnListener(ctx context.Context, config configuration, provision, monit
 }
 
 func serveOnListeners(ctx context.Context, config configuration, provision, monitoring bool, listener, adminListener net.Listener) error {
+	if err := validateIncusObservationMode(config, provision); err != nil {
+		return err
+	}
 	defer listener.Close()
 	if err := validateCIHealthConfiguration(config); err != nil {
 		return err
@@ -240,7 +243,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 		if err != nil {
 			return err
 		}
-		client, err := incusapi.New(host.Endpoint, host.Project, credentials)
+		client, err := newConfiguredIncusClient(host, credentials)
 		if err != nil {
 			return err
 		}

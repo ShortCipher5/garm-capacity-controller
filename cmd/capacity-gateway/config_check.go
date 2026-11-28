@@ -74,6 +74,9 @@ func checkStaticConfig(c configuration, provision bool) error {
 	if !loopback(c.Listen) || c.Controller == "" || strings.ContainsRune(c.Controller, 0) || c.Database == "" || c.IdentityFile == "" || len(c.Pools) == 0 || len(c.Hosts) == 0 {
 		return fail()
 	}
+	if validateIncusObservationMode(c, provision) != nil {
+		return fail()
+	}
 	if provision && (c.BootstrapMode != "gateway-owned-default-cloudinit/v1" || len(c.PreparationPools) != len(c.Pools) || len(c.SourceFingerprints) == 0) {
 		return fail()
 	}
@@ -137,7 +140,7 @@ func checkStaticConfig(c configuration, provision bool) error {
 		if e != nil {
 			return fail()
 		}
-		client, e := incusapi.New(h.Endpoint, h.Project, tls)
+		client, e := newConfiguredIncusClient(h, tls)
 		if e != nil {
 			return fail()
 		}
