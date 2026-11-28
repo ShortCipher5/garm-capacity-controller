@@ -46,3 +46,39 @@ behavior for each host, and check the existing stock GARM route and service
 still work. Validate the private dashboard's allowed route and anonymous
 denials before opening any external route. Rollback removes the observer route,
 stops only its service and revokes only its dedicated client certificates.
+
+### Whole-server headroom (optional, independent of guest telemetry)
+
+The dashboard can monitor up to eight named Linux OS instances (including all
+non-runner workloads visible to that OS). In the protected observer config add
+`whole_hosts`, a map of host ID to the same reviewed SSH inventory target fields
+(`address` literal IP, `port`, `user: "garm-inventory"`, exact pinned SSH
+`host_key`, `credential_ref`), and `whole_host_key_files`, a mapping from those
+credential aliases to the protected local inventory key files. Use the dedicated
+forced-command inventory account, not a general login or the Incus provisioning
+certificate. Install the matching build of `capacity-inventory-shell` on each
+opted-in host using the existing restricted-inventory setup. A pre-headroom
+shell rejects the new fixed command; the dashboard will show unavailable rather
+than fall back to unrestricted SSH. Omit the maps to disable whole-host sampling.
+
+A worker polls independently of browser requests, in parallel with one read per
+configured target, at startup and 30 seconds after each pass finishes (12-second
+per-pass deadline). Only the most recent in-memory sample is retained. The
+dashboard refreshes every 30 seconds after an authenticated load while the tab is
+visible, unless unchecked. Each host's timestamp is the remote start of sampling.
+Clocks should be synchronized; future timestamps beyond one second are rejected
+and samples over 90 seconds old are stale. A failed probe labels the previous
+observation unavailable; the dashboard does not show it as current.
+
+- CPU is the Linux aggregate idle tick fraction from **two** reads over an
+  approximately one-second window. The API reports basis points (10,000 =
+  100%); the UI displays percent. I/O wait and steal are not idle. Counter
+  regression, zero elapsed ticks, or a missing/unsuitable interval means unknown.
+- RAM available is Linux MemAvailable, not MemFree. RAM and root filesystem
+  totals and available space are reported in MiB. Disk means space available to
+  a non-root process on `/` **only**, not the Incus pool, quota, or another mount.
+  Without a separately verified storage-pool binding the pool is explicitly
+  unavailable. The observer does not seek a broader Incus certificate to fill it.
+- A VM shows the VM operating system, not its hypervisor. A container view must
+  not be presented as a physical-host measurement. These data have no authority
+  to register a runner, reserve capacity, change a pool, or affect scheduling.

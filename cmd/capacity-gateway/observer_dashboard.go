@@ -19,14 +19,17 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/incusapi"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/observerview"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/securefiles"
+	"github.com/ShortCipher5/garm-capacity-controller/internal/sshinventory"
 )
 
 type observerDashboardConfig struct {
-	Listen    string                           `json:"listen"`
-	ServerTLS securefiles.TLSFiles             `json:"server_tls"`
-	TokenFile string                           `json:"token_file"`
-	Stock     observerStockConfig              `json:"stock"`
-	Metrics   map[string]observerMetricsConfig `json:"metrics,omitempty"`
+	WholeHosts        map[string]sshinventory.Config   `json:"whole_hosts,omitempty"`
+	WholeHostKeyFiles map[string]string                `json:"whole_host_key_files,omitempty"`
+	Listen            string                           `json:"listen"`
+	ServerTLS         securefiles.TLSFiles             `json:"server_tls"`
+	TokenFile         string                           `json:"token_file"`
+	Stock             observerStockConfig              `json:"stock"`
+	Metrics           map[string]observerMetricsConfig `json:"metrics,omitempty"`
 }
 
 type observerStockConfig struct {
@@ -134,6 +137,29 @@ func serveObserverDashboard(ctx context.Context, c observerDashboardConfig, list
 	if err != nil {
 		return err
 	}
+	if len(c.WholeHosts) > 8 || len(c.WholeHostKeyFiles) > 8 {
+		return gatewayrpc.ErrConfiguration
+	}
+	resolve := sshinventory.PrivateKeyFiles(c.WholeHostKeyFiles)
+	sources := map[string]observerview.HeadroomSource{}
+	for id, target := range c.WholeHosts {
+		if target.User != "garm-inventory" {
+			return gatewayrpc.ErrConfiguration
+		}
+		if _, ok := c.WholeHostKeyFiles[target.CredentialRef]; !ok {
+			return gatewayrpc.ErrConfiguration
+		}
+		client, e := sshinventory.New(target, resolve)
+		if e != nil {
+			return gatewayrpc.ErrConfiguration
+		}
+		sources[id] = client
+	}
+	cache, e := observerview.NewHeadroomCache(sources)
+	if e != nil {
+		return gatewayrpc.ErrConfiguration
+	}
+	view.SetHeadroomCache(cache)
 	if listener == nil {
 		listener, err = net.Listen("tcp", c.Listen)
 		if err != nil {
@@ -151,6 +177,10 @@ func serveObserverDashboard(ctx context.Context, c observerDashboardConfig, list
 		MaxHeaderBytes: 8 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0),
 	}
 	defer server.Close()
+	sampleCtx, cancelSample := context.WithCancel(ctx)
+	sampled := make(chan struct{})
+	go func() { defer close(sampled); cache.Run(sampleCtx) }()
+	defer func() { cancelSample(); <-sampled }()
 	done := make(chan error, 1)
 	go func() { done <- server.ServeTLS(listener, "", "") }()
 	select {

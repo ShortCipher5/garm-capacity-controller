@@ -43,6 +43,7 @@ type HostTelemetry struct {
 }
 
 type Snapshot struct {
+	WholeHosts []HeadroomRow              `json:"whole_hosts,omitempty"`
 	Mode       string                     `json:"mode"`
 	ObservedAt time.Time                  `json:"observed_at"`
 	Stock      *garmapi.DemandObservation `json:"stock,omitempty"`
@@ -59,6 +60,7 @@ type Handler struct {
 	stock StockSource
 	hosts []source
 	busy  chan struct{}
+	whole *HeadroomCache
 }
 
 var hostID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
@@ -78,6 +80,9 @@ func New(token string, stock StockSource, metrics map[string]MetricsSource) (*Ha
 	sort.Slice(h.hosts, func(i, j int) bool { return h.hosts[i].host < h.hosts[j].host })
 	return h, nil
 }
+
+// SetHeadroomCache is called during startup, before the HTTP server is started.
+func (h *Handler) SetHeadroomCache(c *HeadroomCache) { h.whole = c }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -144,6 +149,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	work.Wait()
 	s.ObservedAt = time.Now().UTC()
+	s.WholeHosts = h.whole.snapshot(s.ObservedAt)
 	w.Header().Set("Content-Type", "application/json")
 	if s.Stock == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
