@@ -1,0 +1,8 @@
+# Disposable stock compatibility only. No installed runner or server configuration.
+[provider]
+interface_version = "v0.1.0"
+instance_type = "container"
+
+[pool]
+# Stock GARM's runner_bootstrap_timeout unit is minutes.
+runner_bootstrap_timeout = 3

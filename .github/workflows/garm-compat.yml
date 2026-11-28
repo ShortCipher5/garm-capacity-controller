@@ -24,6 +24,8 @@ jobs:
         run: integration/garm-v0.2.1/management-test.sh "$RUNNER_TEMP/garm-v021-management"
         env:
           GOTOOLCHAIN: local
+      - name: Verify the stock Incus provider protocol in a disposable container
+        run: bash integration/garm-v0.2.1/stock-incus-contract.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

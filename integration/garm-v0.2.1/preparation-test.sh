@@ -32,5 +32,38 @@ go test -mod=vendor -tags testing -race -count=1 -timeout=8m \
 go test -mod=vendor -tags testing -race -count=3 -timeout=8m \
   -run 'TestPoolStressTestSuite/TestPreparation|TestInstTestSuite/TestPreparation' \
   ./runner/pool ./database/sql
+
+# Run extra tests as ephemeral files. The following gateway harness requires
+# the upstream tree to exactly match the previously recorded canonical patch.
+(
+  label_test=database/sql/stock_pool_label_qualification_test.go
+  timeout_test=auth/stock_bootstrap_timeout_qualification_test.go
+  for fixture in "$label_test" "$timeout_test"; do
+    if [[ -e "$fixture" || -L "$fixture" ]]; then
+      echo "Refusing to replace existing test fixture: $fixture" >&2
+      exit 1
+    fi
+  done
+  trap 'rm -f -- "$label_test" "$timeout_test"' EXIT
+
+  # Check the unmodified stock SQL label matcher with a disposable repository pool.
+  cp "$here/stock-pool-label-test.go.txt" "$label_test"
+  go test -mod=vendor -tags testing -race -count=1 -timeout=2m \
+    -run '^TestPoolsTestSuite$/^TestStockPoolRequiresEveryWorkflowLabel$' ./database/sql
+
+  # Measure how stock applies its bootstrap timeout using only a synthetic token.
+  cp "$here/stock-bootstrap-timeout-test.go.txt" "$timeout_test"
+  GCC_FIXTURE_BOOTSTRAP_MINUTES=$(python3 - "$here/stock-incus-contract.toml" <<'PYTOML'
+import sys
+import tomllib
+with open(sys.argv[1], "rb") as source:
+    print(tomllib.load(source)["pool"]["runner_bootstrap_timeout"])
+PYTOML
+  )
+  GCC_FIXTURE_BOOTSTRAP_MINUTES="$GCC_FIXTURE_BOOTSTRAP_MINUTES" \
+    go test -mod=vendor -tags testing -race -count=1 -timeout=2m \
+      -run '^TestStockBootstrapTimeoutUsesMinutes$' ./auth
+)
+
 go vet -mod=vendor -tags testing ./runner/common ./runner/providers/v0.1.1 \
   ./runner/pool ./workers/scaleset ./workers/provider ./util/github
