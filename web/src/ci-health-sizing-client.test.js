@@ -129,3 +129,16 @@ test("accepted lease expires on the first wall or monotonic deadline", () => {
   assert.equal(ciSizingLeaseRemaining(view, null, observed, 300), 0);
   assert.equal(ciSizingLease(view, observed - 1, 300), null);
 });
+
+test("exact workflow resource history is scoped, bounded and never fabricates missing quantities", () => {
+  const s = snapshot(), counts = {...s.sizing.samples, eligible:21, primary:21,successful:21};
+  const h = {definition_sha256:"a".repeat(64),job_definition:"build",primary:21,retries:0,baseline:20,
+    current_run:"21", current_job:"120",cpu_average:{current:"1000",baseline_median:"400",direction:"increase"},
+    ram_peak:{current:"0",baseline_median:"1073741824",direction:"decrease"}};
+  const base={...s, sizing:{...s.sizing,samples:counts,rejected:[],incomparable:0}};
+  assert.equal(validateCISizingSnapshot({...base,history:h}).history.ram_peak.current,"0");
+  for (const bad of [{...h,baseline:2},{...h,job_definition:"a/b"},{...h,current_run:"0"},{...h,baseline:0},
+    {...h,disk_peak:{current:"0",baseline_median:"0",direction:"increase"}}, {...h,definition_sha256:"latest"}])
+    assert.throws(()=>validateCISizingSnapshot({...base,history:bad}));
+  assert.throws(()=>validateCISizingSnapshot({state:"unavailable",sizing:null,history:h}));
+});

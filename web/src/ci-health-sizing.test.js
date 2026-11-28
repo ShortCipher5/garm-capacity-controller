@@ -58,6 +58,13 @@ test("advisory runner sizing renders only qualified advice and never an apply ac
     assert.match(dashboard({ciHealthSizingAvailable: true, readCISizing: read}), /href="#ci-health-sizing"/);
 
     const render = (value) => renderToStaticMarkup(React.createElement(CISizingAdvisory, {snapshot: value}));
+    const h={definition_sha256:"a".repeat(64),job_definition:"build",primary:21,retries:2,baseline:20,current_run:"50",current_job:"79",
+      cpu_average:{current:"1000",baseline_median:"400",direction:"increase"},ram_peak:{current:"0",baseline_median:"1073741824",direction:"decrease"}};
+    const insight=render({...sizingSnapshot(),history:h});
+    assert.match(insight,/Unusual increase \(\+600 millicores\)/);
+    assert.match(insight,/Unusual decrease \(-1073741824 bytes\)/);
+    assert.match(insight,/Sampled peak disk used: unavailable/);
+    assert.match(insight,/No automatic action is taken/);
     const html = render(sizingSnapshot());
     assert.match(html, /Reviewed through:<\/strong> <time/);
     assert.match(html, /matrix <code>ubuntu-24\.04<\/code>/);

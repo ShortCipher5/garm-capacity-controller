@@ -1,6 +1,7 @@
 package adminview
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -18,14 +19,15 @@ import (
 // state. No live producer is wired: recommendations stay disabled until
 // verified job resources and durable exact history exist.
 type CISizingSnapshot struct {
-	scopes     []ciViewScope
-	clock      func() time.Time
-	mu         sync.Mutex
-	latest     time.Time
-	checked    time.Time
-	generation *ciSizingGeneration
-	body       []byte
-	stopped    bool
+	scopes       []ciViewScope
+	clock        func() time.Time
+	mu           sync.Mutex
+	latest       time.Time
+	checked      time.Time
+	generation   *ciSizingGeneration
+	body         []byte
+	stopped      bool
+	historyLease <-chan struct{}
 }
 
 type ciSizingGeneration struct{ reserved byte }
@@ -53,6 +55,27 @@ func NewCISizingSnapshot(approved []CIHealthRepository) (*CISizingSnapshot, erro
 // pinned policy and advisory derivations. On a failed publication the caller
 // must Withdraw.
 func (s *CISizingSnapshot) Publish(observedAt time.Time, advisory cihealth.JobSizingAdvisory) error {
+	return s.publish(observedAt, advisory, nil, nil)
+}
+
+// PublishWorkflowResourceHistory is an optional trusted-producer entry point.
+// Derive the advisory and history from the same scoped rows; do not attach
+// an independently supplied trend to an unrelated sizing snapshot. The trusted
+// producer must cancel enrollment upon authorization loss, history/evidence
+// lineage replacement, revocation, or shutdown. An uncancellable context is
+// rejected. No network call or secret is needed to check revocation on read.
+func (s *CISizingSnapshot) PublishWorkflowResourceHistory(enrollment context.Context, in cihealth.WorkflowResourceInput) error {
+	if s == nil || enrollment == nil || enrollment.Done() == nil || enrollment.Err() != nil || !s.withinScopes(in.Key.Scope) {
+		return ErrConfiguration
+	}
+	advisory, history, err := cihealth.ReviewWorkflowResourceHistory(in)
+	if err != nil {
+		return errCIProjection
+	}
+	return s.publish(in.Window.AsOf, advisory, &history, enrollment.Done())
+}
+
+func (s *CISizingSnapshot) publish(observedAt time.Time, advisory cihealth.JobSizingAdvisory, history *cihealth.WorkflowResourceHistory, historyLease <-chan struct{}) error {
 	if s == nil || len(s.scopes) == 0 {
 		return ErrConfiguration
 	}
@@ -66,10 +89,11 @@ func (s *CISizingSnapshot) Publish(observedAt time.Time, advisory cihealth.JobSi
 		return errCIProjection
 	}
 	wire, err := json.Marshal(struct {
-		State  string       `json:"state"`
-		At     time.Time    `json:"observed_at"`
-		Sizing ciSizingView `json:"sizing"`
-	}{State: "observed", At: at, Sizing: ciSizingViewFor(advisory)})
+		State   string                            `json:"state"`
+		At      time.Time                         `json:"observed_at"`
+		Sizing  ciSizingView                      `json:"sizing"`
+		History *cihealth.WorkflowResourceHistory `json:"history,omitempty"`
+	}{State: "observed", At: at, Sizing: ciSizingViewFor(advisory), History: history})
 	if err != nil || len(wire) > maxCIResponseBytes {
 		return errCIProjection
 	}
@@ -78,7 +102,12 @@ func (s *CISizingSnapshot) Publish(observedAt time.Time, advisory cihealth.JobSi
 	if !s.validAtLocked(at) || lease != s.generation {
 		return errCIProjection
 	}
-	s.latest, s.body, s.generation = at, wire, &ciSizingGeneration{}
+	select {
+	case <-historyLease:
+		return errCIProjection
+	default:
+	}
+	s.latest, s.body, s.generation, s.historyLease = at, wire, &ciSizingGeneration{}, historyLease
 	return nil
 }
 
@@ -175,7 +204,7 @@ func (s *CISizingSnapshot) Stop() {
 }
 
 func (s *CISizingSnapshot) fenceLocked() {
-	s.body, s.generation = nil, &ciSizingGeneration{}
+	s.body, s.generation, s.historyLease = nil, &ciSizingGeneration{}, nil
 	if s.checked.After(s.latest) {
 		s.latest = s.checked
 	}
@@ -185,6 +214,12 @@ func (s *CISizingSnapshot) read() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now, stable := s.wallLocked()
+	select {
+	case <-s.historyLease:
+		s.fenceLocked()
+		return nil
+	default:
+	}
 	if !stable || now.Before(s.latest) || !now.Before(s.latest.Add(ciDisplayLifetime)) {
 		s.body = nil
 	}

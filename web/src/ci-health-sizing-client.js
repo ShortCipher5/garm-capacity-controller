@@ -38,9 +38,9 @@ const nullableDecimal = (value) => value === null || decimal(value, true);
 // the whole response so a degraded server cannot show a confident advice.
 export function validateCISizingSnapshot(value) {
   const fail = () => { throw new Error("CI sizing response unavailable."); };
-  if (!exactKeys(value, ["state", "sizing"], ["observed_at"])) fail();
+  if (!exactKeys(value, ["state", "sizing"], ["observed_at", "history"])) fail();
   if (value.state === "unavailable") {
-    if (Object.hasOwn(value, "observed_at") || value.sizing !== null) fail();
+    if (Object.hasOwn(value, "history") || Object.hasOwn(value, "observed_at") || value.sizing !== null) fail();
     return value;
   }
   const observed = timestamp(value.observed_at);
@@ -116,6 +116,26 @@ export function validateCISizingSnapshot(value) {
         r.source !== s.scope.source || r.repository_id !== s.scope.repository_id || r.workflow_id !== s.scope.workflow_id) fail();
   }
   if (!count(s.incomparable, 1000) || !count(s.unverifiable, 1000) || !count(s.foreign, 1000)) fail();
+  if (Object.hasOwn(value, "history")) {
+    const h = value.history, metrics = ["cpu_average", "cpu_peak", "ram_average", "ram_peak", "disk_peak"];
+    if (!exactKeys(h, ["definition_sha256", "job_definition", "primary", "retries", "baseline"], ["current_run", "current_job", ...metrics]) ||
+        typeof h.definition_sha256 !== "string" || h.definition_sha256.length !== 64 || !/^[0-9a-f]{64}$/.test(h.definition_sha256) ||
+        typeof h.job_definition !== "string" || h.job_definition.trim() !== h.job_definition || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(h.job_definition) ||
+        ![h.primary,h.retries,h.baseline].every(n => count(n, 1000)) || h.primary + h.retries > 1000 ||
+        h.primary < s.samples.primary || h.retries < s.samples.retried) fail();
+    if (h.baseline === 0) {
+      if (["current_run", "current_job", ...metrics].some(k => Object.hasOwn(h,k))) fail();
+    } else if (h.baseline < 20 || h.baseline !== h.primary-1 || !decimal(h.current_run) || !decimal(h.current_job) ||
+               s.coverage !== "complete" || !s.freshness.fresh || s.samples.successful !== h.primary) fail();
+    const quantity = x => typeof x === "string" && x.trim() === x && /^(0|[1-9][0-9]{0,19})$/.test(x) && BigInt(x) <= 18446744073709551615n;
+    for (const k of metrics) if (Object.hasOwn(h,k)) {
+      const m = h[k];
+      if (!exactKeys(m, ["current","baseline_median","direction"]) || !quantity(m.current) || !quantity(m.baseline_median) ||
+          !["increase","decrease","within_baseline"].includes(m.direction)) fail();
+      const cur = BigInt(m.current), base = BigInt(m.baseline_median);
+      if (m.direction === "increase" && cur <= base || m.direction === "decrease" && cur >= base) fail();
+    }
+  }
   return value;
 }
 
