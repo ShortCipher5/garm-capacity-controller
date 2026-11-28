@@ -1,3 +1,4 @@
+import {ServerGroups} from './server-groups.jsx';
 import {AllocatorPlan} from "./allocator-plan.jsx";
 import {warmIdleDraftTotal} from './broker-policy-review.js';
 import {BrokerPolicyReview} from './broker-policy-review.jsx';
@@ -58,6 +59,7 @@ export function BrokerPolicy({ readPolicy, readPlan }) {
         <button type="button" onClick={()=>edit(rows=>rows.filter((_,j)=>j!==i))}>Remove repository from draft policy</button>
       </div>;})}
       <button type="button" onClick={()=>edit(rows=>[...rows,{id:'',weight:1,max_runners:0,pools:[]}])}>Add repository</button>
+      <ServerGroups view={view} savedPolicy={savedPolicy} stale={comparisonStale} change={groups=>{setMessage('');setView(v=>({...v,policy:{...v.policy,groups}}));}}/>
       <BrokerPolicyReview saved={savedPolicy} draft={view.policy} stale={comparisonStale}/>
       {view.writes_enabled&&<><label>Separate management token<input type="password" autoComplete="off" ref={token}/></label>
       <button type="submit">Save capacity policy</button></>}

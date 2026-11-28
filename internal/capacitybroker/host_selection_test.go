@@ -208,3 +208,23 @@ func BenchmarkCrossRepoHostCandidateScan(b *testing.B) {
 		}
 	}
 }
+
+func TestNamedGroupPlannerUsesRemainingCapacityOnce(t *testing.T) {
+	now := time.Now().UTC()
+	s := Snapshot{Global: Resources{10, 10, 10, 10}, Revision: "groups", ObservedAt: now, Complete: true, Hosts: map[string]Host{}, Repositories: map[string]Repository{"r": {MaxRunners: 10}}, Pools: map[string]Pool{}}
+	for _, h := range []string{"a", "b", "x"} {
+		s.Hosts[h] = Host{Budget: s.Global, AcceptNew: true}
+	}
+	s.Pools["p"] = Pool{Repository: "r", Size: Resources{1, 1, 1, 1}, Hosts: []string{"x", "a", "b"}, MaxRunners: 9, Waiting: 4, OldestWaiting: now}
+	s.Groups = &GroupHeadroom{ByHost: map[string]string{"a": "g", "b": "g"}, ByPool: map[string]string{"p": "g"}, Remaining: map[string]Resources{"g": {2, 2, 10, 2}}}
+	s.Charges = []Charge{{ID: "old", Host: "a", Pool: "p", Resources: Resources{2, 2, 2, 2}}}
+	p, e := Build(s, Options{Now: now, MaxAge: time.Minute, MaxAssignments: 10})
+	if e != nil || len(p.Assignments) != 2 {
+		t.Fatalf("unexpected group headroom: %+v %v", p, e)
+	}
+	for _, a := range p.Assignments {
+		if a.Host == "x" {
+			t.Fatal("awarded ungrouped host")
+		}
+	}
+}

@@ -93,6 +93,34 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 			s.Pools[p.ID] = pool
 		}
 	}
+	groupCanRedeem := map[string]bool{}
+	if len(state.Policy.Groups) > 0 {
+		s.Groups = &capacitybroker.GroupHeadroom{ByPool: map[string]string{}, ByHost: map[string]string{}, Remaining: map[string]capacitybroker.Resources{}}
+		for _, g := range state.Policy.Groups {
+			held, ok := g.Charged(state.Allocated)
+			if !ok {
+				return fail()
+			}
+			// Disk is deliberately bounded by the global/host/pool ceilings, not by groups.
+			s.Groups.Remaining[g.ID] = capacitybroker.Resources{max(0, g.Limit.CPU-held.CPU), max(0, g.Limit.RAM-held.RAM), globalBudget[2], max(0, g.Limit.Runners-held.Runners)}
+			groupCanRedeem[g.ID] = held.CPU <= g.Limit.CPU && held.RAM <= g.Limit.RAM && held.Runners <= g.Limit.Runners
+			for _, h := range g.Hosts {
+				s.Groups.ByHost[h] = g.ID
+			}
+			for _, id := range g.Pools {
+				s.Groups.ByPool[id] = g.ID
+			}
+			for _, id := range g.Repositories {
+				for _, repo := range state.Policy.Repositories {
+					if id == repo.ID {
+						for _, p := range repo.Pools {
+							s.Groups.ByPool[p.ID] = g.ID
+						}
+					}
+				}
+			}
+		}
+	}
 	for _, c := range charges {
 		s.Charges = append(s.Charges, capacitybroker.Charge{ID: c.ID, Host: c.Host, Pool: c.Pool, Resources: resources(c.Resources)})
 	}
@@ -108,6 +136,12 @@ func ledgerSnapshot(state admission.BrokerGrantState, charges []admission.Broker
 			for _, id := range state.Config.Pools[g.Spec.Authority.PoolID].Hosts {
 				if id == g.Spec.Host {
 					eligible = true
+				}
+			}
+			if groups := s.Groups; groups != nil {
+				group := groups.ByHost[g.Spec.Host]
+				if group != groups.ByPool[g.Spec.Authority.PoolID] || (group != "" && !groupCanRedeem[group]) {
+					continue
 				}
 			}
 			if !withinBudget(state.Allocated.Global, state.Config.Global) ||

@@ -272,6 +272,13 @@ func sqliteBrokerPolicy(tx *sql.Tx) (BrokerPolicy, error) {
 	if e != nil {
 		return p, e
 	}
+	var groups []byte
+	if e = tx.QueryRow("SELECT document FROM broker_group_policy WHERE id=1").Scan(&groups); e != nil {
+		return p, e
+	}
+	if json.Unmarshal(groups, &p.Groups) != nil {
+		return p, ErrBrokerGrant
+	}
 	if json.Unmarshal(raw, &p.Repositories) != nil || ValidateBrokerPolicy(p) != nil {
 		return p, ErrBrokerGrant
 	}
@@ -499,7 +506,7 @@ func (s *SQLiteStore) issueBrokerGrants(ctx context.Context, b BrokerGrantBatch,
 			}
 			id := g.Authority.PoolID
 			if !shared.permitsCharge(id, g.Resources, g.Resources.Runners, allocated.Pools[id].Runners) ||
-				!shared.permitsExecution(id, g.Execution, &g.Authority) || !shared.permitsHost(id, g.Host, g.HostBindingSequence, config) {
+				!shared.permitsExecution(id, g.Execution, &g.Authority) || !shared.permitsGroup(id, g.Host, allocated, g.Resources) || !shared.permitsHost(id, g.Host, g.HostBindingSequence, config) {
 				return ErrBrokerGrant
 			}
 			host, ok := config.Hosts[g.Host]
@@ -693,7 +700,7 @@ func selectStockGrant(tx *sql.Tx, r PlacementRequest, a StockProviderAuthority, 
 		if err != nil {
 			return BrokerGrant{}, err
 		}
-		if sequence != g.Spec.HostBindingSequence || !shared.permitsHost(r.Pool, g.Spec.Host, sequence, config) {
+		if sequence != g.Spec.HostBindingSequence || !shared.permitsGroup(r.Pool, g.Spec.Host, allocated, Resources{}) || !shared.permitsHost(r.Pool, g.Spec.Host, sequence, config) {
 			continue
 		}
 		return g, nil

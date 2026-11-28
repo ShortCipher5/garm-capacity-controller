@@ -24,6 +24,11 @@ export function brokerPolicyDraftReview(saved,draft,stale){
    if(poolChanges.length)rows.push({repository,pool,fields:poolChanges});
   }
  }
+ for(const [id,before,after] of byID(saved.groups||[],draft.groups||[])){
+  const summary=g=>g?JSON.stringify({name:g.name,hosts:[...g.hosts].sort(),repositories:[...g.repositories].sort(),pools:[...g.pools].sort(),cpu:g.limit.cpu_millis,ram:g.limit.ram_mib,slots:g.limit.runners}):undefined;
+  const a=summary(before),b=summary(after);
+  if(a!==b)rows.push({repository:'Server group '+id,fields:[{label:'Group policy',before:a,after:b}]});
+ }
  return {state:rows.length?'changed':'unchanged',rows};
 }
 

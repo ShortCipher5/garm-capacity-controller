@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -31,7 +32,21 @@ func (h *Handler) serveBrokerPolicy(w http.ResponseWriter, r *http.Request) {
 			fail(503, "advisory policy unavailable")
 			return
 		}
-		raw, err := json.Marshal(map[string]any{"policy": state.Policy, "status": projectBrokerStatus(state, time.Now()), "advisory_only": true, "writes_enabled": h.management})
+		hosts := make([]string, 0, len(state.Config.Hosts))
+		for id := range state.Config.Hosts {
+			hosts = append(hosts, id)
+		}
+		sort.Strings(hosts)
+		charged := map[string]admission.Resources{}
+		for _, g := range state.Policy.Groups {
+			v, ok := g.Charged(state.Allocated)
+			if !ok {
+				fail(503, "group accounting unavailable")
+				return
+			}
+			charged[g.ID] = v
+		}
+		raw, err := json.Marshal(map[string]any{"eligible_hosts": hosts, "group_charges": charged, "policy": state.Policy, "status": projectBrokerStatus(state, time.Now()), "advisory_only": true, "writes_enabled": h.management})
 		if err != nil || len(raw) > 2<<20 {
 			fail(503, "policy comparison unavailable")
 			return
@@ -63,6 +78,10 @@ func (h *Handler) serveBrokerPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		err = h.store.ReplaceBrokerPolicy(r.Context(), p)
+		if errors.Is(err, admission.ErrGroupMembership) {
+			fail(422, "membership changes require a current, charge-free ledger for each affected member")
+			return
+		}
 		if errors.Is(err, admission.ErrBrokerConflict) {
 			fail(409, "policy changed; refresh and review")
 			return

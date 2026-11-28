@@ -35,7 +35,7 @@ type SQLiteStore struct {
 	initialized bool
 }
 
-const sqliteCurrentVersion = 31
+const sqliteCurrentVersion = 32
 
 func sqliteSupportedVersion(version int) bool { return version >= 1 && version <= sqliteCurrentVersion }
 
@@ -486,6 +486,14 @@ func openSQLite(path string, initial Config, initializeID, runtimeID string) (*S
 				return err
 			}
 		}
+		if version < 32 {
+			if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS broker_group_policy (id INTEGER PRIMARY KEY CHECK(id=1),document BLOB NOT NULL) STRICT; INSERT OR IGNORE INTO broker_group_policy VALUES(1,CAST('[]' AS BLOB)); PRAGMA user_version=32;"); err != nil {
+				return err
+			}
+			if err := sqliteAudit(tx, "schema_migrated_v32", "", s.now()); err != nil {
+				return err
+			}
+		}
 		_, _, _, _, err := sqliteMetadata(tx)
 		return err
 	})
@@ -872,7 +880,7 @@ func (s *SQLiteStore) Admit(ctx context.Context, req Request) (Decision, error) 
 				return err
 			}
 			if !shared.permitsCharge(req.Pool, req.Resources, req.Resources.Runners, allocated.Pools[req.Pool].Runners) ||
-				!shared.permitsHost(req.Pool, req.Host, bindings[req.Host].Sequence, config) {
+				!shared.permitsGroup(req.Pool, req.Host, allocated, req.Resources) || !shared.permitsHost(req.Pool, req.Host, bindings[req.Host].Sequence, config) {
 				return deny("denied_shared_policy", ErrDenied)
 			}
 		}
