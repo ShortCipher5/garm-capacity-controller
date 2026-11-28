@@ -22,7 +22,11 @@ def discover(items, reference):
         raise ValueError('pulled reference mismatch')
     config = image['Config']
     entry = config.get('Entrypoint')
-    if not isinstance(entry, list) or len(entry) != 3 or entry[1] != '-config':
+    # The exact v0.2.2 artifact changed the native CLI to double-dash flags.
+    # Other image qualification retains its original strict contract.
+    new_reference = 'ghcr.io/cloudbase/garm:v0.2.2@sha256:5e1943ecc0c6e30e62228072f7c303c6be62875dc3e9514b4f677b37c6c39bde'
+    expected_flag = '--config' if reference == new_reference else '-config'
+    if not isinstance(entry, list) or len(entry) != 3 or entry[1] != expected_flag:
         raise ValueError('direct native entrypoint required')
     for path in (entry[0], entry[2]):
         if not isinstance(path, str) or not re.fullmatch(r'/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', path):
@@ -39,7 +43,7 @@ def discover(items, reference):
     return {'image_id': image_id, 'executable': entry[0], 'reference': reference,
             'os': image['Os'], 'architecture': image['Architecture'],
             'environment': config.get('Env'), 'working_directory': config.get('WorkingDir'),
-            'production_binding': False, 'deployment_authorized': False}
+            'config_flag': expected_flag, 'production_binding': False, 'deployment_authorized': False}
 
 
 if __name__ == '__main__':

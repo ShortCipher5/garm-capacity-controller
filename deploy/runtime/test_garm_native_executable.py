@@ -25,6 +25,18 @@ class Discovery(unittest.TestCase):
             self.assertEqual(result['image_id'], image[0]['Id'])
             self.assertFalse(result['production_binding'])
 
+    def test_double_dash_only_on_pinned_upgrade_artifact(self):
+        ref = 'ghcr.io/cloudbase/garm:v0.2.2@sha256:5e1943ecc0c6e30e62228072f7c303c6be62875dc3e9514b4f677b37c6c39bde'
+        image = self.fixture()
+        image[0]['Config']['Entrypoint'][1] = '--config'
+        with self.assertRaises(ValueError):
+            native.discover(image, self.reference)
+        image[0]['RepoDigests'] = ['ghcr.io/cloudbase/garm@' + ref.split('@')[1]]
+        self.assertEqual(native.discover(image, ref)['config_flag'], '--config')
+        image[0]['Config']['Entrypoint'][1] = '-config'
+        with self.assertRaises(ValueError):
+            native.discover(image, ref)
+
     def test_ambiguous_execution_is_refused(self):
         for entry in [None, [], ['/bin/sh', '-c', 'garm'], ['garm', '-config', '/etc/garm/config.toml'],
                       ['/bin/../bin/garm', '-config', '/etc/config'], ['/bin//garm', '-config', '/etc/config'],

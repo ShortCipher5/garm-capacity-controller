@@ -24,7 +24,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stock_login: ["false", "true"]
+        include:
+          - stock_login: "false"
+            stock_upgrade: "false"
+          - stock_login: "true"
+            stock_upgrade: "false"
+          - stock_login: "true"
+            stock_upgrade: "true"
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -34,4 +40,5 @@ jobs:
       - name: Qualify disposable stock, reader, bridge and gateway containers
         env:
           CAPACITY_STOCK_LOGIN_ENABLED: ${{ matrix.stock_login }}
+          CAPACITY_STOCK_UPGRADE_FIXTURE: ${{ matrix.stock_upgrade }}
         run: timeout --kill-after=30s 1020s bash deploy/runtime/stock-reader-bridge/smoke.sh

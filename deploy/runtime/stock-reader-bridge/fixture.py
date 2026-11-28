@@ -186,6 +186,10 @@ def verify():
     assert call(BRIDGE,'/api/v1/auth/login?extra=1','POST',invalid_login,tls=bridge,sni=URI)[0]==404
     assert call(BRIDGE,'/api/v1/controller','POST',tls=bridge,sni=URI)[0]==404
     assert call(BRIDGE,'/api/v1/instances?extra=1',tls=bridge,sni=URI)[0]==404
+    for query in ('all=true&page=17&pageSize=100', 'all=true&page=1&pageSize=500',
+                  'all=true&page=1&pageSize=100&extra=1'):
+        assert call(BRIDGE,'/api/v1/jobs?'+query,tls=bridge,sni=URI)[0]==404
+    assert call(BRIDGE,'/api/v1/jobs?all=true&page=1&pageSize=100','PUT',{},tls=bridge,sni=URI)[0]==404
     assert call(BRIDGE,'/api/v1/instances',tls=bridge,sni=URI)[0] in (401,403)
     for cert in (None,'bridge-wrong'):
         try: call(BRIDGE,'/api/v1/instances',tls=context('bridge-ca.pem',cert),sni=URI)
@@ -222,7 +226,19 @@ def stock_health():
     print('PASS stock independently still serves')
 
 
+def stock_login_check():
+    stock_health()
+    cfg = json.loads((READ/'inventory.json').read_text())
+    password = (READ/'stock.password').read_text()
+    result, body = call(STOCK,'/api/v1/auth/login','POST',{'username':cfg['stock_login_username'],'password':password})
+    assert result==200, ('stock backup login', result)
+    token=json.loads(body)['token']
+    result, body=call(STOCK,'/api/v1/controller',token=token)
+    assert result==200 and json.loads(body)['controller_id']==cfg['stock_controller'], 'restored stock identity differs'
+    print('PASS enrolled file still signs into the restored controller')
+
+
 if __name__=='__main__':
     mode=sys.argv[1]
     if mode=='prepare': prepare(Path(sys.argv[2]))
-    else: {'bootstrap':bootstrap,'bridge-ready':bridge_ready,'reader-ready':reader_ready,'incus-ready':incus_ready,'verify':verify,'outer':outer,'stock-health':stock_health}[mode]()
+    else: {'bootstrap':bootstrap,'bridge-ready':bridge_ready,'reader-ready':reader_ready,'incus-ready':incus_ready,'verify':verify,'outer':outer,'stock-health':stock_health,'stock-login-check':stock_login_check}[mode]()
