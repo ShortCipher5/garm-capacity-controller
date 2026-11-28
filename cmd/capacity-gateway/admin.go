@@ -23,6 +23,8 @@ import (
 )
 
 type adminConfiguration struct {
+	IncusSetup                  *incusSetupConfiguration   `json:"incus_host_setup,omitempty"`
+	EnableIncusSetup            bool                       `json:"-"`
 	NativeAssets                *nativeAssetsConfiguration `json:"native_assets,omitempty"`
 	EnableNativeAssets          bool                       `json:"-"`
 	demandObserverRuntime       *demandobserver.Service
@@ -427,6 +429,24 @@ func newAdminServerWithSources(config *adminConfiguration, store *admission.SQLi
 			closeAssets()
 			old()
 		}
+	}
+	if config.EnableIncusSetup {
+		targets, tok, e := loadIncusSetup(config)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		if err := store.InitializeIncusSetup(context.Background()); err != nil {
+			cleanup()
+			return nil, noop, err
+		}
+		stop, e := handler.SetIncusSetup(targets, tok)
+		if e != nil {
+			cleanup()
+			return nil, noop, e
+		}
+		old := cleanup
+		cleanup = func() { stop(); old() }
 	}
 	handler.Audit = func(event string) { log.Print(event) }
 	return &http.Server{Addr: config.Listen, Handler: handler, TLSConfig: credentials, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(redactedConnectionLog{}, "", 0)}, cleanup, nil

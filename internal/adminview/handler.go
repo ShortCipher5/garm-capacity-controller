@@ -95,6 +95,7 @@ type Overview struct {
 	Events                       []Event        `json:"events"`
 }
 type Handler struct {
+	incusSetup                  *setupHandler
 	nativeAssets                map[string]NativeAssetsTarget
 	nativeAssetsHash            [32]byte
 	nativeAssetRegistry         *nativeassettransfer.Registry
@@ -232,6 +233,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/admin/api/v1/inventory-key-rotation" {
 		h.serveManagedRotation(w, r)
+		return
+	}
+	if r.URL.Path == "/admin/api/v1/incus-setup" {
+		h.serveIncusSetup(w, r)
 		return
 	}
 	if r.URL.Path == "/admin/api/v1/firstboot/preflight" {
