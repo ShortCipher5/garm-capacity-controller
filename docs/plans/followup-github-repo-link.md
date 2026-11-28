@@ -1,6 +1,13 @@
 # Link a new GitHub repository from the controller
 
-Status: draft implementation plan. This document is not an implemented or activated feature.
+Status: partially implemented; no live repository writes, webhook changes, pool activation or browser enrollment route.
+
+## Implemented boundaries
+
+- A read-only GitHub App [installation catalog](https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation) reads fixed-origin bounded pages using one token snapshot and returns only approved immutable repository IDs and current names. A missing entry is not evidence of deletion or sufficient write permission.
+- The new `garmmanagement.Manager.EnrollReviewedRepository` coordinator records reviewed forge ID, immutable GitHub repository ID, credential/webhook recipe revision and pool/budget revision in the existing single-writer journal before dispatch. It records the acknowledged GARM UUID before exact readback. Replaying a confirmed plan does not contact the upstream; an ambiguous or pending write never repeats the POST.
+- `RecoverReviewedRepository` requires the journaled UUID and authoritative settlement for the exact operation, forge identity, repository and reviewed plan. Without an acknowledgment, the transaction stays blocked; never search by repository slug to recreate it.
+- No stock client implements the privileged registration capability in this PR. Finish a qualified stock enrollment adapter (installation authentication, immutable repository verification, webhook/credential handling and operation settlement), protected UI/API review, existing-pool selection or disabled-pool stage, and shared-budget attachment. Never expose proxy URLs, arbitrary upstream requests or raw credentials to the browser.
 
 ## Scope
 
