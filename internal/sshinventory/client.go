@@ -119,24 +119,38 @@ type Result struct {
 // matching and one fixed read-only command. It does not use ssh-agent, ambient
 // SSH configuration, port forwarding, a PTY, passwords, sudo or remote installs.
 func (c *Client) Probe(ctx context.Context) (Result, error) {
-	if c == nil || ctx == nil || ctx.Err() != nil {
+	raw, e := c.runFixed(ctx, "/bin/sh -s", probeScript)
+	if e != nil {
+		return Result{}, e
+	}
+	result, e := parse(raw)
+	if e != nil {
 		return Result{}, ErrInventory
+	}
+	result.ObservedAt = time.Now().UTC()
+	return result, nil
+}
+
+// Only package-owned fixed commands can reach the transport.
+func (c *Client) runFixed(ctx context.Context, command, stdin string) ([]byte, error) {
+	if c == nil || ctx == nil || ctx.Err() != nil {
+		return nil, ErrInventory
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	signer, e := c.resolve(ctx, c.config.CredentialRef)
 	if e != nil || signer == nil || ctx.Err() != nil {
-		return Result{}, ErrInventory
+		return nil, ErrInventory
 	}
 	address := net.JoinHostPort(c.config.Address, strconv.Itoa(int(c.config.Port)))
 	conn, e := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", address)
 	if e != nil {
-		return Result{}, ErrInventory
+		return nil, ErrInventory
 	}
 	defer conn.Close()
 	deadline, _ := ctx.Deadline()
 	if conn.SetDeadline(deadline) != nil {
-		return Result{}, ErrInventory
+		return nil, ErrInventory
 	}
 	done := make(chan struct{})
 	defer close(done)
@@ -155,29 +169,24 @@ func (c *Client) Probe(ctx context.Context) (Result, error) {
 	}}
 	connection, channels, requests, e := ssh.NewClientConn(conn, address, config)
 	if e != nil {
-		return Result{}, ErrInventory
+		return nil, ErrInventory
 	}
 	client := ssh.NewClient(connection, channels, requests)
 	defer client.Close()
 	session, e := client.NewSession()
 	if e != nil {
-		return Result{}, ErrInventory
+		return nil, ErrInventory
 	}
 	defer session.Close()
 	stdout := &boundedOutput{maximum: 4096, cancel: cancel}
 	stderr := &boundedOutput{maximum: 4096, cancel: cancel, discard: true}
 	session.Stdout = stdout
 	session.Stderr = stderr
-	session.Stdin = strings.NewReader(probeScript)
-	if e = session.Run("/bin/sh -s"); e != nil || ctx.Err() != nil || stdout.exceeded || stderr.exceeded {
-		return Result{}, ErrInventory
+	session.Stdin = strings.NewReader(stdin)
+	if e = session.Run(command); e != nil || ctx.Err() != nil || stdout.exceeded || stderr.exceeded {
+		return nil, ErrInventory
 	}
-	result, e := parse(stdout.data.Bytes())
-	if e != nil {
-		return Result{}, ErrInventory
-	}
-	result.ObservedAt = time.Now().UTC()
-	return result, nil
+	return stdout.data.Bytes(), nil
 }
 
 type boundedOutput struct {

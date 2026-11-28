@@ -77,7 +77,12 @@ func server(t *testing.T, output string, forced ...bool) (Config, KeyResolver, *
 					continue
 				}
 				var command struct{ Command string }
-				if ssh.Unmarshal(req.Payload, &command) != nil || command.Command != "/bin/sh -s" {
+				want := "/bin/sh -s"
+				headroom := len(forced) == 1 && !forced[0]
+				if headroom {
+					want = hostinventory.HeadroomCommand
+				}
+				if ssh.Unmarshal(req.Payload, &command) != nil || command.Command != want {
 					req.Reply(false, nil)
 					return
 				}
@@ -89,7 +94,14 @@ func server(t *testing.T, output string, forced ...bool) (Config, KeyResolver, *
 				if len(forced) == 0 && string(script) != probeScript {
 					t.Error("unreviewed command script")
 				}
-				if len(forced) > 0 {
+				if headroom {
+					if len(script) != 0 {
+						t.Error("unexpected headroom input")
+					}
+					if err := hostinventory.WriteHeadroom(stream); err != nil {
+						t.Error(err)
+					}
+				} else if len(forced) > 0 {
 					if len(script) > 8192 {
 						t.Error("oversized input")
 					}

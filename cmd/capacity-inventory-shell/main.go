@@ -11,8 +11,18 @@ import (
 )
 
 func run(args []string, original string, in io.Reader, out io.Writer) error {
-	if len(args) != 2 || args[0] != "-c" || args[1] != "garm-inventory-v1" || original != "/bin/sh -s" {
+	if len(args) != 2 || args[0] != "-c" || args[1] != "garm-inventory-v1" {
 		return fmt.Errorf("unsupported inventory invocation")
+	}
+	if original == hostinventory.HeadroomCommand {
+		var one [1]byte
+		if n, err := io.ReadFull(in, one[:]); n != 0 || err != io.EOF {
+			return fmt.Errorf("unexpected observation input")
+		}
+		return hostinventory.WriteHeadroom(out)
+	}
+	if original != "/bin/sh -s" {
+		return fmt.Errorf("unsupported inventory command")
 	}
 	n, e := io.Copy(io.Discard, io.LimitReader(in, 8193))
 	if e != nil || n > 8192 {

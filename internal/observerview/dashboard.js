@@ -11,6 +11,11 @@ const value = (n, unit, factor = 1) =>
     ? `${(n / factor).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${unit}`
     : "unobserved";
 
+let loaded = false;
+byID("token").addEventListener("input", () => { loaded = false; byID("snapshot").hidden = true; });
+setInterval(() => {
+  if (loaded && !document.hidden && byID("auto").checked && !byID("refresh").disabled) byID("refresh").click();
+}, 30000);
 byID("refresh").addEventListener("click", async () => {
   const token = byID("token").value.trim();
   if (!/^[a-f0-9]{64}$/.test(token)) {
@@ -42,6 +47,15 @@ byID("refresh").addEventListener("click", async () => {
       for (const cell of [p.pool_id, p.idle, p.creating, p.busy, p.other]) row.append(textNode("td", cell));
       byID("pools").append(row);
     }
+    byID("headroom").replaceChildren();
+    for (const row of observed.whole_hosts ?? []) {
+      const s = row.sample;
+      const at = row.last_observed_at ? new Date(row.last_observed_at).toLocaleString() : "never";
+      const usable = s && ["observed", "partial"].includes(row.status);
+      const details = usable ? `CPU idle ${value(s.cpu_idle_basis_points, "%", 100)} (non-idle incl. wait/steal: ${value(s.cpu_idle_basis_points == null ? null : 10000 - s.cpu_idle_basis_points, "%", 100)}); RAM available ${value(s.available_ram_mib, "MiB")} of ${value(s.ram_mib, "MiB")}; / available ${value(s.root_available_mib, "MiB")} of ${value(s.root_disk_mib, "MiB")}.` : "No current measurement.";
+      byID("headroom").append(textNode("p", `${row.host}: ${row.status}. Last observation: ${at}. ${details} Runner storage pool: unavailable (no verified pool binding).`));
+    }
+    if (!observed.whole_hosts?.length) byID("headroom").append(textNode("p", "No whole-server source configured."));
     for (const host of observed.hosts ?? []) {
       byID("hosts").append(textNode("h3", host.host));
       if (host.status !== "running_guest_telemetry_only" || !host.guests?.length) {
@@ -53,8 +67,10 @@ byID("refresh").addEventListener("click", async () => {
       byID("hosts").append(list);
     }
     if (!observed.hosts?.length) byID("hosts").append(textNode("p", "No Incus telemetry source configured."));
+    loaded = true;
     byID("snapshot").hidden = false;
   } catch (error) {
+    loaded = false;
     byID("status").textContent = error instanceof Error ? error.message : "Observation is unavailable.";
   } finally {
     byID("refresh").disabled = false;
