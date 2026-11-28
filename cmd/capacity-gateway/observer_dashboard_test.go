@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,32 @@ import (
 	"github.com/ShortCipher5/garm-capacity-controller/internal/managedsource"
 	"github.com/ShortCipher5/garm-capacity-controller/internal/observerview"
 )
+
+func TestObserverModeNeverFallsThrough(t *testing.T) {
+	for _, tc := range []struct {
+		args            []string
+		selected, valid bool
+	}{
+		{[]string{"-config=normal"}, false, false},
+		{[]string{"-observer-config=observer"}, true, true},
+		{[]string{"-observer-config="}, true, false},
+		{[]string{"-observer-config=", "-config=normal", "-allow-experimental-provisioning"}, true, false},
+		{[]string{"-observer-config=observer", "-observer-config=", "-config=normal"}, true, false},
+		{[]string{"-observer-config=observer", "-config="}, true, false},
+		{[]string{"-observer-config=observer", "extra"}, true, false},
+	} {
+		flags := flag.NewFlagSet("observer-test", flag.ContinueOnError)
+		observer := flags.String("observer-config", "", "")
+		flags.String("config", "", "")
+		flags.Bool("allow-experimental-provisioning", false, "")
+		if err := flags.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		if selected, valid := observerModeSelection(flags, *observer); selected != tc.selected || valid != tc.valid {
+			t.Fatalf("%v: got selected=%v, valid=%v", tc.args, selected, valid)
+		}
+	}
+}
 
 func TestStandaloneObserverUsesStockAndMetricsOverTLS(t *testing.T) {
 	keys := credentials(t)

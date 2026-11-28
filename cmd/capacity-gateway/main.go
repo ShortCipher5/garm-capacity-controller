@@ -538,9 +538,7 @@ func main() {
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
 	monitoring := flag.Bool("allow-experimental-monitoring", false, "allow periodic host utilization sampling into the admission usage history; monitoring data never gates admission, fits or retirement")
 	flag.Parse()
-	if *observerConfigPath != "" {
-		valid := flag.NArg() == 0
-		flag.Visit(func(f *flag.Flag) { valid = valid && f.Name == "observer-config" })
+	if selected, valid := observerModeSelection(flag.CommandLine, *observerConfigPath); selected {
 		if !valid {
 			fmt.Fprintln(os.Stderr, "observer configuration must run without other modes or flags")
 			os.Exit(1)

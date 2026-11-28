@@ -211,3 +211,5 @@ PY
 [[ $("${curl_fixture[@]}" "${metrics_identity[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/instances?project=$project&recursion=1") == 403 ]]
 [[ $("${curl_fixture[@]}" "${metrics_identity[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/operations?project=$project&recursion=1") == 403 ]]
 echo 'PASS restricted native metrics identity: guest telemetry scoped, inventory and operations denied'
+timeout 90 "$test_binary" -test.run '^TestHostedIncusMetricsObserver702$' -test.v | tee "$work/metrics-reader.log"
+grep -Eq '^--- PASS: TestHostedIncusMetricsObserver702 \(' "$work/metrics-reader.log"

@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"flag"
 	"log"
 	"net"
 	"net/http"
@@ -42,6 +43,20 @@ type observerMetricsConfig struct {
 	Project      string               `json:"project"`
 	ServerKeyPin string               `json:"server_key_pin"`
 	ClientTLS    securefiles.TLSFiles `json:"client_tls"`
+}
+
+// Reject selection of both modes even if interpolation or a repeated flag
+// leaves the explicitly selected observer path empty.
+func observerModeSelection(flags *flag.FlagSet, path string) (selected, valid bool) {
+	mixed := flags.NArg() != 0
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "observer-config" {
+			selected = true
+		} else {
+			mixed = true
+		}
+	})
+	return selected, selected && !mixed && strings.TrimSpace(path) != ""
 }
 
 func runObserverDashboard(ctx context.Context, configPath string) error {
