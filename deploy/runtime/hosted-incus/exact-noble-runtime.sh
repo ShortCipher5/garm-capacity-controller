@@ -30,7 +30,12 @@ guest=$GCC_HOSTED_INCUS_AUTH_GUEST
 pool="garm-ci-dir-$suffix"
 alias="garm-ci-image-$suffix"
 guest_owned=false; project_owned=false; pool_owned=false; image_owned=false
-trust_owned=false; listener_owned=false; cert_fingerprint=
+trust_owned=false; listener_owned=false
+alternate_project="garm-ci-metrics-alt-$suffix"
+alternate_guest="garm-ci-metrics-alt-$suffix"
+alternate_project_owned=false; alternate_guest_owned=false
+metrics_fingerprints=()
+cert_fingerprint=
 cleanup() {
   local rc=$? cleanup_failed=0
   trap - EXIT; set +e
@@ -38,7 +43,11 @@ cleanup() {
     inc config unset core.https_address || cleanup_failed=1
     [[ -z $(inc config get core.https_address) ]] || cleanup_failed=1
   fi
+  local fingerprint
+  for fingerprint in "${metrics_fingerprints[@]}"; do inc config trust remove "$fingerprint" || cleanup_failed=1; done
   if [[ $trust_owned == true ]]; then inc config trust remove "$cert_fingerprint" || cleanup_failed=1; fi
+  if [[ $alternate_guest_owned == true ]]; then inc delete "$alternate_guest" --project "$alternate_project" --force >/dev/null || cleanup_failed=1; fi
+  if [[ $alternate_project_owned == true ]]; then inc project delete "$alternate_project" >/dev/null || cleanup_failed=1; fi
   if [[ $guest_owned == true ]]; then
     inc delete "$guest" --project "$project" --force >/dev/null || cleanup_failed=1
     inc list --project "$project" --format=json |
@@ -138,3 +147,67 @@ else
   exit "$test_rc"
 fi
 grep -Eq '^--- PASS: TestHostedIncusRuntimeHealth702 \(' "$work/reader.log"
+
+# Independently qualify Incus's built-in metrics identity on this same
+# disposable daemon. It is not the authenticated inventory role.
+[[ $(inc config get core.metrics_authentication) != false ]]
+inc project create "$alternate_project" -c features.images=false >/dev/null
+alternate_project_owned=true
+inc init "$f" "$alternate_guest" --project "$alternate_project" --storage "$pool" --no-profiles \
+  -c security.privileged=false -c limits.cpu=1 -c limits.memory=256MiB >/dev/null
+alternate_guest_owned=true
+inc start "$alternate_guest" --project "$alternate_project"
+enroll_metrics_fixture() {
+  local role=$1 allowed_project=$2 fingerprint
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj "/CN=gcc-disposable-$role" \
+    -keyout "$work/$role.key" -out "$work/$role.pem" 2>/dev/null
+  fingerprint=$(openssl x509 -in "$work/$role.pem" -outform DER | sha256sum | cut -d' ' -f1)
+  [[ $fingerprint =~ ^[a-f0-9]{64}$ && $fingerprint != "$cert_fingerprint" ]]
+  inc config trust add-certificate "$work/$role.pem" --type=metrics --restricted --projects "$allowed_project"
+  metrics_fingerprints+=("$fingerprint")
+}
+enroll_metrics_fixture metrics "$project"
+enroll_metrics_fixture metrics-control "$alternate_project"
+curl_fixture=(curl --disable --noproxy '*' --silent --show-error --connect-timeout 3 --max-time 20
+  --proto '=https' --cacert "$work/daemon.pem")
+metrics_identity=(--cert "$work/metrics.pem" --key "$work/metrics.key")
+endpoint=$GCC_HOSTED_INCUS_AUTH_ENDPOINT
+[[ $("${curl_fixture[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/metrics?project=$project") == 403 ]]
+"${curl_fixture[@]}" "${metrics_identity[@]}" --fail --output "$work/telemetry" "$endpoint/1.0/metrics?project=$project"
+"${curl_fixture[@]}" "${metrics_identity[@]}" --fail --output "$work/telemetry-default" "$endpoint/1.0/metrics"
+"${curl_fixture[@]}" "${metrics_identity[@]}" --fail --output "$work/telemetry-alternate" "$endpoint/1.0/metrics?project=$alternate_project"
+"${curl_fixture[@]}" --cert "$work/metrics-control.pem" --key "$work/metrics-control.key" \
+  --fail --output "$work/telemetry-control" "$endpoint/1.0/metrics?project=$alternate_project"
+python3 - "$work" "$project" "$guest" "$alternate_project" "$alternate_guest" <<'PY'
+import math, re, sys
+from pathlib import Path
+root, project, guest, alternate_project, alternate_guest = sys.argv[1:]
+expected = {"incus_cpu_seconds_total", "incus_memory_MemTotal_bytes", "incus_memory_MemFree_bytes"}
+
+def check(filename, allowed, forbidden, required):
+    families = set()
+    with (Path(root) / filename).open(encoding="utf-8") as scrape:
+        for line in scrape:
+            m = re.fullmatch(r"([a-zA-Z0-9_:]+)\{([^}]+)\} (\S+)\s*", line)
+            if not m:
+                continue
+            labels = dict(re.findall(r'(\w+)="([^"]*)"', m[2]))
+            if labels.get("project") == forbidden:
+                raise SystemExit(f"{filename}: foreign project was disclosed")
+            if (labels.get("project"), labels.get("name")) == allowed and m[1] in expected:
+                value = float(m[3])
+                if math.isfinite(value) and value >= 0:
+                    families.add(m[1])
+    if required and families != expected:
+        raise SystemExit(f"{filename}: fixture telemetry is incomplete")
+    if not required and families:
+        raise SystemExit(f"{filename}: wrong project selector returned guest counters")
+
+check("telemetry", (project, guest), alternate_project, True)
+check("telemetry-default", (project, guest), alternate_project, True)
+check("telemetry-alternate", (project, guest), alternate_project, False)
+check("telemetry-control", (alternate_project, alternate_guest), project, True)
+PY
+[[ $("${curl_fixture[@]}" "${metrics_identity[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/instances?project=$project&recursion=1") == 403 ]]
+[[ $("${curl_fixture[@]}" "${metrics_identity[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/operations?project=$project&recursion=1") == 403 ]]
+echo 'PASS restricted native metrics identity: guest telemetry scoped, inventory and operations denied'
