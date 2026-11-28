@@ -30,7 +30,8 @@ guest=$GCC_HOSTED_INCUS_AUTH_GUEST
 pool="garm-ci-dir-$suffix"
 alias="garm-ci-image-$suffix"
 guest_owned=false; project_owned=false; pool_owned=false; image_owned=false
-trust_owned=false; listener_owned=false; cert_fingerprint=
+trust_owned=false; metrics_trust_owned=false; listener_owned=false
+cert_fingerprint=; metrics_fingerprint=
 cleanup() {
   local rc=$? cleanup_failed=0
   trap - EXIT; set +e
@@ -38,6 +39,7 @@ cleanup() {
     inc config unset core.https_address || cleanup_failed=1
     [[ -z $(inc config get core.https_address) ]] || cleanup_failed=1
   fi
+  if [[ $metrics_trust_owned == true ]]; then inc config trust remove "$metrics_fingerprint" || cleanup_failed=1; fi
   if [[ $trust_owned == true ]]; then inc config trust remove "$cert_fingerprint" || cleanup_failed=1; fi
   if [[ $guest_owned == true ]]; then
     inc delete "$guest" --project "$project" --force >/dev/null || cleanup_failed=1
@@ -138,3 +140,38 @@ else
   exit "$test_rc"
 fi
 grep -Eq '^--- PASS: TestHostedIncusRuntimeHealth702 \(' "$work/reader.log"
+
+# Independently qualify Incus's built-in metrics identity on this same
+# disposable daemon. It is not the authenticated inventory role.
+[[ $(inc config get core.metrics_authentication) != false ]]
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj /CN=gcc-disposable-metrics \
+  -keyout "$work/metrics.key" -out "$work/metrics.pem" 2>/dev/null
+metrics_fingerprint=$(openssl x509 -in "$work/metrics.pem" -outform DER | sha256sum | cut -d' ' -f1)
+[[ $metrics_fingerprint =~ ^[a-f0-9]{64}$ && $metrics_fingerprint != "$cert_fingerprint" ]]
+inc config trust add-certificate "$work/metrics.pem" --type=metrics
+metrics_trust_owned=true
+curl_fixture=(curl --disable --noproxy '*' --silent --show-error --connect-timeout 3 --max-time 20
+  --proto '=https' --cacert "$work/daemon.pem")
+metrics_identity=(--cert "$work/metrics.pem" --key "$work/metrics.key")
+endpoint=$GCC_HOSTED_INCUS_AUTH_ENDPOINT
+[[ $("${curl_fixture[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/metrics?project=$project") == 403 ]]
+"${curl_fixture[@]}" "${metrics_identity[@]}" --fail --output "$work/telemetry" "$endpoint/1.0/metrics?project=$project"
+python3 - "$work/telemetry" "$project" "$guest" <<'PY'
+import math, re, sys
+path, project, guest = sys.argv[1:]
+families = set()
+with open(path, encoding="utf-8") as scrape:
+    for line in scrape:
+        m = re.fullmatch(r"(incus_cpu_seconds_total|incus_memory_MemTotal_bytes|incus_memory_MemFree_bytes)\{([^}]+)\} (\S+)\s*", line)
+        if not m:
+            continue
+        labels = dict(re.findall(r'(\w+)="([^"]*)"', m[2]))
+        if labels.get("project") == project and labels.get("name") == guest:
+            value = float(m[3])
+            if math.isfinite(value) and value >= 0:
+                families.add(m[1])
+if families != {"incus_cpu_seconds_total", "incus_memory_MemTotal_bytes", "incus_memory_MemFree_bytes"}:
+    raise SystemExit("native metrics did not contain the three fixture counter families")
+PY
+[[ $("${curl_fixture[@]}" "${metrics_identity[@]}" -o /dev/null -w '%{http_code}' "$endpoint/1.0/instances?project=$project&recursion=1") == 403 ]]
+echo 'PASS dedicated native metrics identity: guest telemetry available, inventory denied'
