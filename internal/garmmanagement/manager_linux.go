@@ -515,7 +515,7 @@ func equivalent(kind string, observed, desired []byte) bool {
 	var operation struct {
 		Operation string `json:"operation"`
 	}
-	if json.Unmarshal(desired, &operation) == nil && operation.Operation == "create_disabled_pool" {
+	if json.Unmarshal(desired, &operation) == nil && (operation.Operation == "create_disabled_pool" || operation.Operation == repoEnrollmentOp) {
 		return false
 	} // Repository GET never proves a POST completed or captures its UUID.
 	if kind == "pool" {
@@ -554,6 +554,16 @@ func (m *Manager) ReconcilePending(ctx context.Context) ([]Observation, error) {
 	}
 	observations := []Observation{}
 	for _, intent := range pending {
+		var operation struct {
+			Operation string `json:"operation"`
+		}
+		if json.Unmarshal(intent.Desired, &operation) != nil {
+			return nil, ErrJournal
+		}
+		// An enrollment target is the deterministic operation key, not an upstream object UUID.
+		if operation.Operation == repoEnrollmentOp {
+			return nil, ErrBlocked
+		}
 		var data []byte
 		if intent.Kind == "pool" {
 			settings, e := m.remote.Pool(ctx, intent.Target)

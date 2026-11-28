@@ -30,8 +30,33 @@ var segment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 // NewGitHub permits one exact HTTPS API origin/path and an explicit repository
 // allowlist. No proxy, redirects, caller-supplied URLs or write methods are used.
 func NewGitHub(endpoint, authority, ref string, resolve CredentialResolver, trust *tls.Config, repos []Repository) (*GitHubClient, error) {
+	if len(repos) == 0 || len(repos) > 100 {
+		return nil, ErrObservation
+	}
+	c, err := newGitHubGET(endpoint, authority, ref, resolve, trust)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, r := range repos {
+		identity := strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name)
+		if r.GarmID == "" || r.Host != authority || !segment.MatchString(r.Owner) || !segment.MatchString(r.Name) || seen[identity] {
+			return nil, ErrObservation
+		}
+		if _, ok := c.scope[r.GarmID]; ok {
+			return nil, ErrObservation
+		}
+		seen[identity] = true
+		c.scope[r.GarmID] = r
+	}
+	return c, nil
+}
+
+// Shared construction only. Each exported reader exposes its own fixed routes;
+// creating an installation catalog never expands an existing demand reader.
+func newGitHubGET(endpoint, authority, ref string, resolve CredentialResolver, trust *tls.Config) (*GitHubClient, error) {
 	u, e := url.Parse(endpoint)
-	if authority == "" || len(authority) > 253 || strings.ToLower(authority) != authority || strings.ContainsAny(authority, "/\\:@?# \r\n\x00") || e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/api/v3") || u.RawPath != "" || ref == "" || len(ref) > 256 || resolve == nil || trust == nil || trust.RootCAs == nil || trust.InsecureSkipVerify || len(repos) == 0 || len(repos) > 100 {
+	if authority == "" || len(authority) > 253 || strings.ToLower(authority) != authority || strings.ContainsAny(authority, "/\\:@?# \r\n\x00") || e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/api/v3") || u.RawPath != "" || ref == "" || len(ref) > 256 || resolve == nil || trust == nil || trust.RootCAs == nil || trust.InsecureSkipVerify {
 		return nil, ErrObservation
 	}
 	t := trust.Clone()
@@ -46,20 +71,7 @@ func NewGitHub(endpoint, authority, ref string, resolve CredentialResolver, trus
 	if t.MaxVersion != 0 && t.MaxVersion < t.MinVersion {
 		return nil, ErrObservation
 	}
-	c := &GitHubClient{base: u.String(), ref: ref, resolve: resolve, scope: map[string]Repository{}, http: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, TLSClientConfig: t, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, ResponseHeaderTimeout: 10 * time.Second, MaxResponseHeaderBytes: 1 << 20}}}
-	seen := map[string]bool{}
-	for _, r := range repos {
-		identity := strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name)
-		if r.GarmID == "" || r.Host != authority || !segment.MatchString(r.Owner) || !segment.MatchString(r.Name) || seen[identity] {
-			return nil, ErrObservation
-		}
-		if _, ok := c.scope[r.GarmID]; ok {
-			return nil, ErrObservation
-		}
-		seen[identity] = true
-		c.scope[r.GarmID] = r
-	}
-	return c, nil
+	return &GitHubClient{base: u.String(), ref: ref, resolve: resolve, scope: map[string]Repository{}, http: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, TLSClientConfig: t, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, ResponseHeaderTimeout: 10 * time.Second, MaxResponseHeaderBytes: 1 << 20}}}, nil
 }
 
 // NewCIHealthGitHub constructs a dedicated CI-only reader over the same
