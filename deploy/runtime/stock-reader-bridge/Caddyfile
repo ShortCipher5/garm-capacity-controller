@@ -44,7 +44,7 @@ https://stock-read-bridge.invalid:{$CAPACITY_BRIDGE_PORT} {
 
 	@inventory {
 		method GET
-		expression `{http.request.uri}.matches('^/api/v1/(controller|jobs|instances|pools(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$')`
+		expression `{http.request.uri}.matches('^/api/v1/(controller|jobs|instances|pools(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$') || {http.request.uri}.matches('^/api/v1/jobs[?]all=true&page=([1-9]|1[0-6])&pageSize=100$')`
 	}
 	handle @inventory {
 		reverse_proxy 127.0.0.1:{$CAPACITY_STOCK_HTTP_PORT} {

@@ -31,6 +31,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 stock=ghcr.io/cloudbase/garm:v0.2.1@sha256:5ccdc29c31084ed4f30ec85e09a57b5105cf3dcc5fa8c1aba9e68de461e7e635
+upgrade=ghcr.io/cloudbase/garm:v0.2.2@sha256:5e1943ecc0c6e30e62228072f7c303c6be62875dc3e9514b4f677b37c6c39bde
+do_upgrade=${CAPACITY_STOCK_UPGRADE_FIXTURE:-false}
+[[ $do_upgrade == false || ( $do_upgrade == true && ${CAPACITY_STOCK_LOGIN_ENABLED:-false} == true ) ]]
 python=python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 docker pull "$stock" >/dev/null
 docker pull "$python" >/dev/null
@@ -48,9 +51,15 @@ docker build --network none -t "$CAPACITY_STOCK_BRIDGE_IMAGE" "$work/caddy"
 docker build --target stock-reader -t "$CAPACITY_STOCK_READER_IMAGE" .
 docker build --target gateway -t "$CAPACITY_GATEWAY_IMAGE" .
 docker build --target ledger-tool -t "$project:ledger" .
-docker image inspect "$stock" > "$work/stock-image.json"
-python3 "$base/garm-native-executable.py" "$work/stock-image.json" "$stock" > "$work/stock-discovered.json"
-read -r stock_id executable < <(python3 -c 'import json,sys;x=json.load(open(sys.argv[1]));print(x["image_id"],x["executable"])' "$work/stock-discovered.json")
+identify() {
+  local ref="$1"
+  docker image inspect "$ref" > "$work/stock-image.json"
+  python3 "$base/garm-native-executable.py" "$work/stock-image.json" "$ref" > "$work/stock-discovered.json"
+  read -r stock_id executable config_flag < <(python3 -c 'import json,sys;x=json.load(open(sys.argv[1]));print(x["image_id"],x["executable"],x["config_flag"])' "$work/stock-discovered.json")
+  [[ $stock_id =~ ^sha256:[a-f0-9]{64}$ && -n $executable && -n $config_flag ]]
+}
+identify "$stock"
+state="$work/stock/state"
 python3 -B "$base/stock-reader-bridge/fixture.py" prepare "$work"
 sudo chown -R 65530:65530 "$work/stock/private" "$work/stock/state"
 sudo chown -R 65528:65528 "$work/bridge"
@@ -71,8 +80,8 @@ create_stock() {
   docker run -d --name "$name" --network none "${restricted[@]}" --user 65530:65530 --workdir / \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65530,gid=65530,mode=0700 \
     --mount "type=bind,src=$work/stock/private,dst=/run/garm-private,readonly" \
-    --mount "type=bind,src=$work/stock/state,dst=/var/lib/garm" \
-    --entrypoint "$executable" "$stock_id" -config /run/garm-private/config.toml > "$work/stock-id"
+    --mount "type=bind,src=$state,dst=/var/lib/garm" \
+    --entrypoint "$executable" "$stock_id" "$config_flag" /run/garm-private/config.toml > "$work/stock-id"
   CAPACITY_STOCK_CONTAINER_ID=$(<"$work/stock-id")
   export CAPACITY_STOCK_CONTAINER_ID
   [[ $CAPACITY_STOCK_CONTAINER_ID =~ ^[a-f0-9]{64}$ ]]
@@ -150,9 +159,25 @@ assert {m["Destination"]:m["RW"] for m in x["Mounts"] if m["Type"]=="bind"}==exp
     old_stock=$CAPACITY_STOCK_CONTAINER_ID
     docker stop --time 25 "$old_stock" >/dev/null
     docker rm "$old_stock" >/dev/null
+    if [[ $do_upgrade == true ]]; then
+      # Copy only this stopped disposable fixture, never a live database.
+      sudo cp -a -- "$state" "$work/stock/backup-021"
+      docker pull "$upgrade" >/dev/null
+      identify "$upgrade"
+    fi
     create_stock "$project-stock-recreated"
     [[ $CAPACITY_STOCK_CONTAINER_ID != "$old_stock" ]]
     probe 65535 "container:$CAPACITY_STOCK_CONTAINER_ID" stock-health
   fi
 done
+if [[ $do_upgrade == true ]]; then
+  docker stop --time 25 "$CAPACITY_STOCK_CONTAINER_ID" >/dev/null
+  docker rm "$CAPACITY_STOCK_CONTAINER_ID" >/dev/null
+  state="$work/stock/backup-021"
+  identify "$stock"
+  create_stock "$project-stock-restored"
+  probe 65529 "container:$CAPACITY_STOCK_CONTAINER_ID" stock-login-check \
+    --mount "type=bind,src=$work/reader,dst=/run/capacity-stock-reader,readonly"
+  echo 'PASS isolated v0.2.1 to v0.2.2 migration and authenticated v0.2.1 backup restore'
+fi
 echo 'PASS disposable stock/companion image namespace checks and explicit stock replacement recovery'

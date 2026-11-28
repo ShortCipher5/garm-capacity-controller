@@ -169,17 +169,23 @@ func (s *isolatedStockReads) verify(ctx context.Context, token string) error {
 }
 
 func (s *isolatedStockReads) read(ctx context.Context, path string) ([]byte, error) {
+	return s.readInventory(ctx, func(ctx context.Context, token string) ([]byte, error) {
+		return s.get(ctx, path, token)
+	})
+}
+
+func (s *isolatedStockReads) readInventory(ctx context.Context, fetch func(context.Context, string) ([]byte, error)) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	token, err := s.token(ctx, "")
 	if err != nil {
 		return nil, ErrConfiguration
 	}
-	raw, err := s.readWithToken(ctx, path, token)
+	raw, err := s.readWithToken(ctx, token, fetch)
 	if errors.Is(err, errStockUnauthorized) && s.login != nil && !s.revoked.Load() {
 		token, err = s.token(ctx, token)
 		if err == nil {
-			raw, err = s.readWithToken(ctx, path, token)
+			raw, err = s.readWithToken(ctx, token, fetch)
 		}
 	}
 	if err != nil {
@@ -188,11 +194,11 @@ func (s *isolatedStockReads) read(ctx context.Context, path string) ([]byte, err
 	return raw, nil
 }
 
-func (s *isolatedStockReads) readWithToken(ctx context.Context, path, token string) ([]byte, error) {
+func (s *isolatedStockReads) readWithToken(ctx context.Context, token string, fetch func(context.Context, string) ([]byte, error)) ([]byte, error) {
 	if err := s.verify(ctx, token); err != nil {
 		return nil, err
 	}
-	raw, err := s.get(ctx, path, token)
+	raw, err := fetch(ctx, token)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +218,7 @@ func (s *isolatedStockReads) Pools(ctx context.Context) ([]byte, error) {
 	return s.read(ctx, "/api/v1/pools")
 }
 func (s *isolatedStockReads) Jobs(ctx context.Context) ([]byte, error) {
-	return s.read(ctx, "/api/v1/jobs")
+	return s.readInventory(ctx, s.fetchJobs)
 }
 func (s *isolatedStockReads) Pool(ctx context.Context, pool string) ([]byte, error) {
 	if !uuid.MatchString(pool) {
