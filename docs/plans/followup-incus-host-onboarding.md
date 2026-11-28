@@ -1,6 +1,6 @@
 # Install and configure Incus during Add Server
 
-Status: draft implementation plan. This document is not an implemented or activated feature.
+Status: partial implementation on this draft branch; not activated or live-qualified. See implementation and remaining scope below.
 
 ## Scope
 
@@ -20,3 +20,15 @@ Disposable clean host, installed-but-uninitialized host, already-configured host
 ## Estimate and release boundary
 
 5–8 engineer-days for an initial supported Linux recipe and UI integration, versus 3–5 for preparing preinstalled hosts. More OS/package channels are separate. Engineering estimate excludes rollout and access lead time. Build against disposable fixtures; no live infrastructure, GitHub installation, or production mutations are needed for this PR. Keep stock GARM and existing queue/runner ownership. Mark any unimplemented or unsupported path plainly; do not mistake a fixture or plan for active capability.
+
+## Implementation in this branch
+
+The Add Server panel now offers a privileged, explicitly enabled **Install or configure Incus** operation. Private gateway config uses `admin.incus_host_setup` with `token_file`, `admin_credential_files` (alias → owner-only key file) and `targets` (target ID → `{admin_credential_alias, target:{address, port, admin_user, host_key, admin_key_fingerprint}}`). The separate `--allow-incus-host-setup` flag is required. The browser cannot choose an arbitrary IP, credential path, command, package or admin grant. Configure this on the private TLS admin listener; do not expose the setup token to public clients.
+
+Load targets, select one, then inspect using the distinct setup token. A missing host must provide Debian 13/systemd, Python 3 and python3-apt, a current signed distribution cache, the independently pinned SSH key and a deployment-approved noninteractive sudo administrative credential. Incus 6.x/7.x are supported for observation. For a missing package the review names the exact native Debian candidate; automatic installation refuses to upgrade existing packages or add package sources. Installing Incus also installs dependencies. An installed but pristine daemon uses upstream local `incus admin init --minimal`; this can create storage, a default bridge and profile devices. Existing configured storage is not converted or erased. Incomplete/ambiguous state, unsupported OS and permission failures never qualify a host.
+
+Apply consumes one five-minute target/identity/recipe/observed-state approval, journals unknown before contacting SSH, and verifies the daemon over its local Unix socket afterwards. A lost HTTP reply can be checked without rerunning: reload targets, read last attempt, then inspect. A surviving root-only remote unknown intent under `/var/lib/garm-capacity-incus-onboarding` blocks more changes. Inspect the host and reconcile that journal privately after a genuinely interrupted multi-step installation; never remove data, reset the daemon, or retry blindly. The gateway does not keep the SSH administrator credential on the target.
+
+Local storage verification is **not** remote connector qualification: this operation never adds a public listener or trusts a controller certificate by itself, never selects an arbitrary existing project and never enables placement. Use the separately authorized Incus discovery and disabled-host enrollment flow. Automatic scoped TLS/project enrollment, verifying network/metrics from the controller and linking that evidence to placement activation require integration work and disposable host qualification before this plan is complete.
+
+Supported upstream references: [Debian packages](https://linuxcontainers.org/incus/docs/main/installing/), [minimal initialization and its defaults](https://linuxcontainers.org/incus/docs/main/howto/initialize/).

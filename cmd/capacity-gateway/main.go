@@ -533,6 +533,7 @@ func main() {
 	nativePlanning := flag.Bool("allow-native-discovery-planning", false, "allow separately approved SSH discovery and saved native resource configuration; no activation")
 	nativeAssets := flag.Bool("allow-native-asset-staging", false, "allow separately approved runtime asset transfer for exact existing native preparation targets; never activation")
 	nativePreparation := flag.Bool("allow-native-owner-preparation", false, "allow separately approved private configuration transfer and disabled owner preparation; never activation")
+	incusSetup := flag.Bool("allow-incus-host-setup", false, "allow separately reviewed Debian 13 Incus package installation and initialization on approved SSH targets")
 	firstboot := flag.Bool("allow-isolated-inventory-firstboot", false, "allow separately approved full-admin first-time isolated listener installation; changes host account, service and owned firewall")
 	bootstrap := flag.Bool("allow-prepared-host-bootstrap", false, "allow separately authorized installation on deployment-approved prepared hosts; no account creation or sshd changes")
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
@@ -637,6 +638,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.Admin.EnableNativeAssets = true
+	}
+	if *incusSetup {
+		if config.Admin == nil {
+			fmt.Fprintln(os.Stderr, "Incus host setup requires private admin configuration")
+			os.Exit(2)
+		}
+		config.Admin.EnableIncusSetup = true
 	}
 	if *firstboot {
 		if config.Admin == nil {
