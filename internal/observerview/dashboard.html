@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GARM Controller | Observation</title>
+  <script src="/admin/observer.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>GARM Controller</h1>
+    <p>Observation only. GARM owns runner lifecycle. Guest telemetry does not establish available host capacity.</p>
+    <label for="token">Dashboard token</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64">
+    <button id="refresh" type="button">Load live view</button>
+    <p id="status" role="status">Enter the dashboard token to load live data.</p>
+    <section id="snapshot" hidden>
+      <h2>Pool and queue status</h2>
+      <p id="queue"></p>
+      <table><thead><tr><th scope="col">Pool</th><th scope="col">Idle</th><th scope="col">Starting</th><th scope="col">Busy</th><th scope="col">Other</th></tr></thead><tbody id="pools"></tbody></table>
+      <h2>Running guest telemetry</h2>
+      <p>CPU is accumulated user and system time since guest start, not a percent. Missing values are not zero.</p>
+      <div id="hosts"></div>
+    </section>
+  </main>
+</body>
+</html>

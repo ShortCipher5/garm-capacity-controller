@@ -16,6 +16,19 @@ import (
 // before any network I/O. The server must independently enforce the client's
 // read-only authorization; this client does not infer permissions from TLS.
 func NewObserver(endpoint, project, serverKeyPin string, credentials *tls.Config) (*Client, error) {
+	trust, err := pinnedObserverTLS(serverKeyPin, credentials)
+	if err != nil {
+		return nil, err
+	}
+	client, err := New(endpoint, project, trust)
+	if err != nil {
+		return nil, err
+	}
+	client.observer = true
+	return client, nil
+}
+
+func pinnedObserverTLS(serverKeyPin string, credentials *tls.Config) (*tls.Config, error) {
 	if credentials == nil || !fingerprint(serverKeyPin) {
 		return nil, ErrConfiguration
 	}
@@ -38,12 +51,7 @@ func NewObserver(endpoint, project, serverKeyPin string, credentials *tls.Config
 		}
 		return nil
 	}
-	client, err := New(endpoint, project, trust)
-	if err != nil {
-		return nil, err
-	}
-	client.observer = true
-	return client, nil
+	return trust, nil
 }
 
 func observerRoute(method, path string, query url.Values) bool {
