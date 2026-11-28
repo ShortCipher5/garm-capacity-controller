@@ -37,11 +37,12 @@ type Target struct {
 	AdminFingerprint string `json:"admin_key_fingerprint"`
 }
 type Report struct {
-	Outcome  string `json:"outcome"`
-	State    string `json:"state"`
-	Version  string `json:"server_version"`
-	Nonce    string `json:"nonce"`
-	Eligible *bool  `json:"placement_eligible"`
+	Certificate string `json:"server_certificate_sha256,omitempty"`
+	Outcome     string `json:"outcome"`
+	State       string `json:"state"`
+	Version     string `json:"server_version"`
+	Nonce       string `json:"nonce"`
+	Eligible    *bool  `json:"placement_eligible"`
 }
 
 func (t Target) Valid() bool {
@@ -56,6 +57,14 @@ func (t Target) Review(r Report) string {
 func (r Report) Mutable() bool { return r.State == "missing" || r.State == "pristine" }
 func (r Report) valid(mode, nonce string) bool {
 	if r.Nonce != nonce || r.Eligible == nil || *r.Eligible || len(r.Version) > 80 || (r.State != "missing" && r.Version != "" && !simpleVersion.MatchString(r.Version)) {
+		return false
+	}
+	if r.State == "configured" {
+		raw, e := hex.DecodeString(r.Certificate)
+		if e != nil || len(raw) != 32 || hex.EncodeToString(raw) != r.Certificate {
+			return false
+		}
+	} else if r.Certificate != "" {
 		return false
 	}
 	switch r.State {

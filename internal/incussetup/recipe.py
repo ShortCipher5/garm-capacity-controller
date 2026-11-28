@@ -82,6 +82,13 @@ def os_supported():
     return rel.get("ID") == "debian" and rel.get("VERSION_ID") == "13" and os.path.isdir("/run/systemd/system")
 
 
+def distro_origin(origin):
+    stable = origin.origin == "Debian" and origin.codename in (
+        "trixie", "trixie-updates", "trixie-security")
+    backports = origin.origin == "Debian Backports" and origin.codename == "trixie-backports"
+    return origin.trusted and (stable or backports)
+
+
 def candidate():
     # python3-apt uses the existing, signed distro cache. Never add keys, edit
     # apt sources, refresh a suite, or upgrade a working daemon here.
@@ -94,8 +101,7 @@ def candidate():
             return ""
         if c.version.split(":")[-1].split(".")[0] not in ("6", "7"):
             return ""
-        if not c.origins or not all(o.trusted and o.origin == "Debian" and o.codename
-                in ("trixie", "trixie-updates", "trixie-security") for o in c.origins):
+        if not c.origins or not all(distro_origin(o) for o in c.origins):
             return ""
         pkg.mark_install(auto_fix=False, auto_inst=True)
         if cache.broken_count or any(p.is_installed for p in cache.get_changes()):
@@ -224,7 +230,14 @@ def main(args):
         if expected not in ("missing", "pristine", "configured") or not re.fullmatch(r"[0-9a-zA-Z.+:~-]{0,80}", expected_version):
             raise Unknown()
         result = apply((expected, expected_version), nonce)
-    print(json.dumps(dict(zip(("outcome", "state", "server_version"), result)) | {"nonce": nonce, "placement_eligible": False}))
+    reply = dict(zip(("outcome", "state", "server_version"), result))
+    if result[1] == "configured":
+        env = api("")["environment"]
+        fingerprint = env.get("certificate_fingerprint", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or env.get("server_version") != result[2]:
+            raise Unknown()
+        reply["server_certificate_sha256"] = fingerprint
+    print(json.dumps(reply | {"nonce": nonce, "placement_eligible": False}))
 
 
 if __name__ == "__main__":

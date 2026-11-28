@@ -4,6 +4,17 @@ import recipe
 
 
 class RecipeTests(unittest.TestCase):
+    def test_preconfigured_backports_requires_exact_trusted_distribution_pair(self):
+        from types import SimpleNamespace as O
+        def accepted(source, codename, trusted=True):
+            return recipe.distro_origin(O(origin=source, codename=codename, trusted=trusted))
+        self.assertTrue(accepted("Debian Backports", "trixie-backports"))
+        self.assertTrue(accepted("Debian", "trixie-security"))
+        self.assertFalse(accepted("Debian Backports", "trixie-backports", False))
+        self.assertFalse(accepted("third-party", "trixie-backports"))
+        self.assertFalse(accepted("Debian Backports", "bookworm-backports"))
+        self.assertFalse(accepted("Debian", "sid"))
+
     def test_fresh_install_and_verify(self):
         calls = []
         obs = Mock(side_effect=[("missing","6.0.4+deb13u1"),("pristine","6.0.4"),("configured","6.0.4")])

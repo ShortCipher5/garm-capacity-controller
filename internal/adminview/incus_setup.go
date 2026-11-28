@@ -18,8 +18,10 @@ import (
 )
 
 type IncusSetupTarget struct {
-	Target  incussetup.Target
-	Execute func(context.Context, *incussetup.Report) (incussetup.Report, error)
+	Profile     string
+	VerifyRoute func(context.Context, string, string) bool
+	Target      incussetup.Target
+	Execute     func(context.Context, *incussetup.Report) (incussetup.Report, error)
 }
 type setupReview struct {
 	r      incussetup.Report
@@ -97,7 +99,7 @@ func (h *Handler) serveIncusSetup(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			busy := s.running[id]
 			s.mu.Unlock()
-			targets = append(targets, map[string]any{"target_id": id, "address": t.Address, "port": t.Port, "admin_user": t.User, "host_key": t.HostKey, "admin_key_fingerprint": t.AdminFingerprint, "recipe_sha256": incussetup.RecipeHash(), "running": busy, "last_attempt": a})
+			targets = append(targets, map[string]any{"target_id": id, "address": t.Address, "port": t.Port, "connector_profile": s.targets[id].Profile, "admin_user": t.User, "host_key": t.HostKey, "admin_key_fingerprint": t.AdminFingerprint, "recipe_sha256": incussetup.RecipeHash(), "running": busy, "last_attempt": a})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"targets": targets})
 		return
@@ -158,7 +160,14 @@ func (h *Handler) serveIncusSetup(w http.ResponseWriter, r *http.Request) {
 			s.reviews[q.ID] = setupReview{result, digest, time.Now().Add(5 * time.Minute)}
 			s.mu.Unlock()
 		}
-		json.NewEncoder(w).Encode(map[string]any{"target_id": q.ID, "review_digest": digest, "report": result})
+		route := "not_checked"
+		if result.State == "configured" && t.VerifyRoute != nil {
+			route = "unavailable_or_mismatch"
+			if t.VerifyRoute(ctx, result.Certificate, result.Version) {
+				route = "authenticated_same_daemon"
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"target_id": q.ID, "review_digest": digest, "report": result, "connector_route": route, "connector_profile": t.Profile})
 		return
 	}
 	review, ok := s.reviews[q.ID]

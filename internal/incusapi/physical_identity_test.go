@@ -53,6 +53,10 @@ func TestPhysicalIdentityIsActualTLSBoundAndProjectIndependent(t *testing.T) {
 	if err != nil || first.ServerKeyFingerprint() != second.ServerKeyFingerprint() || first.OriginFingerprint() != second.OriginFingerprint() || first.ServerName() != second.ServerName() || first.ScopeFingerprint() == second.ScopeFingerprint() {
 		t.Fatalf("project split manufactured a host: %v", err)
 	}
+	certFingerprint := sha256.Sum256(server.Certificate().Raw)
+	if first.CertificateFingerprint() != fmt.Sprintf("%x", certFingerprint) || first.CertificateFingerprint() != second.CertificateFingerprint() {
+		t.Fatal("same-daemon certificate match is not bound to the authenticated transport")
+	}
 	actual := sha256.Sum256(server.Certificate().RawSubjectPublicKeyInfo)
 	canonical, err := a.canonicalOrigin()
 	if err != nil {

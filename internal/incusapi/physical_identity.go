@@ -20,16 +20,26 @@ import (
 // identity changes pending requalification. A restart needs durable binding.
 // Raw addresses, certificates and credentials are deliberately not exposed.
 type PhysicalServerIdentity struct {
-	origin        string
-	scope         string
-	key           string
-	serverName    string
-	serverVersion string
-	verified      bool
+	certFingerprint string
+	origin          string
+	scope           string
+	key             string
+	serverName      string
+	serverVersion   string
+	verified        bool
 }
 
 func (p PhysicalServerIdentity) Valid() bool {
 	return p.verified && fingerprint(p.origin) && fingerprint(p.scope) && fingerprint(p.key) && label(p.serverName) && strings.TrimSpace(p.serverName) == p.serverName
+}
+
+// CertificateFingerprint is for matching a separately authenticated host-local
+// observation to this project's mTLS route. It is not a capacity identity.
+func (p PhysicalServerIdentity) CertificateFingerprint() string {
+	if !p.Valid() || !fingerprint(p.certFingerprint) {
+		return ""
+	}
+	return p.certFingerprint
 }
 func (p PhysicalServerIdentity) ServerKeyFingerprint() string {
 	if !p.Valid() {
@@ -170,5 +180,5 @@ func (c *Client) parsePhysicalIdentity(response envelope) (PhysicalServerIdentit
 		}
 		serverVersion = v
 	}
-	return PhysicalServerIdentity{origin: fmt.Sprintf("%x", originHash), scope: fmt.Sprintf("%x", scopeHash), key: key, serverName: serverName, serverVersion: serverVersion, verified: true}, nil
+	return PhysicalServerIdentity{certFingerprint: reportedFingerprint, origin: fmt.Sprintf("%x", originHash), scope: fmt.Sprintf("%x", scopeHash), key: key, serverName: serverName, serverVersion: serverVersion, verified: true}, nil
 }
