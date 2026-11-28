@@ -1,6 +1,8 @@
 package adminview
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -220,4 +222,47 @@ func TestCISizingOverviewAdvertisesOnlyAnAttachedSource(t *testing.T) {
 	assertOverview(true)
 	source.Withdraw()
 	assertOverview(true)
+}
+
+func TestWorkflowResourceHistoryPublisherScopesAndExpires(t *testing.T) {
+	h, _, token := fixture(t)
+	const route = "/admin/api/v1/ci-health/sizing"
+	now := time.Date(2026, 1, 3, 12, 0, 0, 0, time.UTC)
+	s, err := NewCISizingSnapshot([]CIHealthRepository{{"github", 12}})
+	if err != nil || h.SetCISizingSnapshot(s) != nil {
+		t.Fatal(err)
+	}
+	s.clock = func() time.Time { return now }
+	a := ciSizingAdvisoryFixture(now)
+	in := cihealth.WorkflowResourceInput{Key: cihealth.WorkflowResourceKey{Scope: a.Scope, DefinitionDigest: strings.Repeat("a", 64), JobDefinition: "build", Runner: a.Identity}, Shape: a.Installed, Window: a.Window, Coverage: cihealth.TrendCoveragePartial, Reviewed: true}
+	foreign := in
+	foreign.Key.Scope.RepositoryID = 13
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if s.PublishWorkflowResourceHistory(context.Background(), in) == nil {
+		t.Fatal("uncancellable authority accepted")
+	}
+	if s.PublishWorkflowResourceHistory(ctx, foreign) == nil {
+		t.Fatal("cross-repository publication allowed")
+	}
+	if err := s.PublishWorkflowResourceHistory(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if request(t, h, "GET", route, "").Code != 401 || request(t, h, "POST", route, token).Code != 405 {
+		t.Fatal("read boundary changed")
+	}
+	var got struct {
+		History *cihealth.WorkflowResourceHistory
+	}
+	if err := json.Unmarshal(request(t, h, "GET", route, token).Body.Bytes(), &got); err != nil || got.History == nil || got.History.JobDefinition != "build" || got.History.CPUPeak != nil {
+		t.Fatal(got, err)
+	}
+	cancel()
+	if s.read() != nil || s.PublishWorkflowResourceHistory(ctx, in) == nil {
+		t.Fatal("history survived revocation")
+	}
+	now = now.Add(ciDisplayLifetime)
+	if s.read() != nil {
+		t.Fatal("history survived expiry")
+	}
 }

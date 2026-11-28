@@ -129,3 +129,20 @@ test("accepted lease expires on the first wall or monotonic deadline", () => {
   assert.equal(ciSizingLeaseRemaining(view, null, observed, 300), 0);
   assert.equal(ciSizingLease(view, observed - 1, 300), null);
 });
+
+test("exact workflow resource history is scoped, bounded and never fabricates missing quantities", () => {
+  const s = snapshot(), counts = {...s.sizing.samples, eligible:21, primary:21,successful:21};
+  const h = {definition_sha256:"a".repeat(64),job_definition:"build",primary:21,retries:0,baseline:20,
+    current_run:"21", current_job:"120",cpu_average:{current:"1000",baseline_median:"400",direction:"increase"},
+    ram_peak:{current:"0",baseline_median:"1073741824",direction:"decrease"}};
+  const base={...s, sizing:{...s.sizing,samples:counts,rejected:[],incomparable:0}};
+  assert.equal(validateCISizingSnapshot({...base,history:h}).history.ram_peak.current,"0");
+  for (const bad of [{...h,baseline:2},{...h,job_definition:"a/b"},{...h,current_run:"0"},{...h,baseline:0},
+    {...h,disk_peak:{current:"0",baseline_median:"0",direction:"increase"}}, {...h,definition_sha256:"latest"}])
+    assert.throws(()=>validateCISizingSnapshot({...base,history:bad}));
+  const row={run:"21",attempt:"1",job:"120",completed_at:"2025-12-31T23:00:00Z",cpu_average:"0",cpu_peak:"0"};
+  assert.equal(validateCISizingSnapshot({...base,history:{...h,recent:[row]}}).history.recent[0].cpu_average,"0");
+  for (const recent of [[row,row], [{...row,cpu_peak:null}], [{...row,cpu_average:"7"}], [{...row,completed_at:"2030-01-01T00:00:00Z"}],
+    [{...row,attempt:"2"}]]) assert.throws(()=>validateCISizingSnapshot({...base,history:{...h,recent}}));
+  assert.throws(()=>validateCISizingSnapshot({state:"unavailable",sizing:null,history:h}));
+});

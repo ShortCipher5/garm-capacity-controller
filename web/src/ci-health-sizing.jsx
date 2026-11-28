@@ -66,6 +66,30 @@ function Dimension({label, dimension, unit}) {
   </div>;
 }
 
+function ResourceHistory({history: h}) {
+  const metrics = [["cpu_average", "Average CPU", "millicores"], ["cpu_peak", "Peak interval CPU", "millicores"],
+    ["ram_average", "Average memory", "bytes"], ["ram_peak", "Sampled peak memory", "bytes"], ["disk_peak", "Sampled peak disk used", "bytes"]];
+  return <section aria-label="Exact job resource history"><h4>Workflow job resource history</h4>
+    <p>Job <code>{h.job_definition}</code>, workflow definition <code>{h.definition_sha256}</code>. {h.primary} primary executions; {h.retries} retries excluded from the baseline.</p>
+    {h.recent?.length > 0 && <details><summary>Recent completed executions ({h.recent.length}, newest first)</summary>
+      <p>Usage is scoped to the individual job. A missing reading is not zero.</p>
+      <ul>{h.recent.map(row=><li key={row.job}><strong>Run {row.run}, attempt {row.attempt}, job {row.job}</strong> · <At value={row.completed_at}/>
+        <ul>{metrics.map(([key,label,unit])=><li key={key}>{label}: {row[key] === undefined ? "not measured" : row[key]+" "+unit}</li>)}</ul>
+      </li>)}</ul>
+    </details>}
+    {h.baseline === 0 ? <p>Insufficient comparable evidence for a change signal.</p> : <>
+      <p>Latest exact run <code>{h.current_run}</code>, job <code>{h.current_job}</code>, compared with the median of {h.baseline} prior primary executions in the reviewed window.</p>
+      <ul>{metrics.map(([key,label,unit]) => {
+        const m=h[key];
+        if (!m) return <li key={key}>{label}: unavailable.</li>;
+        const diff=BigInt(m.current)-BigInt(m.baseline_median);
+        return <li key={key}>{label}: {m.current} vs {m.baseline_median} {unit}. {m.direction === "within_baseline" ? "No unusual change" : m.direction === "increase" ? "Unusual increase" : "Unusual decrease"} ({diff > 0n ? "+" : ""}{diff.toString()} {unit}).</li>;
+      })}</ul>
+    </>}
+    <p className="muted">Each value belongs to one job execution. A decrease is not a recommendation to shrink a runner. No automatic action is taken.</p>
+  </section>;
+}
+
 // CISizingAdvisory renders one validated advisory snapshot. It has no apply
 // action by construction: nothing here writes pool settings, caps, routing
 // or allocations, and suggestions are kept separate from saved settings.
@@ -121,6 +145,7 @@ export function CISizingAdvisory({snapshot}) {
         <h4>Warnings</h4>
         <ul>{warnings.map((warning) => <li key={warning}>{warningText[warning] ?? warning}</li>)}</ul>
       </>}
+      {snapshot.history && <ResourceHistory history={snapshot.history}/>}
       <h4>Disk</h4>
       {sizing.disk.state === "observed"
         ? <p>Observed disk usage peak <code>{sizing.disk.peak_bytes}</code> bytes across {sizing.disk.samples} of {sizing.disk.qualified} qualifying samples with independently attributable disk gauges.</p>
