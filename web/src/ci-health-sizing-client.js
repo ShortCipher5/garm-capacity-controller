@@ -118,7 +118,7 @@ export function validateCISizingSnapshot(value) {
   if (!count(s.incomparable, 1000) || !count(s.unverifiable, 1000) || !count(s.foreign, 1000)) fail();
   if (Object.hasOwn(value, "history")) {
     const h = value.history, metrics = ["cpu_average", "cpu_peak", "ram_average", "ram_peak", "disk_peak"];
-    if (!exactKeys(h, ["definition_sha256", "job_definition", "primary", "retries", "baseline"], ["current_run", "current_job", ...metrics]) ||
+    if (!exactKeys(h, ["definition_sha256", "job_definition", "primary", "retries", "baseline"], ["current_run", "current_job", "recent", ...metrics]) ||
         typeof h.definition_sha256 !== "string" || h.definition_sha256.length !== 64 || !/^[0-9a-f]{64}$/.test(h.definition_sha256) ||
         typeof h.job_definition !== "string" || h.job_definition.trim() !== h.job_definition || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(h.job_definition) ||
         ![h.primary,h.retries,h.baseline].every(n => count(n, 1000)) || h.primary + h.retries > 1000 ||
@@ -128,6 +128,25 @@ export function validateCISizingSnapshot(value) {
     } else if (h.baseline < 20 || h.baseline !== h.primary-1 || !decimal(h.current_run) || !decimal(h.current_job) ||
                s.coverage !== "complete" || !s.freshness.fresh || s.samples.successful !== h.primary) fail();
     const quantity = x => typeof x === "string" && x.trim() === x && /^(0|[1-9][0-9]{0,19})$/.test(x) && BigInt(x) <= 18446744073709551615n;
+    if (Object.hasOwn(h, "recent")) {
+      const jobs = new Set(), attempts = new Set();
+      let until = asOf.exact, initial = 0, retried = 0;
+      if (!Array.isArray(h.recent) || h.recent.length > 12 || h.recent.length > s.samples.eligible) fail();
+      for (const row of h.recent) {
+        if (!exactKeys(row, ["run","job","attempt","completed_at"], metrics) ||
+            ![row.run,row.job,row.attempt].every(x => decimal(x))) fail();
+        const end = timestamp(row.completed_at), attempt = row.run + "/" + row.attempt;
+        if (!end || end.exact < from.exact || end.exact > until || jobs.has(row.job) || attempts.has(attempt)) fail();
+        jobs.add(row.job); attempts.add(attempt); until = end.exact;
+        if (row.attempt === "1") initial++; else retried++;
+        if (metrics.some(k => Object.hasOwn(row,k) && !quantity(row[k])) ||
+            Object.hasOwn(row,"cpu_average") !== Object.hasOwn(row,"cpu_peak") ||
+            Object.hasOwn(row,"ram_average") !== Object.hasOwn(row,"ram_peak") ||
+            ("cpu_average" in row && BigInt(row.cpu_average) > BigInt(row.cpu_peak)) ||
+            ("ram_average" in row && BigInt(row.ram_average) > BigInt(row.ram_peak))) fail();
+      }
+      if (initial > h.primary || retried > h.retries) fail();
+    }
     for (const k of metrics) if (Object.hasOwn(h,k)) {
       const m = h[k];
       if (!exactKeys(m, ["current","baseline_median","direction"]) || !quantity(m.current) || !quantity(m.baseline_median) ||

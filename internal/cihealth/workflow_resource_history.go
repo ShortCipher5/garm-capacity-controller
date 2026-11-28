@@ -45,7 +45,23 @@ type ResourceComparison struct {
 	Direction string `json:"direction"`
 }
 
+// RecentJobResourcePoint is one exact completed execution. Never aggregate
+// quantities across parallel jobs or infer omitted observations from a shape.
+type RecentJobResourcePoint struct {
+	Run        string    `json:"run"`
+	Attempt    string    `json:"attempt"`
+	Job        string    `json:"job"`
+	End        time.Time `json:"completed_at"`
+	CPUAverage *uint64   `json:"cpu_average,string,omitempty"`
+	CPUPeak    *uint64   `json:"cpu_peak,string,omitempty"`
+	RAMAverage *uint64   `json:"ram_average,string,omitempty"`
+	RAMPeak    *uint64   `json:"ram_peak,string,omitempty"`
+	DiskPeak   *uint64   `json:"disk_peak,string,omitempty"`
+}
+
 type WorkflowResourceHistory struct {
+	Recent []RecentJobResourcePoint `json:"recent,omitempty"`
+
 	DefinitionDigest string `json:"definition_sha256"`
 	JobDefinition    string `json:"job_definition"`
 	Primary          int    `json:"primary"`
@@ -123,6 +139,41 @@ func ReviewWorkflowResourceHistory(in WorkflowResourceInput) (JobSizingAdvisory,
 	if err != nil {
 		return fail()
 	}
+	// Single-job history is useful on day one. Insufficient cohort evidence
+	// must suppress comparisons, not erase exact individually known completions.
+	if in.Reviewed {
+		rows := slices.Clone(p.Cohort.Samples)
+		slices.SortFunc(rows, func(a, b JobSizingSample) int {
+			if c := b.Completion.EndedAt.Compare(a.Completion.EndedAt); c != 0 {
+				return c
+			}
+			return compareJobKey(a.Resources.Scope.Job, b.Resources.Scope.Job)
+		})
+		for _, s := range rows {
+			if s.Completion.EndedAt.IsZero() || !s.Completion.EndedAt.Equal(s.Resources.Scope.EndAt) {
+				continue
+			}
+			if len(h.Recent) >= 12 {
+				break
+			}
+			job := s.Resources.Scope.Job
+			point := RecentJobResourcePoint{Run: strconv.FormatInt(job.Attempt.RunID, 10), Job: strconv.FormatInt(job.JobID, 10), Attempt: strconv.FormatInt(job.Attempt.Attempt, 10), End: s.Completion.EndedAt.UTC()}
+			m := s.Resources
+			if resourceTrendCPU(m) {
+				avg, peak := m.CPU.AverageMilliCPU, m.CPU.PeakIntervalMilliCPU
+				point.CPUAverage, point.CPUPeak = &avg, &peak
+			}
+			if resourceTrendRAM(m) {
+				avg, peak := m.RAMMean.Bytes, m.RAM.SampleMax
+				point.RAMAverage, point.RAMPeak = &avg, &peak
+			}
+			if resourceTrendDisk(m) {
+				peak := m.DiskUsed.SampleMax
+				point.DiskPeak = &peak
+			}
+			h.Recent = append(h.Recent, point)
+		}
+	}
 	if !in.Reviewed || coverage != TrendCoverageComplete || !ad.Freshness.Fresh || ad.Freshness.Age > 24*time.Hour || ad.Samples.Successful != h.Primary || h.Primary < MinJobSizingPrimaryAttempts+1 {
 		return ad, h, nil
 	}
@@ -157,44 +208,48 @@ func ReviewWorkflowResourceHistory(in WorkflowResourceInput) (JobSizingAdvisory,
 		}
 		return compareResourceValues(values[:len(values)-1], values[len(values)-1], floor)
 	}
-	cpu := func(m JobResourceSummary) bool {
-		return m.CPU != nil && sizingCoverageSufficient(m.CPU.Coverage.Duration, m.Window)
-	}
-	ram := func(m JobResourceSummary) bool {
-		return m.RAMMean != nil && m.RAM != nil && sizingCoverageSufficient(m.RAMMean.Coverage.Duration, m.Window)
-	}
 	h.CPUAverage = measure(func(m JobResourceSummary) (uint64, bool) {
-		if !cpu(m) {
+		if !resourceTrendCPU(m) {
 			return 0, false
 		}
 		return m.CPU.AverageMilliCPU, true
 	}, 50)
 	h.CPUPeak = measure(func(m JobResourceSummary) (uint64, bool) {
-		if !cpu(m) {
+		if !resourceTrendCPU(m) {
 			return 0, false
 		}
 		return m.CPU.PeakIntervalMilliCPU, true
 	}, 50)
 	h.RAMAverage = measure(func(m JobResourceSummary) (uint64, bool) {
-		if !ram(m) {
+		if !resourceTrendRAM(m) {
 			return 0, false
 		}
 		return m.RAMMean.Bytes, true
 	}, 64<<20)
 	h.RAMPeak = measure(func(m JobResourceSummary) (uint64, bool) {
-		if !ram(m) {
+		if !resourceTrendRAM(m) {
 			return 0, false
 		}
 		return m.RAM.SampleMax, true
 	}, 64<<20)
 	h.DiskPeak = measure(func(m JobResourceSummary) (uint64, bool) {
-		span, ok := jobSizingGaugeSpan(m, m.DiskUsed, m.Scope.StartedAt, m.Scope.EndAt)
-		if !ok || m.DiskUsed.PeakAt.Before(m.Scope.StartedAt) || m.DiskUsed.PeakAt.After(m.DiskUsed.LatestAt) || m.DiskUsed.Samples != m.Samples || !sizingCoverageSufficient(span, m.Window) || m.Sampling.CadenceGaps != 0 {
+		if !resourceTrendDisk(m) {
 			return 0, false
 		}
 		return m.DiskUsed.SampleMax, true
 	}, 64<<20)
 	return ad, h, nil
+}
+
+func resourceTrendCPU(m JobResourceSummary) bool {
+	return m.CPU != nil && sizingCoverageSufficient(m.CPU.Coverage.Duration, m.Window)
+}
+func resourceTrendRAM(m JobResourceSummary) bool {
+	return m.RAMMean != nil && m.RAM != nil && sizingCoverageSufficient(m.RAMMean.Coverage.Duration, m.Window)
+}
+func resourceTrendDisk(m JobResourceSummary) bool {
+	span, ok := jobSizingGaugeSpan(m, m.DiskUsed, m.Scope.StartedAt, m.Scope.EndAt)
+	return ok && !m.DiskUsed.PeakAt.Before(m.Scope.StartedAt) && !m.DiskUsed.PeakAt.After(m.DiskUsed.LatestAt) && m.DiskUsed.Samples == m.Samples && sizingCoverageSufficient(span, m.Window) && m.Sampling.CadenceGaps == 0
 }
 
 // A dashboard signal needs a material absolute change, at least a 25%

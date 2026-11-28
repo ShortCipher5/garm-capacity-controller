@@ -104,3 +104,45 @@ func TestWorkflowResourceSignalRequiresAbsoluteRelativeAndHistoricalBand(t *test
 		}
 	}
 }
+
+func TestWorkflowResourceHistoryShowsExactRowsBeforeBaseline(t *testing.T) {
+	in := workflowResourceFixture(t)
+	in.Rows = in.Rows[:3]
+	in.Rows[0].Usage.State = VerifiedUsageUnavailable
+	in.Rows[0].Usage.Measured = nil
+	m := in.Rows[1].Usage.Measured
+	m.CPU.AverageMilliCPU, m.CPU.PeakIntervalMilliCPU = 0, 0
+	m.RAM, m.RAMMean = nil, nil
+	_, h, err := ReviewWorkflowResourceHistory(in)
+	if err != nil || len(h.Recent) != 2 || h.Baseline != 0 || h.Recent[0].Run != "3" || h.Recent[1].Job != "101" || h.Recent[1].CPUAverage == nil || *h.Recent[1].CPUAverage != 0 || h.Recent[1].RAMAverage != nil {
+		t.Fatal(h, err)
+	}
+	full := workflowResourceFixture(t)
+	_, all, err := ReviewWorkflowResourceHistory(full)
+	if err != nil || len(all.Recent) != 12 || all.Recent[11].Run != "10" {
+		t.Fatal(all, err)
+	}
+}
+
+func TestWorkflowResourceHistoryQualifiesDiskIndependently(t *testing.T) {
+	in := workflowResourceFixture(t)
+	in.Capabilities.Sources = append(in.Capabilities.Sources, AttributionCapability{Class: "fixture_disk", Proves: []AttributionFact{FactDiskCounters, FactDiskUsedBytes}})
+	for i := range in.Rows {
+		m := in.Rows[i].Usage.Measured
+		g := *m.RAM
+		g.SampleMax, g.Latest = 1<<30, 1<<30
+		if i == len(in.Rows)-1 {
+			g.SampleMax, g.Latest = 2<<30, 2<<30
+		}
+		m.DiskUsed = &g
+	}
+	_, h, err := ReviewWorkflowResourceHistory(in)
+	if err != nil || h.DiskPeak == nil || h.DiskPeak.Direction != "increase" {
+		t.Fatal(h, err)
+	}
+	in.Rows[0].Usage.diskUnsupported = true
+	_, h, err = ReviewWorkflowResourceHistory(in)
+	if err != nil || h.DiskPeak != nil {
+		t.Fatal(h, err)
+	}
+}

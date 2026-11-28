@@ -60,7 +60,9 @@ test("advisory runner sizing renders only qualified advice and never an apply ac
     const render = (value) => renderToStaticMarkup(React.createElement(CISizingAdvisory, {snapshot: value}));
     const h={definition_sha256:"a".repeat(64),job_definition:"build",primary:21,retries:2,baseline:20,current_run:"50",current_job:"79",
       cpu_average:{current:"1000",baseline_median:"400",direction:"increase"},ram_peak:{current:"0",baseline_median:"1073741824",direction:"decrease"}};
-    const insight=render({...sizingSnapshot(),history:h});
+    const recent=[{run:"50",attempt:"1",job:"79",completed_at:at,cpu_average:"0",cpu_peak:"0"}];
+    const insight=render({...sizingSnapshot(),history:{...h,recent}});
+    assert.match(insight,/Run 50, attempt 1, job 79/); assert.match(insight,/Average CPU: 0 millicores/); assert.match(insight,/Sampled peak disk used: not measured/);
     assert.match(insight,/Unusual increase \(\+600 millicores\)/);
     assert.match(insight,/Unusual decrease \(-1073741824 bytes\)/);
     assert.match(insight,/Sampled peak disk used: unavailable/);
