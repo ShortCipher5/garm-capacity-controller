@@ -22,11 +22,17 @@ Configuration is owner-only JSON. Required fields:
   authenticated private stock reader. The provider names and repository IDs
   must match the approved reader scope. Do not supply the human GARM password
   or any GARM API write credential.
+  If the private reader's certificate carries a DNS SAN rather than a
+  loopback IP SAN, set `stock.server_name` to that exact name; the connection
+  still dials loopback using the enrolled CA, client key and server SPKI pin.
 - Optional `metrics`, keyed by a dashboard host ID, with `endpoint`, `project`,
   `server_key_pin`, and `client_tls` for each host. Use a separately generated
   Incus metrics-only client certificate restricted to the intended project.
   Never substitute an existing GARM provisioning certificate. The client
   requires normal CA and hostname verification plus a pinned native TLS key.
+  If the endpoint is an IP and its native certificate identifies a DNS name,
+  set `server_name` to the exact enrolled DNS SAN. This does not change where
+  the connection dials, allow insecure TLS, or skip the SPKI pin.
   No new relay or wider TLS class authorization is part of this mode.
 
 The GARM feed lists observed pool supply and queue state, not missed webhooks.

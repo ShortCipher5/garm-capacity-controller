@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -43,6 +44,12 @@ type Client struct {
 }
 
 func New(endpoint, project string, credentials *tls.Config) (*Client, error) {
+	return newClient(endpoint, project, credentials, "")
+}
+
+// authenticatedDNSName is used only by the pinned metrics observer for the
+// explicit separation between its dial IP and its enrolled certificate name.
+func newClient(endpoint, project string, credentials *tls.Config, authenticatedDNSName string) (*Client, error) {
 	base, err := url.Parse(endpoint)
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.Hostname() == "" || base.User != nil || (base.Path != "" && base.Path != "/") || base.RawQuery != "" || base.Fragment != "" || !name(project) || credentials == nil || credentials.InsecureSkipVerify || credentials.RootCAs == nil || len(credentials.Certificates) == 0 {
 		return nil, ErrConfiguration
@@ -60,14 +67,48 @@ func New(endpoint, project string, credentials *tls.Config) (*Client, error) {
 	if transportTLS.MaxVersion != 0 && transportTLS.MaxVersion < transportTLS.MinVersion {
 		return nil, ErrConfiguration
 	}
-	if transportTLS.ServerName != "" && transportTLS.ServerName != base.Hostname() {
+	verifiedName := base.Hostname()
+	if authenticatedDNSName != "" {
+		if net.ParseIP(verifiedName) == nil || !dnsName(authenticatedDNSName) {
+			return nil, ErrConfiguration
+		}
+		verifiedName = authenticatedDNSName
+		prior := transportTLS.VerifyConnection
+		transportTLS.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+				return ErrTransport
+			}
+			for _, san := range state.PeerCertificates[0].DNSNames {
+				if strings.EqualFold(san, authenticatedDNSName) {
+					if prior != nil {
+						return prior(state)
+					}
+					return nil
+				}
+			}
+			return ErrTransport
+		}
+	}
+	if transportTLS.ServerName != "" && transportTLS.ServerName != verifiedName {
 		return nil, ErrConfiguration
 	}
-	transportTLS.ServerName = base.Hostname()
+	transportTLS.ServerName = verifiedName
 	transport := &identityTransport{initial: newIncusTransport(transportTLS)}
 	pin := &identityPinState{config: transportTLS.Clone(), transport: transport}
 	base.Path = ""
 	return &Client{base: *base, project: project, pin: pin, http: &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+}
+
+func dnsName(value string) bool {
+	if len(value) > 253 || net.ParseIP(value) != nil {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if !name(part) || part[len(part)-1] == '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }

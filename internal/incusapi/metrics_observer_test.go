@@ -83,3 +83,47 @@ func TestGuestMetricsProjectionBoundaries(t *testing.T) {
 		t.Fatalf("missing CPU pair did not stay unobserved: %v", err)
 	}
 }
+
+func TestMetricsObserverVerifiesExplicitDNSNameWhenDialingIP(t *testing.T) {
+	var seen atomic.Int32
+	const dns = "native-incus-host"
+	srv, trust := tlsFixtureWithDNSName(t, dns, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.Add(1)
+		if r.Method != http.MethodGet || r.URL.RequestURI() != "/1.0/metrics?project=default" || r.TLS.ServerName != dns {
+			t.Errorf("wrong metrics request or verified server name: %q", r.TLS.ServerName)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, guestMetrics)
+	}))
+	leaf, err := x509.ParseCertificate(srv.TLS.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := fmt.Sprintf("%x", sha256.Sum256(leaf.RawSubjectPublicKeyInfo))
+	makeObserver := func(name, serverPin string) *MetricsObserver {
+		t.Helper()
+		m, err := NewMetricsObserverWithServerName(srv.URL, "default", serverPin, name, trust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(m.Close)
+		return m
+	}
+	ctx := context.Background()
+	for _, bad := range []*MetricsObserver{
+		makeObserver("", pin), makeObserver("wrong-host", pin), makeObserver(dns, strings.Repeat("0", 64)),
+	} {
+		if _, err := bad.ReadGuestTelemetry(ctx); !errors.Is(err, ErrTransport) || seen.Load() != 0 {
+			t.Fatal("unverified IP, DNS name or SPKI reached HTTP")
+		}
+	}
+	if any, err := NewMetricsObserverWithServerName("https://existing-dns", "default", pin, dns, trust); any != nil || !errors.Is(err, ErrConfiguration) {
+		t.Fatal("explicit alternate name allowed for a DNS dial endpoint")
+	}
+	if any, err := NewMetricsObserverWithServerName(srv.URL, "default", pin, "*.example.com", trust); any != nil || !errors.Is(err, ErrConfiguration) {
+		t.Fatal("accepted a wildcard expected name")
+	}
+	if got, err := makeObserver(dns, pin).ReadGuestTelemetry(ctx); err != nil || len(got) != 1 || seen.Load() != 1 {
+		t.Fatalf("pinned verified native DNS failed: observations=%d err=%v", len(got), err)
+	}
+}
