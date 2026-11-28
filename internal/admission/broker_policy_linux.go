@@ -22,6 +22,7 @@ type BrokerPoolPolicy struct {
 	WarmIdle   int64  `json:"warm_idle"`
 }
 type BrokerPolicy struct {
+	Groups       []ServerGroup            `json:"groups,omitempty"`
 	Revision     int64                    `json:"revision"`
 	Repositories []BrokerRepositoryPolicy `json:"repositories"`
 }
@@ -61,19 +62,15 @@ func ValidateBrokerPolicy(p BrokerPolicy) error {
 			}
 		}
 	}
-	return nil
+	_, err := indexGroups(p)
+	return err
 }
 func (s *SQLiteStore) BrokerPolicy(ctx context.Context) (BrokerPolicy, error) {
 	var p BrokerPolicy
 	err := s.readTransaction(ctx, func(tx *sql.Tx) error {
-		var body []byte
-		if err := tx.QueryRow("SELECT revision,document FROM broker_policy WHERE id=1").Scan(&p.Revision, &body); err != nil {
-			return err
-		}
-		if err := json.Unmarshal(body, &p.Repositories); err != nil {
-			return err
-		}
-		return ValidateBrokerPolicy(p)
+		var err error
+		p, err = sqliteBrokerPolicy(tx)
+		return err
 	})
 	return p, err
 }
@@ -93,6 +90,30 @@ func (s *SQLiteStore) ReplaceBrokerPolicy(ctx context.Context, p BrokerPolicy) e
 		return err
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
+		old, err := sqliteBrokerPolicy(tx)
+		if err != nil {
+			return err
+		}
+		if old.Revision != p.Revision {
+			return ErrBrokerConflict
+		}
+		// Legacy clients omit groups; they cannot silently clear group constraints.
+		if p.Groups == nil {
+			p.Groups = old.Groups
+		}
+		if err = ValidateBrokerPolicy(p); err != nil {
+			return err
+		}
+		if err = checkGroupEdit(tx, old, p, s.now()); err != nil {
+			return err
+		}
+		groups, err := json.Marshal(p.Groups)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec("UPDATE broker_group_policy SET document=? WHERE id=1", groups); err != nil {
+			return err
+		}
 		result, err := tx.Exec("UPDATE broker_policy SET revision=revision+1,document=? WHERE id=1 AND revision=?", body, p.Revision)
 		if err != nil {
 			return err

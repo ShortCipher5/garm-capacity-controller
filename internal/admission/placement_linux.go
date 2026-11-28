@@ -242,7 +242,7 @@ func (s *SQLiteStore) admitPlacement(ctx context.Context, request PlacementReque
 			if !contains(pool.Hosts, id) || host.Mode != "enabled" || !host.Healthy || !fits(allocated.Hosts[id], request.Resources, host.Budget) {
 				continue
 			}
-			if binding, ok := bindings[id]; !ok || binding.Sequence <= 0 || !shared.permitsHost(request.Pool, id, binding.Sequence, config) {
+			if binding, ok := bindings[id]; !ok || binding.Sequence <= 0 || !shared.permitsGroup(request.Pool, id, allocated, request.Resources) || !shared.permitsHost(request.Pool, id, binding.Sequence, config) {
 				continue
 			}
 			if selected == "" || (request.Strategy == "least_runners" && allocated.Hosts[id].Runners < allocated.Hosts[selected].Runners) {

@@ -61,7 +61,18 @@ type Charge struct {
 	ID, Host, Pool string
 	Resources      Resources
 }
+
+// GroupHeadroom is the coherent ledger limit minus charged physical usage,
+// including retained non-pool overhead. Snapshot.Charges is not subtracted from
+// it again. Only additions selected by this plan consume remaining headroom.
+type GroupHeadroom struct {
+	ByHost    map[string]string
+	ByPool    map[string]string
+	Remaining map[string]Resources
+}
 type Snapshot struct {
+	Groups *GroupHeadroom `json:",omitempty"`
+
 	Revision     string
 	ObservedAt   time.Time
 	Global       Resources
@@ -152,6 +163,41 @@ func Build(s Snapshot, opt Options) (Plan, error) {
 func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 	if !s.Complete || s.Revision == "" || opt.Now.IsZero() || s.ObservedAt.IsZero() || s.ObservedAt.After(opt.Now) || opt.MaxAge <= 0 || opt.Now.Sub(s.ObservedAt) > opt.MaxAge || opt.MaxAssignments < 1 || opt.MaxAssignments > 10000 || !valid(s.Global) || len(s.Pools) > 1000 || len(s.Hosts) > 1000 || len(s.Charges) > 100000 {
 		return Plan{}, ErrSnapshot
+	}
+	plannedByGroup := map[string]Resources{}
+	if groups := s.Groups; groups != nil {
+		if len(groups.Remaining) > 128 || len(groups.ByPool) > len(s.Pools) || len(groups.ByHost) > len(s.Hosts) {
+			return Plan{}, ErrSnapshot
+		}
+		for id, budget := range groups.Remaining {
+			if id == "" || !valid(budget) {
+				return Plan{}, ErrSnapshot
+			}
+		}
+		for host, id := range groups.ByHost {
+			if _, ok := s.Hosts[host]; !ok {
+				return Plan{}, ErrSnapshot
+			}
+			if _, ok := groups.Remaining[id]; !ok {
+				return Plan{}, ErrSnapshot
+			}
+		}
+		for pool, id := range groups.ByPool {
+			if _, ok := s.Pools[pool]; !ok {
+				return Plan{}, ErrSnapshot
+			}
+			if _, ok := groups.Remaining[id]; !ok {
+				return Plan{}, ErrSnapshot
+			}
+		}
+	}
+	groupFits := func(pool, host string, size Resources) bool {
+		groups := s.Groups
+		if groups == nil {
+			return true
+		}
+		id := groups.ByHost[host]
+		return id == groups.ByPool[pool] && (id == "" || fits(plannedByGroup[id], size, groups.Remaining[id]))
 	}
 	global := Resources{}
 	hosts := map[string]Resources{}
@@ -256,7 +302,7 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 				placement := ""
 				fitCount := 0
 				for _, h := range p.Hosts {
-					if s.Hosts[h].AcceptNew && fits(hosts[h], p.Size, s.Hosts[h].Budget) {
+					if s.Hosts[h].AcceptNew && groupFits(id, h, p.Size) && fits(hosts[h], p.Size, s.Hosts[h].Budget) {
 						if placement == "" {
 							placement = h
 						}
@@ -306,11 +352,16 @@ func build(s Snapshot, opt Options, jobs *jobQueue) (Plan, error) {
 			// candidate pools may overlap. Never move or discount existing charges.
 			// This bounded tie-break is not a maximum-packing guarantee.
 			for _, candidate := range p.Hosts {
-				if !s.Hosts[candidate].AcceptNew || !fits(hosts[candidate], p.Size, s.Hosts[candidate].Budget) {
+				if !s.Hosts[candidate].AcceptNew || !groupFits(selected, candidate, p.Size) || !fits(hosts[candidate], p.Size, s.Hosts[candidate].Budget) {
 					continue
 				}
 				if soleHostDemand[candidate] < soleHostDemand[host] || (soleHostDemand[candidate] == soleHostDemand[host] && candidate < host) {
 					host = candidate
+				}
+			}
+			if s.Groups != nil {
+				if id := s.Groups.ByHost[host]; id != "" {
+					plannedByGroup[id], _ = add(plannedByGroup[id], p.Size)
 				}
 			}
 			global, _ = add(global, p.Size)

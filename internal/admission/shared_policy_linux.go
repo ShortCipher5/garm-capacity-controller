@@ -9,6 +9,7 @@ import (
 // ownership evidence: resolve each candidate and every retained pool charge via
 // the observed, immutable profile history in the same write transaction.
 type sharedAdmission struct {
+	groups     *groupIndex
 	profiles   map[string]BrokerPoolProfile
 	repoLimits map[string]int64
 	poolLimits map[string]int64
@@ -27,6 +28,10 @@ func readSharedAdmission(tx *sql.Tx, policy BrokerPolicy, allocated Allocations)
 		return nil, err
 	}
 	s := &sharedAdmission{profiles: profiles, repoLimits: map[string]int64{}, poolLimits: map[string]int64{}, runners: map[string]int64{}}
+	s.groups, err = indexGroups(policy)
+	if err != nil {
+		return nil, err
+	}
 	for _, repo := range policy.Repositories {
 		s.repoLimits[repo.ID] = repo.MaxRunners
 		for _, pool := range repo.Pools {
@@ -84,6 +89,9 @@ func (s *sharedAdmission) permitsExecution(pool string, execution ExecutionImage
 	return reflect.DeepEqual(p.Execution, execution) && (authority == nil || p.Authority == *authority)
 }
 
+func (s *sharedAdmission) permitsGroup(pool, host string, a Allocations, delta Resources) bool {
+	return s == nil || s.groups.allows(host, pool, a, delta)
+}
 func (s *sharedAdmission) permitsHost(pool, host string, sequence int64, c Config) bool {
 	if s == nil {
 		return true
