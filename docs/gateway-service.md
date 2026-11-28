@@ -110,3 +110,30 @@ No startup probe or dynamic host enrollment occurs. Explicit checks additionally
 require `--allow-experimental-onboarding-probes` and the separate management
 token, without enabling unrelated ledger-policy writes; successful daemon observations never qualify capacity or activate
 placement.
+
+### Direct read-only Incus observation
+
+Set `observation_server_key_pin` on **every** configured host to opt into the
+direct Incus observer. Use the lowercase SHA-256 digest of the native server
+certificate's DER SubjectPublicKeyInfo, obtained through an independently trusted
+administrative channel. The endpoint still needs normal TLS hostname verification
+against the configured CA and a separate client certificate. An intermediary
+TLS certificate is not the Incus server identity: the native Incus root response
+must report a certificate matching its TLS peer.
+
+This is a transport restriction, not an Incus authorization configuration. Before
+enabling it, enroll an independently verified **server-enforced read-only**
+identity that can see the complete required inventory and operations for the
+approved project. Do not use GARM's provisioning credentials or assume that an
+Incus project-restricted TLS certificate is read-only. Do not replace or reroute
+the authorization of any existing clients. If the required scope cannot be
+verified, leave the observer disabled rather than introducing privileged
+credentials or a transparent proxy.
+
+The client uses fixed GET routes for the standalone server identity, resources,
+instances and state, and operation inventory, always with its configured project.
+It does not forward browser requests or raw Incus response bodies. Provisioning,
+mixed legacy/observer hosts, and stock-provider callbacks are refused in this
+mode. The gateway still requires its normal configured pools and ledger and does
+not infer capacity from an empty or failed response. Autoscaling and deployment
+remain separate qualification steps.

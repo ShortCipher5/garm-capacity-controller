@@ -37,6 +37,7 @@ type Client struct {
 	base        url.URL
 	project     string
 	storagePool string
+	observer    bool
 	http        *http.Client
 	pin         *identityPinState
 }
@@ -167,6 +168,9 @@ type envelope struct {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, input any) (envelope, error) {
+	if c.observer && (input != nil || !observerRoute(method, path, query)) {
+		return envelope{}, ErrUnsupported
+	}
 	target := c.base
 	target.Path = path
 	if query == nil {
@@ -269,6 +273,11 @@ func (c *Client) trustedRoot(ctx context.Context, requireCreate bool) (envelope,
 	}
 	if err := validateTrustedRoot(response, requireCreate); err != nil {
 		return envelope{}, err
+	}
+	if c.observer {
+		if _, err := c.parsePhysicalIdentity(response); err != nil {
+			return envelope{}, ErrUnsupported
+		}
 	}
 	if err := c.checkPinnedRoot(response); err != nil {
 		return envelope{}, err
