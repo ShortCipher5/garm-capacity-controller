@@ -513,6 +513,7 @@ func serveOnListeners(ctx context.Context, config configuration, provision, moni
 	return err
 }
 func main() {
+	observerConfigPath := flag.String("observer-config", "", "run only the protected GARM and Incus observation dashboard")
 	configPath := flag.String("config", "", "private gateway configuration file")
 	ciHealth := flag.Bool("allow-ci-health-timing", false, "enable explicitly enrolled read-only GitHub Actions timing observations")
 	ciHealthHistory := flag.Bool("allow-ci-health-retained-history", false, "reopen exactly reviewed dedicated CI history for the existing owner dashboard; never initializes or repairs")
@@ -537,6 +538,21 @@ func main() {
 	sshInventory := flag.Bool("allow-read-only-ssh-inventory", false, "allow separately authorized pinned SSH inventory only; no installation or enrollment")
 	monitoring := flag.Bool("allow-experimental-monitoring", false, "allow periodic host utilization sampling into the admission usage history; monitoring data never gates admission, fits or retirement")
 	flag.Parse()
+	if *observerConfigPath != "" {
+		valid := flag.NArg() == 0
+		flag.Visit(func(f *flag.Flag) { valid = valid && f.Name == "observer-config" })
+		if !valid {
+			fmt.Fprintln(os.Stderr, "observer configuration must run without other modes or flags")
+			os.Exit(1)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if runObserverDashboard(ctx, *observerConfigPath) != nil {
+			fmt.Fprintln(os.Stderr, "observation dashboard unavailable")
+			os.Exit(1)
+		}
+		return
+	}
 	raw, err := securefiles.Read(*configPath, 1<<20)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gateway configuration unavailable")

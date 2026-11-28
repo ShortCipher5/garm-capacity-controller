@@ -41,6 +41,10 @@ Physical deletion and project-observation-based release are blocked by the [reti
 
 See [Garm settings management](docs/garm-management.md), [architecture](docs/architecture.md), [service trust and configuration](docs/gateway-service.md), [Garm integration tradeoffs](integration/garm-v0.2.1/README.md), [security](SECURITY.md) and [open acceptance gates](docs/operational-acceptance.md).
 
+For an existing stock GARM deployment, the [observation dashboard](docs/observer-dashboard.md)
+can show scoped pool and queue status with optional direct Incus guest telemetry
+without enabling admission or management.
+
 ## Test without infrastructure
 
 Requires Linux, the Go compiler **1.25+**, CGO and a C compiler for the pinned SQLite driver. Standard tests need no credentials or live infrastructure.
