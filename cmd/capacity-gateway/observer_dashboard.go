@@ -42,6 +42,7 @@ type observerMetricsConfig struct {
 	Endpoint     string               `json:"endpoint"`
 	Project      string               `json:"project"`
 	ServerKeyPin string               `json:"server_key_pin"`
+	ServerName   string               `json:"server_name,omitempty"`
 	ClientTLS    securefiles.TLSFiles `json:"client_tls"`
 }
 
@@ -121,7 +122,7 @@ func serveObserverDashboard(ctx context.Context, c observerDashboardConfig, list
 		if !reserveKey(trust) {
 			return gatewayrpc.ErrConfiguration
 		}
-		m, err := incusapi.NewMetricsObserver(cfg.Endpoint, cfg.Project, cfg.ServerKeyPin, trust)
+		m, err := incusapi.NewMetricsObserverWithServerName(cfg.Endpoint, cfg.Project, cfg.ServerKeyPin, cfg.ServerName, trust)
 		if err != nil {
 			return err
 		}

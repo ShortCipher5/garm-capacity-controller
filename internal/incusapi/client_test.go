@@ -25,6 +25,10 @@ import (
 const operation = "12345678-1234-1234-1234-123456789abc"
 
 func tlsFixture(t *testing.T, handler http.Handler) (*httptest.Server, *tls.Config) {
+	return tlsFixtureWithDNSName(t, "", handler)
+}
+
+func tlsFixtureWithDNSName(t *testing.T, serverDNS string, handler http.Handler) (*httptest.Server, *tls.Config) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -51,6 +55,10 @@ func tlsFixture(t *testing.T, handler http.Handler) (*httptest.Server, *tls.Conf
 			template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
 		} else {
 			template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+			if serverDNS != "" {
+				template.DNSNames = []string{serverDNS}
+				template.IPAddresses = nil
+			}
 		}
 		leaf, err := x509.CreateCertificate(rand.Reader, template, parsed, &leafKey.PublicKey, key)
 		if err != nil {

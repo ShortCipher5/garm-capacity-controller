@@ -171,13 +171,20 @@ func parseGuestTelemetry(data []byte, project string) ([]GuestTelemetry, error) 
 }
 
 func NewMetricsObserver(endpoint, project, serverKeyPin string, credentials *tls.Config) (*MetricsObserver, error) {
+	return NewMetricsObserverWithServerName(endpoint, project, serverKeyPin, "", credentials)
+}
+
+// NewMetricsObserverWithServerName adds an explicit enrolled DNS certificate
+// name for a directly dialed IP. CA, hostname and exact SPKI verification
+// all still apply. The name never changes the socket destination.
+func NewMetricsObserverWithServerName(endpoint, project, serverKeyPin, serverName string, credentials *tls.Config) (*MetricsObserver, error) {
 	trust, err := pinnedObserverTLS(serverKeyPin, credentials)
 	if err != nil {
 		return nil, err
 	}
 	// Reuse the normal verified native TLS policy, but expose only one route
 	// and do not request native root metadata (unavailable to metrics roles).
-	client, err := New(endpoint, project, trust)
+	client, err := newClient(endpoint, project, trust, serverName)
 	if err != nil {
 		return nil, err
 	}

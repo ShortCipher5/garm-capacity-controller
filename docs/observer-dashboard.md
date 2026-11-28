@@ -27,6 +27,9 @@ Configuration is owner-only JSON. Required fields:
   Incus metrics-only client certificate restricted to the intended project.
   Never substitute an existing GARM provisioning certificate. The client
   requires normal CA and hostname verification plus a pinned native TLS key.
+  If the endpoint is an IP and its native certificate identifies a DNS name,
+  set `server_name` to the exact enrolled DNS SAN. This does not change where
+  the connection dials, allow insecure TLS, or skip the SPKI pin.
   No new relay or wider TLS class authorization is part of this mode.
 
 The GARM feed lists observed pool supply and queue state, not missed webhooks.
